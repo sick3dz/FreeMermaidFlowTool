@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  CallflowDirectionFilter,
   CallflowGraph,
   CallflowNode,
   CallflowTraceResult,
@@ -24,7 +25,10 @@ interface CallflowInspectorProps {
   graph: CallflowGraph;
   selectedNodeId: string | null;
   onSelectNodeId: (id: string | null) => void;
+  onFocusNodeOnCanvas?: (id: string) => void;
   traceResult: CallflowTraceResult | null;
+  directionFilter: CallflowDirectionFilter;
+  onChangeDirectionFilter: (dir: CallflowDirectionFilter) => void;
   isolateSubgraphMode: boolean;
   onToggleIsolateSubgraphMode: (isolate: boolean) => void;
   themeConfig: ThemeConfiguration;
@@ -39,7 +43,10 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
   graph,
   selectedNodeId,
   onSelectNodeId,
+  onFocusNodeOnCanvas,
   traceResult,
+  directionFilter,
+  onChangeDirectionFilter,
   isolateSubgraphMode,
   onToggleIsolateSubgraphMode,
   themeConfig,
@@ -180,8 +187,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
               </div>
               <input
                 type="range"
-                min={25}
-                max={160}
+                min={15}
+                max={260}
                 step={5}
                 value={themeConfig.nodeSpacing}
                 onChange={(e) => handleSpacingChange('nodeSpacing', Number(e.target.value))}
@@ -198,8 +205,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
               </div>
               <input
                 type="range"
-                min={35}
-                max={220}
+                min={20}
+                max={320}
                 step={5}
                 value={themeConfig.rankSpacing}
                 onChange={(e) => handleSpacingChange('rankSpacing', Number(e.target.value))}
@@ -207,6 +214,38 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
               />
             </div>
           </div>
+
+          {themeConfig.layoutEngine === 'elk' ? (
+            <div className="flex items-center justify-between gap-2 text-[11px] text-amber-300/90 bg-amber-950/30 border border-amber-500/30 rounded-lg px-2.5 py-1.5">
+              <span>
+                ELK setzt eigene feste Abstände. Für manuelle Regler auf Dagre wechseln:
+              </span>
+              <button
+                type="button"
+                onClick={() => handleLayoutEngineChange('dagre')}
+                className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-200 font-medium whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Dagre
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between text-[11px] text-slate-400">
+              <span>Wirkt sofort live im Diagramm</span>
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeThemeConfig({
+                    ...themeConfig,
+                    nodeSpacing: 55,
+                    rankSpacing: 70,
+                  })
+                }
+                className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2 cursor-pointer"
+              >
+                Abstände zurücksetzen
+              </button>
+            </div>
+          )}
 
           {/* 1-Click Auto Topology Grouping */}
           <button
@@ -257,7 +296,11 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
             onChange={(e) => {
               const val = e.target.value || null;
               onSelectNodeId(val);
-              if (!val) onToggleIsolateSubgraphMode(false);
+              if (!val) {
+                onToggleIsolateSubgraphMode(false);
+              } else if (onFocusNodeOnCanvas) {
+                onFocusNodeOnCanvas(val);
+              }
             }}
             className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
           >
@@ -294,11 +337,38 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                 {traceResult.selectedNode.label}
               </div>
 
+              {/* Richtungs-Filter: Ganzer Pfad vs Nur Woher vs Nur Wohin */}
+              <div className="space-y-1">
+                <span className="text-[11px] text-amber-200/80 block">
+                  Richtungs-Filter (im Gesamtbild abdunkeln)
+                </span>
+                <div className="grid grid-cols-3 gap-1 p-1 bg-slate-950/90 rounded-lg border border-slate-800">
+                  {[
+                    { id: 'both' as const, label: 'Ganzer Pfad' },
+                    { id: 'upstream' as const, label: 'Nur Woher' },
+                    { id: 'downstream' as const, label: 'Nur Wohin' },
+                  ].map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => onChangeDirectionFilter(item.id)}
+                      className={`py-1 px-1.5 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        directionFilter === item.id
+                          ? 'bg-indigo-600 text-white'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="flex items-center gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => onToggleIsolateSubgraphMode(!isolateSubgraphMode)}
-                  className={`flex-1 py-1.5 px-2.5 text-xs font-medium rounded-lg border transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 ${
+                  className={`flex-1 py-1.5 px-2.5 text-xs font-medium rounded-lg border transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
                     isolateSubgraphMode
                       ? 'bg-indigo-600 border-indigo-500 text-white'
                       : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-200'
@@ -312,6 +382,17 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   </span>
                 </button>
 
+                {onFocusNodeOnCanvas && (
+                  <button
+                    type="button"
+                    onClick={() => onFocusNodeOnCanvas(traceResult.selectedNode.id)}
+                    title="Kamera im Diagramm direkt auf diesen Knoten zentrieren und lesbar zoomen"
+                    className="py-1.5 px-2.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-200 text-xs font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Fokus 1:1
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => {
@@ -319,7 +400,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                     onToggleIsolateSubgraphMode(false);
                   }}
                   title="Auswahl aufheben"
-                  className="p-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded-lg transition-colors"
+                  className="p-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded-lg transition-colors cursor-pointer"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                 </button>
@@ -327,60 +408,80 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
             </div>
 
             {/* 1. Root Entry Points (Wo beginnt der Callflow?) */}
-            <TraceListBlock
-              title="1. Ursprungs-Startpunkte (Entry)"
-              subtitle="Hier beginnt die Aufrufkette"
-              accentColor="text-sky-400"
-              borderColor="border-sky-500/40"
-              items={traceResult.entryPoints.map((n) => ({
-                node: n,
-                badge: n.id === traceResult.selectedNode.id ? 'Dieser Knoten' : 'Startpunkt',
-              }))}
-              onSelectNode={onSelectNodeId}
-              emptyText="Dieser Knoten ist selbst ein Startpunkt."
-            />
+            {directionFilter !== 'downstream' && (
+              <TraceListBlock
+                title="1. Ursprungs-Startpunkte (Entry)"
+                subtitle="Hier beginnt die Aufrufkette"
+                accentColor="text-sky-400"
+                borderColor="border-sky-500/40"
+                items={traceResult.entryPoints.map((n) => ({
+                  node: n,
+                  badge: n.id === traceResult.selectedNode.id ? 'Dieser Knoten' : 'Startpunkt',
+                }))}
+                onSelectNode={(id) => {
+                  onSelectNodeId(id);
+                  onFocusNodeOnCanvas?.(id);
+                }}
+                emptyText="Dieser Knoten ist selbst ein Startpunkt."
+              />
+            )}
 
             {/* 2. Direct Callers (Woher kommt der Aufruf unmittelbar?) */}
-            <TraceListBlock
-              title="2. Direkte Aufrufer (Woher?)"
-              subtitle="Unmittelbar vorgeschaltete Skripte"
-              accentColor="text-indigo-400"
-              borderColor="border-indigo-500/40"
-              items={traceResult.directCallers.map((c) => ({
-                node: c.node,
-                badge: c.edgeLabel || 'ruft auf →',
-              }))}
-              onSelectNode={onSelectNodeId}
-              emptyText="Keine eingehenden Aufrufe (Einstiegspunkt)."
-            />
+            {directionFilter !== 'downstream' && (
+              <TraceListBlock
+                title="2. Direkte Aufrufer (Woher?)"
+                subtitle="Unmittelbar vorgeschaltete Skripte"
+                accentColor="text-indigo-400"
+                borderColor="border-indigo-500/40"
+                items={traceResult.directCallers.map((c) => ({
+                  node: c.node,
+                  badge: c.edgeLabel || 'ruft auf →',
+                }))}
+                onSelectNode={(id) => {
+                  onSelectNodeId(id);
+                  onFocusNodeOnCanvas?.(id);
+                }}
+                emptyText="Keine eingehenden Aufrufe (Einstiegspunkt)."
+              />
+            )}
 
             {/* 3. Direct Callees (Wohin verzweigt dieser Knoten?) */}
-            <TraceListBlock
-              title="3. Direkte Folgeschritte (Wohin?)"
-              subtitle="Unmittelbar aufgerufene Ziele"
-              accentColor="text-emerald-400"
-              borderColor="border-emerald-500/40"
-              items={traceResult.directCallees.map((c) => ({
-                node: c.node,
-                badge: c.edgeLabel || '→ Folgeaufruf',
-              }))}
-              onSelectNode={onSelectNodeId}
-              emptyText="Keine ausgehenden Aufrufe (Endpunkt)."
-            />
+            {directionFilter !== 'upstream' && (
+              <TraceListBlock
+                title="3. Direkte Folgeschritte (Wohin?)"
+                subtitle="Unmittelbar aufgerufene Ziele"
+                accentColor="text-emerald-400"
+                borderColor="border-emerald-500/40"
+                items={traceResult.directCallees.map((c) => ({
+                  node: c.node,
+                  badge: c.edgeLabel || '→ Folgeaufruf',
+                }))}
+                onSelectNode={(id) => {
+                  onSelectNodeId(id);
+                  onFocusNodeOnCanvas?.(id);
+                }}
+                emptyText="Keine ausgehenden Aufrufe (Endpunkt)."
+              />
+            )}
 
             {/* 4. Terminal Sinks (Wo endet der Callflow?) */}
-            <TraceListBlock
-              title="4. Endpunkte (Wo endet es?)"
-              subtitle="Letzte Ziele dieser Aufrufkette"
-              accentColor="text-rose-400"
-              borderColor="border-rose-500/40"
-              items={traceResult.terminalPoints.map((n) => ({
-                node: n,
-                badge: n.id === traceResult.selectedNode.id ? 'Dieser Knoten' : 'Endpunkt',
-              }))}
-              onSelectNode={onSelectNodeId}
-              emptyText="Keine Endpunkte ermittelt."
-            />
+            {directionFilter !== 'upstream' && (
+              <TraceListBlock
+                title="4. Endpunkte (Wo endet es?)"
+                subtitle="Letzte Ziele dieser Aufrufkette"
+                accentColor="text-rose-400"
+                borderColor="border-rose-500/40"
+                items={traceResult.terminalPoints.map((n) => ({
+                  node: n,
+                  badge: n.id === traceResult.selectedNode.id ? 'Dieser Knoten' : 'Endpunkt',
+                }))}
+                onSelectNode={(id) => {
+                  onSelectNodeId(id);
+                  onFocusNodeOnCanvas?.(id);
+                }}
+                emptyText="Keine Endpunkte ermittelt."
+              />
+            )}
           </section>
         ) : (
           /* Overview of Entry Points, Hubs, and Terminal Sinks when no single node is selected */
@@ -403,7 +504,10 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                 node: n,
                 badge: `${n.outDegree} Ausgänge`,
               }))}
-              onSelectNode={onSelectNodeId}
+              onSelectNode={(id) => {
+                onSelectNodeId(id);
+                onFocusNodeOnCanvas?.(id);
+              }}
               emptyText="Keine isolierten Startknoten erkannt."
             />
 
@@ -416,7 +520,10 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                 node: n,
                 badge: `${n.inDegree} ein · ${n.outDegree} aus`,
               }))}
-              onSelectNode={onSelectNodeId}
+              onSelectNode={(id) => {
+                onSelectNodeId(id);
+                onFocusNodeOnCanvas?.(id);
+              }}
               emptyText="Keine mehrfachen Verteilerknoten erkannt."
             />
 
@@ -429,7 +536,10 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                 node: n,
                 badge: `${n.inDegree} Eingänge`,
               }))}
-              onSelectNode={onSelectNodeId}
+              onSelectNode={(id) => {
+                onSelectNodeId(id);
+                onFocusNodeOnCanvas?.(id);
+              }}
               emptyText="Keine isolierten Endpunkte erkannt."
             />
           </section>

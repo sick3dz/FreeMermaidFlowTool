@@ -33,12 +33,21 @@ export function configureMermaidEngine(
 
   const nodeSpacing = Number.isFinite(themeConfig.nodeSpacing) ? themeConfig.nodeSpacing : 55;
   const rankSpacing = Number.isFinite(themeConfig.rankSpacing) ? themeConfig.rankSpacing : 70;
+  const isElk = themeConfig.layoutEngine === 'elk';
+
+  // Reset cached Mermaid config scope before re-initializing so slider changes always apply
+  try {
+    const api = (mermaid as unknown as { mermaidAPI?: { reset?: () => void } }).mermaidAPI;
+    api?.reset?.();
+  } catch {
+    // ignore if reset is unavailable
+  }
 
   const baseConfig: Record<string, unknown> = {
     startOnLoad: false,
     securityLevel: 'strict',
     look: themeConfig.look,
-    layout: themeConfig.layoutEngine || 'dagre',
+    layout: isElk ? 'elk' : 'dagre',
     theme: themeConfig.useCustomColors ? 'base' : themeConfig.theme,
     fontFamily: themeConfig.fontFamily,
     altFontFamily: themeConfig.fontFamily,
@@ -52,21 +61,30 @@ export function configureMermaidEngine(
       useMaxWidth: false,
       nodeSpacing,
       rankSpacing,
-      padding: 18,
-      diagramPadding: 16,
-      defaultRenderer: themeConfig.layoutEngine === 'elk' ? 'elk' : 'dagre-wrapper',
+      padding: Math.max(12, Math.min(48, Math.round(nodeSpacing * 0.25))),
+      diagramPadding: 18,
     },
     sequence: {
       useMaxWidth: false,
       mirrorActors: true,
-      messageMargin: 44,
+      messageMargin: Math.max(30, Math.round(rankSpacing * 0.65)),
+      actorMargin: Math.max(35, nodeSpacing),
       boxMargin: 14,
     },
     state: {
       useMaxWidth: false,
+      nodeSpacing,
+      rankSpacing,
+    },
+    class: {
+      useMaxWidth: false,
+      nodeSpacing,
+      rankSpacing,
     },
     er: {
       useMaxWidth: false,
+      layoutDirection: 'TB',
+      entityPadding: Math.max(12, Math.round(nodeSpacing * 0.3)),
     },
     gantt: {
       useMaxWidth: false,
@@ -164,6 +182,23 @@ export function detectDiagramTypeLabel(code: string): string {
 }
 
 /**
+ * Merges active UI layout/spacing settings over any %%{init:...}%% block in the code
+ * solely for rendering, so sliders in the Callflow Inspector always take effect immediately
+ * while preserving optional YAML frontmatter (`--- ... ---`).
+ */
+function prepareCodeWithRuntimeLayout(code: string, themeConfig: ThemeConfiguration): string {
+  const strippedInit = code.replace(/^\s*%%\{init:[\s\S]*?\}%%\s*\n?/gm, '').trimStart();
+  const runtimeInit = buildInitDirectiveBlock(themeConfig);
+  const frontmatterMatch = strippedInit.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
+  if (frontmatterMatch) {
+    const fm = frontmatterMatch[0];
+    const body = strippedInit.slice(fm.length);
+    return `${fm}${runtimeInit}\n${body}`;
+  }
+  return `${runtimeInit}\n${strippedInit}`;
+}
+
+/**
  * Validates and renders the Mermaid diagram completely locally in the browser.
  * Includes an automatic fallback to Dagre layout if ELK layout fails for a specific diagram type.
  */
@@ -196,28 +231,34 @@ export async function renderLocalMermaidDiagram(
   try {
     configureMermaidEngine(themeConfig, forceNativeSvgLabels);
 
-    // Step 1: Parse and validate syntax without mutating the main canvas on error
+    // Step 1: Parse and validate user's exact code first for accurate line numbers
     await mermaid.parse(trimmed, { suppressErrors: false });
 
-    // Step 2: Render clean SVG (with automatic fallback to Dagre if ELK fails on non-flowchart diagrams)
+    // Apply live UI layout/spacing directive on top of code so sliders never get ignored by stale init blocks
+    const renderCode = prepareCodeWithRuntimeLayout(trimmed, themeConfig);
+
+    // Step 2: Render clean SVG (with automatic fallback to Dagre if ELK fails on unsupported diagram types)
     renderCounter += 1;
     const uniqueRenderId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
     let svgResult: string;
     try {
-      const rendered = await mermaid.render(uniqueRenderId, trimmed);
+      const rendered = await mermaid.render(uniqueRenderId, renderCode);
       svgResult = rendered.svg;
     } catch (renderErr) {
       if (themeConfig.layoutEngine === 'elk' || themeConfig.look === 'handDrawn') {
         if (typeof document !== 'undefined') {
           document.querySelectorAll('[id^="dmermaid-local-svg-"]').forEach((n) => n.remove());
         }
-        configureMermaidEngine(
-          { ...themeConfig, layoutEngine: 'dagre', look: 'classic' },
-          forceNativeSvgLabels
-        );
+        const fallbackConfig: ThemeConfiguration = {
+          ...themeConfig,
+          layoutEngine: 'dagre',
+          look: 'classic',
+        };
+        configureMermaidEngine(fallbackConfig, forceNativeSvgLabels);
+        const fallbackRenderCode = prepareCodeWithRuntimeLayout(trimmed, fallbackConfig);
         renderCounter += 1;
         const fallbackId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
-        const fallbackRendered = await mermaid.render(fallbackId, trimmed);
+        const fallbackRendered = await mermaid.render(fallbackId, fallbackRenderCode);
         svgResult = fallbackRendered.svg;
       } else {
         throw renderErr;
@@ -225,9 +266,10 @@ export async function renderLocalMermaidDiagram(
     }
 
     const elapsed = Math.max(1, Math.round(performance.now() - startTime));
+    const normalizedSvg = normalizeSvgIntrinsicDimensions(svgResult);
 
     return {
-      svg: svgResult,
+      svg: normalizedSvg,
       validation: {
         isValid: true,
         diagramType,
@@ -307,14 +349,32 @@ export function updateDiagramDirection(code: string, newDirection: DiagramDirect
  * and injects or updates it at the top of the user's code.
  */
 export function buildInitDirectiveBlock(themeConfig: ThemeConfiguration): string {
+  const nodeSpacing = Number.isFinite(themeConfig.nodeSpacing) ? themeConfig.nodeSpacing : 55;
+  const rankSpacing = Number.isFinite(themeConfig.rankSpacing) ? themeConfig.rankSpacing : 70;
   const initPayload: Record<string, unknown> = {
     theme: themeConfig.useCustomColors ? 'base' : themeConfig.theme,
     look: themeConfig.look,
     layout: themeConfig.layoutEngine || 'dagre',
     flowchart: {
       curve: themeConfig.curve,
-      nodeSpacing: themeConfig.nodeSpacing,
-      rankSpacing: themeConfig.rankSpacing,
+      nodeSpacing,
+      rankSpacing,
+      padding: Math.max(12, Math.min(48, Math.round(nodeSpacing * 0.25))),
+    },
+    state: {
+      nodeSpacing,
+      rankSpacing,
+    },
+    class: {
+      nodeSpacing,
+      rankSpacing,
+    },
+    sequence: {
+      actorMargin: Math.max(35, nodeSpacing),
+      messageMargin: Math.max(30, Math.round(rankSpacing * 0.65)),
+    },
+    er: {
+      entityPadding: Math.max(12, Math.round(nodeSpacing * 0.3)),
     },
   };
 
@@ -342,6 +402,55 @@ export function injectInitDirectiveIntoCode(code: string, themeConfig: ThemeConf
   const directive = buildInitDirectiveBlock(themeConfig);
   const withoutExisting = code.replace(/^\s*%%\{init:[\s\S]*?\}%%\s*\n?/, '');
   return `${directive}\n${withoutExisting}`;
+}
+
+/**
+ * Converts Mermaid's default `width="100%"` / `style="max-width: ..."` into explicit
+ * 1:1 pixel dimensions (`width="<vbW>px" height="<vbH>px" style="max-width: none; ..."`)
+ * based on the SVG's `viewBox`. This prevents CSS Flexbox from squishing large diagrams
+ * into the viewport width and guarantees that 100% zoom equals true 1:1 readable size.
+ */
+export function normalizeSvgIntrinsicDimensions(svgString: string): string {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(svgString, 'image/svg+xml');
+  const svgEl = doc.querySelector('svg');
+  if (!svgEl) return svgString;
+
+  let intrinsicWidth = 0;
+  let intrinsicHeight = 0;
+
+  const viewBox = svgEl.getAttribute('viewBox');
+  if (viewBox) {
+    const parts = viewBox
+      .trim()
+      .split(/[\s,]+/)
+      .map(Number);
+    if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+      intrinsicWidth = Math.ceil(parts[2]);
+      intrinsicHeight = Math.ceil(parts[3]);
+    }
+  }
+
+  if (intrinsicWidth <= 0 || intrinsicHeight <= 0) {
+    const wAttr = parseFloat(svgEl.getAttribute('width') || '0');
+    const hAttr = parseFloat(svgEl.getAttribute('height') || '0');
+    if (wAttr > 100 && hAttr > 50) {
+      intrinsicWidth = Math.ceil(wAttr);
+      intrinsicHeight = Math.ceil(hAttr);
+    }
+  }
+
+  if (intrinsicWidth > 0 && intrinsicHeight > 0) {
+    svgEl.setAttribute('width', `${intrinsicWidth}px`);
+    svgEl.setAttribute('height', `${intrinsicHeight}px`);
+    svgEl.style.maxWidth = 'none';
+    svgEl.style.width = `${intrinsicWidth}px`;
+    svgEl.style.height = `${intrinsicHeight}px`;
+    svgEl.style.display = 'block';
+  }
+
+  const serializer = new XMLSerializer();
+  return serializer.serializeToString(svgEl);
 }
 
 /**

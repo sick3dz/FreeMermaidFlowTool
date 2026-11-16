@@ -25,6 +25,7 @@ export interface LogicAnalysisSummary {
 }
 
 export type CallflowNodeRole = 'entry' | 'hub' | 'step' | 'terminal';
+export type CallflowDirectionFilter = 'both' | 'upstream' | 'downstream';
 
 export interface CallflowNode {
   id: string;
@@ -59,6 +60,8 @@ export interface CallflowTraceResult {
   upstreamNodeIds: Set<string>;
   downstreamNodeIds: Set<string>;
   activeNodeIds: Set<string>;
+  upstreamEdges: CallflowEdge[];
+  downstreamEdges: CallflowEdge[];
   activeEdges: CallflowEdge[];
 }
 

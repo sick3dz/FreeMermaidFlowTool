@@ -22,6 +22,18 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Prevent flex containers or preflight rules from shrinking large Mermaid SVGs */
+.mermaid-canvas-stage {
+  flex-shrink: 0;
+}
+
+.mermaid-canvas-stage > svg {
+  max-width: none !important;
+  max-height: none !important;
+  flex-shrink: 0;
+  display: block;
+}
+
 /* Subtle studio scrollbars */
 ::-webkit-scrollbar {
   width: 6px;

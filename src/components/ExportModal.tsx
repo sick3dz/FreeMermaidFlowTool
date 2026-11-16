@@ -26,6 +26,7 @@ interface ExportModalProps {
   isOpen: boolean;
   onClose: () => void;
   svgContent: string | null;
+  unfilteredSvgContent?: string | null;
   code: string;
   diagramTitle: string;
   defaultBackground: 'dark' | 'light';
@@ -38,6 +39,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   isOpen,
   onClose,
   svgContent,
+  unfilteredSvgContent,
   code,
   diagramTitle,
   defaultBackground,
@@ -101,10 +103,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   };
 
   const handleDownloadInteractiveHtml = () => {
-    if (!svgContent) return;
+    const htmlSvg = unfilteredSvgContent || svgContent;
+    if (!htmlSvg) return;
     const htmlContent = generateInteractiveCallflowHtml(
       diagramTitle,
-      svgContent,
+      htmlSvg,
       callflowGraph,
       bgMode === 'light' ? 'light' : 'dark'
     );

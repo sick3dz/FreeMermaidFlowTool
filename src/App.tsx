@@ -30,6 +30,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import {
+  CallflowDirectionFilter,
   DiagramDirection,
   DiagramTemplate,
   LogicAnalysisSummary,
@@ -173,6 +174,8 @@ export default function App() {
 
   // Callflow Interactive Path Tracing State
   const [selectedCallflowNodeId, setSelectedCallflowNodeId] = useState<string | null>(null);
+  const [callflowDirectionFilter, setCallflowDirectionFilter] =
+    useState<CallflowDirectionFilter>('both');
   const [isolateSubgraphMode, setIsolateSubgraphMode] = useState<boolean>(false);
 
   // Right Inspector Panel Mode ('callflow' | 'theme')
@@ -275,10 +278,15 @@ export default function App() {
 
   const effectiveMermaidCode = useMemo(() => {
     if (isolateSubgraphMode && callflowTrace) {
-      return buildIsolatedPathMermaidCode(callflowTrace, currentDirection || 'LR');
+      return buildIsolatedPathMermaidCode(
+        callflowTrace,
+        callflowGraph,
+        currentDirection || 'LR',
+        callflowDirectionFilter
+      );
     }
     return code;
-  }, [code, isolateSubgraphMode, callflowTrace, currentDirection]);
+  }, [code, isolateSubgraphMode, callflowTrace, callflowGraph, currentDirection, callflowDirectionFilter]);
 
   // Debounced Local Mermaid v11 Parsing & Base SVG Rendering
   useEffect(() => {
@@ -301,13 +309,15 @@ export default function App() {
   }, [effectiveMermaidCode, themeConfig]);
 
   // Apply Smart Logic Coloring AND Callflow Path Spotlight
-  const { coloredSvg, logicSummary } = useMemo<{
+  const { coloredSvg, unfilteredColoredSvg, logicSummary } = useMemo<{
     coloredSvg: string | null;
+    unfilteredColoredSvg: string | null;
     logicSummary: LogicAnalysisSummary;
   }>(() => {
     if (!baseRenderedSvg) {
       return {
         coloredSvg: null,
+        unfilteredColoredSvg: null,
         logicSummary: {
           activeMode: smartColorMode,
           recommendedMode: 'semantic',
@@ -335,12 +345,14 @@ export default function App() {
             processed.svg,
             callflowTrace,
             canvasSurface,
-            callflowGraph
+            callflowGraph,
+            callflowDirectionFilter
           )
         : processed.svg;
 
     return {
       coloredSvg: finalSvg,
+      unfilteredColoredSvg: processed.svg,
       logicSummary: processed.summary,
     };
   }, [
@@ -351,6 +363,7 @@ export default function App() {
     callflowTrace,
     isolateSubgraphMode,
     callflowGraph,
+    callflowDirectionFilter,
   ]);
 
   // Resizable Split Pane Handler (Desktop)
@@ -421,7 +434,7 @@ export default function App() {
     });
   };
 
-  // Fit diagram to viewport
+  // Fit entire diagram into viewport (overview)
   const handleFitToViewport = useCallback(() => {
     if (!coloredSvg || !canvasViewportRef.current) {
       setZoom(1);
@@ -433,18 +446,84 @@ export default function App() {
     const padding = rect.width < 640 ? 32 : 80;
     const scaleX = Math.max(100, rect.width - padding) / Math.max(1, dims.width);
     const scaleY = Math.max(100, rect.height - padding) / Math.max(1, dims.height);
-    const optimalScale = Math.min(2.2, Math.max(0.25, Math.min(scaleX, scaleY)));
+    const optimalScale = Math.min(2.5, Math.max(0.05, Math.min(scaleX, scaleY)));
     setZoom(Number(optimalScale.toFixed(2)));
     setPan({ x: 0, y: 0 });
   }, [coloredSvg]);
 
-  // Canvas Wheel Zoom
+  // Center and zoom camera directly onto a specific Callflow node in readable 1:1+ scale
+  const handleFocusNodeOnCanvas = useCallback(
+    (nodeId: string, desiredMinZoom = 1.2) => {
+      if (!canvasViewportRef.current) return;
+      requestAnimationFrame(() => {
+        if (!canvasViewportRef.current) return;
+        const vpRect = canvasViewportRef.current.getBoundingClientRect();
+        const vpCenterX = vpRect.left + vpRect.width / 2;
+        const vpCenterY = vpRect.top + vpRect.height / 2;
+
+        const candidates = canvasViewportRef.current.querySelectorAll(
+          'g.node, g.actor, g.statediagram-state, g.classGroup'
+        );
+        let targetEl: Element | null = null;
+        for (const el of Array.from(candidates)) {
+          const matched = resolveClickedNodeIdFromSvgElement(el, callflowGraph);
+          if (matched === nodeId) {
+            targetEl = el;
+            break;
+          }
+        }
+
+        if (!targetEl) return;
+
+        const nodeRect = targetEl.getBoundingClientRect();
+        const nodeCenterX = nodeRect.left + nodeRect.width / 2;
+        const nodeCenterY = nodeRect.top + nodeRect.height / 2;
+
+        // Calculate unscaled (1:1) offset of the node relative to the stage center
+        const currentStageCenterX = vpCenterX + pan.x;
+        const currentStageCenterY = vpCenterY + pan.y;
+        const unscaledOffsetX = (nodeCenterX - currentStageCenterX) / Math.max(0.05, zoom);
+        const unscaledOffsetY = (nodeCenterY - currentStageCenterY) / Math.max(0.05, zoom);
+
+        const nextZoom = Number(
+          Math.min(20.0, Math.max(desiredMinZoom, zoom < 0.95 ? 1.25 : zoom)).toFixed(2)
+        );
+        setZoom(nextZoom);
+        setPan({
+          x: Math.round(-unscaledOffsetX * nextZoom),
+          y: Math.round(-unscaledOffsetY * nextZoom),
+        });
+      });
+    },
+    [callflowGraph, pan.x, pan.y, zoom]
+  );
+
+  // Cursor-centered Canvas Wheel Zoom (5% up to 2000%)
   const handleCanvasWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    if (!canvasViewportRef.current) return;
+
+    const rect = canvasViewportRef.current.getBoundingClientRect();
+    const cursorOffsetX = e.clientX - (rect.left + rect.width / 2);
+    const cursorOffsetY = e.clientY - (rect.top + rect.height / 2);
+
+    const factor = e.deltaY < 0 ? 1.16 : 0.86;
+    const nextZoom = Math.min(20.0, Math.max(0.05, Number((zoom * factor).toFixed(2))));
+    const scaleRatio = nextZoom / Math.max(0.05, zoom);
+
+    setPan((prevPan) => ({
+      x: Math.round(cursorOffsetX - (cursorOffsetX - prevPan.x) * scaleRatio),
+      y: Math.round(cursorOffsetY - (cursorOffsetY - prevPan.y) * scaleRatio),
+    }));
+    setZoom(nextZoom);
+  };
+
+  // Adaptive step zoom in/out for toolbar buttons
+  const handleStepZoom = (direction: 'in' | 'out') => {
     setZoom((prev) => {
-      const next = Math.min(4.0, Math.max(0.2, Number((prev * factor).toFixed(2))));
-      return next;
+      const step = prev < 0.5 ? 0.1 : prev < 2.0 ? 0.25 : prev < 5.0 ? 0.5 : 1.5;
+      const next = direction === 'in' ? prev + step : prev - step;
+      return Math.min(20.0, Math.max(0.05, Number(next.toFixed(2))));
     });
   };
 
@@ -481,7 +560,7 @@ export default function App() {
     }
   };
 
-  // Multi-Touch Gestures: 1-Finger Pan & 2-Finger Pinch-to-Zoom
+  // Multi-Touch Gestures: 1-Finger Pan & 2-Finger Pinch-to-Zoom (up to 2000%)
   const getTouchDistance = (touches: React.TouchList): number => {
     const dx = touches[0].clientX - touches[1].clientX;
     const dy = touches[0].clientY - touches[1].clientY;
@@ -522,8 +601,8 @@ export default function App() {
       const currentDist = getTouchDistance(e.touches);
       const ratio = currentDist / touchGestureRef.current.initialPinchDistance;
       const nextZoom = Math.min(
-        4.0,
-        Math.max(0.2, Number((touchGestureRef.current.initialZoom * ratio).toFixed(2)))
+        20.0,
+        Math.max(0.05, Number((touchGestureRef.current.initialZoom * ratio).toFixed(2)))
       );
       setZoom(nextZoom);
     }
@@ -678,10 +757,11 @@ export default function App() {
   };
 
   const handleQuickDownloadInteractiveHtml = () => {
-    if (!coloredSvg) return;
+    const exportSvg = unfilteredColoredSvg || coloredSvg;
+    if (!exportSvg) return;
     const htmlContent = generateInteractiveCallflowHtml(
       diagramTitle,
-      coloredSvg,
+      exportSvg,
       callflowGraph,
       canvasSurface
     );
@@ -1138,52 +1218,89 @@ export default function App() {
               </div>
             </div>
 
-            {/* Center: Zoom & Fit Controls */}
+            {/* Center: High-Range Zoom (5% - 2000%), 1:1 Readable Scale & Fit Controls */}
             <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded-lg p-0.5 shrink-0">
               <button
                 type="button"
-                onClick={() =>
-                  setZoom((z) => Math.max(0.2, Number((z - 0.15).toFixed(2))))
-                }
+                onClick={() => handleStepZoom('out')}
                 title="Verkleinern"
-                className="p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded-md transition-colors"
+                className="p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded-md transition-colors cursor-pointer"
               >
                 <ZoomOut className="w-3.5 h-3.5" />
               </button>
+
+              <select
+                aria-label="Zoom-Stufe wählen"
+                value={String(Math.round(zoom * 100))}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val === 'fit') {
+                    handleFitToViewport();
+                  } else {
+                    const num = Number(val) / 100;
+                    if (Number.isFinite(num) && num > 0) {
+                      setZoom(num);
+                    }
+                  }
+                }}
+                title="Zoom-Stufe direkt wählen (5 % bis 2000 %)"
+                className="bg-transparent hover:bg-slate-800 text-xs font-mono text-slate-200 px-1.5 py-1 rounded-md tabular-nums focus:outline-none cursor-pointer"
+              >
+                <option value={String(Math.round(zoom * 100))} className="bg-slate-900 text-slate-100">
+                  {Math.round(zoom * 100)}%
+                </option>
+                <option value="fit" className="bg-slate-900 text-indigo-300">
+                  Einpassen (Fit)
+                </option>
+                {[10, 25, 50, 75, 100, 125, 150, 200, 300, 400, 600, 800, 1200, 1600, 2000].map(
+                  (pct) => (
+                    <option key={pct} value={String(pct)} className="bg-slate-900 text-slate-100">
+                      {pct === 100 ? '100% (1:1 Lesbar)' : `${pct}%`}
+                    </option>
+                  )
+                )}
+              </select>
+
+              <button
+                type="button"
+                onClick={() => handleStepZoom('in')}
+                title="Vergrößern (bis 2000 %)"
+                className="p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded-md transition-colors cursor-pointer"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
+
               <button
                 type="button"
                 onClick={() => {
                   setZoom(1);
                   setPan({ x: 0, y: 0 });
                 }}
-                title="Auf 100 % zurücksetzen"
-                className="px-2 py-1 text-xs font-mono text-slate-200 hover:bg-slate-800 rounded-md tabular-nums whitespace-nowrap shrink-0"
+                title="Echte 1:1-Originalgröße (100 % gestochen scharfe Lesegröße)"
+                className={`px-2 py-1 text-[11px] font-mono font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  Math.round(zoom * 100) === 100
+                    ? 'bg-indigo-600/30 text-indigo-200 border border-indigo-500/40'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                }`}
               >
-                {Math.round(zoom * 100)}%
+                1:1
               </button>
-              <button
-                type="button"
-                onClick={() =>
-                  setZoom((z) => Math.min(4.0, Number((z + 0.15).toFixed(2))))
-                }
-                title="Vergrößern"
-                className="p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded-md transition-colors"
-              >
-                <ZoomIn className="w-3.5 h-3.5" />
-              </button>
+
               <button
                 type="button"
                 onClick={handleFitToViewport}
-                title="Diagramm optimal einpassen"
-                className="px-2 py-1 text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-800 rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
+                title="Gesamtes Diagramm als Übersicht in das Fenster einpassen"
+                className="px-2 py-1 text-xs font-medium text-slate-300 hover:text-white hover:bg-slate-800 rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Scan className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="hidden xl:inline text-[11px]">Fit</span>
               </button>
+
               <button
                 type="button"
                 onClick={() => setShowGrid((prev) => !prev)}
                 title="Hintergrund-Raster ein-/ausblenden"
-                className={`p-1.5 rounded-md transition-colors ${
+                className={`p-1.5 rounded-md transition-colors cursor-pointer ${
                   showGrid
                     ? 'text-indigo-300 bg-slate-800'
                     : 'text-slate-500 hover:text-slate-300'
@@ -1304,7 +1421,37 @@ export default function App() {
                   </span>
                 </div>
 
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="flex items-center gap-0.5 p-0.5 bg-slate-950 border border-slate-800 rounded-md">
+                    {[
+                      { id: 'both' as const, label: 'Ganzer Pfad' },
+                      { id: 'upstream' as const, label: 'Nur Woher' },
+                      { id: 'downstream' as const, label: 'Nur Wohin' },
+                    ].map((dirOpt) => (
+                      <button
+                        key={dirOpt.id}
+                        type="button"
+                        onClick={() => setCallflowDirectionFilter(dirOpt.id)}
+                        className={`px-2 py-0.5 text-[11px] font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          callflowDirectionFilter === dirOpt.id
+                            ? 'bg-indigo-600 text-white'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {dirOpt.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleFocusNodeOnCanvas(callflowTrace.selectedNode.id, 1.35)}
+                    title="Kamera direkt auf diesen Knoten zentrieren und lesbar heranzoomen"
+                    className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Auf Knoten zoomen
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => setIsolateSubgraphMode((prev) => !prev)}
@@ -1363,7 +1510,7 @@ export default function App() {
                   transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
                   transformOrigin: 'center center',
                 }}
-                className="transition-transform duration-75 ease-out p-4 sm:p-8"
+                className="mermaid-canvas-stage shrink-0 transition-transform duration-75 ease-out p-4 sm:p-8"
                 dangerouslySetInnerHTML={{ __html: coloredSvg }}
               />
             ) : (
@@ -1447,7 +1594,13 @@ export default function App() {
               onSelectNodeId={(id) => {
                 setSelectedCallflowNodeId(id);
               }}
+              onFocusNodeOnCanvas={(id) => {
+                setMobileActivePane('preview');
+                setTimeout(() => handleFocusNodeOnCanvas(id, 1.25), 60);
+              }}
               traceResult={callflowTrace}
+              directionFilter={callflowDirectionFilter}
+              onChangeDirectionFilter={setCallflowDirectionFilter}
               isolateSubgraphMode={isolateSubgraphMode}
               onToggleIsolateSubgraphMode={setIsolateSubgraphMode}
               themeConfig={themeConfig}
@@ -1517,7 +1670,10 @@ export default function App() {
                   graph={callflowGraph}
                   selectedNodeId={selectedCallflowNodeId}
                   onSelectNodeId={setSelectedCallflowNodeId}
+                  onFocusNodeOnCanvas={(id) => handleFocusNodeOnCanvas(id, 1.25)}
                   traceResult={callflowTrace}
+                  directionFilter={callflowDirectionFilter}
+                  onChangeDirectionFilter={setCallflowDirectionFilter}
                   isolateSubgraphMode={isolateSubgraphMode}
                   onToggleIsolateSubgraphMode={setIsolateSubgraphMode}
                   themeConfig={themeConfig}
@@ -1650,6 +1806,7 @@ export default function App() {
         isOpen={isExportModalOpen}
         onClose={() => setIsExportModalOpen(false)}
         svgContent={coloredSvg}
+        unfilteredSvgContent={unfilteredColoredSvg}
         code={code}
         diagramTitle={diagramTitle}
         defaultBackground={canvasSurface}
