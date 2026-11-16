@@ -54,6 +54,7 @@ export function configureMermaidEngine(
       rankSpacing,
       padding: 18,
       diagramPadding: 16,
+      defaultRenderer: themeConfig.layoutEngine === 'elk' ? 'elk' : 'dagre-wrapper',
     },
     sequence: {
       useMaxWidth: false,
@@ -164,6 +165,7 @@ export function detectDiagramTypeLabel(code: string): string {
 
 /**
  * Validates and renders the Mermaid diagram completely locally in the browser.
+ * Includes an automatic fallback to Dagre layout if ELK layout fails for a specific diagram type.
  */
 export async function renderLocalMermaidDiagram(
   code: string,
@@ -197,14 +199,35 @@ export async function renderLocalMermaidDiagram(
     // Step 1: Parse and validate syntax without mutating the main canvas on error
     await mermaid.parse(trimmed, { suppressErrors: false });
 
-    // Step 2: Render clean SVG
+    // Step 2: Render clean SVG (with automatic fallback to Dagre if ELK fails on non-flowchart diagrams)
     renderCounter += 1;
     const uniqueRenderId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
-    const { svg } = await mermaid.render(uniqueRenderId, trimmed);
+    let svgResult: string;
+    try {
+      const rendered = await mermaid.render(uniqueRenderId, trimmed);
+      svgResult = rendered.svg;
+    } catch (renderErr) {
+      if (themeConfig.layoutEngine === 'elk' || themeConfig.look === 'handDrawn') {
+        if (typeof document !== 'undefined') {
+          document.querySelectorAll('[id^="dmermaid-local-svg-"]').forEach((n) => n.remove());
+        }
+        configureMermaidEngine(
+          { ...themeConfig, layoutEngine: 'dagre', look: 'classic' },
+          forceNativeSvgLabels
+        );
+        renderCounter += 1;
+        const fallbackId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
+        const fallbackRendered = await mermaid.render(fallbackId, trimmed);
+        svgResult = fallbackRendered.svg;
+      } else {
+        throw renderErr;
+      }
+    }
+
     const elapsed = Math.max(1, Math.round(performance.now() - startTime));
 
     return {
-      svg,
+      svg: svgResult,
       validation: {
         isValid: true,
         diagramType,

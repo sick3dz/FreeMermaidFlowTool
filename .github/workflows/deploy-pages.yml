@@ -28,16 +28,43 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
+
+      - name: Normalize package.json for public npm registry
+        run: |
+          rm -f bun.lock package-lock.json
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.dependencies = {
+              "@mermaid-js/layout-elk": "latest",
+              "@tailwindcss/vite": "latest",
+              "@vitejs/plugin-react": "latest",
+              "lucide-react": "latest",
+              "mermaid": "latest",
+              "react": "^19.0.0",
+              "react-dom": "^19.0.0",
+              "vite": "latest"
+            };
+            pkg.devDependencies = {
+              "@types/node": "^22.0.0",
+              "@types/react": "^19.0.0",
+              "@types/react-dom": "^19.0.0",
+              "tailwindcss": "latest",
+              "typescript": "latest"
+            };
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
+          '
 
       - name: Install dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps --no-audit --no-fund
 
       - name: Build static web app
         run: npm run build
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload dist artifact
         uses: actions/upload-pages-artifact@v3
