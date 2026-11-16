@@ -1,0 +1,6 @@
+{
+  "name": "MermaidFree2UseOpen",
+  "description": "Vollständige lokale Entwicklungsumgebung für Mermaid v11 Diagramme mit Live-Editor, Theme-Konfigurator und hochauflösendem SVG/PNG-Export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
