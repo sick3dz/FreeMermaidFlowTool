@@ -1,8 +1,19 @@
 import {
+  CallflowAnnouncementRegistryItem,
+  CallflowBuildingBlockType,
+  CallflowCrossRefRegistryItem,
+  CallflowGraph,
+  CallflowHealthFinding,
   CallflowIssueResolution,
   CallflowOpenIssue,
+  CallflowResourceRegistry,
+  CallflowRoutingMatrixRow,
+  CallflowSkillsetRegistryItem,
+  CallflowVariableRegistryItem,
+  CallflowViewLevel,
   DiagramDirection,
   MasterScriptChecklistItem,
+  NodePositionOffset,
   ResolvedIssueRecord,
   ScriptChoiceOption,
   ScriptManualLink,
@@ -1767,6 +1778,7 @@ export interface WorkspaceResolutionState {
   manualQuestions?: CallflowOpenIssue[];
   manualLinks?: ScriptManualLink[];
   masterScriptNumber?: string;
+  nodeOffsets?: Record<string, NodePositionOffset>;
 }
 
 /**
@@ -2146,6 +2158,7 @@ export function buildScriptWorkspace(
     openIssueCount,
     masterScriptNumber,
     masterChecklist,
+    nodeOffsets: prevState?.nodeOffsets,
     updatedAt: Date.now(),
   };
 }
@@ -2292,6 +2305,7 @@ export function applyIssueResolutionToWorkspace(
     manualQuestions: nextManualQuestions,
     manualLinks: nextLinks,
     masterScriptNumber: workspace.masterScriptNumber,
+    nodeOffsets: workspace.nodeOffsets,
   });
 }
 
@@ -2337,6 +2351,7 @@ export function reopenIssueInWorkspace(
     manualQuestions: nextManualQuestions,
     manualLinks: nextLinks,
     masterScriptNumber: workspace.masterScriptNumber,
+    nodeOffsets: workspace.nodeOffsets,
   });
 }
 
@@ -2358,6 +2373,7 @@ export function unignoreChecklistTargetInWorkspace(
     manualQuestions: workspace.manualQuestions,
     manualLinks: workspace.manualLinks,
     masterScriptNumber: workspace.masterScriptNumber,
+    nodeOffsets: workspace.nodeOffsets,
   });
 }
 
@@ -2796,4 +2812,1758 @@ export function buildScriptDetailMermaid(
 
   return lines.join('\n');
 }
+
+/**
+ * Baustein A: Automatische Logik- & Qualitätsprüfung (Health-Check)
+ * Prüft den gesamten Callflow-Arbeitsbereich auf Zyklus-Schleifen, Sackgassen,
+ * verwaiste Skripte (Dead Code), deaktivierte Überläufe, fehlende Zeitplan-Prüfungen
+ * und doppelte Prioritäten.
+ */
+export function analyzeWorkspaceLogicHealth(
+  workspace: ScriptWorkspace
+): CallflowHealthFinding[] {
+  const findings: CallflowHealthFinding[] = [];
+  const modules = workspace.modules || [];
+  if (modules.length === 0) return findings;
+
+  const moduleByKey = new Map<string, ScriptModule>();
+  modules.forEach((m) => moduleByKey.set(canonicalScriptMatchKey(m.scriptNumber), m));
+
+  const masterKey = workspace.masterScriptNumber
+    ? canonicalScriptMatchKey(workspace.masterScriptNumber)
+    : canonicalScriptMatchKey(
+        (modules.find((m) => m.isMaster) || modules[0]).scriptNumber
+      );
+
+  // Build adjacency map (including manual links)
+  const adjacency = new Map<string, Set<string>>();
+  const callersByTarget = new Map<string, Set<string>>();
+  modules.forEach((m) => {
+    const k = canonicalScriptMatchKey(m.scriptNumber);
+    if (!adjacency.has(k)) adjacency.set(k, new Set());
+    m.outgoingNumbers.forEach((out) => {
+      const outKey = canonicalScriptMatchKey(out);
+      if (outKey && outKey !== k) {
+        adjacency.get(k)!.add(outKey);
+        if (!callersByTarget.has(outKey)) callersByTarget.set(outKey, new Set());
+        callersByTarget.get(outKey)!.add(m.scriptNumber);
+      }
+    });
+  });
+
+  (workspace.manualLinks || []).forEach((lnk) => {
+    const fromKey = canonicalScriptMatchKey(lnk.fromScriptNumber);
+    const toKey = canonicalScriptMatchKey(lnk.toTargetNumber);
+    if (fromKey && toKey && fromKey !== toKey) {
+      if (!adjacency.has(fromKey)) adjacency.set(fromKey, new Set());
+      adjacency.get(fromKey)!.add(toKey);
+      if (!callersByTarget.has(toKey)) callersByTarget.set(toKey, new Set());
+      callersByTarget.get(toKey)!.add(lnk.fromScriptNumber);
+    }
+  });
+
+  // 1. Detect multi-module cycles (Ping-Pong / Endlosschleifen)
+  const seenCycles = new Set<string>();
+  const visitedGlobal = new Set<string>();
+
+  const dfsCycles = (currentKey: string, stack: string[], stackSet: Set<string>) => {
+    visitedGlobal.add(currentKey);
+    const neighbors = adjacency.get(currentKey) || new Set<string>();
+    for (const nextKey of neighbors) {
+      if (!moduleByKey.has(nextKey)) continue;
+      if (stackSet.has(nextKey)) {
+        const cycleStartIdx = stack.indexOf(nextKey);
+        if (cycleStartIdx >= 0) {
+          const cycleKeys = stack.slice(cycleStartIdx);
+          // Canonicalize cycle rotation so A->B->A and B->A->B only report once
+          const rotations = cycleKeys.map((_, idx) =>
+            [...cycleKeys.slice(idx), ...cycleKeys.slice(0, idx)].join('->')
+          );
+          rotations.sort();
+          const signature = rotations[0];
+          if (!seenCycles.has(signature)) {
+            seenCycles.add(signature);
+            const displayChain = [...cycleKeys, nextKey].map(
+              (k) => moduleByKey.get(k)?.scriptNumber || k
+            );
+            const entryMod = moduleByKey.get(cycleKeys[0])!;
+            findings.push({
+              id: `health:cycle:${signature}`,
+              severity: 'error',
+              category: 'cycle',
+              scriptNumber: entryMod.scriptNumber,
+              scriptName: entryMod.scriptName,
+              title: `Zyklische Skript-Schleife (${displayChain.join(' → ')})`,
+              description: `Zwischen den Skripten besteht ein geschlossener Rücksprung-Kreislauf (${displayChain.join(
+                ' → '
+              )}). Ohne Abbruchbedingung oder Zähler droht eine Endlosschleife.`,
+              recommendation:
+                'Prüfen Sie die Rücksprung-Bedingung (z. B. Sys_Retour_Zentrale oder Überlauf) und begrenzen Sie die Wiederholungsanzahl.',
+              cyclePath: displayChain,
+            });
+          }
+        }
+      } else if (!visitedGlobal.has(nextKey)) {
+        stack.push(nextKey);
+        stackSet.add(nextKey);
+        dfsCycles(nextKey, stack, stackSet);
+        stack.pop();
+        stackSet.delete(nextKey);
+      }
+    }
+  };
+
+  for (const mod of modules) {
+    const k = canonicalScriptMatchKey(mod.scriptNumber);
+    if (!visitedGlobal.has(k)) {
+      dfsCycles(k, [k], new Set([k]));
+    }
+  }
+
+  // 2. Reachability from Master -> Orphan modules (Dead Code)
+  const reachableFromMaster = new Set<string>();
+  const queue: string[] = [masterKey];
+  while (queue.length > 0) {
+    const curr = queue.shift()!;
+    if (reachableFromMaster.has(curr)) continue;
+    reachableFromMaster.add(curr);
+    const nexts = adjacency.get(curr) || new Set<string>();
+    for (const n of nexts) {
+      if (!reachableFromMaster.has(n)) queue.push(n);
+    }
+  }
+
+  // 3. Per-module checks
+  for (const mod of modules) {
+    const modKey = canonicalScriptMatchKey(mod.scriptNumber);
+    const isMasterMod = modKey === masterKey || mod.isMaster;
+
+    // 3a. Orphan check (when more than 1 module is loaded)
+    if (
+      modules.length > 1 &&
+      !isMasterMod &&
+      !reachableFromMaster.has(modKey) &&
+      (callersByTarget.get(modKey)?.size || 0) === 0
+    ) {
+      findings.push({
+        id: `health:orphan:${modKey}`,
+        severity: 'warning',
+        category: 'orphan-module',
+        scriptNumber: mod.scriptNumber,
+        scriptName: mod.scriptName,
+        title: `Verwaistes Skript [${mod.scriptNumber}] (Dead Code)`,
+        description: `Das Skript "${mod.scriptName}" (${mod.scriptNumber}) wird weder vom Hauptskript noch von einem anderen geladenen Teil-Skript aufgerufen.`,
+        recommendation:
+          'Prüfen Sie, ob ein Sprungbefehl aus Main fehlt oder ob das Skript bei der Migration stillgelegt werden kann.',
+      });
+    }
+
+    // 3b. Dead-end module check (no outgoing scripts, no queueTarget, no choices)
+    const hasAnyQueue = mod.rules.some((r) => Boolean(r.queueTarget));
+    const hasAnyOutgoing =
+      mod.outgoingNumbers.length > 0 ||
+      (workspace.manualLinks || []).some(
+        (l) => canonicalScriptMatchKey(l.fromScriptNumber) === modKey
+      );
+    if (!hasAnyQueue && !hasAnyOutgoing) {
+      findings.push({
+        id: `health:dead-end-mod:${modKey}`,
+        severity: 'error',
+        category: 'dead-end-module',
+        scriptNumber: mod.scriptNumber,
+        scriptName: mod.scriptName,
+        title: `Skript [${mod.scriptNumber}] ohne Weiterleitung oder Queue`,
+        description: `In [${mod.scriptNumber}] wurde weder ein Ziel-Skript noch eine Warteschlange/Skillset erkannt – Anrufe enden hier in einer Sackgasse.`,
+        recommendation:
+          'Ergänzen Sie ein Ziel-Skript (Wohin/Sprung), eine DTMF-Auswahl oder ein Ziel-Skillset (Queue).',
+      });
+    }
+
+    // 3c. Duplicate priorities & dead-end rules & inactive overflows
+    const prioMap = new Map<number, ScriptRule[]>();
+    for (const rule of mod.rules) {
+      const list = prioMap.get(rule.prio) || [];
+      list.push(rule);
+      prioMap.set(rule.prio, list);
+
+      const hasAction =
+        Boolean(rule.targetNumber) ||
+        rule.choices.length > 0 ||
+        Boolean(rule.queueTarget) ||
+        Boolean(rule.announcement) ||
+        Boolean(rule.schedule) ||
+        Boolean(rule.holiday) ||
+        /^Init\b/i.test(rule.stepName);
+
+      if (!hasAction) {
+        findings.push({
+          id: `health:dead-end-rule:${modKey}:${rule.id}`,
+          severity: 'warning',
+          category: 'dead-end-rule',
+          scriptNumber: mod.scriptNumber,
+          scriptName: mod.scriptName,
+          ruleId: rule.id,
+          prio: rule.prio,
+          title: `Unvollständige Regel (Prio ${rule.prio}: ${rule.stepName})`,
+          description: `Schritt "${rule.stepName}" in [${mod.scriptNumber}] besitzt weder Zielnummer, DTMF-Auswahl, Ansage noch Warteschlange.`,
+          recommendation:
+            'Definieren Sie ein Sprungziel oder entfernen Sie den leeren Regelschritt.',
+        });
+      }
+
+      if (
+        /deaktiviert\s*=\s*0/i.test(rule.stepName) ||
+        /Default_Skillset/i.test(rule.condition || '') ||
+        /Default_Skillset/i.test(rule.rawLine || '')
+      ) {
+        findings.push({
+          id: `health:inactive-overflow:${modKey}:${rule.id}`,
+          severity: 'info',
+          category: 'inactive-overflow',
+          scriptNumber: mod.scriptNumber,
+          scriptName: mod.scriptName,
+          ruleId: rule.id,
+          prio: rule.prio,
+          title: `Deaktivierter Überlauf / Platzhalter-Skillset in [${mod.scriptNumber}]`,
+          description: `In Schritt "${rule.stepName}" ist das Überlauf-Routing deaktiviert (Sys_UeberlaufRouting = 0) oder auf Default_Skillset gesetzt.`,
+          recommendation:
+            'Klären Sie für das Zielsystem, ob bei Wartezeit-Überschreitung ein echter Überlauf oder Rücksprung aktiv sein soll.',
+        });
+      }
+    }
+
+    for (const [prio, rulesWithPrio] of prioMap.entries()) {
+      if (rulesWithPrio.length > 1) {
+        // Ignore if rules have distinct conditions (e.g. IF / ELSE branches)
+        const distinctConditions = new Set(
+          rulesWithPrio.map((r) => (r.condition || '').trim()).filter(Boolean)
+        );
+        if (distinctConditions.size < rulesWithPrio.length) {
+          findings.push({
+            id: `health:dup-prio:${modKey}:${prio}`,
+            severity: 'warning',
+            category: 'duplicate-prio',
+            scriptNumber: mod.scriptNumber,
+            scriptName: mod.scriptName,
+            prio,
+            title: `Doppelte Priorität ${prio} in [${mod.scriptNumber}]`,
+            description: `${rulesWithPrio.length} Regeln in [${mod.scriptNumber}] verwenden dieselbe Prioritätsstufe ${prio} (${rulesWithPrio
+              .map((r) => r.stepName)
+              .join(', ')}).`,
+            recommendation:
+              'Vergeben Sie eindeutige Prioritäten, damit die Auswertungsreihenfolge deterministisch bleibt.',
+          });
+        }
+      }
+    }
+
+    // 3d. Master schedule/holiday check
+    if (isMasterMod && mod.rules.length > 0) {
+      const hasScheduleOrHolidayInMaster = mod.rules.some(
+        (r) =>
+          Boolean(r.schedule) ||
+          Boolean(r.holiday) ||
+          /zeitplan|feiertag|[oö]ffnungszeit|sondzeit|nacht/i.test(
+            `${r.stepName} ${r.condition || ''} ${r.rawLine}`
+          )
+      );
+      if (!hasScheduleOrHolidayInMaster) {
+        findings.push({
+          id: `health:no-schedule:${modKey}`,
+          severity: 'info',
+          category: 'missing-schedule-guard',
+          scriptNumber: mod.scriptNumber,
+          scriptName: mod.scriptName,
+          title: `Keine explizite Zeitplan-/Feiertagsprüfung in [${mod.scriptNumber}]`,
+          description: `Im Hauptskript [${mod.scriptNumber}] wurde keine direkte Öffnungszeiten-, Feiertags- oder Sonderzeit-Regel erkannt.`,
+          recommendation:
+            'Prüfen Sie, ob Öffnungszeiten und Feiertage in einem nachgelagerten Teil-Skript oder zentral vor dem Callflow geprüft werden.',
+        });
+      }
+    }
+  }
+
+  const severityOrder: Record<string, number> = { error: 0, warning: 1, info: 2 };
+  return findings.sort(
+    (a, b) => (severityOrder[a.severity] ?? 3) - (severityOrder[b.severity] ?? 3)
+  );
+}
+
+/**
+ * Baustein B: Zentrales Ressourcen- & Variablen-Register
+ * Extrahiert alle Skillsets/Warteschlangen, Ansagen/RAN-IDs, Systemvariablen (ASSIGN)
+ * und Skript-/Rufnummern-Kreuzreferenzen über den gesamten Arbeitsbereich.
+ */
+export function extractWorkspaceResourceRegistry(
+  workspace: ScriptWorkspace
+): CallflowResourceRegistry {
+  const modules = workspace.modules || [];
+  const skillsetMap = new Map<string, CallflowSkillsetRegistryItem>();
+  const announcementMap = new Map<string, CallflowAnnouncementRegistryItem>();
+  const variableMap = new Map<string, CallflowVariableRegistryItem>();
+
+  const registerSkillset = (
+    rawName: string,
+    role: 'primary' | 'overflow' | 'rule',
+    usage: {
+      scriptNumber: string;
+      scriptName: string;
+      prio?: number;
+      stepName?: string;
+      context?: string;
+    }
+  ) => {
+    const clean = rawName.trim();
+    if (!clean || clean === '-1' || clean === '0') return;
+    const key = clean.toLowerCase();
+    let item = skillsetMap.get(key);
+    if (!item) {
+      item = { name: clean, role, usages: [] };
+      skillsetMap.set(key, item);
+    } else if (role === 'primary' && item.role !== 'primary') {
+      item.role = 'primary';
+    }
+    if (
+      !item.usages.some(
+        (u) =>
+          u.scriptNumber === usage.scriptNumber &&
+          u.prio === usage.prio &&
+          u.stepName === usage.stepName
+      )
+    ) {
+      item.usages.push(usage);
+    }
+  };
+
+  const registerAnnouncement = (
+    rawId: string,
+    usage: {
+      scriptNumber: string;
+      scriptName: string;
+      prio?: number;
+      stepName?: string;
+      context?: string;
+    }
+  ) => {
+    const clean = rawId.trim();
+    if (!clean || clean === '-1' || clean === '0') return;
+    const key = clean.toLowerCase();
+    let item = announcementMap.get(key);
+    if (!item) {
+      item = { idOrName: clean, usages: [] };
+      announcementMap.set(key, item);
+    }
+    if (
+      !item.usages.some(
+        (u) =>
+          u.scriptNumber === usage.scriptNumber &&
+          u.prio === usage.prio &&
+          u.stepName === usage.stepName
+      )
+    ) {
+      item.usages.push(usage);
+    }
+  };
+
+  const registerVariable = (
+    varName: string,
+    value: string,
+    scriptNumber: string,
+    scriptName: string
+  ) => {
+    const cleanVar = varName.trim();
+    const cleanVal = value.trim();
+    if (!cleanVar || !cleanVal) return;
+    const key = cleanVar.toLowerCase();
+    let item = variableMap.get(key);
+    if (!item) {
+      item = { variableName: cleanVar, valuesByScript: [] };
+      variableMap.set(key, item);
+    }
+    if (
+      !item.valuesByScript.some(
+        (v) => v.scriptNumber === scriptNumber && v.value === cleanVal
+      )
+    ) {
+      item.valuesByScript.push({ scriptNumber, scriptName, value: cleanVal });
+    }
+  };
+
+  for (const mod of modules) {
+    // 1. Rules inspection
+    for (const rule of mod.rules) {
+      if (rule.queueTarget) {
+        const isOverflow = /[uü]berlauf/i.test(rule.stepName);
+        registerSkillset(
+          rule.queueTarget,
+          isOverflow ? 'overflow' : 'rule',
+          {
+            scriptNumber: mod.scriptNumber,
+            scriptName: mod.scriptName,
+            prio: rule.prio,
+            stepName: rule.stepName,
+            context: rule.condition || rule.schedule,
+          }
+        );
+      }
+      if (rule.announcement) {
+        registerAnnouncement(rule.announcement, {
+          scriptNumber: mod.scriptNumber,
+          scriptName: mod.scriptName,
+          prio: rule.prio,
+          stepName: rule.stepName,
+          context: rule.condition || rule.schedule,
+        });
+      }
+    }
+
+    // 2. Raw text AACC ASSIGN statements (`assign <VAL> to <VAR>` and `ASSIGN <VAR> = <VAL>`)
+    if (mod.rawText) {
+      const cleanedRaw = stripScriptCommentsAndNoise(mod.rawText);
+      const assignToRegex = /\bassign\s+([\s\S]{1,120}?)\s+to\s+([A-Za-z0-9_]+)\b/gi;
+      let m: RegExpExecArray | null;
+      while ((m = assignToRegex.exec(cleanedRaw)) !== null) {
+        const val = m[1].replace(/\s+/g, ' ').trim();
+        const varName = m[2].trim();
+        registerVariable(varName, val, mod.scriptNumber, mod.scriptName);
+        if (/^Sys_Team_Skillset$/i.test(varName)) {
+          registerSkillset(val, 'primary', {
+            scriptNumber: mod.scriptNumber,
+            scriptName: mod.scriptName,
+            stepName: 'Sys_Team_Skillset',
+          });
+        } else if (/^Sys_Ueberlauf_Skillset$/i.test(varName)) {
+          registerSkillset(val, 'overflow', {
+            scriptNumber: mod.scriptNumber,
+            scriptName: mod.scriptName,
+            stepName: 'Sys_Ueberlauf_Skillset',
+          });
+        } else if (/^Sys_Musik$/i.test(varName)) {
+          registerAnnouncement(`Musik-ID ${val}`, {
+            scriptNumber: mod.scriptNumber,
+            scriptName: mod.scriptName,
+            stepName: 'Sys_Musik',
+          });
+        }
+      }
+
+      const assignEqRegex = /\bassign\s+([A-Za-z0-9_]+)\s*=\s*([^\r\n]+)/gi;
+      let meq: RegExpExecArray | null;
+      while ((meq = assignEqRegex.exec(cleanedRaw)) !== null) {
+        const varName = meq[1].trim();
+        const val = meq[2].trim();
+        if (!/\bto\s+[A-Za-z0-9_]+$/i.test(val)) {
+          registerVariable(varName, val, mod.scriptNumber, mod.scriptName);
+        }
+      }
+    }
+  }
+
+  // 3. Cross-Reference matrix (all loaded modules + missing/external targets)
+  const moduleByKey = new Map<string, ScriptModule>();
+  modules.forEach((m) => moduleByKey.set(canonicalScriptMatchKey(m.scriptNumber), m));
+  const externalKeys = new Set(
+    (workspace.externalEndpoints || []).map(canonicalScriptMatchKey)
+  );
+  const masterKey = workspace.masterScriptNumber
+    ? canonicalScriptMatchKey(workspace.masterScriptNumber)
+    : modules.find((m) => m.isMaster)
+    ? canonicalScriptMatchKey(modules.find((m) => m.isMaster)!.scriptNumber)
+    : '';
+
+  const allRefKeysOrder: string[] = [];
+  const displayByRefKey = new Map<string, { refKey: string; displayName: string }>();
+  const callersMap = new Map<string, Set<string>>();
+  const calleesMap = new Map<string, Set<string>>();
+
+  const ensureRefEntry = (rawRef: string, displayName?: string) => {
+    const k = canonicalScriptMatchKey(rawRef);
+    if (!k) return k;
+    if (!displayByRefKey.has(k)) {
+      allRefKeysOrder.push(k);
+      const matched = moduleByKey.get(k);
+      displayByRefKey.set(k, {
+        refKey: matched ? matched.scriptNumber : rawRef,
+        displayName: matched ? matched.scriptName : displayName || rawRef,
+      });
+    }
+    if (!callersMap.has(k)) callersMap.set(k, new Set());
+    if (!calleesMap.has(k)) calleesMap.set(k, new Set());
+    return k;
+  };
+
+  modules.forEach((m) => {
+    const fromKey = ensureRefEntry(m.scriptNumber, m.scriptName);
+    m.outgoingNumbers.forEach((out) => {
+      const toKey = ensureRefEntry(out);
+      if (toKey && toKey !== fromKey) {
+        calleesMap.get(fromKey)!.add(displayByRefKey.get(toKey)!.refKey);
+        callersMap.get(toKey)!.add(m.scriptNumber);
+      }
+    });
+  });
+
+  (workspace.manualLinks || []).forEach((lnk) => {
+    const fromKey = ensureRefEntry(lnk.fromScriptNumber);
+    const toKey = ensureRefEntry(lnk.toTargetNumber);
+    if (fromKey && toKey && fromKey !== toKey) {
+      calleesMap.get(fromKey)!.add(displayByRefKey.get(toKey)!.refKey);
+      callersMap.get(toKey)!.add(displayByRefKey.get(fromKey)!.refKey);
+    }
+  });
+
+  const crossRefs: CallflowCrossRefRegistryItem[] = allRefKeysOrder.map((k) => {
+    const info = displayByRefKey.get(k)!;
+    const matched = moduleByKey.get(k);
+    const status: 'present' | 'missing' | 'external' | 'master' =
+      k === masterKey || matched?.isMaster
+        ? 'master'
+        : matched
+        ? 'present'
+        : externalKeys.has(k)
+        ? 'external'
+        : 'missing';
+
+    return {
+      refKey: info.refKey,
+      displayName: info.displayName,
+      status,
+      callers: Array.from(callersMap.get(k) || []),
+      callees: Array.from(calleesMap.get(k) || []),
+      ruleCount: matched ? matched.rules.length : 0,
+    };
+  });
+
+  return {
+    skillsets: Array.from(skillsetMap.values()).sort((a, b) =>
+      a.name.localeCompare(b.name, 'de')
+    ),
+    announcements: Array.from(announcementMap.values()).sort((a, b) =>
+      a.idOrName.localeCompare(b.idOrName, 'de')
+    ),
+    variables: Array.from(variableMap.values()).sort((a, b) =>
+      a.variableName.localeCompare(b.variableName, 'de')
+    ),
+    crossRefs,
+  };
+}
+
+/**
+ * Baustein C: Erstellt die abgeflachte Routing-Matrix über alle geladenen Skripte
+ * für die Tabellen-Vorschau, den CSV-/Excel-Export und die Migrations-Dokumentation.
+ */
+export function buildWorkspaceRoutingMatrix(
+  workspace: ScriptWorkspace
+): CallflowRoutingMatrixRow[] {
+  const rows: CallflowRoutingMatrixRow[] = [];
+  const modules = workspace.modules || [];
+  const loadedKeys = new Set(
+    modules.map((m) => canonicalScriptMatchKey(m.scriptNumber))
+  );
+  const externalKeys = new Set(
+    (workspace.externalEndpoints || []).map(canonicalScriptMatchKey)
+  );
+
+  for (const mod of modules) {
+    const sortedRules = [...mod.rules].sort((a, b) => a.prio - b.prio);
+    for (const rule of sortedRules) {
+      const condParts: string[] = [];
+      if (rule.schedule) condParts.push(`Zeitplan: ${rule.schedule}`);
+      if (rule.holiday) condParts.push(`Feiertag: ${rule.holiday}`);
+      if (rule.condition) condParts.push(rule.condition);
+
+      const targetParts: string[] = [];
+      const referencedTargets: string[] = [];
+
+      if (rule.targetNumber) {
+        targetParts.push(`→ ${rule.targetNumber}`);
+        referencedTargets.push(rule.targetNumber);
+      }
+      for (const ch of rule.choices) {
+        const prefix = /^(?:Feiertag|Zeitplan|Bedingung|Sprung)$/i.test(ch.choice)
+          ? ch.choice
+          : `Taste ${ch.choice}`;
+        targetParts.push(
+          `${prefix} → ${ch.targetNumber}${ch.label ? ` (${ch.label})` : ''}`
+        );
+        referencedTargets.push(ch.targetNumber);
+      }
+
+      let targetStatus = 'Intern / Queue';
+      if (referencedTargets.length > 0) {
+        const statuses = referencedTargets.map((t) => {
+          const k = canonicalScriptMatchKey(t);
+          if (loadedKeys.has(k)) return 'Geladen';
+          if (externalKeys.has(k)) return 'Extern';
+          return 'Ausstehend';
+        });
+        if (statuses.includes('Ausstehend')) {
+          targetStatus = 'Ausstehende Referenz';
+        } else if (statuses.every((s) => s === 'Extern')) {
+          targetStatus = 'Externes Ziel';
+        } else {
+          targetStatus = 'Vollständig geladen';
+        }
+      } else if (!rule.queueTarget && !rule.announcement) {
+        targetStatus = 'Offen / Prüfen';
+      }
+
+      rows.push({
+        scriptNumber: mod.scriptNumber,
+        scriptName: mod.scriptName,
+        isMaster: mod.isMaster,
+        prio: rule.prio,
+        stepName: rule.stepName,
+        conditionAndSchedule: condParts.join(' · ') || '—',
+        announcement: rule.announcement || '—',
+        queueTarget: rule.queueTarget || '—',
+        targetsAndChoices: targetParts.join(', ') || '—',
+        targetStatus,
+      });
+    }
+  }
+
+  return rows;
+}
+
+function escapeCsvCell(val: string | number): string {
+  const str = String(val ?? '')
+    .replace(/\r?\n/g, ' ')
+    .trim();
+  if (/[;"\t]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/**
+ * Exportiert die gesamte Routing-Matrix als Semikolon-getrennte CSV-Datei mit UTF-8 BOM
+ * (direkt in deutschem Microsoft Excel mit korrekten Umlauten öffenbar).
+ */
+export function exportRoutingMatrixCsv(workspace: ScriptWorkspace): string {
+  const rows = buildWorkspaceRoutingMatrix(workspace);
+  const header = [
+    'Skript-ID',
+    'Skript-Bezeichnung',
+    'Rolle',
+    'Prio',
+    'Regelschritt',
+    'Bedingung / Zeitplan / Feiertag',
+    'Ansage / RAN / Musik',
+    'Warteschlange / Skillset',
+    'Ziel-Skripte & DTMF-Auswahl',
+    'Referenz-Status',
+  ];
+
+  const lines = [
+    header.map(escapeCsvCell).join(';'),
+    ...rows.map((r) =>
+      [
+        r.scriptNumber,
+        r.scriptName,
+        r.isMaster ? 'Master (Main)' : 'Teil-Skript',
+        r.prio,
+        r.stepName,
+        r.conditionAndSchedule,
+        r.announcement,
+        r.queueTarget,
+        r.targetsAndChoices,
+        r.targetStatus,
+      ]
+        .map(escapeCsvCell)
+        .join(';')
+    ),
+  ];
+
+  return `\uFEFF${lines.join('\r\n')}`;
+}
+
+/**
+ * Erzeugt ein vollständiges technisches Migrations- und Fachkonzept-Handbuch im Markdown-Format.
+ */
+export function exportMigrationDocumentationMarkdown(
+  workspace: ScriptWorkspace
+): string {
+  const modules = workspace.modules || [];
+  const checklist = workspace.masterChecklist || [];
+  const health = analyzeWorkspaceLogicHealth(workspace);
+  const registry = extractWorkspaceResourceRegistry(workspace);
+  const matrix = buildWorkspaceRoutingMatrix(workspace);
+  const missingCount = checklist.filter((i) => i.status === 'missing').length;
+  const presentCount = checklist.filter((i) => i.status === 'present').length;
+  const externalCount = checklist.filter((i) => i.status === 'external').length;
+
+  const md: string[] = [];
+  md.push('# Callflow-Migrations- & Fachkonzept-Dokumentation');
+  md.push('');
+  md.push(`- **Erstellt am:** ${new Date().toLocaleString('de-DE')}`);
+  md.push(`- **Geladene Skript-Module:** ${modules.length}`);
+  md.push(
+    `- **Hauptskript (Master):** ${workspace.masterScriptNumber || modules[0]?.scriptNumber || 'Main'}`
+  );
+  md.push(
+    `- **Referenz-Abgleich:** ${presentCount} geladen · ${externalCount} extern · ${missingCount} ausstehend`
+  );
+  md.push(
+    `- **Erkannte Ressourcen:** ${registry.skillsets.length} Skillsets/Queues · ${registry.announcements.length} Ansagen/RAN · ${registry.variables.length} Systemvariablen`
+  );
+  md.push(`- **Logik-Prüfbefunde:** ${health.length}`);
+  md.push('');
+
+  // 1. Callflow-Hierarchie / Checkliste
+  md.push('## 1. Callflow-Referenzbaum & Abgleichstatus');
+  md.push('');
+  if (checklist.length === 0) {
+    md.push('_Keine ausgehenden Skript-Referenzen in der Master-Checkliste._');
+  } else {
+    md.push('| Nr. | Ebene | Ziel-Skript / Nummer | Aufrufer | Kontext | Status |');
+    md.push('| --- | --- | --- | --- | --- | --- |');
+    checklist.forEach((item) => {
+      const statusLabel =
+        item.status === 'present'
+          ? 'Vorhanden (Geladen)'
+          : item.status === 'external'
+          ? 'Externes Ziel'
+          : 'Ausstehende Referenz';
+      md.push(
+        `| ${item.orderIndex} | Ebene ${item.depth || 1} | \`${item.refKey}\` (${item.displayName}) | \`${item.callerScriptNumber}\` | ${item.contextLabel} | **${statusLabel}** |`
+      );
+    });
+  }
+  md.push('');
+
+  // 2. Ressourcen-Register
+  md.push('## 2. Zentrales Ressourcen- & Variablen-Register');
+  md.push('');
+  md.push('### 2.1 Warteschlangen & Skillsets');
+  if (registry.skillsets.length === 0) {
+    md.push('_Keine Skillsets oder Warteschlangen im Callflow erkannt._');
+  } else {
+    md.push('| Skillset / Queue | Typ | Verwendet in Skripten |');
+    md.push('| --- | --- | --- |');
+    registry.skillsets.forEach((sk) => {
+      const roleLabel =
+        sk.role === 'primary'
+          ? 'Primär-Skillset'
+          : sk.role === 'overflow'
+          ? 'Überlauf-Skillset'
+          : 'Regel-Queue';
+      const refs = sk.usages
+        .map(
+          (u) =>
+            `\`[${u.scriptNumber}]\` ${u.stepName || ''}${u.prio !== undefined ? ` (Prio ${u.prio})` : ''}`
+        )
+        .join(', ');
+      md.push(`| \`${sk.name}\` | ${roleLabel} | ${refs} |`);
+    });
+  }
+  md.push('');
+
+  md.push('### 2.2 Ansagen, RAN & Wartemusik');
+  if (registry.announcements.length === 0) {
+    md.push('_Keine Ansagen oder Musik-IDs erkannt._');
+  } else {
+    md.push('| Ansage / RAN / Audio | Verwendet in Skripten |');
+    md.push('| --- | --- |');
+    registry.announcements.forEach((ann) => {
+      const refs = ann.usages
+        .map(
+          (u) =>
+            `\`[${u.scriptNumber}]\` ${u.stepName || ''}${u.prio !== undefined ? ` (Prio ${u.prio})` : ''}`
+        )
+        .join(', ');
+      md.push(`| \`${ann.idOrName}\` | ${refs} |`);
+    });
+  }
+  md.push('');
+
+  if (registry.variables.length > 0) {
+    md.push('### 2.3 AACC-Systemvariablen (`ASSIGN`)');
+    md.push('| Variable | Gesetzte Werte je Skript |');
+    md.push('| --- | --- |');
+    registry.variables.forEach((v) => {
+      const vals = v.valuesByScript
+        .map((s) => `\`[${s.scriptNumber}]\`: \`${s.value}\``)
+        .join(' · ');
+      md.push(`| \`${v.variableName}\` | ${vals} |`);
+    });
+    md.push('');
+  }
+
+  // 3. Logik-Prüfung
+  md.push('## 3. Automatische Logik- & Qualitätsprüfung');
+  md.push('');
+  if (health.length === 0) {
+    md.push('Keine kritischen Schleifen, Sackgassen oder verwaisten Skripte erkannt.');
+  } else {
+    health.forEach((f) => {
+      const badge =
+        f.severity === 'error'
+          ? '[FEHLER]'
+          : f.severity === 'warning'
+          ? '[WARNUNG]'
+          : '[HINWEIS]';
+      md.push(`- **${badge} ${f.title}** (\`[${f.scriptNumber}] ${f.scriptName}\`)`);
+      md.push(`  - *Befund:* ${f.description}`);
+      md.push(`  - *Empfehlung:* ${f.recommendation}`);
+    });
+  }
+  md.push('');
+
+  // 4. Vollständige Routing-Matrix
+  md.push('## 4. Vollständige Routing-Matrix');
+  md.push('');
+  if (matrix.length === 0) {
+    md.push('_Keine Routing-Regeln vorhanden._');
+  } else {
+    md.push(
+      '| Skript | Prio | Schritt | Bedingung / Zeitplan | Ansage / RAN | Queue / Skillset | Ziel / DTMF | Status |'
+    );
+    md.push('| --- | --- | --- | --- | --- | --- | --- | --- |');
+    matrix.forEach((r) => {
+      md.push(
+        `| \`[${r.scriptNumber}]\` ${r.scriptName} | ${r.prio} | ${r.stepName} | ${r.conditionAndSchedule} | ${r.announcement} | ${r.queueTarget} | ${r.targetsAndChoices} | ${r.targetStatus} |`
+      );
+    });
+  }
+  md.push('');
+
+  return md.join('\n');
+}
+
+export interface EditableNodeConnectionItem {
+  id: string;
+  toTargetNumber: string;
+  label: string;
+  kind: 'rule-target' | 'choice' | 'manual-link';
+  ruleId?: string;
+  choiceKey?: string;
+}
+
+export interface EditableCallflowNodeSnapshot {
+  nodeId: string;
+  mode: 'workspace-module' | 'workspace-step' | 'workspace-external' | 'raw-mermaid';
+  scriptNumber: string;
+  title: string;
+  blockType: CallflowBuildingBlockType;
+  prio?: number;
+  ruleId?: string;
+  announcement: string;
+  queueTarget: string;
+  schedule: string;
+  condition: string;
+  outgoingConnections: EditableNodeConnectionItem[];
+}
+
+/**
+ * Inspects a node from the current diagram so the Double-Click Node Editor modal can
+ * pre-populate its title, number, building block type, announcement, skillset, schedule/condition,
+ * and outgoing transitions.
+ */
+export function inspectWorkspaceNodeForEdit(
+  workspace: ScriptWorkspace,
+  viewLevel: CallflowViewLevel,
+  nodeId: string,
+  graph: CallflowGraph
+): EditableCallflowNodeSnapshot {
+  const graphNode = graph.nodes.get(nodeId);
+  const fallbackLabel = graphNode?.label || nodeId;
+
+  if (workspace.modules.length === 0) {
+    const rawOutgoing: EditableNodeConnectionItem[] = graph.edges
+      .filter((e) => e.from === nodeId)
+      .map((e, idx) => ({
+        id: `raw-${idx}-${e.to}`,
+        toTargetNumber: e.to,
+        label: e.label || '',
+        kind: 'manual-link',
+      }));
+    return {
+      nodeId,
+      mode: 'raw-mermaid',
+      scriptNumber: nodeId,
+      title: fallbackLabel,
+      blockType: 'script',
+      announcement: '',
+      queueTarget: '',
+      schedule: '',
+      condition: '',
+      outgoingConnections: rawOutgoing,
+    };
+  }
+
+  // Detail View Step (`STEP_<modSuffix>_<idx>`)
+  const stepMatch = nodeId.match(/^STEP_([A-Za-z0-9_]+)_(\d+)$/);
+  if (viewLevel.level === 'detail' && stepMatch) {
+    const stepIndex = Math.max(0, parseInt(stepMatch[2], 10) - 1);
+    const mod = workspace.modules.find(
+      (m) =>
+        canonicalScriptMatchKey(m.scriptNumber) ===
+        canonicalScriptMatchKey(viewLevel.scriptNumber)
+    );
+    const sortedRules = mod ? [...mod.rules].sort((a, b) => a.prio - b.prio) : [];
+    const rule = sortedRules[stepIndex];
+    if (mod && rule) {
+      const outgoing: EditableNodeConnectionItem[] = [];
+      if (rule.targetNumber) {
+        outgoing.push({
+          id: `rt-${rule.id}`,
+          toTargetNumber: rule.targetNumber,
+          label: `Wohin: ${rule.targetNumber}`,
+          kind: 'rule-target',
+          ruleId: rule.id,
+        });
+      }
+      rule.choices.forEach((ch, cIdx) => {
+        outgoing.push({
+          id: `ch-${rule.id}-${cIdx}`,
+          toTargetNumber: ch.targetNumber,
+          label: ch.choice,
+          kind: 'choice',
+          ruleId: rule.id,
+          choiceKey: ch.choice,
+        });
+      });
+      (workspace.manualLinks || [])
+        .filter(
+          (lnk) =>
+            canonicalScriptMatchKey(lnk.fromScriptNumber) ===
+              canonicalScriptMatchKey(mod.scriptNumber) && lnk.fromRuleId === rule.id
+        )
+        .forEach((lnk) => {
+          outgoing.push({
+            id: lnk.id,
+            toTargetNumber: lnk.toTargetNumber,
+            label: lnk.label || 'Verknüpft',
+            kind: 'manual-link',
+            ruleId: rule.id,
+          });
+        });
+
+      const blockType: CallflowBuildingBlockType =
+        rule.choices.length > 0
+          ? 'dtmf'
+          : rule.schedule || rule.condition
+          ? 'condition'
+          : rule.queueTarget
+          ? 'queue'
+          : rule.announcement
+          ? 'announcement'
+          : 'script';
+
+      return {
+        nodeId,
+        mode: 'workspace-step',
+        scriptNumber: mod.scriptNumber,
+        title: rule.stepName,
+        blockType,
+        prio: rule.prio,
+        ruleId: rule.id,
+        announcement: rule.announcement || '',
+        queueTarget: rule.queueTarget || '',
+        schedule: rule.schedule || '',
+        condition: rule.condition || '',
+        outgoingConnections: outgoing,
+      };
+    }
+  }
+
+  // Master View or Detail Jump/Self/Inc node -> maps to a ScriptModule or Missing/External target
+  const extractedRef =
+    extractScriptNumberFromNodeId(nodeId, workspace.modules) ||
+    (viewLevel.level === 'detail' ? viewLevel.scriptNumber : nodeId.replace(/^S_/, ''));
+  const targetKey = canonicalScriptMatchKey(extractedRef);
+  const mod = workspace.modules.find(
+    (m) => canonicalScriptMatchKey(m.scriptNumber) === targetKey
+  );
+
+  if (mod) {
+    const primaryRule = [...mod.rules].sort((a, b) => a.prio - b.prio)[0];
+    const outgoing: EditableNodeConnectionItem[] = [];
+    mod.rules.forEach((r) => {
+      if (r.targetNumber) {
+        outgoing.push({
+          id: `rt-${r.id}`,
+          toTargetNumber: r.targetNumber,
+          label: `P${r.prio}`,
+          kind: 'rule-target',
+          ruleId: r.id,
+        });
+      }
+      r.choices.forEach((ch, cIdx) => {
+        outgoing.push({
+          id: `ch-${r.id}-${cIdx}`,
+          toTargetNumber: ch.targetNumber,
+          label: ch.choice,
+          kind: 'choice',
+          ruleId: r.id,
+          choiceKey: ch.choice,
+        });
+      });
+    });
+    (workspace.manualLinks || [])
+      .filter((lnk) => canonicalScriptMatchKey(lnk.fromScriptNumber) === targetKey)
+      .forEach((lnk) => {
+        outgoing.push({
+          id: lnk.id,
+          toTargetNumber: lnk.toTargetNumber,
+          label: lnk.label || 'Verknüpft',
+          kind: 'manual-link',
+        });
+      });
+
+    const hasChoices = mod.rules.some((r) => r.choices.length > 0);
+    const firstAnn = mod.rules.find((r) => Boolean(r.announcement))?.announcement || '';
+    const firstQueue = mod.rules.find((r) => Boolean(r.queueTarget))?.queueTarget || '';
+    const firstSched = mod.rules.find((r) => Boolean(r.schedule))?.schedule || '';
+    const firstCond = mod.rules.find((r) => Boolean(r.condition))?.condition || '';
+
+    const blockType: CallflowBuildingBlockType = hasChoices
+      ? 'dtmf'
+      : firstSched || firstCond
+      ? 'condition'
+      : firstQueue && mod.outgoingNumbers.length === 0
+      ? 'queue'
+      : firstAnn && mod.outgoingNumbers.length === 0
+      ? 'announcement'
+      : 'script';
+
+    return {
+      nodeId,
+      mode: 'workspace-module',
+      scriptNumber: mod.scriptNumber,
+      title: mod.scriptName,
+      blockType,
+      prio: primaryRule?.prio ?? 1,
+      ruleId: primaryRule?.id,
+      announcement: firstAnn,
+      queueTarget: firstQueue,
+      schedule: firstSched,
+      condition: firstCond,
+      outgoingConnections: outgoing,
+    };
+  }
+
+  const isExternal = (workspace.externalEndpoints || []).some(
+    (e) => canonicalScriptMatchKey(e) === targetKey
+  );
+  const outgoing: EditableNodeConnectionItem[] = (workspace.manualLinks || [])
+    .filter((lnk) => canonicalScriptMatchKey(lnk.fromScriptNumber) === targetKey)
+    .map((lnk) => ({
+      id: lnk.id,
+      toTargetNumber: lnk.toTargetNumber,
+      label: lnk.label || 'Verknüpft',
+      kind: 'manual-link',
+    }));
+
+  return {
+    nodeId,
+    mode: 'workspace-external',
+    scriptNumber: extractedRef,
+    title: isExternal ? 'Externes Ziel' : `Skript ${extractedRef}`,
+    blockType: isExternal ? 'external' : 'script',
+    announcement: '',
+    queueTarget: '',
+    schedule: '',
+    condition: '',
+    outgoingConnections: outgoing,
+  };
+}
+
+/**
+ * Adds a new Callflow Building Block (from the PC Drag & Drop Palette Bar) into the
+ * ScriptWorkspace and returns the updated workspace + created node ID + optional initial offset.
+ */
+export function addBuildingBlockToWorkspace(
+  workspace: ScriptWorkspace,
+  viewLevel: CallflowViewLevel,
+  block: {
+    type: CallflowBuildingBlockType;
+    idOrNumber?: string;
+    title?: string;
+    announcement?: string;
+    queueTarget?: string;
+    schedule?: string;
+    condition?: string;
+    connectFromNodeId?: string | null;
+    connectLabel?: string;
+    initialOffset?: NodePositionOffset;
+  }
+): { workspace: ScriptWorkspace; createdNodeId: string; createdScriptNumber: string } {
+  const existingKeys = new Set(
+    workspace.modules.map((m) => canonicalScriptMatchKey(m.scriptNumber))
+  );
+
+  // Generate a clean default number/identifier if not provided
+  const pickNextScriptNumber = (prefixNum: number): string => {
+    let candidate = prefixNum;
+    while (existingKeys.has(String(candidate))) {
+      candidate += 10;
+    }
+    return String(candidate);
+  };
+
+  // Detail View: If viewing a specific script in Level 2, add a new Rule Step directly to that script!
+  if (viewLevel.level === 'detail' && workspace.modules.length > 0 && block.type !== 'external') {
+    const activeScriptNum = viewLevel.scriptNumber;
+    const activeKey = canonicalScriptMatchKey(activeScriptNum);
+    const mod = workspace.modules.find(
+      (m) => canonicalScriptMatchKey(m.scriptNumber) === activeKey
+    );
+    if (mod) {
+      const maxPrio = mod.rules.reduce((max, r) => Math.max(max, r.prio), 0);
+      const nextPrio = maxPrio + 1;
+      const newRuleId = `${toMermaidNodeSuffix(mod.scriptNumber)}-dd-${Date.now().toString(36)}`;
+      const targetRef = block.idOrNumber
+        ? normalizeScriptRef(block.idOrNumber)
+        : block.type === 'script' || block.type === 'dtmf'
+        ? pickNextScriptNumber(4500)
+        : undefined;
+
+      const newRule: ScriptRule = {
+        id: newRuleId,
+        prio: nextPrio,
+        stepName:
+          block.title?.trim() ||
+          (block.type === 'announcement'
+            ? 'Ansage / RAN abspielen'
+            : block.type === 'queue'
+            ? 'Skillset / Warteschlange'
+            : block.type === 'condition'
+            ? 'Zeit- / IF-Weiche'
+            : block.type === 'dtmf'
+            ? 'DTMF-Auswahlmenü'
+            : `Aufruf ${targetRef || 'Folgeskript'}`),
+        sourceNumber: mod.scriptNumber,
+        targetNumber: block.type === 'dtmf' ? undefined : targetRef,
+        announcement:
+          block.announcement?.trim() ||
+          (block.type === 'announcement' ? 'willkommen_ansage.wav' : undefined),
+        queueTarget:
+          block.queueTarget?.trim() ||
+          (block.type === 'queue' ? 'Service_Skillset_DE' : undefined),
+        schedule:
+          block.schedule?.trim() ||
+          (block.type === 'condition' ? 'Mo-Fr 08:00-18:00' : undefined),
+        condition: block.condition?.trim() || undefined,
+        choices:
+          block.type === 'dtmf'
+            ? [
+                {
+                  choice: '1',
+                  targetNumber: targetRef || pickNextScriptNumber(4510),
+                  label: 'Taste 1',
+                },
+              ]
+            : [],
+        rawLine: `Prio ${nextPrio}: ${block.title || block.type}`,
+      };
+
+      const nextModules = workspace.modules.map((m) =>
+        canonicalScriptMatchKey(m.scriptNumber) === activeKey
+          ? { ...m, rules: [...m.rules, newRule] }
+          : m
+      );
+      const stepIdx = mod.rules.length + 1;
+      const createdNodeId = `STEP_${toMermaidNodeSuffix(mod.scriptNumber)}_${stepIdx}`;
+      const nextOffsets = { ...(workspace.nodeOffsets || {}) };
+      if (block.initialOffset) {
+        nextOffsets[createdNodeId] = block.initialOffset;
+      }
+
+      const updatedWs = buildScriptWorkspace(nextModules, {
+        ...workspace,
+        nodeOffsets: nextOffsets,
+      });
+      return {
+        workspace: updatedWs,
+        createdNodeId,
+        createdScriptNumber: mod.scriptNumber,
+      };
+    }
+  }
+
+  // Master View (or creating an external target / new module)
+  const defaultNumByType: Record<CallflowBuildingBlockType, number> = {
+    script: 4100,
+    announcement: 3100,
+    queue: 5100,
+    condition: 2100,
+    dtmf: 6100,
+    external: 9900,
+  };
+  const newScriptNumber = block.idOrNumber?.trim()
+    ? normalizeScriptRef(block.idOrNumber)
+    : workspace.modules.length === 0
+    ? 'Main'
+    : pickNextScriptNumber(defaultNumByType[block.type] || 4000);
+
+  const defaultTitleByType: Record<CallflowBuildingBlockType, string> = {
+    script: newScriptNumber === 'Main' ? 'Hauptskript (Main)' : `Teil-Skript ${newScriptNumber}`,
+    announcement: `Ansage / RAN (${newScriptNumber})`,
+    queue: `Skillset-Routing (${newScriptNumber})`,
+    condition: `Zeit- & Feiertagsweiche (${newScriptNumber})`,
+    dtmf: `DTMF-Sprachmenü (${newScriptNumber})`,
+    external: `Externes Ziel (${newScriptNumber})`,
+  };
+  const newTitle = block.title?.trim() || defaultTitleByType[block.type];
+  const createdNodeId = `S_${toMermaidNodeSuffix(newScriptNumber)}`;
+  const nextOffsets = { ...(workspace.nodeOffsets || {}) };
+  if (block.initialOffset) {
+    nextOffsets[createdNodeId] = block.initialOffset;
+  }
+
+  // Determine optional source script to auto-connect from if user dropped onto a node
+  const fromScriptRef = block.connectFromNodeId
+    ? extractScriptNumberFromNodeId(block.connectFromNodeId, workspace.modules)
+    : null;
+
+  if (block.type === 'external') {
+    const nextExternal = Array.from(
+      new Set([...(workspace.externalEndpoints || []), newScriptNumber])
+    );
+    const nextLinks = [...(workspace.manualLinks || [])];
+    const sourceCaller =
+      fromScriptRef ||
+      (viewLevel.level === 'detail'
+        ? viewLevel.scriptNumber
+        : workspace.masterScriptNumber || workspace.modules[0]?.scriptNumber);
+    if (
+      sourceCaller &&
+      canonicalScriptMatchKey(sourceCaller) !== canonicalScriptMatchKey(newScriptNumber)
+    ) {
+      nextLinks.push({
+        id: `lnk-dd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        fromScriptNumber: sourceCaller,
+        toTargetNumber: newScriptNumber,
+        label: block.connectLabel || 'Extern',
+      });
+    }
+    const updatedWs = buildScriptWorkspace(workspace.modules, {
+      ...workspace,
+      externalEndpoints: nextExternal,
+      manualLinks: nextLinks,
+      nodeOffsets: nextOffsets,
+    });
+    return {
+      workspace: updatedWs,
+      createdNodeId,
+      createdScriptNumber: newScriptNumber,
+    };
+  }
+
+  // Build initial rule for the new module based on building block type
+  const ruleId = `${toMermaidNodeSuffix(newScriptNumber)}-1`;
+  const initialRule: ScriptRule = {
+    id: ruleId,
+    prio: 1,
+    stepName: newTitle,
+    sourceNumber: newScriptNumber,
+    announcement:
+      block.announcement?.trim() ||
+      (block.type === 'announcement' ? `ansage_${toMermaidNodeSuffix(newScriptNumber)}.wav` : undefined),
+    queueTarget:
+      block.queueTarget?.trim() ||
+      (block.type === 'queue' || block.type === 'script'
+        ? `Skillset_${toMermaidNodeSuffix(newScriptNumber)}`
+        : undefined),
+    schedule:
+      block.schedule?.trim() ||
+      (block.type === 'condition' ? 'Mo-Fr 08:00-18:00' : undefined),
+    condition:
+      block.condition?.trim() ||
+      (block.type === 'condition' ? 'Öffnungszeiten aktiv' : undefined),
+    choices:
+      block.type === 'dtmf'
+        ? [
+            {
+              choice: '1',
+              targetNumber: pickNextScriptNumber(5200),
+              label: 'Auswahl 1',
+            },
+          ]
+        : [],
+    rawLine: `Prio 1: ${newTitle}`,
+  };
+
+  const newModule: ScriptModule = {
+    scriptNumber: newScriptNumber,
+    scriptName: newTitle,
+    isMaster:
+      workspace.modules.length === 0 ||
+      /^(?:main|master(?:script)?|0000)$/i.test(canonicalScriptMatchKey(newScriptNumber)),
+    origin: 'legacy-text',
+    rawText: `=== [${newScriptNumber}] ${newTitle} ===\n${initialRule.rawLine}`,
+    rules: [initialRule],
+    outgoingNumbers: [],
+  };
+
+  const nextModules = [...workspace.modules, newModule];
+  const nextLinks = [...(workspace.manualLinks || [])];
+  if (
+    fromScriptRef &&
+    canonicalScriptMatchKey(fromScriptRef) !== canonicalScriptMatchKey(newScriptNumber)
+  ) {
+    nextLinks.push({
+      id: `lnk-dd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      fromScriptNumber: fromScriptRef,
+      toTargetNumber: newScriptNumber,
+      label: block.connectLabel || 'Sprung',
+    });
+  }
+
+  const updatedWs = buildScriptWorkspace(nextModules, {
+    ...workspace,
+    manualLinks: nextLinks,
+    nodeOffsets: nextOffsets,
+  });
+
+  return {
+    workspace: updatedWs,
+    createdNodeId,
+    createdScriptNumber: newScriptNumber,
+  };
+}
+
+/**
+ * Creates a new transition connection (or updates an existing one) when the user drags a connection
+ * wire from `fromNodeId` to `toNodeId` on the PC canvas.
+ */
+export function connectNodesInWorkspace(
+  workspace: ScriptWorkspace,
+  viewLevel: CallflowViewLevel,
+  fromNodeId: string,
+  toNodeId: string,
+  edgeLabel: string = ''
+): ScriptWorkspace {
+  if (!fromNodeId || !toNodeId || fromNodeId === toNodeId) return workspace;
+
+  const cleanLabel = edgeLabel.trim();
+
+  // Case 1: Detail view connecting a STEP_<mod>_<idx> to a JUMP_<target> or S_<target>
+  const stepMatch = fromNodeId.match(/^STEP_([A-Za-z0-9_]+)_(\d+)$/);
+  if (viewLevel.level === 'detail' && stepMatch) {
+    const stepIndex = Math.max(0, parseInt(stepMatch[2], 10) - 1);
+    const toRef =
+      extractScriptNumberFromNodeId(toNodeId, workspace.modules) ||
+      toNodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
+    if (!toRef) return workspace;
+
+    const activeKey = canonicalScriptMatchKey(viewLevel.scriptNumber);
+    const nextModules = workspace.modules.map((mod) => {
+      if (canonicalScriptMatchKey(mod.scriptNumber) !== activeKey) return mod;
+      const sorted = [...mod.rules].sort((a, b) => a.prio - b.prio);
+      const targetRule = sorted[stepIndex];
+      if (!targetRule) return mod;
+
+      const choiceMatch = cleanLabel.match(/^(?:taste\s*)?([0-9*#]+)$/i);
+      const updatedRule: ScriptRule = choiceMatch
+        ? {
+            ...targetRule,
+            choices: [
+              ...targetRule.choices.filter((c) => c.choice !== choiceMatch[1]),
+              { choice: choiceMatch[1], targetNumber: toRef, label: cleanLabel },
+            ],
+          }
+        : !targetRule.targetNumber
+        ? { ...targetRule, targetNumber: toRef }
+        : {
+            ...targetRule,
+            choices: [
+              ...targetRule.choices,
+              { choice: cleanLabel || 'Sprung', targetNumber: toRef },
+            ],
+          };
+
+      return {
+        ...mod,
+        rules: mod.rules.map((r) => (r.id === targetRule.id ? updatedRule : r)),
+      };
+    });
+
+    return buildScriptWorkspace(nextModules, workspace);
+  }
+
+  // Case 2: Master Overview (or general script-to-script connection)
+  const fromRef =
+    extractScriptNumberFromNodeId(fromNodeId, workspace.modules) ||
+    (viewLevel.level === 'detail' ? viewLevel.scriptNumber : fromNodeId.replace(/^S_/, ''));
+  const toRef =
+    extractScriptNumberFromNodeId(toNodeId, workspace.modules) ||
+    toNodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
+
+  if (!fromRef || !toRef) return workspace;
+  const fromKey = canonicalScriptMatchKey(fromRef);
+  const toKey = canonicalScriptMatchKey(toRef);
+  if (fromKey === toKey) return workspace;
+
+  const sourceMod = workspace.modules.find(
+    (m) => canonicalScriptMatchKey(m.scriptNumber) === fromKey
+  );
+
+  if (sourceMod) {
+    const choiceMatch = cleanLabel.match(/^(?:taste\s*)?([0-9*#]+)$/i);
+    const maxPrio = sourceMod.rules.reduce((max, r) => Math.max(max, r.prio), 0);
+    const newRule: ScriptRule = {
+      id: `${toMermaidNodeSuffix(sourceMod.scriptNumber)}-conn-${Date.now().toString(36)}`,
+      prio: maxPrio + 1,
+      stepName: cleanLabel ? `${cleanLabel} → ${toRef}` : `Weiterleitung → ${toRef}`,
+      sourceNumber: sourceMod.scriptNumber,
+      targetNumber: choiceMatch ? undefined : toRef,
+      choices: choiceMatch ? [{ choice: choiceMatch[1], targetNumber: toRef }] : [],
+      rawLine: `Prio ${maxPrio + 1}: ${cleanLabel || 'Wohin'} -> ${toRef}`,
+    };
+
+    const nextModules = workspace.modules.map((m) =>
+      canonicalScriptMatchKey(m.scriptNumber) === fromKey
+        ? { ...m, rules: [...m.rules, newRule] }
+        : m
+    );
+    return buildScriptWorkspace(nextModules, workspace);
+  }
+
+  // Fallback if source is a missing/external node: record in manualLinks
+  const nextLinks: ScriptManualLink[] = [
+    ...(workspace.manualLinks || []),
+    {
+      id: `lnk-dd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      fromScriptNumber: fromRef,
+      toTargetNumber: toRef,
+      label: cleanLabel || 'Verknüpft',
+    },
+  ];
+  return buildScriptWorkspace(workspace.modules, {
+    ...workspace,
+    manualLinks: nextLinks,
+  });
+}
+
+/**
+ * Updates a node's properties, text, and outgoing transitions from the Double-Click Node Editor modal.
+ */
+export function updateWorkspaceNodeFromEdit(
+  workspace: ScriptWorkspace,
+  viewLevel: CallflowViewLevel,
+  snapshot: EditableCallflowNodeSnapshot,
+  updates: {
+    scriptNumber: string;
+    title: string;
+    blockType: CallflowBuildingBlockType;
+    announcement: string;
+    queueTarget: string;
+    schedule: string;
+    condition: string;
+    outgoingConnections: EditableNodeConnectionItem[];
+  }
+): ScriptWorkspace {
+  const cleanScriptNum = normalizeScriptRef(updates.scriptNumber || snapshot.scriptNumber) || snapshot.scriptNumber;
+  const cleanTitle = updates.title.trim() || cleanScriptNum;
+  const cleanAnn = updates.announcement.trim();
+  const cleanQueue = updates.queueTarget.trim();
+  const cleanSched = updates.schedule.trim();
+  const cleanCond = updates.condition.trim();
+
+  // Case 1: Editing a specific Rule Step in Level 2 Detail View
+  if (snapshot.mode === 'workspace-step' && snapshot.ruleId) {
+    const modKey = canonicalScriptMatchKey(snapshot.scriptNumber);
+    const ruleTargets = updates.outgoingConnections.filter((c) => c.toTargetNumber.trim());
+    const primaryTarget =
+      ruleTargets.find((c) => c.kind === 'rule-target')?.toTargetNumber.trim() ||
+      (updates.blockType !== 'dtmf' ? ruleTargets[0]?.toTargetNumber.trim() : undefined);
+
+    const choiceItems: ScriptChoiceOption[] = ruleTargets
+      .filter((c) => c.kind === 'choice' || (updates.blockType === 'dtmf' && c.toTargetNumber.trim()))
+      .map((c, idx) => ({
+        choice: c.label.replace(/^Taste\s+/i, '').trim() || String(idx + 1),
+        targetNumber: normalizeScriptRef(c.toTargetNumber),
+      }));
+
+    const nextModules = workspace.modules.map((mod) => {
+      if (canonicalScriptMatchKey(mod.scriptNumber) !== modKey) return mod;
+      return {
+        ...mod,
+        rules: mod.rules.map((r) =>
+          r.id === snapshot.ruleId
+            ? {
+                ...r,
+                stepName: cleanTitle,
+                targetNumber: primaryTarget ? normalizeScriptRef(primaryTarget) : undefined,
+                announcement: cleanAnn || undefined,
+                queueTarget: cleanQueue || undefined,
+                schedule: cleanSched || undefined,
+                condition: cleanCond || undefined,
+                choices: choiceItems,
+              }
+            : r
+        ),
+      };
+    });
+
+    return buildScriptWorkspace(nextModules, workspace);
+  }
+
+  // Case 2: Editing a ScriptModule in Master Overview (or promoting a missing/external node to a full module)
+  const oldKey = canonicalScriptMatchKey(snapshot.scriptNumber);
+  const newKey = canonicalScriptMatchKey(cleanScriptNum);
+
+  const validConnections = updates.outgoingConnections.filter((c) =>
+    Boolean(c.toTargetNumber.trim())
+  );
+
+  // If the user set blockType === 'external' and there is no module for it (or they want it as an external endpoint)
+  if (updates.blockType === 'external' && snapshot.mode === 'workspace-external') {
+    const nextExternal = Array.from(
+      new Set([
+        ...(workspace.externalEndpoints || []).filter(
+          (e) => canonicalScriptMatchKey(e) !== oldKey
+        ),
+        cleanScriptNum,
+      ])
+    );
+    const nextLinks = [
+      ...(workspace.manualLinks || []).filter(
+        (l) => canonicalScriptMatchKey(l.fromScriptNumber) !== oldKey
+      ),
+      ...validConnections.map((c) => ({
+        id: c.id || `lnk-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        fromScriptNumber: cleanScriptNum,
+        toTargetNumber: normalizeScriptRef(c.toTargetNumber),
+        label: c.label.trim() || 'Verknüpft',
+      })),
+    ];
+    return buildScriptWorkspace(workspace.modules, {
+      ...workspace,
+      externalEndpoints: nextExternal,
+      manualLinks: nextLinks,
+    });
+  }
+
+  const existingMod = workspace.modules.find(
+    (m) => canonicalScriptMatchKey(m.scriptNumber) === oldKey
+  );
+
+  // Build updated rules list reflecting the edited fields & outgoing connections
+  let updatedRules: ScriptRule[] = [];
+  if (existingMod && existingMod.rules.length > 0) {
+    const sorted = [...existingMod.rules].sort((a, b) => a.prio - b.prio);
+    const firstRule = sorted[0];
+
+    const newRulesFromConnections: ScriptRule[] = [];
+    const choiceList: ScriptChoiceOption[] = [];
+    let firstDirectTarget: string | undefined;
+
+    validConnections.forEach((conn, idx) => {
+      const targetNorm = normalizeScriptRef(conn.toTargetNumber);
+      const tasteMatch = conn.label.match(/^(?:taste\s*)?([0-9*#]+)$/i);
+      if (conn.kind === 'choice' || updates.blockType === 'dtmf' || tasteMatch) {
+        choiceList.push({
+          choice: tasteMatch ? tasteMatch[1] : conn.label.trim() || String(idx + 1),
+          targetNumber: targetNorm,
+        });
+      } else if (!firstDirectTarget) {
+        firstDirectTarget = targetNorm;
+      } else {
+        newRulesFromConnections.push({
+          id: `${toMermaidNodeSuffix(cleanScriptNum)}-r-${idx + 2}`,
+          prio: idx + 2,
+          stepName: conn.label.trim() || `Weiterleitung → ${targetNorm}`,
+          sourceNumber: cleanScriptNum,
+          targetNumber: targetNorm,
+          choices: [],
+          rawLine: `Prio ${idx + 2}: Wohin -> ${targetNorm}`,
+        });
+      }
+    });
+
+    updatedRules = [
+      {
+        ...firstRule,
+        sourceNumber: cleanScriptNum,
+        stepName:
+          firstRule.stepName === existingMod.scriptName || !firstRule.stepName
+            ? cleanTitle
+            : firstRule.stepName,
+        announcement: cleanAnn || undefined,
+        queueTarget: cleanQueue || undefined,
+        schedule: cleanSched || undefined,
+        condition: cleanCond || undefined,
+        targetNumber: firstDirectTarget,
+        choices: choiceList,
+      },
+      ...newRulesFromConnections,
+    ];
+  } else {
+    // Creating a module from a previously missing/external node
+    const firstTarget = validConnections[0]?.toTargetNumber
+      ? normalizeScriptRef(validConnections[0].toTargetNumber)
+      : undefined;
+    updatedRules = [
+      {
+        id: `${toMermaidNodeSuffix(cleanScriptNum)}-1`,
+        prio: 1,
+        stepName: cleanTitle,
+        sourceNumber: cleanScriptNum,
+        targetNumber: firstTarget,
+        announcement: cleanAnn || undefined,
+        queueTarget: cleanQueue || undefined,
+        schedule: cleanSched || undefined,
+        condition: cleanCond || undefined,
+        choices: validConnections.slice(1).map((c, idx) => ({
+          choice: c.label.trim() || String(idx + 1),
+          targetNumber: normalizeScriptRef(c.toTargetNumber),
+        })),
+        rawLine: `Prio 1: ${cleanTitle}`,
+      },
+    ];
+  }
+
+  let nextModules: ScriptModule[];
+  if (existingMod) {
+    nextModules = workspace.modules.map((mod) => {
+      if (canonicalScriptMatchKey(mod.scriptNumber) === oldKey) {
+        return {
+          ...mod,
+          scriptNumber: cleanScriptNum,
+          scriptName: cleanTitle,
+          rules: updatedRules,
+        };
+      }
+      // If scriptNumber was renamed, update incoming references in other modules
+      if (oldKey !== newKey) {
+        return {
+          ...mod,
+          rules: mod.rules.map((r) => ({
+            ...r,
+            targetNumber:
+              r.targetNumber && canonicalScriptMatchKey(r.targetNumber) === oldKey
+                ? cleanScriptNum
+                : r.targetNumber,
+            choices: r.choices.map((ch) =>
+              canonicalScriptMatchKey(ch.targetNumber) === oldKey
+                ? { ...ch, targetNumber: cleanScriptNum }
+                : ch
+            ),
+          })),
+        };
+      }
+      return mod;
+    });
+  } else {
+    nextModules = [
+      ...workspace.modules,
+      {
+        scriptNumber: cleanScriptNum,
+        scriptName: cleanTitle,
+        isMaster: false,
+        origin: 'legacy-text',
+        rawText: `=== [${cleanScriptNum}] ${cleanTitle} ===`,
+        rules: updatedRules,
+        outgoingNumbers: [],
+      },
+    ];
+  }
+
+  // Clear old manualLinks from this module since outgoingConnections are now stored in rules
+  const nextLinks = (workspace.manualLinks || [])
+    .filter((lnk) => canonicalScriptMatchKey(lnk.fromScriptNumber) !== oldKey)
+    .map((lnk) =>
+      oldKey !== newKey && canonicalScriptMatchKey(lnk.toTargetNumber) === oldKey
+        ? { ...lnk, toTargetNumber: cleanScriptNum }
+        : lnk
+    );
+
+  // Preserve nodeOffsets if renamed
+  const nextOffsets = { ...(workspace.nodeOffsets || {}) };
+  const oldNodeId = `S_${toMermaidNodeSuffix(snapshot.scriptNumber)}`;
+  const newNodeId = `S_${toMermaidNodeSuffix(cleanScriptNum)}`;
+  if (oldNodeId !== newNodeId && nextOffsets[oldNodeId]) {
+    nextOffsets[newNodeId] = nextOffsets[oldNodeId];
+    delete nextOffsets[oldNodeId];
+  }
+
+  return buildScriptWorkspace(nextModules, {
+    ...workspace,
+    manualLinks: nextLinks,
+    masterScriptNumber:
+      workspace.masterScriptNumber &&
+      canonicalScriptMatchKey(workspace.masterScriptNumber) === oldKey
+        ? cleanScriptNum
+        : workspace.masterScriptNumber,
+    nodeOffsets: nextOffsets,
+  });
+}
+
+/**
+ * Deletes a node (module, external target, or detail-view rule step) from the ScriptWorkspace.
+ */
+export function deleteNodeFromWorkspace(
+  workspace: ScriptWorkspace,
+  viewLevel: CallflowViewLevel,
+  nodeId: string
+): ScriptWorkspace {
+  const stepMatch = nodeId.match(/^STEP_([A-Za-z0-9_]+)_(\d+)$/);
+  if (viewLevel.level === 'detail' && stepMatch) {
+    const stepIndex = Math.max(0, parseInt(stepMatch[2], 10) - 1);
+    const activeKey = canonicalScriptMatchKey(viewLevel.scriptNumber);
+    const nextModules = workspace.modules.map((mod) => {
+      if (canonicalScriptMatchKey(mod.scriptNumber) !== activeKey) return mod;
+      const sorted = [...mod.rules].sort((a, b) => a.prio - b.prio);
+      const targetRule = sorted[stepIndex];
+      if (!targetRule) return mod;
+      return {
+        ...mod,
+        rules: mod.rules.filter((r) => r.id !== targetRule.id),
+      };
+    });
+    const nextOffsets = { ...(workspace.nodeOffsets || {}) };
+    delete nextOffsets[nodeId];
+    return buildScriptWorkspace(nextModules, {
+      ...workspace,
+      nodeOffsets: nextOffsets,
+    });
+  }
+
+  const targetRef =
+    extractScriptNumberFromNodeId(nodeId, workspace.modules) ||
+    nodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
+  if (!targetRef) return workspace;
+  const targetKey = canonicalScriptMatchKey(targetRef);
+
+  const nextModules = workspace.modules
+    .filter((m) => canonicalScriptMatchKey(m.scriptNumber) !== targetKey)
+    .map((m) => ({
+      ...m,
+      rules: m.rules.map((r) => ({
+        ...r,
+        targetNumber:
+          r.targetNumber && canonicalScriptMatchKey(r.targetNumber) === targetKey
+            ? undefined
+            : r.targetNumber,
+        choices: r.choices.filter(
+          (ch) => canonicalScriptMatchKey(ch.targetNumber) !== targetKey
+        ),
+      })),
+    }));
+
+  const nextExternal = (workspace.externalEndpoints || []).filter(
+    (e) => canonicalScriptMatchKey(e) !== targetKey
+  );
+  const nextLinks = (workspace.manualLinks || []).filter(
+    (l) =>
+      canonicalScriptMatchKey(l.fromScriptNumber) !== targetKey &&
+      canonicalScriptMatchKey(l.toTargetNumber) !== targetKey
+  );
+  const nextOffsets = { ...(workspace.nodeOffsets || {}) };
+  delete nextOffsets[nodeId];
+  delete nextOffsets[`S_${toMermaidNodeSuffix(targetRef)}`];
+
+  return buildScriptWorkspace(nextModules, {
+    ...workspace,
+    externalEndpoints: nextExternal,
+    manualLinks: nextLinks,
+    nodeOffsets: nextOffsets,
+  });
+}
+
+
 

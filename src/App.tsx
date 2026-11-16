@@ -8,6 +8,7 @@ import {
   Code2,
   Copy,
   Download,
+  Edit3,
   Eye,
   FileImage,
   Filter,
@@ -19,6 +20,7 @@ import {
   Maximize2,
   Minimize2,
   Moon,
+  Move,
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
@@ -34,6 +36,7 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import {
+  CallflowBuildingBlockType,
   CallflowDirectionFilter,
   CallflowHopDepth,
   CallflowIssueResolution,
@@ -42,6 +45,7 @@ import {
   DiagramDirection,
   DiagramTemplate,
   LogicAnalysisSummary,
+  NodePositionOffset,
   SavedDiagram,
   ScriptOrigin,
   ScriptWorkspace,
@@ -70,6 +74,7 @@ import {
 } from './utils/smartColorEngine';
 import {
   applyCallflowSpotlightToSvg,
+  applyNodeOffsetsToSvg,
   buildIsolatedPathMermaidCode,
   generateInteractiveCallflowHtml,
   InteractiveCallflowHtmlView,
@@ -78,18 +83,26 @@ import {
   traceCallflowForNode,
 } from './utils/callflowEngine';
 import {
+  addBuildingBlockToWorkspace,
   applyIssueResolutionToWorkspace,
   buildMasterOverviewMermaid,
   buildScriptDetailMermaid,
   buildScriptWorkspace,
   canonicalScriptMatchKey,
+  connectNodesInWorkspace,
+  deleteNodeFromWorkspace,
+  EditableCallflowNodeSnapshot,
+  EditableNodeConnectionItem,
   extractScriptNumberFromNodeId,
+  inspectWorkspaceNodeForEdit,
   looksLikeRawCallflowScript,
   mergeScriptModules,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
   reopenIssueInWorkspace,
+  toMermaidNodeSuffix,
   unignoreChecklistTargetInWorkspace,
+  updateWorkspaceNodeFromEdit,
 } from './utils/scriptCallflowParser';
 import { parseVisioFileToModules } from './utils/visioParser';
 import { ThemeConfigurator } from './components/ThemeConfigurator';
@@ -98,6 +111,7 @@ import { TemplateGalleryModal } from './components/TemplateGalleryModal';
 import { ExportModal } from './components/ExportModal';
 import { MultiScriptModal } from './components/MultiScriptModal';
 import { NewCallflowModal } from './components/NewCallflowModal';
+import { NodeInlineEditorModal } from './components/NodeInlineEditorModal';
 
 const STORAGE_KEYS = {
   ACTIVE_CODE: 'mermaid_studio_local_active_code_v3',
@@ -107,6 +121,7 @@ const STORAGE_KEYS = {
   CANVAS_SURFACE: 'mermaid_studio_local_canvas_surface_v2',
   SAVED_LIST: 'mermaid_studio_local_saved_diagrams_v1',
   SCRIPT_WORKSPACE: 'mermaid_studio_local_script_workspace_v2',
+  WORKSPACE_MODE: 'mermaid_studio_local_workspace_mode_v1',
 };
 
 const QUICK_SYNTAX_TOKENS: Array<{ label: string; token: string; hint: string }> = [
@@ -252,6 +267,15 @@ export default function App() {
   } | null>(null);
   const skipAutoConvertRef = useRef<boolean>(false);
 
+  // Workspace Mode: 'guided' (default, clutter-free 3-step assistant starting with Main) vs 'free' (full Mermaid Studio)
+  const [workspaceMode, setWorkspaceMode] = useState<'guided' | 'free'>(() => {
+    const saved = localStorage.getItem(STORAGE_KEYS.WORKSPACE_MODE);
+    return saved === 'free' ? 'free' : 'guided';
+  });
+  const [guidedStep, setGuidedStep] = useState<1 | 2 | 3>(() =>
+    scriptWorkspace.modules.length === 0 ? 1 : 2
+  );
+
   // Right Inspector Panel Mode ('callflow' | 'theme')
   const [rightSidebarTab, setRightSidebarTab] = useState<'callflow' | 'theme'>('callflow');
 
@@ -275,6 +299,7 @@ export default function App() {
   const [isRightPanelOpen, setIsRightPanelOpen] = useState<boolean>(true);
   const [isFullscreenPreview, setIsFullscreenPreview] = useState<boolean>(false);
   const [showGrid, setShowGrid] = useState<boolean>(true);
+  const lastTouchTimeRef = useRef<number>(0);
 
   // Pan & Zoom state (Mouse + Multi-Touch)
   const [zoom, setZoom] = useState<number>(1);
@@ -303,6 +328,67 @@ export default function App() {
   }>({ isOpen: false, tab: 'templates' });
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
 
+  // PC Visual Drag-and-Drop Callflow Editor State
+  const [isVisualEditMode, setIsVisualEditMode] = useState<boolean>(false);
+  const [visualEditTool, setVisualEditTool] = useState<'move' | 'connect'>('move');
+  const [snapToGrid, setSnapToGrid] = useState<boolean>(true);
+  const [standaloneNodeOffsets, setStandaloneNodeOffsets] = useState<
+    Record<string, NodePositionOffset>
+  >({});
+  const [editingNodeSnapshot, setEditingNodeSnapshot] =
+    useState<EditableCallflowNodeSnapshot | null>(null);
+  const [activeWirePreview, setActiveWirePreview] = useState<{
+    fromNodeId: string;
+    fromLabel: string;
+    startX: number;
+    startY: number;
+    curX: number;
+    curY: number;
+    hoverTargetNodeId: string | null;
+  } | null>(null);
+  const [recentConnectionBanner, setRecentConnectionBanner] = useState<{
+    fromNodeId: string;
+    toNodeId: string;
+    fromLabel: string;
+    toLabel: string;
+    labelDraft: string;
+  } | null>(null);
+  const nodeDragRef = useRef<{
+    active: boolean;
+    mode: 'move-node' | 'connect-wire';
+    nodeId: string;
+    startClientX: number;
+    startClientY: number;
+    origDx: number;
+    origDy: number;
+    currentDx: number;
+    currentDy: number;
+    baseTransformX: number;
+    baseTransformY: number;
+    baseTransformRest: string;
+    domNodeGroup: SVGGElement | null;
+    movedPixels: number;
+    wireStartX: number;
+    wireStartY: number;
+  }>({
+    active: false,
+    mode: 'move-node',
+    nodeId: '',
+    startClientX: 0,
+    startClientY: 0,
+    origDx: 0,
+    origDy: 0,
+    currentDx: 0,
+    currentDy: 0,
+    baseTransformX: 0,
+    baseTransformY: 0,
+    baseTransformRest: '',
+    domNodeGroup: null,
+    movedPixels: 0,
+    wireStartX: 0,
+    wireStartY: 0,
+  });
+
   // Quick feedback states
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
   const [quickDownloadFeedback, setQuickDownloadFeedback] = useState<
@@ -326,10 +412,22 @@ export default function App() {
       localStorage.setItem(STORAGE_KEYS.SMART_COLOR_MODE, smartColorMode);
       localStorage.setItem(STORAGE_KEYS.CANVAS_SURFACE, canvasSurface);
       localStorage.setItem(STORAGE_KEYS.SCRIPT_WORKSPACE, JSON.stringify(scriptWorkspace));
+      localStorage.setItem(STORAGE_KEYS.WORKSPACE_MODE, workspaceMode);
     } catch {
       // ignore storage quota errors
     }
-  }, [code, diagramTitle, themeConfig, smartColorMode, canvasSurface, scriptWorkspace]);
+  }, [code, diagramTitle, themeConfig, smartColorMode, canvasSurface, scriptWorkspace, workspaceMode]);
+
+  const handleChangeWorkspaceMode = useCallback((nextMode: 'guided' | 'free') => {
+    setWorkspaceMode(nextMode);
+    if (nextMode === 'guided') {
+      setIsRightPanelOpen(true);
+      setRightSidebarTab('callflow');
+      setMobileActivePane((prev) => (prev === 'editor' || prev === 'theme' ? 'callflow' : prev));
+    } else {
+      setIsDesktopEditorCollapsed(false);
+    }
+  }, []);
 
   // Parse local Callflow Graph from code
   const callflowGraph = useMemo(() => parseCallflowGraph(code), [code]);
@@ -415,7 +513,23 @@ export default function App() {
     };
   }, [effectiveMermaidCode, themeConfig]);
 
-  // Apply Smart Logic Coloring AND Callflow Path Spotlight
+  const activeNodeOffsets = useMemo<Record<string, NodePositionOffset>>(
+    () =>
+      scriptWorkspace.modules.length > 0
+        ? scriptWorkspace.nodeOffsets || {}
+        : standaloneNodeOffsets,
+    [scriptWorkspace.modules.length, scriptWorkspace.nodeOffsets, standaloneNodeOffsets]
+  );
+
+  const hasCustomNodeOffsets = useMemo(
+    () =>
+      Object.values(activeNodeOffsets).some(
+        (off) => off && (Math.abs(off.dx) > 0.5 || Math.abs(off.dy) > 0.5)
+      ),
+    [activeNodeOffsets]
+  );
+
+  // Apply Smart Logic Coloring, Callflow Path Spotlight, AND PC Drag-and-Drop Node Offsets
   const { coloredSvg, unfilteredColoredSvg, logicSummary } = useMemo<{
     coloredSvg: string | null;
     unfilteredColoredSvg: string | null;
@@ -447,7 +561,7 @@ export default function App() {
     );
 
     // If a Callflow node is selected and we are in full diagram view, apply Spotlight dimming/highlighting
-    const finalSvg =
+    const spotlightSvg =
       callflowTrace && !isolateSubgraphMode
         ? applyCallflowSpotlightToSvg(
             processed.svg,
@@ -459,9 +573,22 @@ export default function App() {
           )
         : processed.svg;
 
+    const finalCanvasSvg = applyNodeOffsetsToSvg(
+      spotlightSvg,
+      activeNodeOffsets,
+      callflowGraph,
+      isVisualEditMode
+    );
+    const finalExportSvg = applyNodeOffsetsToSvg(
+      processed.svg,
+      activeNodeOffsets,
+      callflowGraph,
+      false
+    );
+
     return {
-      coloredSvg: finalSvg,
-      unfilteredColoredSvg: processed.svg,
+      coloredSvg: finalCanvasSvg,
+      unfilteredColoredSvg: finalExportSvg,
       logicSummary: processed.summary,
     };
   }, [
@@ -475,6 +602,8 @@ export default function App() {
     callflowGraph,
     callflowDirectionFilter,
     callflowHopDepth,
+    activeNodeOffsets,
+    isVisualEditMode,
   ]);
 
   // Keep diagram line/theme contrast synced when toggling Dark/Light canvas surface
@@ -692,15 +821,229 @@ export default function App() {
     });
   };
 
-  // Canvas Mouse Drag Pan + Click-to-Trace Node Detection
+  const isCanvasOverlayTarget = (target: EventTarget | null): boolean => {
+    const el = target instanceof Element ? target : null;
+    if (!el) return false;
+    return Boolean(
+      el.closest(
+        '[data-canvas-ui="true"], button, a, input, select, textarea, label, [role="button"]'
+      )
+    );
+  };
+
+  const commitNodePositionOffset = useCallback(
+    (nodeId: string, offset: NodePositionOffset | null) => {
+      if (scriptWorkspace.modules.length > 0) {
+        const nextOffsets = { ...(scriptWorkspace.nodeOffsets || {}) };
+        if (!offset || (Math.abs(offset.dx) < 0.5 && Math.abs(offset.dy) < 0.5)) {
+          delete nextOffsets[nodeId];
+        } else {
+          nextOffsets[nodeId] = {
+            dx: Math.round(offset.dx),
+            dy: Math.round(offset.dy),
+          };
+        }
+        setScriptWorkspace((prev) => ({
+          ...prev,
+          nodeOffsets: nextOffsets,
+          updatedAt: Date.now(),
+        }));
+      } else {
+        setStandaloneNodeOffsets((prev) => {
+          const next = { ...prev };
+          if (!offset || (Math.abs(offset.dx) < 0.5 && Math.abs(offset.dy) < 0.5)) {
+            delete next[nodeId];
+          } else {
+            next[nodeId] = {
+              dx: Math.round(offset.dx),
+              dy: Math.round(offset.dy),
+            };
+          }
+          return next;
+        });
+      }
+    },
+    [scriptWorkspace.modules.length, scriptWorkspace.nodeOffsets]
+  );
+
+  const handleResetAllNodeOffsets = useCallback(() => {
+    if (scriptWorkspace.modules.length > 0) {
+      setScriptWorkspace((prev) => ({
+        ...prev,
+        nodeOffsets: {},
+        updatedAt: Date.now(),
+      }));
+    } else {
+      setStandaloneNodeOffsets({});
+    }
+  }, [scriptWorkspace.modules.length]);
+
+  const handleOpenNodeEditor = useCallback(
+    (nodeId: string) => {
+      if (!nodeId || !callflowGraph.nodes.has(nodeId)) return;
+      const snap = inspectWorkspaceNodeForEdit(
+        scriptWorkspace,
+        callflowViewLevel,
+        nodeId,
+        callflowGraph
+      );
+      setEditingNodeSnapshot(snap);
+    },
+    [scriptWorkspace, callflowViewLevel, callflowGraph]
+  );
+
+  // Canvas Mouse Drag Pan + Visual Node Drag & Wire Connect + Click-to-Trace Node Detection
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Ignore synthetic mouse events generated by mobile browsers right after touch events
+    if (Date.now() - lastTouchTimeRef.current < 700) return;
     if (e.button !== 0) return;
+    if (isCanvasOverlayTarget(e.target)) return;
+
+    const targetEl = e.target as Element;
+    const portEl = targetEl?.closest?.('[data-port-node-id]');
+    const clickedNodeId = resolveClickedNodeIdFromSvgElement(targetEl, callflowGraph);
+
+    // 1. Check if starting a Drag-to-Connect wire (either from a connection port dot or in 'connect' tool mode)
+    const wireSourceNodeId =
+      portEl?.getAttribute('data-port-node-id') ||
+      (isVisualEditMode && visualEditTool === 'connect' ? clickedNodeId : null);
+
+    if (wireSourceNodeId && canvasViewportRef.current) {
+      e.stopPropagation();
+      const vpRect = canvasViewportRef.current.getBoundingClientRect();
+      const startX = e.clientX - vpRect.left;
+      const startY = e.clientY - vpRect.top;
+      const fromLabel = callflowGraph.nodes.get(wireSourceNodeId)?.label || wireSourceNodeId;
+
+      nodeDragRef.current = {
+        active: true,
+        mode: 'connect-wire',
+        nodeId: wireSourceNodeId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        origDx: 0,
+        origDy: 0,
+        currentDx: 0,
+        currentDy: 0,
+        baseTransformX: 0,
+        baseTransformY: 0,
+        baseTransformRest: '',
+        domNodeGroup: null,
+        movedPixels: 0,
+        wireStartX: startX,
+        wireStartY: startY,
+      };
+      setActiveWirePreview({
+        fromNodeId: wireSourceNodeId,
+        fromLabel,
+        startX,
+        startY,
+        curX: startX,
+        curY: startY,
+        hoverTargetNodeId: null,
+      });
+      return;
+    }
+
+    // 2. Check if starting a 60fps Node Move Drag on PC when isVisualEditMode is active
+    if (isVisualEditMode && visualEditTool === 'move' && clickedNodeId) {
+      const domGroup = targetEl.closest(
+        'g.node, g.actor, g.statediagram-state, g.classGroup'
+      ) as SVGGElement | null;
+      if (domGroup) {
+        const currentOff = activeNodeOffsets[clickedNodeId] || { dx: 0, dy: 0 };
+        const rawTransform = domGroup.getAttribute('transform') || '';
+        const trMatch = rawTransform.match(
+          /translate\(\s*([+-]?\d+(?:\.\d+)?)(?:[\s,]+([+-]?\d+(?:\.\d+)?))?\s*\)/i
+        );
+        const curTx = trMatch ? parseFloat(trMatch[1] || '0') : 0;
+        const curTy = trMatch ? parseFloat(trMatch[2] || '0') : 0;
+        const restTransform = trMatch ? rawTransform.replace(trMatch[0], '').trim() : rawTransform;
+        // Base SVG layout coordinate before offset
+        const baseX = curTx - currentOff.dx;
+        const baseY = curTy - currentOff.dy;
+
+        nodeDragRef.current = {
+          active: true,
+          mode: 'move-node',
+          nodeId: clickedNodeId,
+          startClientX: e.clientX,
+          startClientY: e.clientY,
+          origDx: currentOff.dx,
+          origDy: currentOff.dy,
+          currentDx: currentOff.dx,
+          currentDy: currentOff.dy,
+          baseTransformX: baseX,
+          baseTransformY: baseY,
+          baseTransformRest: restTransform,
+          domNodeGroup: domGroup,
+          movedPixels: 0,
+          wireStartX: 0,
+          wireStartY: 0,
+        };
+        return;
+      }
+    }
+
     setIsPanning(true);
     dragDistanceRef.current = 0;
     panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
   };
 
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (Date.now() - lastTouchTimeRef.current < 700) return;
+
+    if (nodeDragRef.current.active) {
+      const st = nodeDragRef.current;
+      const rawPixelDx = e.clientX - st.startClientX;
+      const rawPixelDy = e.clientY - st.startClientY;
+      st.movedPixels = Math.max(st.movedPixels, Math.hypot(rawPixelDx, rawPixelDy));
+
+      if (st.mode === 'connect-wire' && canvasViewportRef.current) {
+        const vpRect = canvasViewportRef.current.getBoundingClientRect();
+        const curX = e.clientX - vpRect.left;
+        const curY = e.clientY - vpRect.top;
+        const hoveredId = resolveClickedNodeIdFromSvgElement(
+          e.target as Element,
+          callflowGraph
+        );
+        setActiveWirePreview((prev) =>
+          prev
+            ? {
+                ...prev,
+                curX,
+                curY,
+                hoverTargetNodeId:
+                  hoveredId && hoveredId !== st.nodeId ? hoveredId : null,
+              }
+            : null
+        );
+        return;
+      }
+
+      if (st.mode === 'move-node' && st.domNodeGroup) {
+        const unscaledDx = rawPixelDx / Math.max(0.05, zoom);
+        const unscaledDy = rawPixelDy / Math.max(0.05, zoom);
+        let nextDx = st.origDx + unscaledDx;
+        let nextDy = st.origDy + unscaledDy;
+        if (snapToGrid) {
+          nextDx = Math.round(nextDx / 16) * 16;
+          nextDy = Math.round(nextDy / 16) * 16;
+        }
+        st.currentDx = nextDx;
+        st.currentDy = nextDy;
+        const nextTx = Number((st.baseTransformX + nextDx).toFixed(2));
+        const nextTy = Number((st.baseTransformY + nextDy).toFixed(2));
+        st.domNodeGroup.setAttribute(
+          'transform',
+          `translate(${nextTx}, ${nextTy})${
+            st.baseTransformRest ? ` ${st.baseTransformRest}` : ''
+          }`
+        );
+        return;
+      }
+    }
+
     if (!isPanning) return;
     const nextX = e.clientX - panStartRef.current.x;
     const nextY = e.clientY - panStartRef.current.y;
@@ -709,8 +1052,74 @@ export default function App() {
   };
 
   const handleCanvasMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (Date.now() - lastTouchTimeRef.current < 700) {
+      setIsPanning(false);
+      nodeDragRef.current.active = false;
+      setActiveWirePreview(null);
+      return;
+    }
+
+    if (nodeDragRef.current.active) {
+      const st = nodeDragRef.current;
+      nodeDragRef.current.active = false;
+
+      if (st.mode === 'connect-wire') {
+        const targetNodeId = resolveClickedNodeIdFromSvgElement(
+          e.target as Element,
+          callflowGraph
+        );
+        setActiveWirePreview(null);
+        if (targetNodeId && targetNodeId !== st.nodeId) {
+          const fromLabel = callflowGraph.nodes.get(st.nodeId)?.label || st.nodeId;
+          const toLabel = callflowGraph.nodes.get(targetNodeId)?.label || targetNodeId;
+          if (scriptWorkspace.modules.length > 0) {
+            const nextWs = connectNodesInWorkspace(
+              scriptWorkspace,
+              callflowViewLevel,
+              st.nodeId,
+              targetNodeId,
+              ''
+            );
+            setScriptWorkspace(nextWs);
+            refreshDiagramFromWorkspace(nextWs);
+          } else {
+            // Raw Mermaid diagram fallback: append edge line
+            skipAutoConvertRef.current = true;
+            setCode((prev) => `${prev.trimEnd()}\n    ${st.nodeId} --> ${targetNodeId}\n`);
+          }
+          setRecentConnectionBanner({
+            fromNodeId: st.nodeId,
+            toNodeId: targetNodeId,
+            fromLabel,
+            toLabel,
+            labelDraft: '',
+          });
+        }
+        return;
+      }
+
+      if (st.mode === 'move-node') {
+        if (st.movedPixels >= 4) {
+          commitNodePositionOffset(st.nodeId, {
+            dx: st.currentDx,
+            dy: st.currentDy,
+          });
+          setSelectedCallflowNodeId(st.nodeId);
+        } else {
+          // Treat as a regular click on the node
+          setSelectedCallflowNodeId((prev) =>
+            prev === st.nodeId ? null : st.nodeId
+          );
+          setRightSidebarTab('callflow');
+          setIsRightPanelOpen(true);
+        }
+        return;
+      }
+    }
+
     const wasClick = isPanning && dragDistanceRef.current < 6;
     setIsPanning(false);
+    if (isCanvasOverlayTarget(e.target)) return;
 
     if (wasClick) {
       const clickedId = resolveClickedNodeIdFromSvgElement(
@@ -733,6 +1142,12 @@ export default function App() {
   };
 
   const handleCanvasTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    lastTouchTimeRef.current = Date.now();
+    if (isCanvasOverlayTarget(e.target) || !coloredSvg) {
+      touchGestureRef.current.mode = 'none';
+      setIsPanning(false);
+      return;
+    }
     if (e.touches.length === 1) {
       dragDistanceRef.current = 0;
       touchGestureRef.current = {
@@ -757,6 +1172,8 @@ export default function App() {
   };
 
   const handleCanvasTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    lastTouchTimeRef.current = Date.now();
+    if (isCanvasOverlayTarget(e.target) || !coloredSvg) return;
     if (touchGestureRef.current.mode === 'pan' && e.touches.length === 1) {
       const nextX = e.touches[0].clientX - touchGestureRef.current.startX;
       const nextY = e.touches[0].clientY - touchGestureRef.current.startY;
@@ -774,6 +1191,12 @@ export default function App() {
   };
 
   const handleCanvasTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    lastTouchTimeRef.current = Date.now();
+    if (isCanvasOverlayTarget(e.target) || !coloredSvg) {
+      touchGestureRef.current.mode = 'none';
+      setIsPanning(false);
+      return;
+    }
     const wasTap =
       touchGestureRef.current.mode === 'pan' && dragDistanceRef.current < 8;
     touchGestureRef.current.mode = 'none';
@@ -836,7 +1259,11 @@ export default function App() {
   };
 
   const handleSwitchCallflowViewLevel = useCallback(
-    (nextLevel: CallflowViewLevel, overrideWorkspace?: ScriptWorkspace) => {
+    (
+      nextLevel: CallflowViewLevel,
+      overrideWorkspace?: ScriptWorkspace,
+      switchToMobilePreview = false
+    ) => {
       const ws = overrideWorkspace || scriptWorkspace;
       if (ws.modules.length === 0) return;
       const dir = currentDirection || 'LR';
@@ -863,7 +1290,9 @@ export default function App() {
       setIsolateSubgraphMode(false);
       setZoom(1);
       setPan({ x: 0, y: 0 });
-      setMobileActivePane('preview');
+      if (switchToMobilePreview) {
+        setMobileActivePane('preview');
+      }
     },
     [scriptWorkspace, currentDirection]
   );
@@ -1049,17 +1478,214 @@ export default function App() {
     [scriptWorkspace, refreshDiagramFromWorkspace]
   );
 
+  const handleAddBuildingBlock = useCallback(
+    (
+      blockType: CallflowBuildingBlockType,
+      connectFromNodeId?: string | null,
+      initialOffset?: NodePositionOffset
+    ) => {
+      if (scriptWorkspace.modules.length === 0 && code.trim() && !looksLikeRawCallflowScript(code)) {
+        // Free Mode raw Mermaid diagram: append a typed node to the Mermaid code
+        skipAutoConvertRef.current = true;
+        const idx = callflowGraph.nodes.size + 1;
+        const newNodeId = `N_${blockType}_${idx}`;
+        const shapeLine =
+          blockType === 'condition'
+            ? `    ${newNodeId}{{"Zeit- / IF-Weiche ${idx}"}}`
+            : blockType === 'queue'
+            ? `    ${newNodeId}[("Queue / Skillset ${idx}")]`
+            : blockType === 'external'
+            ? `    ${newNodeId}(["■ Externes Ziel ${idx}"])`
+            : `    ${newNodeId}["${
+                blockType === 'announcement'
+                  ? `Ansage / RAN ${idx}`
+                  : blockType === 'dtmf'
+                  ? `DTMF-Menü ${idx}`
+                  : `Teil-Skript ${idx}`
+              }"]`;
+        const edgeLine = connectFromNodeId
+          ? `\n    ${connectFromNodeId} --> ${newNodeId}`
+          : '';
+        setCode((prev) => `${prev.trimEnd()}\n${shapeLine}${edgeLine}\n`);
+        if (initialOffset) {
+          setStandaloneNodeOffsets((prev) => ({
+            ...prev,
+            [newNodeId]: initialOffset,
+          }));
+        }
+        setSelectedCallflowNodeId(newNodeId);
+        return;
+      }
+
+      const effectiveConnectFrom =
+        connectFromNodeId ?? selectedCallflowNodeId ?? null;
+      const { workspace: nextWs, createdNodeId } = addBuildingBlockToWorkspace(
+        scriptWorkspace,
+        callflowViewLevel,
+        {
+          type: blockType,
+          connectFromNodeId: effectiveConnectFrom,
+          initialOffset,
+        }
+      );
+      setScriptWorkspace(nextWs);
+      refreshDiagramFromWorkspace(nextWs);
+      setSelectedCallflowNodeId(createdNodeId);
+    },
+    [
+      scriptWorkspace,
+      code,
+      callflowGraph.nodes.size,
+      selectedCallflowNodeId,
+      callflowViewLevel,
+      refreshDiagramFromWorkspace,
+    ]
+  );
+
+  const handleSaveNodeInlineEdits = useCallback(
+    (
+      snapshot: EditableCallflowNodeSnapshot,
+      updates: {
+        scriptNumber: string;
+        title: string;
+        blockType: CallflowBuildingBlockType;
+        announcement: string;
+        queueTarget: string;
+        schedule: string;
+        condition: string;
+        outgoingConnections: EditableNodeConnectionItem[];
+      }
+    ) => {
+      if (snapshot.mode === 'raw-mermaid') {
+        skipAutoConvertRef.current = true;
+        const safeLabel = updates.title.replace(/"/g, "'");
+        setCode((prev) => {
+          const idEsc = snapshot.nodeId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const labelRegex = new RegExp(
+            `(\\b${idEsc}\\s*(?:\\[\\"|\\(\\[\\"|\\{\\{\\"|\\[\\(\\"|\\[))([^"\\]\\)\\}]+)((?:\\"\\]|\\"\\]\\)|\\"\\}\\}|\\"\\)\\]|\\]))`
+          );
+          if (labelRegex.test(prev)) {
+            return prev.replace(labelRegex, `$1${safeLabel}$3`);
+          }
+          return `${prev.trimEnd()}\n    ${snapshot.nodeId}["${safeLabel}"]\n`;
+        });
+        return;
+      }
+
+      const nextWs = updateWorkspaceNodeFromEdit(
+        scriptWorkspace,
+        callflowViewLevel,
+        snapshot,
+        updates
+      );
+      setScriptWorkspace(nextWs);
+      refreshDiagramFromWorkspace(nextWs);
+    },
+    [scriptWorkspace, callflowViewLevel, refreshDiagramFromWorkspace]
+  );
+
+  const handleDeleteNodeFromCanvas = useCallback(
+    (nodeId: string) => {
+      if (scriptWorkspace.modules.length === 0) {
+        skipAutoConvertRef.current = true;
+        const idEsc = nodeId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const lineRegex = new RegExp(`^.*\\b${idEsc}\\b.*$`, 'gm');
+        setCode((prev) =>
+          prev
+            .replace(lineRegex, '')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim()
+        );
+        setSelectedCallflowNodeId(null);
+        return;
+      }
+
+      const nextWs = deleteNodeFromWorkspace(
+        scriptWorkspace,
+        callflowViewLevel,
+        nodeId
+      );
+      setScriptWorkspace(nextWs);
+      refreshDiagramFromWorkspace(nextWs);
+      setSelectedCallflowNodeId(null);
+    },
+    [scriptWorkspace, callflowViewLevel, refreshDiagramFromWorkspace]
+  );
+
+  const handleApplyRecentConnectionLabel = useCallback(
+    (customLabel: string) => {
+      if (!recentConnectionBanner) return;
+      const clean = customLabel.trim();
+      if (!clean) {
+        setRecentConnectionBanner(null);
+        return;
+      }
+      if (scriptWorkspace.modules.length > 0) {
+        // Update the most recently added rule or manualLink between fromNodeId and toNodeId
+        const fromRef =
+          extractScriptNumberFromNodeId(
+            recentConnectionBanner.fromNodeId,
+            scriptWorkspace.modules
+          ) || recentConnectionBanner.fromNodeId.replace(/^S_/, '');
+        const toRef =
+          extractScriptNumberFromNodeId(
+            recentConnectionBanner.toNodeId,
+            scriptWorkspace.modules
+          ) || recentConnectionBanner.toNodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
+        const fromKey = canonicalScriptMatchKey(fromRef);
+        const toKey = canonicalScriptMatchKey(toRef);
+        const tasteMatch = clean.match(/^(?:taste\s*)?([0-9*#]+)$/i);
+
+        const nextModules = scriptWorkspace.modules.map((mod) => {
+          if (canonicalScriptMatchKey(mod.scriptNumber) !== fromKey) return mod;
+          const idx = [...mod.rules]
+            .reverse()
+            .findIndex(
+              (r) =>
+                (r.targetNumber && canonicalScriptMatchKey(r.targetNumber) === toKey) ||
+                r.choices.some((c) => canonicalScriptMatchKey(c.targetNumber) === toKey)
+            );
+          if (idx === -1) return mod;
+          const realIdx = mod.rules.length - 1 - idx;
+          const targetRule = mod.rules[realIdx];
+          const updatedRule = tasteMatch
+            ? {
+                ...targetRule,
+                stepName: `Taste ${tasteMatch[1]} → ${toRef}`,
+                targetNumber: undefined,
+                choices: [{ choice: tasteMatch[1], targetNumber: toRef, label: clean }],
+              }
+            : {
+                ...targetRule,
+                stepName: `${clean} → ${toRef}`,
+              };
+          return {
+            ...mod,
+            rules: mod.rules.map((r, i) => (i === realIdx ? updatedRule : r)),
+          };
+        });
+        const nextWs = buildScriptWorkspace(nextModules, scriptWorkspace);
+        setScriptWorkspace(nextWs);
+        refreshDiagramFromWorkspace(nextWs);
+      }
+      setRecentConnectionBanner(null);
+    },
+    [recentConnectionBanner, scriptWorkspace, refreshDiagramFromWorkspace]
+  );
+
   const handleStartNewCallflow = useCallback(
     (payload: { title: string; workspace: ScriptWorkspace }) => {
       skipAutoConvertRef.current = false;
       setRawScriptDraft(null);
       setScriptWorkspace(payload.workspace);
-      handleSwitchCallflowViewLevel({ level: 'master' }, payload.workspace);
+      setGuidedStep(2);
+      handleSwitchCallflowViewLevel({ level: 'master' }, payload.workspace, false);
       if (payload.title) {
         setDiagramTitle(payload.title);
       }
       setRightSidebarTab('callflow');
       setIsRightPanelOpen(true);
+      setMobileActivePane('callflow');
     },
     [handleSwitchCallflowViewLevel]
   );
@@ -1301,6 +1927,7 @@ export default function App() {
       for (const spec of viewSpecs) {
         const res = await renderLocalMermaidDiagram(spec.mermaidCode, exportThemeConfig);
         if (!res.svg) continue;
+        const parsedGraph = parseCallflowGraph(spec.mermaidCode);
         const colored = applySmartLogicColoring(
           res.svg,
           spec.mermaidCode,
@@ -1308,12 +1935,18 @@ export default function App() {
           targetSurface,
           exportThemeConfig.lineColor
         ).svg;
+        const withOffsets = applyNodeOffsetsToSvg(
+          colored,
+          scriptWorkspace.nodeOffsets,
+          parsedGraph,
+          false
+        );
         views.push({
           key: spec.key,
           label: spec.label,
           scriptNumber: spec.scriptNumber,
-          svg: colored,
-          graph: parseCallflowGraph(spec.mermaidCode),
+          svg: withOffsets,
+          graph: parsedGraph,
         });
       }
 
@@ -1381,6 +2014,7 @@ export default function App() {
     setDiagramTitle('Neuer Callflow');
     setCode('');
     setScriptWorkspace(buildScriptWorkspace([]));
+    setGuidedStep(1);
     setCallflowViewLevel({ level: 'master' });
     setSelectedCallflowNodeId(null);
     setIsolateSubgraphMode(false);
@@ -1400,77 +2034,142 @@ export default function App() {
   };
 
   const lineCount = useMemo(() => Math.max(1, code.split('\n').length), [code]);
-  const showDesktopEditor = !isFullscreenPreview && !isDesktopEditorCollapsed;
+  const showDesktopEditor =
+    workspaceMode === 'free' && !isFullscreenPreview && !isDesktopEditorCollapsed;
 
   return (
     <div className="h-dvh w-full flex flex-col bg-slate-950 text-slate-100 overflow-hidden select-none">
-      {/* Top Bar Contract: strictly 3 zones separated by gap-8 */}
-      <header className="flex items-center justify-between gap-3 sm:gap-4 lg:gap-8 px-3 sm:px-4 lg:px-6 h-12 lg:h-14 border-b border-slate-800 bg-slate-950 shrink-0 min-w-0">
-        {/* Zone 1: Single text element wordmark */}
-        <a
-          href="#studio"
-          onClick={(e) => {
-            e.preventDefault();
-            handleFitToViewport();
-          }}
-          className="text-sm sm:text-base font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
-        >
-          MermaidFree2UseOpen
-        </a>
-
-        {/* Zone 2: 5 concise single-line text navigation links */}
-        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-400">
-          <button
-            type="button"
-            onClick={() => setLibraryModal({ isOpen: true, tab: 'templates' })}
-            className="hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            Vorlagen
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setRightSidebarTab('callflow');
-              setIsRightPanelOpen(true);
-              setMobileActivePane('callflow');
+      {/* Top Bar: Brand + Mode Switcher (Geführter Modus vs. Freier Modus) + Primary Action */}
+      <header className="flex items-center justify-between gap-2 sm:gap-4 lg:gap-6 px-2.5 sm:px-4 lg:px-6 h-12 lg:h-14 border-b border-slate-800 bg-slate-950 shrink-0 min-w-0 overflow-x-auto">
+        {/* Zone 1: Brand + Mode Switcher */}
+        <div className="flex items-center gap-2 sm:gap-4 min-w-0 shrink-0">
+          <a
+            href="#studio"
+            onClick={(e) => {
+              e.preventDefault();
+              handleFitToViewport();
             }}
-            className={`hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-              isRightPanelOpen && rightSidebarTab === 'callflow' ? 'text-indigo-400' : ''
-            }`}
+            className="text-xs sm:text-base font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
           >
-            Callflow-Inspektor
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setRightSidebarTab('theme');
-              setIsRightPanelOpen(true);
-              setMobileActivePane('theme');
-            }}
-            className={`hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-              isRightPanelOpen && rightSidebarTab === 'theme' ? 'text-indigo-400' : ''
-            }`}
-          >
-            Logik-Farben
-          </button>
-          <button
-            type="button"
-            onClick={() => setLibraryModal({ isOpen: true, tab: 'saved' })}
-            className="hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            Speicherstände
-          </button>
-          <button
-            type="button"
-            onClick={() => setLibraryModal({ isOpen: true, tab: 'help' })}
-            className="hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            Syntax-Hilfe
-          </button>
-        </nav>
+            MermaidFree2UseOpen
+          </a>
 
-        {/* Zone 3: 1 primary action */}
-        <div className="flex items-center shrink-0">
+          <div
+            role="group"
+            aria-label="Arbeitsmodus wählen"
+            className="flex items-center gap-0.5 sm:gap-1 p-0.5 sm:p-1 bg-slate-900 border border-slate-800 rounded-lg shrink-0"
+          >
+            <button
+              type="button"
+              onClick={() => handleChangeWorkspaceMode('guided')}
+              title="Aufgeräumter 3-Schritte-Assistent ohne Code-Editor (Start mit Masterscript Main)"
+              className={`px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs font-semibold rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer ${
+                workspaceMode === 'guided'
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <span className="sm:hidden">Geführt</span>
+              <span className="hidden sm:inline">Geführter Modus</span>
+              <span className="hidden md:inline text-[10px] font-normal opacity-90">
+                (Masterscript)
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleChangeWorkspaceMode('free')}
+              title="Freier Experten-Modus mit Mermaid-Code-Editor, Vorlagen und allen Analyse-Tabs"
+              className={`px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs font-semibold rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer ${
+                workspaceMode === 'free'
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <span className="sm:hidden">Frei</span>
+              <span className="hidden sm:inline">Freier Modus</span>
+              <span className="hidden md:inline text-[10px] font-normal opacity-90">
+                (Editor &amp; Studio)
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Zone 2: Studio navigation links (only shown in Free Mode so Guided Mode stays calm) */}
+        {workspaceMode === 'free' ? (
+          <nav className="hidden xl:flex items-center gap-5 text-xs font-medium text-slate-400">
+            <button
+              type="button"
+              onClick={() => setLibraryModal({ isOpen: true, tab: 'templates' })}
+              className="hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Vorlagen
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRightSidebarTab('callflow');
+                setIsRightPanelOpen(true);
+                setMobileActivePane('callflow');
+              }}
+              className={`hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                isRightPanelOpen && rightSidebarTab === 'callflow' ? 'text-indigo-400' : ''
+              }`}
+            >
+              Callflow-Inspektor
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRightSidebarTab('theme');
+                setIsRightPanelOpen(true);
+                setMobileActivePane('theme');
+              }}
+              className={`hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                isRightPanelOpen && rightSidebarTab === 'theme' ? 'text-indigo-400' : ''
+              }`}
+            >
+              Logik-Farben
+            </button>
+            <button
+              type="button"
+              onClick={() => setLibraryModal({ isOpen: true, tab: 'saved' })}
+              className="hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Speicherstände
+            </button>
+            <button
+              type="button"
+              onClick={() => setLibraryModal({ isOpen: true, tab: 'help' })}
+              className="hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Syntax-Hilfe
+            </button>
+          </nav>
+        ) : (
+          <div className="hidden xl:flex items-center gap-2 text-xs text-slate-400 truncate">
+            <span className="px-2 py-0.5 rounded bg-indigo-950/70 border border-indigo-500/30 text-indigo-300 font-medium">
+              Fokus-Ansicht aktiv
+            </span>
+            <span className="truncate">
+              Mermaid-Editor ausgeblendet · Rechts in 3 Schritten vom Masterscript bis zum Export
+            </span>
+          </div>
+        )}
+
+        {/* Zone 3: Primary actions */}
+        <div className="flex items-center gap-2 shrink-0">
+          {(code.trim().length > 0 || scriptWorkspace.modules.length > 0) &&
+            workspaceMode === 'guided' && (
+              <button
+                type="button"
+                onClick={handleClearWorkspace}
+                title="Aktuellen Callflow zurücksetzen und neu starten"
+                className="px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:text-rose-200 bg-slate-900 hover:bg-rose-950/60 border border-slate-800 rounded-lg transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Neu starten</span>
+              </button>
+            )}
           <button
             type="button"
             onClick={() => setIsExportModalOpen(true)}
@@ -1829,9 +2528,9 @@ export default function App() {
         >
           {/* Canvas Toolbar: Smart Color Switcher + ELK Anti-Overlap Switch + Zoom + Direct PNG & HTML Export */}
           <div className="px-3 sm:px-4 py-2 border-b border-slate-800 bg-slate-900/90 flex items-center justify-between gap-2 overflow-x-auto z-10 shrink-0">
-            {/* Left: Editor Expand + Smart Logic Coloring + ELK Anti-Overlap Toggle */}
+            {/* Left: Editor Expand (Free Mode only) + Smart Logic Coloring (Free Mode only) + ELK Anti-Overlap Toggle */}
             <div className="flex items-center gap-2 shrink-0">
-              {!isFullscreenPreview && (
+              {workspaceMode === 'free' && !isFullscreenPreview && (
                 <button
                   type="button"
                   onClick={() => setIsDesktopEditorCollapsed((prev) => !prev)}
@@ -1857,42 +2556,44 @@ export default function App() {
                 </button>
               )}
 
-              {/* Live Clarity / Smart Coloring Mode Switcher */}
-              <div
-                className="flex items-center gap-0.5 p-0.5 bg-slate-950 border border-slate-800 rounded-lg"
-                title="Automatische Farbdifferenzierung & Übersichtlichkeits-Modus umschalten"
-              >
-                <div className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-indigo-400 whitespace-nowrap shrink-0">
-                  <Wand2 className="w-3.5 h-3.5" />
+              {/* Live Clarity / Smart Coloring Mode Switcher (Free Mode only) */}
+              {workspaceMode === 'free' && (
+                <div
+                  className="flex items-center gap-0.5 p-0.5 bg-slate-950 border border-slate-800 rounded-lg"
+                  title="Automatische Farbdifferenzierung & Übersichtlichkeits-Modus umschalten"
+                >
+                  <div className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-indigo-400 whitespace-nowrap shrink-0">
+                    <Wand2 className="w-3.5 h-3.5" />
+                  </div>
+                  {CLARITY_MODE_OPTIONS.map((opt) => {
+                    const isActive = smartColorMode === opt.id;
+                    const isRecommended =
+                      logicSummary.recommendedMode === opt.id && smartColorMode !== opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        title={opt.hint}
+                        onClick={() => setSmartColorMode(opt.id)}
+                        className={`px-2 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 ${
+                          isActive
+                            ? 'bg-indigo-600 text-white shadow-xs'
+                            : isRecommended
+                            ? 'text-emerald-300 hover:bg-slate-800/80'
+                            : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                        }`}
+                      >
+                        <span>{opt.shortLabel}</span>
+                        {isRecommended && (
+                          <span className="text-[10px] text-emerald-400 font-semibold">
+                            ★
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
-                {CLARITY_MODE_OPTIONS.map((opt) => {
-                  const isActive = smartColorMode === opt.id;
-                  const isRecommended =
-                    logicSummary.recommendedMode === opt.id && smartColorMode !== opt.id;
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      title={opt.hint}
-                      onClick={() => setSmartColorMode(opt.id)}
-                      className={`px-2 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 ${
-                        isActive
-                          ? 'bg-indigo-600 text-white shadow-xs'
-                          : isRecommended
-                          ? 'text-emerald-300 hover:bg-slate-800/80'
-                          : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
-                      }`}
-                    >
-                      <span>{opt.shortLabel}</span>
-                      {isRecommended && (
-                        <span className="text-[10px] text-emerald-400 font-semibold">
-                          ★
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+              )}
 
               {/* 1-Click ELK Anti-Overlap Engine Switch */}
               <button
@@ -2035,8 +2736,24 @@ export default function App() {
               </button>
             </div>
 
-            {/* Right: Prominent 1-Click PNG Download + Interactive HTML Download + Right Panel Switch */}
+            {/* Right: PC Drag & Drop Toggle + Prominent 1-Click PNG Download + Interactive HTML Download + Right Panel Switch */}
             <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsVisualEditMode((prev) => !prev)}
+                title="Manueller Drag-and-Drop-Editor für PC: Knoten frei verschieben, Verbindungen ziehen, Doppelklick-Textbearbeitung und neue Bausteine ins Diagramm ziehen"
+                className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                  isVisualEditMode
+                    ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-sm'
+                    : 'bg-slate-900 hover:bg-slate-800 border-indigo-500/50 text-indigo-200'
+                }`}
+              >
+                <Move className="w-3.5 h-3.5" />
+                <span>
+                  {isVisualEditMode ? 'Drag & Drop aktiv' : 'Manuell bearbeiten'}
+                </span>
+              </button>
+
               <button
                 type="button"
                 disabled={!coloredSvg || isDownloadingPng}
@@ -2071,30 +2788,32 @@ export default function App() {
                 </span>
               </button>
 
-              <button
-                type="button"
-                onClick={() => setIsRightPanelOpen((prev) => !prev)}
-                title="Rechtes Inspektor-Panel ein-/ausblenden"
-                className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
-                  isRightPanelOpen
-                    ? 'bg-indigo-600/20 border-indigo-500/60 text-indigo-300'
-                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {isRightPanelOpen ? (
-                  <PanelRightClose className="w-3.5 h-3.5" />
-                ) : (
-                  <PanelRightOpen className="w-3.5 h-3.5" />
-                )}
-              </button>
+              {workspaceMode === 'free' && (
+                <button
+                  type="button"
+                  onClick={() => setIsRightPanelOpen((prev) => !prev)}
+                  title="Rechtes Inspektor-Panel ein-/ausblenden"
+                  className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
+                    isRightPanelOpen
+                      ? 'bg-indigo-600/20 border-indigo-500/60 text-indigo-300'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {isRightPanelOpen ? (
+                    <PanelRightClose className="w-3.5 h-3.5" />
+                  ) : (
+                    <PanelRightOpen className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              )}
 
               <button
                 type="button"
                 onClick={() => setIsFullscreenPreview((prev) => !prev)}
                 title={
                   isFullscreenPreview
-                    ? 'Split-Editor wieder einblenden'
-                    : 'Vorschau maximieren (Vollbild)'
+                    ? 'Assistent / Editor wieder einblenden'
+                    : 'Diagramm-Vorschau maximieren (Vollbild)'
                 }
                 className="hidden lg:flex p-1.5 bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-100 rounded-lg transition-colors"
               >
@@ -2245,24 +2964,173 @@ export default function App() {
             );
           })()}
 
-          {/* Interactive Pan, Pinch-to-Zoom & Click-to-Trace Viewport */}
+          {/* PC Visual Drag-and-Drop Building Block Palette & Tool Bar */}
+          {isVisualEditMode && (
+            <div
+              data-canvas-ui="true"
+              className="px-3 sm:px-4 py-2 border-b border-indigo-500/40 bg-slate-900/95 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 z-20"
+            >
+              <div className="flex flex-wrap items-center gap-1.5">
+                {/* Tool Switch: Move Node vs Draw Connection Wire */}
+                <div className="flex items-center gap-0.5 p-0.5 bg-slate-950 border border-slate-800 rounded-lg mr-1">
+                  <button
+                    type="button"
+                    onClick={() => setVisualEditTool('move')}
+                    title="Knoten im Diagramm frei per Drag & Drop verschieben"
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                      visualEditTool === 'move'
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Move className="w-3 h-3" />
+                    <span>Knoten verschieben</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVisualEditTool('connect')}
+                    title="Von einem Knoten zu einem Ziel-Knoten ziehen, um eine neue Verbindung zu knüpfen"
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
+                      visualEditTool === 'connect'
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <ArrowRight className="w-3 h-3" />
+                    <span>Verbindung ziehen</span>
+                  </button>
+                </div>
+
+                <span className="text-[11px] text-slate-400 hidden xl:inline mr-1">
+                  Bausteine ins Diagramm ziehen (oder klicken):
+                </span>
+
+                {(
+                  [
+                    { id: 'script', label: '+ Unter-Skript' },
+                    { id: 'announcement', label: '+ Ansage / RAN' },
+                    { id: 'queue', label: '+ Skillset / Queue' },
+                    { id: 'condition', label: '+ Zeit- / IF-Weiche' },
+                    { id: 'dtmf', label: '+ DTMF-Menü' },
+                    { id: 'external', label: '+ Externes Ziel' },
+                  ] as Array<{ id: CallflowBuildingBlockType; label: string }>
+                ).map((block) => (
+                  <button
+                    key={block.id}
+                    type="button"
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData('application/x-callflow-block', block.id);
+                      e.dataTransfer.effectAllowed = 'copy';
+                    }}
+                    onClick={() => handleAddBuildingBlock(block.id)}
+                    title="Per Drag & Drop auf das Diagramm (oder auf einen bestehenden Knoten) ziehen oder anklicken"
+                    className="px-2.5 py-1 rounded-lg bg-slate-950 hover:bg-indigo-950/80 border border-slate-700 hover:border-indigo-400 text-[11px] font-medium text-slate-100 transition-colors cursor-grab active:cursor-grabbing whitespace-nowrap"
+                  >
+                    {block.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {selectedCallflowNodeId && (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenNodeEditor(selectedCallflowNodeId)}
+                    className="px-2.5 py-1 rounded-lg bg-indigo-600/25 hover:bg-indigo-600/40 border border-indigo-500/50 text-[11px] font-semibold text-indigo-200 flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <Edit3 className="w-3 h-3" />
+                    <span>Knoten bearbeiten</span>
+                  </button>
+                )}
+
+                <label className="hidden sm:inline-flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={snapToGrid}
+                    onChange={(e) => setSnapToGrid(e.target.checked)}
+                    className="rounded border-slate-700 bg-slate-950 text-indigo-600"
+                  />
+                  <span>16px Raster</span>
+                </label>
+
+                {hasCustomNodeOffsets && (
+                  <button
+                    type="button"
+                    onClick={handleResetAllNodeOffsets}
+                    title="Alle manuellen Knoten-Verschiebungen zurücksetzen"
+                    className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] text-slate-200 flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Positionen Reset</span>
+                  </button>
+                )}
+
+                <span className="hidden 2xl:inline text-[11px] text-amber-300/90 font-medium">
+                  Doppelklick auf Knoten = Text &amp; Ziele editieren
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Interactive Pan, Pinch-to-Zoom, Drag-and-Drop & Click-to-Trace Viewport */}
           <div
             ref={canvasViewportRef}
             onWheel={handleCanvasWheel}
             onMouseDown={handleCanvasMouseDown}
             onMouseMove={handleCanvasMouseMove}
             onMouseUp={handleCanvasMouseUp}
-            onMouseLeave={() => setIsPanning(false)}
+            onMouseLeave={() => {
+              setIsPanning(false);
+              nodeDragRef.current.active = false;
+              setActiveWirePreview(null);
+            }}
             onTouchStart={handleCanvasTouchStart}
             onTouchMove={handleCanvasTouchMove}
             onTouchEnd={handleCanvasTouchEnd}
             onTouchCancel={() => setIsPanning(false)}
-            onDoubleClick={() => {
+            onDragOver={(e) => {
+              if (e.dataTransfer.types.includes('application/x-callflow-block')) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+              }
+            }}
+            onDrop={(e) => {
+              const rawBlock = e.dataTransfer.getData('application/x-callflow-block') as
+                | CallflowBuildingBlockType
+                | '';
+              if (!rawBlock) return;
+              e.preventDefault();
+              const droppedOnNodeId = resolveClickedNodeIdFromSvgElement(
+                e.target as Element,
+                callflowGraph
+              );
+              handleAddBuildingBlock(rawBlock, droppedOnNodeId);
+            }}
+            onDoubleClick={(e) => {
+              if (isCanvasOverlayTarget(e.target) || !coloredSvg) return;
+              const doubleClickedNodeId = resolveClickedNodeIdFromSvgElement(
+                e.target as Element,
+                callflowGraph
+              );
+              if (doubleClickedNodeId) {
+                e.stopPropagation();
+                handleOpenNodeEditor(doubleClickedNodeId);
+                return;
+              }
               setZoom(1);
               setPan({ x: 0, y: 0 });
             }}
-            className={`flex-1 relative overflow-hidden flex items-center justify-center touch-none ${
-              isPanning ? 'cursor-grabbing' : 'cursor-grab'
+            className={`flex-1 relative flex items-center justify-center ${
+              coloredSvg
+                ? `overflow-hidden touch-none ${
+                    isVisualEditMode && visualEditTool === 'connect'
+                      ? 'cursor-crosshair'
+                      : isPanning
+                      ? 'cursor-grabbing'
+                      : 'cursor-grab'
+                  }`
+                : 'overflow-y-auto overscroll-contain touch-pan-y p-3 sm:p-6'
             } ${
               canvasSurface === 'dark'
                 ? showGrid
@@ -2275,7 +3143,14 @@ export default function App() {
           >
             {/* Canvas Overlay Stack: Active Trace Banner + Non-destructive Syntax Warning */}
             {(callflowTrace || (!validation.isValid && coloredSvg)) && (
-              <div className="absolute top-3 left-3 right-3 sm:right-auto z-20 flex flex-col items-start gap-2 pointer-events-none">
+              <div
+                data-canvas-ui="true"
+                onMouseDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
+                onTouchMove={(e) => e.stopPropagation()}
+                onTouchEnd={(e) => e.stopPropagation()}
+                className="absolute top-3 left-3 right-3 sm:right-auto z-20 flex flex-col items-start gap-2 pointer-events-none"
+              >
                 {callflowTrace && (
                   <div className="pointer-events-auto px-3.5 py-2 rounded-xl bg-slate-900/95 border border-amber-500/60 text-xs flex flex-wrap items-center gap-2.5 shadow-xl max-w-full">
                     <div className="flex items-center gap-2">
@@ -2418,6 +3293,101 @@ export default function App() {
               </div>
             )}
 
+            {/* Quick Label Customization Banner after dragging a new Connection Wire */}
+            {recentConnectionBanner && (
+              <div
+                data-canvas-ui="true"
+                onMouseDown={(e) => e.stopPropagation()}
+                className="absolute top-3 right-3 z-30 px-3.5 py-2.5 rounded-xl bg-slate-900/95 border border-indigo-500/70 text-xs flex flex-wrap items-center gap-2 shadow-2xl max-w-lg"
+              >
+                <span className="text-slate-200 font-medium">
+                  Verknüpft:{' '}
+                  <strong className="font-mono text-indigo-300">
+                    {recentConnectionBanner.fromLabel}
+                  </strong>{' '}
+                  →{' '}
+                  <strong className="font-mono text-emerald-300">
+                    {recentConnectionBanner.toLabel}
+                  </strong>
+                </span>
+                <div className="flex flex-wrap items-center gap-1">
+                  {['Taste 1', 'Taste 2', 'Überlauf', 'Feiertag'].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => handleApplyRecentConnectionLabel(preset)}
+                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-indigo-600 text-[11px] text-slate-200 hover:text-white transition-colors cursor-pointer"
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                  <input
+                    type="text"
+                    value={recentConnectionBanner.labelDraft}
+                    onChange={(e) =>
+                      setRecentConnectionBanner((prev) =>
+                        prev ? { ...prev, labelDraft: e.target.value } : null
+                      )
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        handleApplyRecentConnectionLabel(recentConnectionBanner.labelDraft);
+                      }
+                    }}
+                    placeholder="Eigene Beschriftung..."
+                    className="w-32 px-2 py-0.5 bg-slate-950 border border-slate-700 rounded text-[11px] text-slate-100 focus:outline-none focus:border-indigo-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleApplyRecentConnectionLabel(recentConnectionBanner.labelDraft)
+                    }
+                    className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold cursor-pointer"
+                  >
+                    OK
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Live Rubberband SVG Connection Wire Overlay while dragging a new transition */}
+            {activeWirePreview && (
+              <svg
+                className="absolute inset-0 w-full h-full pointer-events-none z-30"
+                aria-hidden="true"
+              >
+                <defs>
+                  <marker
+                    id="callflow-wire-arrow"
+                    viewBox="0 0 10 10"
+                    refX="8"
+                    refY="5"
+                    markerWidth="6"
+                    markerHeight="6"
+                    orient="auto-start-reverse"
+                  >
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#6366f1" />
+                  </marker>
+                </defs>
+                <line
+                  x1={activeWirePreview.startX}
+                  y1={activeWirePreview.startY}
+                  x2={activeWirePreview.curX}
+                  y2={activeWirePreview.curY}
+                  stroke={activeWirePreview.hoverTargetNodeId ? '#10b981' : '#6366f1'}
+                  strokeWidth="3"
+                  strokeDasharray="6 4"
+                  markerEnd="url(#callflow-wire-arrow)"
+                />
+                <circle
+                  cx={activeWirePreview.startX}
+                  cy={activeWirePreview.startY}
+                  r="5"
+                  fill="#6366f1"
+                />
+              </svg>
+            )}
+
             {coloredSvg ? (
               <div
                 style={{
@@ -2427,8 +3397,99 @@ export default function App() {
                 className="mermaid-canvas-stage shrink-0 transition-transform duration-75 ease-out p-4 sm:p-8"
                 dangerouslySetInnerHTML={{ __html: coloredSvg }}
               />
+            ) : workspaceMode === 'guided' ? (
+              <div
+                data-canvas-ui="true"
+                onMouseDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
+                className="max-w-lg w-full mx-auto my-auto p-5 sm:p-7 rounded-2xl bg-slate-900/95 border border-slate-800 text-slate-200 space-y-4 sm:space-y-5 shadow-2xl"
+              >
+                <div className="space-y-1.5 text-center">
+                  <span className="inline-block px-2.5 py-0.5 rounded-md bg-indigo-500/15 border border-indigo-500/30 text-[11px] font-semibold text-indigo-300">
+                    Geführter Modus · Ohne Mermaid-Ballast
+                  </span>
+                  <h2 className="text-base sm:text-lg font-bold text-slate-100">
+                    Callflow in 3 klaren Schritten aufbauen
+                  </h2>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Der Mermaid-Code-Editor ist bewusst ausgeblendet. Sie arbeiten im Schritt-Assistenten direkt mit Ihrem Masterscript:
+                  </p>
+                </div>
+
+                <div className="space-y-2 text-xs">
+                  <div className="p-2.5 rounded-xl bg-slate-950/90 border border-indigo-500/40 flex items-start gap-2.5">
+                    <span className="w-5 h-5 rounded-md bg-indigo-600 text-white font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                      1
+                    </span>
+                    <div>
+                      <div className="font-semibold text-slate-100">Masterscript (Main) laden</div>
+                      <div className="text-[11px] text-slate-400">
+                        Im Schritt 1 Ihr Hauptskript (AACC, Tabelle oder Visio) direkt einfügen.
+                      </div>
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800 flex items-start gap-2.5">
+                    <span className="w-5 h-5 rounded-md bg-slate-800 text-slate-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                      2
+                    </span>
+                    <div>
+                      <div className="font-semibold text-slate-200">Ausstehende Referenzen abarbeiten</div>
+                      <div className="text-[11px] text-slate-400">
+                        Erkannte Unter-Skripte (3- bis 6-stellig oder benannt) der Reihe nach ergänzen.
+                      </div>
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800 flex items-start gap-2.5">
+                    <span className="w-5 h-5 rounded-md bg-slate-800 text-slate-300 font-bold text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                      3
+                    </span>
+                    <div>
+                      <div className="font-semibold text-slate-200">Prüfen &amp; Exportieren</div>
+                      <div className="text-[11px] text-slate-400">
+                        Automatischer Logik-Check, Variablen-Register &amp; Excel-Routing-Matrix (.csv).
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGuidedStep(1);
+                      setIsRightPanelOpen(true);
+                      setRightSidebarTab('callflow');
+                      setMobileActivePane('callflow');
+                    }}
+                    className="lg:hidden px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <span>Zu Schritt 1 (Main laden)</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsNewCallflowModalOpen(true)}
+                    className="px-3.5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Main per Dialog starten</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleChangeWorkspaceMode('free')}
+                    className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                  >
+                    Zum Freien Modus (Editor)
+                  </button>
+                </div>
+              </div>
             ) : (
-              <div className="max-w-md mx-4 text-center p-6 sm:p-8 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-300 space-y-4">
+              <div
+                data-canvas-ui="true"
+                onMouseDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
+                className="max-w-md w-full mx-auto my-auto text-center p-6 sm:p-8 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-300 space-y-4"
+              >
                 <p className="text-sm font-semibold text-slate-100">
                   Arbeitsbereich ist leer
                 </p>
@@ -2465,14 +3526,17 @@ export default function App() {
             )}
 
             {/* Floating Bottom-Right Viewport Reset Button */}
-            {(zoom !== 1 || pan.x !== 0 || pan.y !== 0) && (
+            {coloredSvg && (zoom !== 1 || pan.x !== 0 || pan.y !== 0) && (
               <button
                 type="button"
+                data-canvas-ui="true"
+                onMouseDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
                 onClick={() => {
                   setZoom(1);
                   setPan({ x: 0, y: 0 });
                 }}
-                className="absolute bottom-12 right-3 px-3 py-1.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700 text-xs text-slate-200 flex items-center gap-1.5 shadow-lg transition-colors whitespace-nowrap shrink-0 z-20"
+                className="absolute bottom-12 right-3 px-3 py-1.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700 text-xs text-slate-200 flex items-center gap-1.5 shadow-lg transition-colors whitespace-nowrap shrink-0 z-20 cursor-pointer"
               >
                 <RotateCcw className="w-3.5 h-3.5 text-indigo-400" />
                 <span>Ansicht zentrieren</span>
@@ -2555,6 +3619,16 @@ export default function App() {
               onExportInteractiveHtml={() => void handleQuickDownloadInteractiveHtml()}
               onClose={() => setMobileActivePane('preview')}
               isMobileView={true}
+              workspaceMode={workspaceMode}
+              onChangeWorkspaceMode={handleChangeWorkspaceMode}
+              guidedStep={guidedStep}
+              onChangeGuidedStep={setGuidedStep}
+              isVisualEditMode={isVisualEditMode}
+              onToggleVisualEditMode={setIsVisualEditMode}
+              onAddBuildingBlock={(type) => handleAddBuildingBlock(type)}
+              onOpenNodeEditor={handleOpenNodeEditor}
+              onResetAllNodeOffsets={handleResetAllNodeOffsets}
+              hasCustomNodeOffsets={hasCustomNodeOffsets}
             />
           </div>
         )}
@@ -2579,39 +3653,41 @@ export default function App() {
           </div>
         )}
 
-        {/* Pane 3 (Desktop Right Sidebar with Switchable Tabs: Callflow-Inspektor vs. Logik-Farben & Theme) */}
-        {isRightPanelOpen && (
+        {/* Pane 3 (Desktop Right Sidebar: Guided 3-Step Assistant in Guided Mode, or Switchable Studio Tabs in Free Mode) */}
+        {(isRightPanelOpen || workspaceMode === 'guided') && !isFullscreenPreview && (
           <div className="hidden lg:flex flex-col h-full shrink-0 border-l border-slate-800 bg-slate-900/95">
-            {/* Desktop Right Sidebar Mode Switcher */}
-            <div className="grid grid-cols-2 gap-1 p-1.5 bg-slate-950 border-b border-slate-800 shrink-0">
-              <button
-                type="button"
-                onClick={() => setRightSidebarTab('callflow')}
-                className={`py-1.5 px-2.5 text-xs font-semibold rounded-md transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
-                  rightSidebarTab === 'callflow'
-                    ? 'bg-indigo-600 text-white'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <GitBranch className="w-3.5 h-3.5" />
-                <span>Callflow &amp; ELK</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setRightSidebarTab('theme')}
-                className={`py-1.5 px-2.5 text-xs font-semibold rounded-md transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
-                  rightSidebarTab === 'theme'
-                    ? 'bg-indigo-600 text-white'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Palette className="w-3.5 h-3.5" />
-                <span>Logik-Farben</span>
-              </button>
-            </div>
+            {/* Desktop Right Sidebar Mode Switcher (only shown in Free Mode) */}
+            {workspaceMode === 'free' && (
+              <div className="grid grid-cols-2 gap-1 p-1.5 bg-slate-950 border-b border-slate-800 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setRightSidebarTab('callflow')}
+                  className={`py-1.5 px-2.5 text-xs font-semibold rounded-md transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                    rightSidebarTab === 'callflow'
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <GitBranch className="w-3.5 h-3.5" />
+                  <span>Callflow &amp; ELK</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRightSidebarTab('theme')}
+                  className={`py-1.5 px-2.5 text-xs font-semibold rounded-md transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                    rightSidebarTab === 'theme'
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Palette className="w-3.5 h-3.5" />
+                  <span>Logik-Farben</span>
+                </button>
+              </div>
+            )}
 
             <div className="flex-1 min-h-0 flex overflow-hidden">
-              {rightSidebarTab === 'callflow' ? (
+              {workspaceMode === 'guided' || rightSidebarTab === 'callflow' ? (
                 <CallflowInspector
                   graph={callflowGraph}
                   selectedNodeId={selectedCallflowNodeId}
@@ -2642,6 +3718,16 @@ export default function App() {
                   onExportInteractiveHtml={() => void handleQuickDownloadInteractiveHtml()}
                   onClose={() => setIsRightPanelOpen(false)}
                   isMobileView={false}
+                  workspaceMode={workspaceMode}
+                  onChangeWorkspaceMode={handleChangeWorkspaceMode}
+                  guidedStep={guidedStep}
+                  onChangeGuidedStep={setGuidedStep}
+                  isVisualEditMode={isVisualEditMode}
+                  onToggleVisualEditMode={setIsVisualEditMode}
+                  onAddBuildingBlock={(type) => handleAddBuildingBlock(type)}
+                  onOpenNodeEditor={handleOpenNodeEditor}
+                  onResetAllNodeOffsets={handleResetAllNodeOffsets}
+                  hasCustomNodeOffsets={hasCustomNodeOffsets}
                 />
               ) : (
                 <ThemeConfigurator
@@ -2668,22 +3754,26 @@ export default function App() {
       {/* Mobile Bottom Navigation Bar */}
       <nav
         aria-label="Mobile Arbeitsbereich-Navigation"
-        className="lg:hidden h-14 border-t border-slate-800 bg-slate-950/95 backdrop-blur-md grid grid-cols-5 items-center px-1.5 shrink-0 z-30"
+        className={`lg:hidden h-14 border-t border-slate-800 bg-slate-950/95 backdrop-blur-md grid ${
+          workspaceMode === 'guided' ? 'grid-cols-2' : 'grid-cols-5'
+        } items-center px-1.5 shrink-0 z-30`}
       >
-        <button
-          type="button"
-          onClick={() => setMobileActivePane('editor')}
-          className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg transition-colors ${
-            mobileActivePane === 'editor'
-              ? 'text-indigo-400 bg-indigo-950/40'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Code2 className="w-4 h-4" />
-          <span className="text-[10px] font-medium mt-0.5 whitespace-nowrap">
-            Editor
-          </span>
-        </button>
+        {workspaceMode === 'free' && (
+          <button
+            type="button"
+            onClick={() => setMobileActivePane('editor')}
+            className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg transition-colors ${
+              mobileActivePane === 'editor'
+                ? 'text-indigo-400 bg-indigo-950/40'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Code2 className="w-4 h-4" />
+            <span className="text-[10px] font-medium mt-0.5 whitespace-nowrap">
+              Editor
+            </span>
+          </button>
+        )}
 
         <button
           type="button"
@@ -2701,7 +3791,7 @@ export default function App() {
             )}
           </div>
           <span className="text-[10px] font-medium mt-0.5 whitespace-nowrap">
-            Vorschau
+            {workspaceMode === 'guided' ? 'Callflow-Diagramm' : 'Vorschau'}
           </span>
         </button>
 
@@ -2716,35 +3806,39 @@ export default function App() {
         >
           <GitBranch className="w-4 h-4" />
           <span className="text-[10px] font-medium mt-0.5 whitespace-nowrap">
-            Callflow
+            {workspaceMode === 'guided' ? '3-Schritte-Assistent' : 'Callflow'}
           </span>
         </button>
 
-        <button
-          type="button"
-          onClick={() => setMobileActivePane('theme')}
-          className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg transition-colors ${
-            mobileActivePane === 'theme'
-              ? 'text-indigo-400 bg-indigo-950/40'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Palette className="w-4 h-4" />
-          <span className="text-[10px] font-medium mt-0.5 whitespace-nowrap">
-            Farben
-          </span>
-        </button>
+        {workspaceMode === 'free' && (
+          <button
+            type="button"
+            onClick={() => setMobileActivePane('theme')}
+            className={`min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg transition-colors ${
+              mobileActivePane === 'theme'
+                ? 'text-indigo-400 bg-indigo-950/40'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Palette className="w-4 h-4" />
+            <span className="text-[10px] font-medium mt-0.5 whitespace-nowrap">
+              Farben
+            </span>
+          </button>
+        )}
 
-        <button
-          type="button"
-          onClick={() => setLibraryModal({ isOpen: true, tab: 'templates' })}
-          className="min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-slate-400 hover:text-slate-200 transition-colors"
-        >
-          <Layers className="w-4 h-4" />
-          <span className="text-[10px] font-medium mt-0.5 whitespace-nowrap">
-            Katalog
-          </span>
-        </button>
+        {workspaceMode === 'free' && (
+          <button
+            type="button"
+            onClick={() => setLibraryModal({ isOpen: true, tab: 'templates' })}
+            className="min-h-[44px] min-w-[44px] flex flex-col items-center justify-center rounded-lg text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            <Layers className="w-4 h-4" />
+            <span className="text-[10px] font-medium mt-0.5 whitespace-nowrap">
+              Katalog
+            </span>
+          </button>
+        )}
       </nav>
 
       {/* Modals */}
@@ -2797,6 +3891,25 @@ export default function App() {
         hasExistingWorkspace={scriptWorkspace.modules.length > 0 || code.trim().length > 0}
         onClose={() => setIsNewCallflowModalOpen(false)}
         onStartNewCallflow={handleStartNewCallflow}
+      />
+
+      <NodeInlineEditorModal
+        isOpen={Boolean(editingNodeSnapshot)}
+        snapshot={editingNodeSnapshot}
+        availableTargetRefs={scriptWorkspace.modules.map((m) => ({
+          scriptNumber: m.scriptNumber,
+          scriptName: m.scriptName,
+        }))}
+        hasCustomPositionOffset={Boolean(
+          editingNodeSnapshot &&
+            activeNodeOffsets[editingNodeSnapshot.nodeId] &&
+            (Math.abs(activeNodeOffsets[editingNodeSnapshot.nodeId].dx) > 0.5 ||
+              Math.abs(activeNodeOffsets[editingNodeSnapshot.nodeId].dy) > 0.5)
+        )}
+        onClose={() => setEditingNodeSnapshot(null)}
+        onSave={handleSaveNodeInlineEdits}
+        onResetPositionOffset={(nodeId) => commitNodePositionOffset(nodeId, null)}
+        onDeleteNode={handleDeleteNodeFromCanvas}
       />
     </div>
   );

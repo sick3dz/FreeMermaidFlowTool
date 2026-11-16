@@ -1,17 +1,24 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeft,
   ArrowRight,
+  BookOpen,
+  Check,
   CheckCircle2,
+  Copy,
   Download,
+  Edit3,
   FileText,
   Filter,
   FolderPlus,
   GitBranch,
+  Grid,
   Layers,
   ListChecks,
   MessageSquarePlus,
+  Move,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -21,6 +28,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  CallflowBuildingBlockType,
   CallflowDirectionFilter,
   CallflowGraph,
   CallflowHopDepth,
@@ -35,8 +43,13 @@ import {
   ThemeConfiguration,
 } from '../types/mermaidStudio';
 import {
+  analyzeWorkspaceLogicHealth,
+  buildWorkspaceRoutingMatrix,
   canonicalScriptMatchKey,
+  exportMigrationDocumentationMarkdown,
+  exportRoutingMatrixCsv,
   extractScriptNumberFromNodeId,
+  extractWorkspaceResourceRegistry,
   toMermaidNodeSuffix,
 } from '../utils/scriptCallflowParser';
 
@@ -82,6 +95,16 @@ interface CallflowInspectorProps {
   onExportInteractiveHtml: () => void;
   onClose: () => void;
   isMobileView?: boolean;
+  workspaceMode?: 'guided' | 'free';
+  onChangeWorkspaceMode?: (mode: 'guided' | 'free') => void;
+  guidedStep?: 1 | 2 | 3;
+  onChangeGuidedStep?: (step: 1 | 2 | 3) => void;
+  isVisualEditMode?: boolean;
+  onToggleVisualEditMode?: (active: boolean) => void;
+  onAddBuildingBlock?: (type: CallflowBuildingBlockType) => void;
+  onOpenNodeEditor?: (nodeId: string) => void;
+  onResetAllNodeOffsets?: () => void;
+  hasCustomNodeOffsets?: boolean;
 }
 
 export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
@@ -114,6 +137,16 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
   onExportInteractiveHtml,
   onClose,
   isMobileView = false,
+  workspaceMode = 'guided',
+  onChangeWorkspaceMode,
+  guidedStep: controlledGuidedStep,
+  onChangeGuidedStep,
+  isVisualEditMode = false,
+  onToggleVisualEditMode,
+  onAddBuildingBlock,
+  onOpenNodeEditor,
+  onResetAllNodeOffsets,
+  hasCustomNodeOffsets = false,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [issueFilterTab, setIssueFilterTab] = useState<'open' | 'resolved'>('open');
@@ -123,7 +156,33 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
   const [linkDraftByIssueId, setLinkDraftByIssueId] = useState<Record<string, string>>({});
   const [noteDraftByIssueId, setNoteDraftByIssueId] = useState<Record<string, string>>({});
 
+  // Guided 3-Step Wizard State (1: Main laden, 2: Referenzen abarbeiten, 3: Prüfen & Exportieren)
+  const [internalGuidedStep, setInternalGuidedStep] = useState<1 | 2 | 3>(() =>
+    scriptWorkspace.modules.length === 0 ? 1 : 2
+  );
+  const guidedStep = controlledGuidedStep ?? internalGuidedStep;
+  const setGuidedStep = (next: 1 | 2 | 3) => {
+    setInternalGuidedStep(next);
+    onChangeGuidedStep?.(next);
+  };
+  const [guidedMainDraft, setGuidedMainDraft] = useState('');
+  const [guidedMainFeedback, setGuidedMainFeedback] = useState<string | null>(null);
+  const [isImportingGuidedMainVisio, setIsImportingGuidedMainVisio] = useState(false);
+  const guidedMainVisioInputRef = useRef<HTMLInputElement>(null);
+  const prevModulesCountRef = useRef<number>(scriptWorkspace.modules.length);
+
   // Top-Down Masterscript Checklist Wizard & Sync Map state
+  const [inspectorTab, setInspectorTab] = useState<'overview' | 'health' | 'registry' | 'matrix'>(
+    'overview'
+  );
+  const [healthFilter, setHealthFilter] = useState<'all' | 'error' | 'warning'>('all');
+  const [registrySubTab, setRegistrySubTab] = useState<
+    'skillsets' | 'announcements' | 'variables' | 'crossrefs'
+  >('skillsets');
+  const [registrySearch, setRegistrySearch] = useState('');
+  const [matrixSearch, setMatrixSearch] = useState('');
+  const [copyReportFeedback, setCopyReportFeedback] = useState(false);
+
   const [activeChecklistRef, setActiveChecklistRef] = useState<string | null>(null);
   const [checklistFilter, setChecklistFilter] = useState<'all' | 'todo' | 'synced'>('all');
   const [checklistDraftText, setChecklistDraftText] = useState('');
@@ -134,6 +193,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
 
   useEffect(() => {
     if (focusChecklistTrigger?.refKey) {
+      setInspectorTab('overview');
+      setGuidedStep(2);
       setActiveChecklistRef(focusChecklistTrigger.refKey);
       setChecklistFilter('all');
       setChecklistFeedback(null);
@@ -142,8 +203,131 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
   }, [focusChecklistTrigger]);
 
   useEffect(() => {
+    const prevCount = prevModulesCountRef.current;
+    const nextCount = scriptWorkspace.modules.length;
+    prevModulesCountRef.current = nextCount;
+    if (nextCount === 0) {
+      setGuidedStep(1);
+    } else if (prevCount === 0 && nextCount > 0) {
+      setGuidedStep(2);
+    }
+  }, [scriptWorkspace.modules.length]);
+
+  useEffect(() => {
     setChecklistFilter('all');
   }, [scriptWorkspace.masterScriptNumber]);
+
+  const healthFindings = useMemo(
+    () => analyzeWorkspaceLogicHealth(scriptWorkspace),
+    [scriptWorkspace]
+  );
+  const healthErrorCount = useMemo(
+    () => healthFindings.filter((f) => f.severity === 'error').length,
+    [healthFindings]
+  );
+  const healthWarningCount = useMemo(
+    () => healthFindings.filter((f) => f.severity === 'warning').length,
+    [healthFindings]
+  );
+  const filteredHealthFindings = useMemo(() => {
+    if (healthFilter === 'error') {
+      return healthFindings.filter((f) => f.severity === 'error');
+    }
+    if (healthFilter === 'warning') {
+      return healthFindings.filter((f) => f.severity === 'warning');
+    }
+    return healthFindings;
+  }, [healthFindings, healthFilter]);
+
+  const resourceRegistry = useMemo(
+    () => extractWorkspaceResourceRegistry(scriptWorkspace),
+    [scriptWorkspace]
+  );
+  const totalRegistryCount =
+    resourceRegistry.skillsets.length +
+    resourceRegistry.announcements.length +
+    resourceRegistry.variables.length;
+
+  const routingMatrixRows = useMemo(
+    () => buildWorkspaceRoutingMatrix(scriptWorkspace),
+    [scriptWorkspace]
+  );
+  const filteredMatrixRows = useMemo(() => {
+    const q = matrixSearch.trim().toLowerCase();
+    if (!q) return routingMatrixRows;
+    return routingMatrixRows.filter(
+      (r) =>
+        r.scriptNumber.toLowerCase().includes(q) ||
+        r.scriptName.toLowerCase().includes(q) ||
+        r.stepName.toLowerCase().includes(q) ||
+        r.conditionAndSchedule.toLowerCase().includes(q) ||
+        r.announcement.toLowerCase().includes(q) ||
+        r.queueTarget.toLowerCase().includes(q) ||
+        r.targetsAndChoices.toLowerCase().includes(q)
+    );
+  }, [routingMatrixRows, matrixSearch]);
+
+  const jumpToScriptInInspector = (
+    scriptNumber: string,
+    openDetail = false,
+    switchMobileToCanvas = false
+  ) => {
+    const nodeId = `S_${toMermaidNodeSuffix(scriptNumber)}`;
+    if (graph.nodes.has(nodeId)) {
+      onSelectNodeId(nodeId);
+      if (!isMobileView || switchMobileToCanvas) {
+        onFocusNodeOnCanvas?.(nodeId);
+      }
+    }
+    if (openDetail) {
+      const exists = scriptWorkspace.modules.some(
+        (m) => canonicalScriptMatchKey(m.scriptNumber) === canonicalScriptMatchKey(scriptNumber)
+      );
+      if (exists) {
+        onSwitchViewLevel({ level: 'detail', scriptNumber });
+        if (isMobileView && switchMobileToCanvas) {
+          onClose();
+        }
+      }
+    }
+  };
+
+  const handleDownloadCsvMatrix = () => {
+    const csv = exportRoutingMatrixCsv(scriptWorkspace);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `callflow-routing-matrix-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadMarkdownDoc = () => {
+    const md = exportMigrationDocumentationMarkdown(scriptWorkspace);
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `callflow-migrations-konzept-${new Date().toISOString().slice(0, 10)}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleCopyMarkdownDoc = async () => {
+    const md = exportMigrationDocumentationMarkdown(scriptWorkspace);
+    try {
+      await navigator.clipboard.writeText(md);
+      setCopyReportFeedback(true);
+      setTimeout(() => setCopyReportFeedback(false), 2200);
+    } catch {
+      // Fallback ignored if clipboard blocked
+    }
+  };
 
   const masterChecklist = scriptWorkspace.masterChecklist || [];
   const ignoredTargets = scriptWorkspace.ignoredChecklistTargets || [];
@@ -393,10 +577,10 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
         <div className="flex items-center gap-2 min-w-0">
           <GitBranch className="w-4 h-4 text-indigo-400 shrink-0" />
           <h2 className="text-sm font-semibold text-slate-100 truncate">
-            Callflow-Inspektor
+            {workspaceMode === 'guided' ? 'Geführter Assistent' : 'Callflow-Inspektor'}
           </h2>
         </div>
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           {selectedNodeId && (
             <button
               type="button"
@@ -410,7 +594,23 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
               Alle zeigen
             </button>
           )}
-          {!isMobileView && (
+          {onChangeWorkspaceMode && (
+            <button
+              type="button"
+              onClick={() =>
+                onChangeWorkspaceMode(workspaceMode === 'guided' ? 'free' : 'guided')
+              }
+              title={
+                workspaceMode === 'guided'
+                  ? 'In den Freien Modus mit Mermaid-Editor und allen Experten-Tabs wechseln'
+                  : 'Zurück in den aufgeräumten 3-Schritt-Assistenten wechseln'
+              }
+              className="px-2 py-1 text-[11px] font-medium text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {workspaceMode === 'guided' ? 'Freier Modus' : 'Geführt'}
+            </button>
+          )}
+          {!isMobileView && workspaceMode === 'free' && (
             <button
               type="button"
               onClick={onClose}
@@ -423,10 +623,178 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
         </div>
       </div>
 
+      {/* Mode-Specific Top Navigation: 3-Step Stepper in Guided Mode vs 4 Tabs in Free Mode */}
+      {workspaceMode === 'guided' ? (
+        <div className="grid grid-cols-3 gap-1.5 px-3 py-2.5 border-b border-slate-800 bg-slate-950/90 shrink-0">
+          <button
+            type="button"
+            onClick={() => setGuidedStep(1)}
+            className={`px-2 py-2 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-start gap-0.5 border cursor-pointer ${
+              guidedStep === 1
+                ? 'bg-indigo-600/25 text-indigo-100 border-indigo-500/50'
+                : scriptWorkspace.modules.length > 0
+                ? 'bg-emerald-950/20 text-emerald-300 border-emerald-500/30 hover:bg-emerald-950/35'
+                : 'bg-slate-900/80 text-slate-400 border-slate-800 hover:text-slate-200'
+            }`}
+          >
+            <div className="flex items-center justify-between w-full gap-1">
+              <span className="font-mono text-[10px] uppercase tracking-wider opacity-80">
+                Schritt 1
+              </span>
+              {scriptWorkspace.modules.length > 0 && (
+                <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+              )}
+            </div>
+            <span className="font-semibold truncate w-full text-left">Main laden</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setGuidedStep(2)}
+            className={`px-2 py-2 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-start gap-0.5 border cursor-pointer ${
+              guidedStep === 2
+                ? 'bg-indigo-600/25 text-indigo-100 border-indigo-500/50'
+                : scriptWorkspace.modules.length > 0 && checklistMissingCount === 0
+                ? 'bg-emerald-950/20 text-emerald-300 border-emerald-500/30 hover:bg-emerald-950/35'
+                : 'bg-slate-900/80 text-slate-400 border-slate-800 hover:text-slate-200'
+            }`}
+          >
+            <div className="flex items-center justify-between w-full gap-1">
+              <span className="font-mono text-[10px] uppercase tracking-wider opacity-80">
+                Schritt 2
+              </span>
+              {scriptWorkspace.modules.length > 0 &&
+                (checklistMissingCount > 0 ? (
+                  <span className="text-[10px] font-mono text-amber-300 tabular-nums">
+                    {checklistMissingCount} offen
+                  </span>
+                ) : (
+                  <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                ))}
+            </div>
+            <span className="font-semibold truncate w-full text-left">Referenzen</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setGuidedStep(3)}
+            className={`px-2 py-2 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-start gap-0.5 border cursor-pointer ${
+              guidedStep === 3
+                ? 'bg-indigo-600/25 text-indigo-100 border-indigo-500/50'
+                : 'bg-slate-900/80 text-slate-400 border-slate-800 hover:text-slate-200'
+            }`}
+          >
+            <div className="flex items-center justify-between w-full gap-1">
+              <span className="font-mono text-[10px] uppercase tracking-wider opacity-80">
+                Schritt 3
+              </span>
+              {scriptWorkspace.modules.length > 0 && (
+                <span
+                  className={`text-[10px] font-mono tabular-nums ${
+                    healthErrorCount > 0 ? 'text-rose-400' : 'text-emerald-400'
+                  }`}
+                >
+                  {healthFindings.length}
+                </span>
+              )}
+            </div>
+            <span className="font-semibold truncate w-full text-left">Prüfen &amp; Export</span>
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-4 gap-1 px-3 py-2 border-b border-slate-800 bg-slate-950/90 shrink-0">
+          <button
+            type="button"
+            onClick={() => setInspectorTab('overview')}
+            className={`px-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+              inspectorTab === 'overview'
+                ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <ListChecks className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Checkliste</span>
+            </div>
+            <span
+              className={`text-[10px] font-mono tabular-nums ${
+                checklistMissingCount > 0 ? 'text-amber-300' : 'text-emerald-400'
+              }`}
+            >
+              {checklistMissingCount > 0 ? `${checklistMissingCount} offen` : 'Synchron'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setInspectorTab('health')}
+            className={`px-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+              inspectorTab === 'health'
+                ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Logik-Prüfung</span>
+            </div>
+            <span
+              className={`text-[10px] font-mono tabular-nums ${
+                healthErrorCount > 0
+                  ? 'text-rose-400'
+                  : healthWarningCount > 0
+                  ? 'text-amber-300'
+                  : 'text-emerald-400'
+              }`}
+            >
+              {healthFindings.length > 0 ? `${healthFindings.length} Befunde` : '0 Fehler'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setInspectorTab('registry')}
+            className={`px-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+              inspectorTab === 'registry'
+                ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <BookOpen className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Register</span>
+            </div>
+            <span className="text-[10px] font-mono tabular-nums text-slate-400">
+              {totalRegistryCount} Einträge
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setInspectorTab('matrix')}
+            className={`px-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+              inspectorTab === 'matrix'
+                ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <Grid className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Matrix</span>
+            </div>
+            <span className="text-[10px] font-mono tabular-nums text-slate-400">
+              {routingMatrixRows.length} Regeln
+            </span>
+          </button>
+        </div>
+      )}
+
       {/* Scrollable Body */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {/* Section 1: Zwei-Ebenen Master & Teil-Skripte */}
-        <section className="space-y-2.5 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
+      <div className="flex-1 overflow-y-auto overscroll-contain touch-pan-y p-4 space-y-4">
+        {/* Compact View-Level Switcher when modules exist */}
+        {scriptWorkspace.modules.length > 0 &&
+          (workspaceMode === 'free' || guidedStep === 1) && (
+            <section className="space-y-2.5 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
               <Layers className="w-3.5 h-3.5 text-indigo-400" />
@@ -518,7 +886,872 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
             </button>
           </div>
         </section>
+          )}
 
+        {/* GUIDED STEP 1: Masterscript (Main) direkt laden */}
+        {workspaceMode === 'guided' && guidedStep === 1 && (
+          <section className="space-y-3 bg-slate-950/80 border border-indigo-500/35 rounded-xl p-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="w-5 h-5 rounded-full bg-indigo-600 text-white text-[11px] font-bold flex items-center justify-center shrink-0">
+                  1
+                </span>
+                <span className="text-xs font-semibold text-slate-100 truncate">
+                  Masterscript (Main) laden
+                </span>
+              </div>
+              {scriptWorkspace.modules.length > 0 && (
+                <span className="text-[11px] font-mono text-emerald-400 shrink-0">
+                  ✓ {mainScriptLabel} aktiv
+                </span>
+              )}
+            </div>
+
+            <p className="text-[11px] text-slate-300 leading-relaxed">
+              Fügen Sie hier Ihr <strong className="text-slate-100">Masterscript (Main)</strong> ein (AACC-Skript, Excel-/Tabellenzeilen oder Freitext) oder wählen Sie einen Visio-Export. Alle darin aufgerufenen Folgeskripte und 3–6-stelligen Rufnummern werden automatisch erkannt.
+            </p>
+
+            {onSubmitChecklistDetailScript && (
+              <div className="space-y-2">
+                <textarea
+                  rows={5}
+                  value={guidedMainDraft}
+                  onChange={(e) => {
+                    setGuidedMainDraft(e.target.value);
+                    if (guidedMainFeedback) setGuidedMainFeedback(null);
+                  }}
+                  placeholder={`Masterscript (Main) hier einfügen...\nBeispiel:\nSECTION Init\n  GIVE RAN 301\n  EXECUTE "Schaltung1"\n  TRANSFER TO 48210`}
+                  className="w-full px-2.5 py-2 bg-slate-900 border border-slate-800 rounded-lg text-[11px] font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 resize-y"
+                />
+
+                {guidedMainFeedback && (
+                  <p className="text-[11px] text-rose-400">{guidedMainFeedback}</p>
+                )}
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={!guidedMainDraft.trim()}
+                    onClick={() => {
+                      const targetRef = scriptWorkspace.masterScriptNumber || 'Main';
+                      const updatedWs = onSubmitChecklistDetailScript(
+                        targetRef,
+                        guidedMainDraft,
+                        'legacy-text'
+                      );
+                      if (!updatedWs) {
+                        setGuidedMainFeedback(
+                          'Bitte ein gültiges Skript mit mindestens einer Regel, Queue oder Zielnummer einfügen.'
+                        );
+                        return;
+                      }
+                      setGuidedMainDraft('');
+                      setGuidedMainFeedback(null);
+                      setGuidedStep(2);
+                    }}
+                    className="flex-1 py-2 px-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>Main einlesen &amp; weiter zu Schritt 2</span>
+                  </button>
+
+                  {onSubmitChecklistVisioFile && (
+                    <>
+                      <input
+                        ref={guidedMainVisioInputRef}
+                        type="file"
+                        accept=".vsdx,.vdx,.svg,.xml"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          e.target.value = '';
+                          if (!file) return;
+                          setIsImportingGuidedMainVisio(true);
+                          setGuidedMainFeedback(null);
+                          try {
+                            const updatedWs = await onSubmitChecklistVisioFile(
+                              scriptWorkspace.masterScriptNumber || 'Main',
+                              file
+                            );
+                            if (!updatedWs) {
+                              setGuidedMainFeedback(
+                                'Keine Formen in dieser Visio-Datei erkannt.'
+                              );
+                            } else {
+                              setGuidedStep(2);
+                            }
+                          } finally {
+                            setIsImportingGuidedMainVisio(false);
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        disabled={isImportingGuidedMainVisio}
+                        onClick={() => guidedMainVisioInputRef.current?.click()}
+                        className="py-2 px-3 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>{isImportingGuidedMainVisio ? 'Lade...' : 'Visio (.vsdx/.svg)'}</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {scriptWorkspace.modules.length > 0 && (
+              <div className="pt-2 border-t border-slate-800 flex items-center justify-between gap-2">
+                <span className="text-[11px] text-slate-400">
+                  {masterChecklist.length} Referenzen in {mainScriptLabel} erkannt
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setGuidedStep(2)}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <span>Weiter zu Schritt 2</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Finaler PC Drag-and-Drop Nachbearbeitungs-Modus in Schritt 3 (oder Freier Modus) */}
+        {((workspaceMode === 'guided' && guidedStep === 3) ||
+          (workspaceMode === 'free' && inspectorTab === 'matrix')) &&
+          onToggleVisualEditMode && (
+            <section
+              className={`space-y-3 rounded-xl p-3.5 border transition-colors ${
+                isVisualEditMode
+                  ? 'bg-indigo-950/35 border-indigo-500/60'
+                  : 'bg-slate-950/85 border-slate-800'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <Move className="w-4 h-4 text-indigo-400 shrink-0" />
+                  <span className="text-xs font-semibold text-slate-100 truncate">
+                    Manuelles Editieren (Drag &amp; Drop am PC)
+                  </span>
+                </div>
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide shrink-0 ${
+                    isVisualEditMode
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                      : 'bg-slate-900 text-slate-400 border border-slate-800'
+                  }`}
+                >
+                  {isVisualEditMode ? 'Aktiv' : 'Bereit'}
+                </span>
+              </div>
+
+              <p className="text-[11px] text-slate-300 leading-relaxed">
+                Verschieben Sie Knoten frei per Maus, ziehen Sie neue Verbindungen vom rechten Knoten-Punkt, bearbeiten Sie Knoten-Texte per <strong className="text-slate-100">Doppelklick</strong> oder ziehen Sie neue Bausteine direkt ins Diagramm. Alle Änderungen werden in Datenmodell und Exporte übernommen.
+              </p>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onToggleVisualEditMode(!isVisualEditMode)}
+                  className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer ${
+                    isVisualEditMode
+                      ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                      : 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                  }`}
+                >
+                  <Move className="w-3.5 h-3.5" />
+                  <span>
+                    {isVisualEditMode
+                      ? 'Drag-&-Drop-Modus beenden'
+                      : 'Manuell bearbeiten (Drag & Drop starten)'}
+                  </span>
+                </button>
+
+                {hasCustomNodeOffsets && onResetAllNodeOffsets && (
+                  <button
+                    type="button"
+                    onClick={onResetAllNodeOffsets}
+                    title="Alle manuell verschobenen Knoten-Positionen auf das automatische Layout zurücksetzen"
+                    className="py-2 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Layout Reset</span>
+                  </button>
+                )}
+              </div>
+
+              {selectedNodeId && onOpenNodeEditor && (
+                <button
+                  type="button"
+                  onClick={() => onOpenNodeEditor(selectedNodeId)}
+                  className="w-full py-1.5 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 border border-indigo-500/40 text-indigo-200 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Edit3 className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Ausgewählten Knoten jetzt bearbeiten (Text, Queue &amp; Ziele)</span>
+                </button>
+              )}
+
+              {onAddBuildingBlock && (
+                <div className="space-y-1.5 pt-1 border-t border-slate-800/80">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    Baustein per Ziehen oder Klick ins Diagramm einfügen:
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(
+                      [
+                        { id: 'script', label: '+ Unter-Skript' },
+                        { id: 'announcement', label: '+ Ansage / RAN' },
+                        { id: 'queue', label: '+ Skillset / Queue' },
+                        { id: 'condition', label: '+ Zeit- / IF-Weiche' },
+                        { id: 'dtmf', label: '+ DTMF-Menü' },
+                        { id: 'external', label: '+ Externes Ziel' },
+                      ] as Array<{ id: CallflowBuildingBlockType; label: string }>
+                    ).map((b) => (
+                      <button
+                        key={b.id}
+                        type="button"
+                        draggable
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData('application/x-callflow-block', b.id);
+                          e.dataTransfer.effectAllowed = 'copy';
+                          if (!isVisualEditMode) {
+                            onToggleVisualEditMode(true);
+                          }
+                        }}
+                        onClick={() => {
+                          if (!isVisualEditMode) {
+                            onToggleVisualEditMode(true);
+                          }
+                          onAddBuildingBlock(b.id);
+                        }}
+                        className="py-1.5 px-2.5 rounded-lg bg-slate-900 hover:bg-indigo-950/60 border border-slate-800 hover:border-indigo-500/50 text-left text-[11px] font-medium text-slate-200 transition-colors cursor-grab active:cursor-grabbing truncate"
+                      >
+                        {b.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+        {/* TAB 2 (Free Mode) or STEP 3 (Guided Mode): Automatische Logik- & Qualitätsprüfung */}
+        {((workspaceMode === 'free' && inspectorTab === 'health') ||
+          (workspaceMode === 'guided' && guidedStep === 3)) && (
+          <section className="space-y-3 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span className="text-xs font-semibold text-slate-100 truncate">
+                  Automatische Logik-Prüfung
+                </span>
+              </div>
+              <span className="text-[11px] font-mono text-slate-400 tabular-nums shrink-0">
+                {healthFindings.length} {healthFindings.length === 1 ? 'Befund' : 'Befunde'}
+              </span>
+            </div>
+
+            {scriptWorkspace.modules.length === 0 ? (
+              <div className="text-[11px] text-slate-400 py-2 leading-relaxed">
+                Laden Sie zuerst ein Hauptskript (<span className="font-mono text-slate-200">Main</span>) oder mehrere Teil-Skripte, um die automatische Prüfung auf Schleifen, Sackgassen und verwaiste Skripte zu starten.
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-3 gap-1.5 text-center">
+                  <button
+                    type="button"
+                    onClick={() => setHealthFilter('all')}
+                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium transition-colors cursor-pointer ${
+                      healthFilter === 'all'
+                        ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Alle ({healthFindings.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHealthFilter('error')}
+                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium transition-colors cursor-pointer ${
+                      healthFilter === 'error'
+                        ? 'bg-rose-950/40 border-rose-500/50 text-rose-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Fehler ({healthErrorCount})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHealthFilter('warning')}
+                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium transition-colors cursor-pointer ${
+                      healthFilter === 'warning'
+                        ? 'bg-amber-950/40 border-amber-500/50 text-amber-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Warnungen ({healthWarningCount})
+                  </button>
+                </div>
+
+                {filteredHealthFindings.length === 0 ? (
+                  <div className="p-3 rounded-lg bg-emerald-950/20 border border-emerald-500/30 flex items-center gap-2 text-xs text-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>
+                      Keine Schleifen, Sackgassen oder verwaisten Skripte in dieser Kategorie gefunden.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5 max-h-[540px] overflow-y-auto pr-0.5">
+                    {filteredHealthFindings.map((finding) => {
+                      const isErr = finding.severity === 'error';
+                      const isWarn = finding.severity === 'warning';
+                      return (
+                        <div
+                          key={finding.id}
+                          className={`p-3 rounded-lg border space-y-2 ${
+                            isErr
+                              ? 'bg-rose-950/20 border-rose-500/40'
+                              : isWarn
+                              ? 'bg-amber-950/20 border-amber-500/35'
+                              : 'bg-slate-900/90 border-slate-800'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide shrink-0 ${
+                                  isErr
+                                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                    : isWarn
+                                    ? 'bg-amber-500/20 text-amber-200 border border-amber-500/40'
+                                    : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                                }`}
+                              >
+                                {isErr ? 'Fehler' : isWarn ? 'Warnung' : 'Hinweis'}
+                              </span>
+                              <span className="text-xs font-semibold text-slate-100 leading-snug">
+                                {finding.title}
+                              </span>
+                            </div>
+                          </div>
+
+                          <p className="text-[11px] text-slate-300 leading-relaxed">
+                            {finding.description}
+                          </p>
+
+                          {finding.cyclePath && finding.cyclePath.length > 0 && (
+                            <div className="px-2 py-1 rounded bg-slate-950/80 border border-slate-800 text-[11px] font-mono text-rose-300 overflow-x-auto">
+                              Zyklus: {finding.cyclePath.join(' → ')}
+                            </div>
+                          )}
+
+                          <div className="text-[11px] text-slate-400 bg-slate-950/60 border border-slate-800/80 rounded px-2.5 py-1.5 leading-relaxed">
+                            <span className="font-semibold text-slate-300">Empfehlung: </span>
+                            {finding.recommendation}
+                          </div>
+
+                          <div className="flex items-center gap-1.5 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                jumpToScriptInInspector(finding.scriptNumber, false, true)
+                              }
+                              className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] font-medium text-slate-200 transition-colors cursor-pointer"
+                            >
+                              Im Canvas markieren
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                jumpToScriptInInspector(finding.scriptNumber, true, true)
+                              }
+                              className="px-2.5 py-1 rounded bg-indigo-600/25 hover:bg-indigo-600/40 border border-indigo-500/40 text-[11px] font-medium text-indigo-200 transition-colors cursor-pointer"
+                            >
+                              Ebene 2 öffnen ([{finding.scriptNumber}])
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        )}
+
+        {/* TAB 3: Zentrales Ressourcen- & Variablen-Register (Free Mode or Guided Step 3) */}
+        {((workspaceMode === 'free' && inspectorTab === 'registry') ||
+          (workspaceMode === 'guided' && guidedStep === 3)) && (
+          <section className="space-y-3 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <BookOpen className="w-4 h-4 text-indigo-400 shrink-0" />
+                <span className="text-xs font-semibold text-slate-100 truncate">
+                  Ressourcen- &amp; Variablen-Register
+                </span>
+              </div>
+              <span className="text-[11px] font-mono text-slate-400 tabular-nums shrink-0">
+                {totalRegistryCount} Ressourcen
+              </span>
+            </div>
+
+            {scriptWorkspace.modules.length === 0 ? (
+              <div className="text-[11px] text-slate-400 py-2 leading-relaxed">
+                Noch keine Skripte geladen. Nach dem Import sehen Sie hier alle im Callflow verwendeten Skillsets, Ansagen (RAN/WAV), Systemvariablen (<span className="font-mono text-slate-200">Sys_*</span>) und Rufnummern-Verweise.
+              </div>
+            ) : (
+              <>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={registrySearch}
+                    onChange={(e) => setRegistrySearch(e.target.value)}
+                    placeholder="Skillset, Ansage, Variable oder Nummer suchen..."
+                    className="w-full pl-8 pr-7 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                  />
+                  {registrySearch && (
+                    <button
+                      type="button"
+                      onClick={() => setRegistrySearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setRegistrySubTab('skillsets')}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
+                      registrySubTab === 'skillsets'
+                        ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Skillsets ({resourceRegistry.skillsets.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRegistrySubTab('announcements')}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
+                      registrySubTab === 'announcements'
+                        ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Ansagen / RAN ({resourceRegistry.announcements.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRegistrySubTab('variables')}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
+                      registrySubTab === 'variables'
+                        ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Variablen ({resourceRegistry.variables.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRegistrySubTab('crossrefs')}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
+                      registrySubTab === 'crossrefs'
+                        ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Kreuzreferenz ({resourceRegistry.crossRefs.length})
+                  </button>
+                </div>
+
+                {/* Sub-Tab 3a: Skillsets */}
+                {registrySubTab === 'skillsets' && (
+                  <div className="space-y-2 max-h-[480px] overflow-y-auto pr-0.5">
+                    {resourceRegistry.skillsets
+                      .filter(
+                        (s) =>
+                          !registrySearch.trim() ||
+                          s.name.toLowerCase().includes(registrySearch.toLowerCase()) ||
+                          s.usages.some((u) =>
+                            u.scriptNumber.toLowerCase().includes(registrySearch.toLowerCase())
+                          )
+                      )
+                      .map((sk) => (
+                        <div
+                          key={sk.name}
+                          className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-mono font-semibold text-emerald-300 truncate">
+                              {sk.name}
+                            </span>
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 ${
+                                sk.role === 'primary'
+                                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                  : sk.role === 'overflow'
+                                  ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                                  : 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/30'
+                              }`}
+                            >
+                              {sk.role === 'primary'
+                                ? 'Primär-Skillset'
+                                : sk.role === 'overflow'
+                                ? 'Überlauf'
+                                : 'Queue-Regel'}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1 pt-0.5">
+                            {sk.usages.map((u, idx) => (
+                              <button
+                                key={`${u.scriptNumber}-${idx}`}
+                                type="button"
+                                onClick={() => jumpToScriptInInspector(u.scriptNumber, true)}
+                                className="px-2 py-0.5 rounded bg-slate-950 hover:bg-indigo-950/60 border border-slate-800 hover:border-indigo-500/40 text-[11px] font-mono text-slate-200 transition-colors cursor-pointer"
+                              >
+                                [{u.scriptNumber}]
+                                {u.prio !== undefined ? ` Prio ${u.prio}` : ''}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    {resourceRegistry.skillsets.length === 0 && (
+                      <div className="text-xs text-slate-500 py-2">
+                        Keine Skillsets oder Warteschlangen erkannt.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Sub-Tab 3b: Announcements / RAN */}
+                {registrySubTab === 'announcements' && (
+                  <div className="space-y-2 max-h-[480px] overflow-y-auto pr-0.5">
+                    {resourceRegistry.announcements
+                      .filter(
+                        (a) =>
+                          !registrySearch.trim() ||
+                          a.idOrName.toLowerCase().includes(registrySearch.toLowerCase()) ||
+                          a.usages.some((u) =>
+                            u.scriptNumber.toLowerCase().includes(registrySearch.toLowerCase())
+                          )
+                      )
+                      .map((ann) => (
+                        <div
+                          key={ann.idOrName}
+                          className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-mono font-semibold text-amber-300 truncate">
+                              {ann.idOrName}
+                            </span>
+                            <span className="text-[10px] font-mono text-slate-400 shrink-0">
+                              {ann.usages.length}× genutzt
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {ann.usages.map((u, idx) => (
+                              <button
+                                key={`${u.scriptNumber}-${idx}`}
+                                type="button"
+                                onClick={() => jumpToScriptInInspector(u.scriptNumber, true)}
+                                className="px-2 py-0.5 rounded bg-slate-950 hover:bg-indigo-950/60 border border-slate-800 hover:border-indigo-500/40 text-[11px] font-mono text-slate-200 transition-colors cursor-pointer"
+                              >
+                                [{u.scriptNumber}] {u.stepName || ''}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    {resourceRegistry.announcements.length === 0 && (
+                      <div className="text-xs text-slate-500 py-2">
+                        Keine Ansagen, RAN-Nummern oder Musik-IDs erkannt.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Sub-Tab 3c: System Variables */}
+                {registrySubTab === 'variables' && (
+                  <div className="space-y-2 max-h-[480px] overflow-y-auto pr-0.5">
+                    {resourceRegistry.variables
+                      .filter(
+                        (v) =>
+                          !registrySearch.trim() ||
+                          v.variableName.toLowerCase().includes(registrySearch.toLowerCase()) ||
+                          v.valuesByScript.some(
+                            (s) =>
+                              s.value.toLowerCase().includes(registrySearch.toLowerCase()) ||
+                              s.scriptNumber.toLowerCase().includes(registrySearch.toLowerCase())
+                          )
+                      )
+                      .map((v) => (
+                        <div
+                          key={v.variableName}
+                          className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5"
+                        >
+                          <div className="text-xs font-mono font-semibold text-indigo-300">
+                            {v.variableName}
+                          </div>
+                          <div className="space-y-1">
+                            {v.valuesByScript.map((entry, idx) => (
+                              <div
+                                key={`${entry.scriptNumber}-${idx}`}
+                                className="flex items-center justify-between gap-2 text-[11px] bg-slate-950/80 px-2 py-1 rounded border border-slate-800/80"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => jumpToScriptInInspector(entry.scriptNumber, true)}
+                                  className="font-mono text-indigo-300 hover:underline shrink-0 cursor-pointer"
+                                >
+                                  [{entry.scriptNumber}]
+                                </button>
+                                <span className="font-mono text-slate-200 truncate">
+                                  = {entry.value}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    {resourceRegistry.variables.length === 0 && (
+                      <div className="text-xs text-slate-500 py-2">
+                        Keine AACC ASSIGN-Variablen im Quelltext gefunden.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Sub-Tab 3d: Cross-References (Wer ruft wen auf?) */}
+                {registrySubTab === 'crossrefs' && (
+                  <div className="space-y-2 max-h-[480px] overflow-y-auto pr-0.5">
+                    {resourceRegistry.crossRefs
+                      .filter(
+                        (cr) =>
+                          !registrySearch.trim() ||
+                          cr.refKey.toLowerCase().includes(registrySearch.toLowerCase()) ||
+                          cr.displayName.toLowerCase().includes(registrySearch.toLowerCase())
+                      )
+                      .map((cr) => (
+                        <div
+                          key={cr.refKey}
+                          className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              onClick={() => jumpToScriptInInspector(cr.refKey, cr.status !== 'missing')}
+                              className="text-left text-xs font-mono font-semibold text-slate-100 hover:text-indigo-300 truncate cursor-pointer"
+                            >
+                              [{cr.refKey}] {cr.displayName !== cr.refKey ? cr.displayName : ''}
+                            </button>
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 ${
+                                cr.status === 'master'
+                                  ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                                  : cr.status === 'present'
+                                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                  : cr.status === 'external'
+                                  ? 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
+                                  : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                              }`}
+                            >
+                              {cr.status === 'master'
+                                ? 'Master'
+                                : cr.status === 'present'
+                                ? 'Geladen'
+                                : cr.status === 'external'
+                                ? 'Extern'
+                                : 'Ausstehend'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-400 space-y-0.5">
+                            <div>
+                              <span className="text-slate-500">Aufgerufen von: </span>
+                              {cr.callers.length > 0 ? (
+                                <span className="font-mono text-slate-200">
+                                  {cr.callers.join(', ')}
+                                </span>
+                              ) : (
+                                <span className="text-slate-500">Eingang / Niemand</span>
+                              )}
+                            </div>
+                            <div>
+                              <span className="text-slate-500">Ruft auf: </span>
+                              {cr.callees.length > 0 ? (
+                                <span className="font-mono text-slate-200">
+                                  {cr.callees.join(', ')}
+                                </span>
+                              ) : (
+                                <span className="text-slate-500">—</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        )}
+
+        {/* TAB 4: Exportierbare Routing-Matrix & Migrations-Dokumentation */}
+        {((workspaceMode === 'free' && inspectorTab === 'matrix') ||
+          (workspaceMode === 'guided' && guidedStep === 3)) && (
+          <section className="space-y-3 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Grid className="w-4 h-4 text-indigo-400 shrink-0" />
+                <span className="text-xs font-semibold text-slate-100 truncate">
+                  Routing-Matrix &amp; Migrations-Export
+                </span>
+              </div>
+              <span className="text-[11px] font-mono text-slate-400 tabular-nums shrink-0">
+                {routingMatrixRows.length} Regeln
+              </span>
+            </div>
+
+            {scriptWorkspace.modules.length === 0 ? (
+              <div className="text-[11px] text-slate-400 py-2 leading-relaxed">
+                Laden Sie zuerst Skripte in den Arbeitsbereich, um die Routing-Matrix als Excel-CSV oder vollständiges Migrations-Fachkonzept zu exportieren.
+              </div>
+            ) : (
+              <>
+                <div className="flex flex-col gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleDownloadCsvMatrix}
+                    className="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Routing-Matrix für Excel speichern (.csv)</span>
+                  </button>
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleDownloadMarkdownDoc}
+                      className="py-1.5 px-2.5 bg-indigo-600/25 hover:bg-indigo-600/35 border border-indigo-500/40 text-indigo-200 text-[11px] font-medium rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <FileText className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">Fachkonzept (.md)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleCopyMarkdownDoc}
+                      className="py-1.5 px-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-medium rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      {copyReportFeedback ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                          <span className="truncate text-emerald-300">Kopiert!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">Bericht kopieren</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="relative pt-1">
+                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={matrixSearch}
+                    onChange={(e) => setMatrixSearch(e.target.value)}
+                    placeholder="Matrix nach Skript, Queue, Ansage oder Ziel filtern..."
+                    className="w-full pl-8 pr-7 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                  />
+                  {matrixSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setMatrixSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="space-y-2 max-h-[460px] overflow-y-auto pr-0.5">
+                  {filteredMatrixRows.map((row, idx) => (
+                    <div
+                      key={`${row.scriptNumber}-${row.prio}-${idx}`}
+                      className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5 text-[11px]"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => jumpToScriptInInspector(row.scriptNumber, true)}
+                          className="font-mono font-semibold text-indigo-300 hover:underline truncate cursor-pointer"
+                        >
+                          [{row.scriptNumber}] Prio {row.prio}: {row.stepName}
+                        </button>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 ${
+                            row.targetStatus === 'Ausstehende Referenz'
+                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                              : row.targetStatus === 'Vollständig geladen'
+                              ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                              : 'bg-slate-800 text-slate-300'
+                          }`}
+                        >
+                          {row.targetStatus}
+                        </span>
+                      </div>
+
+                      {row.conditionAndSchedule !== '—' && (
+                        <div className="text-slate-300">
+                          <span className="text-slate-500">Bedingung/Zeit: </span>
+                          {row.conditionAndSchedule}
+                        </div>
+                      )}
+                      {row.announcement !== '—' && (
+                        <div className="text-amber-300 font-mono">
+                          <span className="text-slate-500 font-sans">Ansage/RAN: </span>
+                          {row.announcement}
+                        </div>
+                      )}
+                      {row.queueTarget !== '—' && (
+                        <div className="text-emerald-300 font-mono">
+                          <span className="text-slate-500 font-sans">Queue/Skillset: </span>
+                          {row.queueTarget}
+                        </div>
+                      )}
+                      {row.targetsAndChoices !== '—' && (
+                        <div className="text-indigo-200 font-mono">
+                          <span className="text-slate-500 font-sans">Ziel/Auswahl: </span>
+                          {row.targetsAndChoices}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {filteredMatrixRows.length === 0 && (
+                    <div className="text-xs text-slate-500 py-2">
+                      Keine passenden Routing-Regeln gefunden.
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+        )}
+
+        {((workspaceMode === 'free' && inspectorTab === 'overview') ||
+          (workspaceMode === 'guided' && guidedStep === 2)) && (
+          <>
         {/* Section 1a: Masterscript Top-Down Checkliste & Echtzeit-Sync-Karte */}
         <section className="space-y-3 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
           <div className="flex items-center justify-between gap-2">
@@ -1144,6 +2377,25 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   </div>
                 </div>
               )}
+              {workspaceMode === 'guided' && (
+                <div className="pt-3 border-t border-slate-800/90 flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setGuidedStep(1)}
+                    className="py-1.5 px-2.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-[11px] font-medium rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    ← 1. Main anpassen
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGuidedStep(3)}
+                    className="flex-1 py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    <span>Weiter zu Schritt 3: Prüfen &amp; Export</span>
+                    <ArrowRight className="w-3.5 h-3.5 shrink-0" />
+                  </button>
+                </div>
+              )}
             </>
           )}
         </section>
@@ -1310,7 +2562,9 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                               : null;
                             if (nodeToSelect) {
                               onSelectNodeId(nodeToSelect);
-                              onFocusNodeOnCanvas?.(nodeToSelect);
+                              if (!isMobileView) {
+                                onFocusNodeOnCanvas?.(nodeToSelect);
+                              }
                             }
                           }}
                           className="w-full text-left flex items-start justify-between gap-2 cursor-pointer group"
@@ -1520,6 +2774,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
         )}
 
         {/* Section 2: Unified Layout-Profil (Dagre vs ELK cleanly separated) */}
+        {workspaceMode === 'free' && (
+          <>
         <section className="space-y-3 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
@@ -1689,6 +2945,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
             ))}
           </select>
         </section>
+          </>
+        )}
 
         {/* Section 4: Detailed Callflow Path Trace */}
         {traceResult ? (
@@ -1924,7 +3182,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
               </div>
             )}
           </section>
-        ) : (
+        ) : workspaceMode === 'free' ? (
           <section className="space-y-3 pt-2 border-t border-slate-800/80">
             <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 text-xs text-slate-300 leading-relaxed">
               <strong className="text-slate-100 block mb-1">
@@ -1983,6 +3241,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
               emptyText="Keine isolierten Endpunkte erkannt."
             />
           </section>
+        ) : null}
+          </>
         )}
       </div>
 

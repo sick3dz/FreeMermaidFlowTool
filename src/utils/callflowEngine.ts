@@ -7,6 +7,7 @@ import {
   CallflowNode,
   CallflowNodeRole,
   CallflowTraceResult,
+  NodePositionOffset,
 } from '../types/mermaidStudio';
 import { toMermaidNodeSuffix } from './scriptCallflowParser';
 
@@ -817,6 +818,291 @@ export function applyCallflowSpotlightToSvg(
   clusters.forEach((cl) => {
     (cl as SVGElement).style.opacity = '0.35';
   });
+
+  const serializer = new XMLSerializer();
+  return serializer.serializeToString(svgEl);
+}
+
+function parseTranslateFromTransform(transformAttr: string | null): { x: number; y: number; rest: string } {
+  if (!transformAttr) return { x: 0, y: 0, rest: '' };
+  const match = transformAttr.match(/translate\(\s*([+-]?\d+(?:\.\d+)?)(?:[\s,]+([+-]?\d+(?:\.\d+)?))?\s*\)/i);
+  if (!match) {
+    return { x: 0, y: 0, rest: transformAttr.trim() };
+  }
+  const x = parseFloat(match[1] || '0');
+  const y = parseFloat(match[2] || '0');
+  const rest = transformAttr.replace(match[0], '').trim();
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+    rest,
+  };
+}
+
+function shiftAbsoluteSvgPathD(
+  d: string,
+  dxFrom: number,
+  dyFrom: number,
+  dxTo: number,
+  dyTo: number
+): string {
+  // Tokenize SVG path into commands and numbers. Mermaid v11 flowcharts emit uppercase absolute commands (M, L, C, Q, S).
+  const tokenRegex = /([A-Za-z])|([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)/gi;
+  const tokens: Array<{ type: 'cmd' | 'num'; raw: string; val?: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = tokenRegex.exec(d)) !== null) {
+    if (m[1]) {
+      tokens.push({ type: 'cmd', raw: m[1] });
+    } else if (m[2]) {
+      tokens.push({ type: 'num', raw: m[2], val: parseFloat(m[2]) });
+    }
+  }
+
+  // Collect indices of (x, y) coordinate pairs in absolute commands
+  const pairTokenIndices: Array<{ xIdx: number; yIdx: number }> = [];
+  let currentCmd = 'M';
+  let i = 0;
+  while (i < tokens.length) {
+    const tk = tokens[i];
+    if (tk.type === 'cmd') {
+      currentCmd = tk.raw;
+      i++;
+      continue;
+    }
+    const upper = currentCmd.toUpperCase();
+    const isRelative = currentCmd !== upper;
+    if (upper === 'Z') {
+      i++;
+      continue;
+    }
+    if (upper === 'H' || upper === 'V') {
+      i++;
+      continue;
+    }
+    if (upper === 'A') {
+      // Arc: rx ry x-axis-rotation large-arc-flag sweep-flag x y (7 numbers)
+      if (!isRelative && i + 6 < tokens.length) {
+        pairTokenIndices.push({ xIdx: i + 5, yIdx: i + 6 });
+      }
+      i += 7;
+      continue;
+    }
+    // M, L, T, C, S, Q all consist of (x, y) coordinate pairs
+    if (!isRelative && i + 1 < tokens.length && tokens[i + 1].type === 'num') {
+      pairTokenIndices.push({ xIdx: i, yIdx: i + 1 });
+      i += 2;
+    } else {
+      i++;
+    }
+  }
+
+  if (pairTokenIndices.length === 0) return d;
+
+  const totalPairs = pairTokenIndices.length;
+  pairTokenIndices.forEach((pair, idx) => {
+    const t = totalPairs <= 1 ? 0 : idx / (totalPairs - 1);
+    const shiftX = dxFrom * (1 - t) + dxTo * t;
+    const shiftY = dyFrom * (1 - t) + dyTo * t;
+    const xVal = (tokens[pair.xIdx].val ?? 0) + shiftX;
+    const yVal = (tokens[pair.yIdx].val ?? 0) + shiftY;
+    tokens[pair.xIdx].raw = Number(xVal.toFixed(2)).toString();
+    tokens[pair.yIdx].raw = Number(yVal.toFixed(2)).toString();
+  });
+
+  let out = '';
+  for (let k = 0; k < tokens.length; k++) {
+    const tk = tokens[k];
+    if (tk.type === 'cmd') {
+      out += (k > 0 ? ' ' : '') + tk.raw;
+    } else {
+      const prev = k > 0 ? tokens[k - 1] : null;
+      out += (prev && prev.type === 'cmd' ? '' : ',') + tk.raw;
+    }
+  }
+  return out;
+}
+
+/**
+ * Applies user-defined Drag & Drop node position offsets (`{ dx, dy }`) directly to the rendered
+ * Mermaid SVG so manual node arrangements persist across re-renders, PNG exports, SVG exports,
+ * and Interactive HTML exports. Also injects interactive connection ports when `isVisualEditMode` is active.
+ */
+export function applyNodeOffsetsToSvg(
+  svgString: string,
+  nodeOffsets: Record<string, NodePositionOffset> | undefined,
+  graph: CallflowGraph,
+  isVisualEditMode: boolean = false
+): string {
+  const hasOffsets =
+    nodeOffsets &&
+    Object.values(nodeOffsets).some(
+      (off) => off && (Math.abs(off.dx) > 0.5 || Math.abs(off.dy) > 0.5)
+    );
+
+  if (!hasOffsets && !isVisualEditMode) {
+    return svgString;
+  }
+
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(svgString, 'image/svg+xml');
+  const svgEl = doc.querySelector('svg');
+  if (!svgEl) return svgString;
+
+  const activeOffsets = nodeOffsets || {};
+  const nodeGroups = Array.from(
+    svgEl.querySelectorAll('g.node, g.actor, g.statediagram-state, g.classGroup')
+  );
+
+  let minDeltaX = 0;
+  let maxDeltaX = 0;
+  let minDeltaY = 0;
+  let maxDeltaY = 0;
+
+  nodeGroups.forEach((nodeGroup) => {
+    const matchedId = resolveClickedNodeIdFromSvgElement(nodeGroup, graph);
+    if (!matchedId) return;
+
+    nodeGroup.setAttribute('data-callflow-node-id', matchedId);
+    const off = activeOffsets[matchedId];
+    if (off && (Math.abs(off.dx) > 0.5 || Math.abs(off.dy) > 0.5)) {
+      const { x, y, rest } = parseTranslateFromTransform(nodeGroup.getAttribute('transform'));
+      const nextX = Number((x + off.dx).toFixed(2));
+      const nextY = Number((y + off.dy).toFixed(2));
+      nodeGroup.setAttribute(
+        'transform',
+        `translate(${nextX}, ${nextY})${rest ? ` ${rest}` : ''}`
+      );
+      nodeGroup.setAttribute('data-offset-dx', String(off.dx));
+      nodeGroup.setAttribute('data-offset-dy', String(off.dy));
+      if (off.dx < minDeltaX) minDeltaX = off.dx;
+      if (off.dx > maxDeltaX) maxDeltaX = off.dx;
+      if (off.dy < minDeltaY) minDeltaY = off.dy;
+      if (off.dy > maxDeltaY) maxDeltaY = off.dy;
+    }
+
+    if (isVisualEditMode) {
+      (nodeGroup as SVGElement).style.cursor = 'move';
+      // Determine approximate right-hand side for the connection port handle
+      const rectEl = nodeGroup.querySelector('rect');
+      let portX = 72;
+      let portY = 0;
+      if (rectEl) {
+        const rx = parseFloat(rectEl.getAttribute('x') || '0');
+        const rw = parseFloat(rectEl.getAttribute('width') || '120');
+        const ry = parseFloat(rectEl.getAttribute('y') || '0');
+        const rh = parseFloat(rectEl.getAttribute('height') || '44');
+        if (Number.isFinite(rx) && Number.isFinite(rw)) {
+          portX = rx + rw / 2;
+        }
+        if (Number.isFinite(ry) && Number.isFinite(rh)) {
+          portY = ry + rh / 2;
+        }
+      }
+      if (!nodeGroup.querySelector('.callflow-connect-port')) {
+        const portGroup = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
+        portGroup.setAttribute('class', 'callflow-connect-port');
+        portGroup.setAttribute('data-port-node-id', matchedId);
+        portGroup.setAttribute('transform', `translate(${Number(portX.toFixed(1))}, ${Number(portY.toFixed(1))})`);
+        portGroup.setAttribute('style', 'cursor: crosshair;');
+
+        const portTitle = doc.createElementNS('http://www.w3.org/2000/svg', 'title');
+        portTitle.textContent = 'Ziehen, um neue Verbindung zu einem Ziel-Knoten zu knüpfen (Doppelklick auf Knoten = Text bearbeiten)';
+        portGroup.appendChild(portTitle);
+
+        const outerCircle = doc.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        outerCircle.setAttribute('r', '7');
+        outerCircle.setAttribute('fill', '#4f46e5');
+        outerCircle.setAttribute('stroke', '#e0e7ff');
+        outerCircle.setAttribute('stroke-width', '2');
+        outerCircle.setAttribute('data-port-node-id', matchedId);
+        portGroup.appendChild(outerCircle);
+
+        const innerDot = doc.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        innerDot.setAttribute('r', '2.5');
+        innerDot.setAttribute('fill', '#ffffff');
+        innerDot.setAttribute('data-port-node-id', matchedId);
+        portGroup.appendChild(innerDot);
+
+        nodeGroup.appendChild(portGroup);
+      }
+    }
+  });
+
+  if (hasOffsets) {
+    // Shift connected edges and edge labels
+    const edgeElements = Array.from(
+      svgEl.querySelectorAll('g.edgePaths > *, g.edgePath, path.flowchart-link')
+    );
+    const edgeLabelElements = Array.from(
+      svgEl.querySelectorAll('g.edgeLabels > *, g.edgeLabel')
+    );
+
+    edgeElements.forEach((edgeEl, idx) => {
+      const matchedEdge = graph.edges.find((e) => matchesSvgEdge(edgeEl, [e]));
+      if (!matchedEdge) return;
+      const fromOff = activeOffsets[matchedEdge.from] || { dx: 0, dy: 0 };
+      const toOff = activeOffsets[matchedEdge.to] || { dx: 0, dy: 0 };
+      if (
+        Math.abs(fromOff.dx) <= 0.5 &&
+        Math.abs(fromOff.dy) <= 0.5 &&
+        Math.abs(toOff.dx) <= 0.5 &&
+        Math.abs(toOff.dy) <= 0.5
+      ) {
+        return;
+      }
+
+      const paths =
+        edgeEl.tagName.toLowerCase() === 'path'
+          ? [edgeEl]
+          : Array.from(edgeEl.querySelectorAll('path'));
+      paths.forEach((p) => {
+        const origD = p.getAttribute('d');
+        if (!origD) return;
+        p.setAttribute(
+          'd',
+          shiftAbsoluteSvgPathD(origD, fromOff.dx, fromOff.dy, toOff.dx, toOff.dy)
+        );
+      });
+
+      // Shift corresponding edgeLabel by midpoint offset
+      const midDx = (fromOff.dx + toOff.dx) / 2;
+      const midDy = (fromOff.dy + toOff.dy) / 2;
+      const labelEl =
+        edgeLabelElements.find((l) => matchesSvgEdge(l, [matchedEdge])) ||
+        (edgeLabelElements.length === edgeElements.length ? edgeLabelElements[idx] : null);
+      if (labelEl && (Math.abs(midDx) > 0.5 || Math.abs(midDy) > 0.5)) {
+        const { x, y, rest } = parseTranslateFromTransform(labelEl.getAttribute('transform'));
+        labelEl.setAttribute(
+          'transform',
+          `translate(${Number((x + midDx).toFixed(2))}, ${Number((y + midDy).toFixed(2))})${
+            rest ? ` ${rest}` : ''
+          }`
+        );
+      }
+    });
+
+    // Expand SVG viewBox if nodes were dragged outside original bounds
+    const vbAttr = svgEl.getAttribute('viewBox');
+    if (vbAttr) {
+      const parts = vbAttr
+        .trim()
+        .split(/[\s,]+/)
+        .map(Number);
+      if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
+        const padLeft = minDeltaX < 0 ? Math.abs(minDeltaX) + 40 : 0;
+        const padTop = minDeltaY < 0 ? Math.abs(minDeltaY) + 40 : 0;
+        const padRight = maxDeltaX > 0 ? maxDeltaX + 40 : 0;
+        const padBottom = maxDeltaY > 0 ? maxDeltaY + 40 : 0;
+        if (padLeft > 0 || padTop > 0 || padRight > 0 || padBottom > 0) {
+          const nextMinX = Math.floor(parts[0] - padLeft);
+          const nextMinY = Math.floor(parts[1] - padTop);
+          const nextW = Math.ceil(parts[2] + padLeft + padRight);
+          const nextH = Math.ceil(parts[3] + padTop + padBottom);
+          svgEl.setAttribute('viewBox', `${nextMinX} ${nextMinY} ${nextW} ${nextH}`);
+        }
+      }
+    }
+  }
 
   const serializer = new XMLSerializer();
   return serializer.serializeToString(svgEl);

@@ -175,6 +175,19 @@ export interface MasterScriptChecklistItem {
   matchedModuleNumber?: string;
 }
 
+export interface NodePositionOffset {
+  dx: number;
+  dy: number;
+}
+
+export type CallflowBuildingBlockType =
+  | 'script'
+  | 'announcement'
+  | 'queue'
+  | 'condition'
+  | 'dtmf'
+  | 'external';
+
 export interface ScriptWorkspace {
   modules: ScriptModule[];
   missingTargets: string[];
@@ -187,6 +200,7 @@ export interface ScriptWorkspace {
   openIssueCount?: number;
   masterScriptNumber?: string;
   masterChecklist?: MasterScriptChecklistItem[];
+  nodeOffsets?: Record<string, NodePositionOffset>;
   updatedAt: number;
 }
 
@@ -253,3 +267,86 @@ export interface ValidationState {
   errorLine: number | null;
   lastRenderMs: number;
 }
+
+export type CallflowHealthSeverity = 'error' | 'warning' | 'info';
+
+export type CallflowHealthCategory =
+  | 'cycle'
+  | 'dead-end-rule'
+  | 'dead-end-module'
+  | 'orphan-module'
+  | 'inactive-overflow'
+  | 'missing-schedule-guard'
+  | 'duplicate-prio';
+
+export interface CallflowHealthFinding {
+  id: string;
+  severity: CallflowHealthSeverity;
+  category: CallflowHealthCategory;
+  scriptNumber: string;
+  scriptName: string;
+  ruleId?: string;
+  prio?: number;
+  title: string;
+  description: string;
+  recommendation: string;
+  cyclePath?: string[];
+}
+
+export interface CallflowResourceUsageRef {
+  scriptNumber: string;
+  scriptName: string;
+  prio?: number;
+  stepName?: string;
+  context?: string;
+}
+
+export interface CallflowSkillsetRegistryItem {
+  name: string;
+  role: 'primary' | 'overflow' | 'rule';
+  usages: CallflowResourceUsageRef[];
+}
+
+export interface CallflowAnnouncementRegistryItem {
+  idOrName: string;
+  usages: CallflowResourceUsageRef[];
+}
+
+export interface CallflowVariableRegistryItem {
+  variableName: string;
+  valuesByScript: Array<{
+    scriptNumber: string;
+    scriptName: string;
+    value: string;
+  }>;
+}
+
+export interface CallflowCrossRefRegistryItem {
+  refKey: string;
+  displayName: string;
+  status: 'present' | 'missing' | 'external' | 'master';
+  callers: string[];
+  callees: string[];
+  ruleCount: number;
+}
+
+export interface CallflowResourceRegistry {
+  skillsets: CallflowSkillsetRegistryItem[];
+  announcements: CallflowAnnouncementRegistryItem[];
+  variables: CallflowVariableRegistryItem[];
+  crossRefs: CallflowCrossRefRegistryItem[];
+}
+
+export interface CallflowRoutingMatrixRow {
+  scriptNumber: string;
+  scriptName: string;
+  isMaster: boolean;
+  prio: number;
+  stepName: string;
+  conditionAndSchedule: string;
+  announcement: string;
+  queueTarget: string;
+  targetsAndChoices: string;
+  targetStatus: string;
+}
+
