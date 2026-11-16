@@ -21,6 +21,7 @@ import {
   ThemeConfiguration,
 } from '../types/mermaidStudio';
 import { generateInteractiveCallflowHtml } from '../utils/callflowEngine';
+import { applySmartLogicColoring } from '../utils/smartColorEngine';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -33,6 +34,8 @@ interface ExportModalProps {
   themeConfig: ThemeConfiguration;
   smartColorMode: SmartColorMode;
   callflowGraph: CallflowGraph;
+  scriptCount?: number;
+  buildInteractiveHtml?: (targetSurface: 'dark' | 'light') => Promise<string | null>;
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({
@@ -46,10 +49,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   themeConfig,
   smartColorMode,
   callflowGraph,
+  scriptCount = 0,
+  buildInteractiveHtml,
 }) => {
   const [pngScale, setPngScale] = useState<1 | 2 | 4>(2);
   const [bgMode, setBgMode] = useState<'transparent' | 'dark' | 'light'>(defaultBackground);
   const [isExportingPng, setIsExportingPng] = useState(false);
+  const [isExportingHtml, setIsExportingHtml] = useState(false);
   const [copiedType, setCopiedType] = useState<'svg' | 'mmd' | 'md' | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
 
@@ -70,9 +76,24 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       .replace(/[^a-z0-9äöüß_-]+/gi, '-')
       .replace(/^-+|-+$/g, '') || 'mermaid-diagramm';
 
+  const getSurfaceAdjustedSvg = (sourceSvg: string, targetSurface: 'dark' | 'light'): string => {
+    if (targetSurface === 'dark' && defaultBackground !== 'dark') {
+      return applySmartLogicColoring(
+        sourceSvg,
+        code,
+        smartColorMode,
+        'dark',
+        themeConfig.lineColor
+      ).svg;
+    }
+    return sourceSvg;
+  };
+
   const handleDownloadSvg = () => {
     if (!svgContent) return;
-    const { serializedSvg } = prepareStandaloneSvg(svgContent, bgMode, 32);
+    const adjustedSvg =
+      bgMode === 'dark' ? getSurfaceAdjustedSvg(svgContent, 'dark') : svgContent;
+    const { serializedSvg } = prepareStandaloneSvg(adjustedSvg, bgMode, 32);
     const blob = new Blob([serializedSvg], { type: 'image/svg+xml;charset=utf-8' });
     triggerLocalDownload(blob, `${safeFilename}.svg`);
     setExportStatus('SVG-Vektorgrafik wurde lokal heruntergeladen.');
@@ -84,11 +105,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     setIsExportingPng(true);
     setExportStatus(null);
     try {
-      const { blob, width, height } = await exportSvgToPngBlob(svgContent, pngScale, bgMode, {
+      const targetSurface = bgMode === 'light' ? 'light' : 'dark';
+      const adjustedSvg =
+        bgMode === 'dark' ? getSurfaceAdjustedSvg(svgContent, 'dark') : svgContent;
+      const { blob, width, height } = await exportSvgToPngBlob(adjustedSvg, pngScale, bgMode, {
         code,
         themeConfig,
         smartColorMode,
-        canvasSurface: bgMode === 'light' ? 'light' : 'dark',
+        canvasSurface: targetSurface,
       });
       triggerLocalDownload(blob, `${safeFilename}-${pngScale}x-${width}x${height}.png`);
       setExportStatus(`PNG (${width} × ${height} px) wurde lokal gerendert und heruntergeladen.`);
@@ -102,21 +126,37 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     }
   };
 
-  const handleDownloadInteractiveHtml = () => {
-    const htmlSvg = unfilteredSvgContent || svgContent;
-    if (!htmlSvg) return;
-    const htmlContent = generateInteractiveCallflowHtml(
-      diagramTitle,
-      htmlSvg,
-      callflowGraph,
-      bgMode === 'light' ? 'light' : 'dark'
-    );
-    const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
-    triggerLocalDownload(blob, `${safeFilename}-interaktiv-callflow.html`);
-    setExportStatus(
-      'Interaktive Callflow-HTML wurde gespeichert (offline im Browser klickbar).'
-    );
-    setTimeout(() => setExportStatus(null), 3500);
+  const handleDownloadInteractiveHtml = async () => {
+    const rawHtmlSvg = unfilteredSvgContent || svgContent;
+    if (!rawHtmlSvg || isExportingHtml) return;
+    setIsExportingHtml(true);
+    try {
+      const targetSurface = bgMode === 'light' ? 'light' : 'dark';
+      let htmlContent: string | null = null;
+      if (buildInteractiveHtml) {
+        htmlContent = await buildInteractiveHtml(targetSurface);
+      }
+      if (!htmlContent) {
+        const htmlSvg =
+          targetSurface === 'dark' ? getSurfaceAdjustedSvg(rawHtmlSvg, 'dark') : rawHtmlSvg;
+        htmlContent = generateInteractiveCallflowHtml(
+          diagramTitle,
+          htmlSvg,
+          callflowGraph,
+          targetSurface
+        );
+      }
+      const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+      triggerLocalDownload(blob, `${safeFilename}-interaktiv-callflow.html`);
+      setExportStatus(
+        scriptCount > 0
+          ? `Interaktive Zwei-Ebenen HTML (${scriptCount} Skripte + Master) gespeichert.`
+          : 'Interaktive Callflow-HTML wurde gespeichert (offline im Browser klickbar).'
+      );
+      setTimeout(() => setExportStatus(null), 3500);
+    } finally {
+      setIsExportingHtml(false);
+    }
   };
 
   const handleDownloadMmd = () => {
@@ -264,9 +304,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
             <button
               type="button"
-              disabled={!svgContent}
+              disabled={!svgContent || isExportingHtml}
               onClick={handleDownloadInteractiveHtml}
-              className="p-4 rounded-xl bg-emerald-950/30 border border-emerald-500/50 hover:border-emerald-400 text-left transition-colors flex flex-col justify-between group disabled:opacity-50"
+              className="p-4 rounded-xl bg-emerald-950/30 border border-emerald-500/50 hover:border-emerald-400 text-left transition-colors flex flex-col justify-between group disabled:opacity-50 cursor-pointer"
             >
               <div>
                 <Globe className="w-5 h-5 text-emerald-400 mb-2" />
@@ -274,12 +314,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   Interaktive HTML
                 </div>
                 <div className="text-xs text-slate-300 mt-1">
-                  Offline-Viewer mit klickbarer Pfad-Filterung
+                  {scriptCount > 0
+                    ? `2-Ebenen Viewer (Master + ${scriptCount} Skripte)`
+                    : 'Offline-Viewer mit klickbarer Pfad-Filterung'}
                 </div>
               </div>
               <div className="mt-4 flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
                 <Download className="w-3.5 h-3.5" />
-                <span>.html laden</span>
+                <span>{isExportingHtml ? 'Rendere HTML...' : '.html laden'}</span>
               </div>
             </button>
 

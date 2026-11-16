@@ -40,6 +40,7 @@ export const THEME_PRESETS: Array<{
     config: {
       theme: 'base',
       useCustomColors: true,
+      background: '#0b0f19',
       primaryColor: '#1e293b',
       primaryTextColor: '#f8fafc',
       primaryBorderColor: '#6366f1',
@@ -62,6 +63,7 @@ export const THEME_PRESETS: Array<{
     config: {
       theme: 'base',
       useCustomColors: true,
+      background: '#0b0f19',
       primaryColor: '#064e3b',
       primaryTextColor: '#ecfdf5',
       primaryBorderColor: '#10b981',
@@ -84,6 +86,7 @@ export const THEME_PRESETS: Array<{
     config: {
       theme: 'base',
       useCustomColors: true,
+      background: '#ffffff',
       primaryColor: '#eef2ff',
       primaryTextColor: '#0f172a',
       primaryBorderColor: '#4f46e5',

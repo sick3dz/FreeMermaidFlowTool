@@ -3,6 +3,7 @@ import {
   LogicAnalysisSummary,
   SmartColorMode,
 } from '../types/mermaidStudio';
+import { isColorDark } from './mermaidEngine';
 
 export type SemanticRoleId =
   | 'start-actor'
@@ -228,6 +229,127 @@ function applyGroupTextStyle(group: Element, textColor: string, fontWeight?: str
 }
 
 /**
+ * Resolves a safe, high-contrast line color for dark mode (never black/dark gray).
+ */
+function resolveDarkModeLineColor(preferredLineColor?: string): string {
+  if (preferredLineColor && !isColorDark(preferredLineColor)) {
+    return preferredLineColor;
+  }
+  return '#818cf8';
+}
+
+/**
+ * Ensures all edge paths, sequence/state/class/ER lines, and SVG arrowhead markers
+ * are clearly visible on a dark canvas and never remain black (#000 / #333 / #0b0b0b).
+ */
+function ensureDarkModeEdgeVisibility(
+  svgEl: SVGSVGElement,
+  solidColor: string,
+  asyncColor: string,
+  overwriteAllEdges = false
+): void {
+  const isDashedEdge = (el: Element): boolean => {
+    const styleAttr = el.getAttribute('style') || '';
+    const dashAttr = el.getAttribute('stroke-dasharray') || '';
+    return (
+      dashAttr.length > 0 ||
+      styleAttr.includes('stroke-dasharray') ||
+      el.classList.contains('edge-pattern-dotted') ||
+      el.classList.contains('edge-pattern-dashed') ||
+      el.classList.contains('messageLine1')
+    );
+  };
+
+  // 1. Patch embedded <style> rules if Mermaid generated dark/black line or marker rules
+  const svgIdAttr = svgEl.getAttribute('id');
+  const scopePrefix = svgIdAttr ? `#${svgIdAttr} ` : '';
+  const overrideCss = `
+${scopePrefix}.flowchart-link,
+${scopePrefix}.edgePaths .path,
+${scopePrefix}.edgePath path.path,
+${scopePrefix}path.transition,
+${scopePrefix}path.relationshipLine,
+${scopePrefix}line.messageLine0,
+${scopePrefix}line.messageLine1,
+${scopePrefix}line.actor-line {
+  stroke: ${solidColor};
+}
+${scopePrefix}.arrowheadPath,
+${scopePrefix}.arrowMarkerPath,
+${scopePrefix}marker path,
+${scopePrefix}marker circle,
+${scopePrefix}marker polygon {
+  fill: ${solidColor};
+  stroke: ${solidColor};
+}
+${scopePrefix}.edgeLabel text,
+${scopePrefix}.edgeLabel span,
+${scopePrefix}.edgeLabel p {
+  color: #e2e8f0;
+  fill: #e2e8f0;
+}
+${scopePrefix}.edgeLabel rect,
+${scopePrefix}.labelBkg {
+  fill: #0f172a;
+  background-color: rgba(15, 23, 42, 0.88);
+}
+`;
+
+  const styleTags = svgEl.querySelectorAll('style');
+  if (styleTags.length > 0) {
+    const lastStyle = styleTags[styleTags.length - 1];
+    lastStyle.textContent = `${lastStyle.textContent || ''}\n${overrideCss}`;
+  } else {
+    const nsStyle = svgEl.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'style');
+    nsStyle.textContent = overrideCss;
+    svgEl.insertBefore(nsStyle, svgEl.firstChild);
+  }
+
+  // 2. Directly inspect and fix edge paths & lines (handles inline styles or ELK/Dagre stroke attributes)
+  const edgeShapes = svgEl.querySelectorAll(
+    'g.edgePaths path, g.edgePath path, path.flowchart-link, path.transition, path.relationshipLine, line.messageLine0, line.messageLine1, line.actor-line, g.mindmap-edges path, path.edge'
+  );
+
+  edgeShapes.forEach((el) => {
+    const svgShape = el as SVGElement;
+    const inlineStroke = svgShape.style.stroke || el.getAttribute('stroke') || '';
+    const dashed = isDashedEdge(el);
+    const targetStroke = dashed ? asyncColor : solidColor;
+
+    if (
+      overwriteAllEdges ||
+      !inlineStroke ||
+      inlineStroke === 'none' ||
+      isColorDark(inlineStroke)
+    ) {
+      svgShape.style.stroke = targetStroke;
+      el.setAttribute('stroke', targetStroke);
+      if (!svgShape.style.strokeWidth) {
+        svgShape.style.strokeWidth = '2px';
+      }
+    }
+  });
+
+  // 3. Fix all SVG markers & arrowheads so none stay default SVG black (#000)
+  const markerShapes = svgEl.querySelectorAll(
+    'defs marker path, defs marker polygon, defs marker circle, marker path, marker polygon, marker circle, .arrowheadPath, .arrowMarkerPath'
+  );
+  markerShapes.forEach((mEl) => {
+    const svgMarker = mEl as SVGElement;
+    const curFill = svgMarker.style.fill || mEl.getAttribute('fill') || '';
+    const curStroke = svgMarker.style.stroke || mEl.getAttribute('stroke') || '';
+    if (!curFill || curFill === 'none' || isColorDark(curFill)) {
+      svgMarker.style.fill = solidColor;
+      mEl.setAttribute('fill', solidColor);
+    }
+    if (!curStroke || isColorDark(curStroke)) {
+      svgMarker.style.stroke = solidColor;
+      mEl.setAttribute('stroke', solidColor);
+    }
+  });
+}
+
+/**
  * Applies Smart Logic Coloring to a rendered Mermaid SVG string and returns both the enhanced SVG
  * and the logic analysis summary (including recommended mode and active legend items).
  */
@@ -235,7 +357,8 @@ export function applySmartLogicColoring(
   rawSvg: string,
   code: string,
   mode: SmartColorMode,
-  canvasSurface: 'dark' | 'light'
+  canvasSurface: 'dark' | 'light',
+  preferredLineColor?: string
 ): { svg: string; summary: LogicAnalysisSummary } {
   const parser = new DOMParser();
   const doc = parser.parseFromString(rawSvg, 'image/svg+xml');
@@ -290,7 +413,26 @@ export function applySmartLogicColoring(
     recommendationReason = `Komplexes Diagramm (${nodeGroups.length} Elemente) — Hoher Kontrast verbessert Pfad-Lesbarkeit`;
   }
 
+  const darkLineColor = resolveDarkModeLineColor(preferredLineColor);
+
   if (mode === 'standard') {
+    if (canvasSurface === 'dark') {
+      ensureDarkModeEdgeVisibility(svgEl, darkLineColor, darkLineColor, false);
+      const serializer = new XMLSerializer();
+      return {
+        svg: serializer.serializeToString(svgEl),
+        summary: {
+          activeMode: mode,
+          recommendedMode,
+          recommendationReason,
+          legend: [],
+          nodeCount: nodeGroups.length,
+          clusterCount: Math.max(clusterGroups.length, subgraphCountInCode),
+          asyncEdgeCount: asyncEdgeCountInCode,
+        },
+      };
+    }
+
     return {
       svg: rawSvg,
       summary: {
@@ -552,6 +694,126 @@ export function applySmartLogicColoring(
         count: asyncCount,
       });
     }
+  }
+
+  if (canvasSurface === 'dark') {
+    const asyncCol =
+      mode === 'semantic'
+        ? '#c084fc'
+        : mode === 'high-contrast'
+        ? '#f59e0b'
+        : darkLineColor;
+    const solidCol = mode === 'high-contrast' ? '#38bdf8' : darkLineColor;
+    ensureDarkModeEdgeVisibility(
+      svgEl,
+      solidCol,
+      asyncCol,
+      mode === 'high-contrast'
+    );
+  }
+
+  // Decorate any node flagged as `openIssue` or `missingScript` with a crisp SVG red sphere ("rote Kugel")
+  let openIssueSvgCount = 0;
+  const svgNs = 'http://www.w3.org/2000/svg';
+  const allNodesForOpen = Array.from(
+    svgEl.querySelectorAll('g.node, g.statediagram-state')
+  );
+
+  for (const node of allNodesForOpen) {
+    const labelTxt = (node.textContent || '').trim();
+    const isMissing = node.classList.contains('missingScript');
+    const hasOpen =
+      isMissing ||
+      node.classList.contains('openIssue') ||
+      labelTxt.includes('●');
+    if (!hasOpen) continue;
+
+    openIssueSvgCount++;
+
+    // Enforce crimson stroke so open status stands out in all color modes
+    const shapes = node.querySelectorAll('rect, polygon, path, circle, ellipse');
+    shapes.forEach((shape) => {
+      if (shape.closest('.open-issue-sphere')) return;
+      (shape as SVGElement).style.stroke = '#ef4444';
+      shape.setAttribute('stroke', '#ef4444');
+      (shape as SVGElement).style.strokeWidth = '2.5px';
+      if (isMissing) {
+        (shape as SVGElement).style.strokeDasharray = '6 4';
+        shape.setAttribute('stroke-dasharray', '6 4');
+      }
+    });
+
+    // Compute local top-right corner from child shape geometry (works without browser getBBox)
+    let cornerX = 48;
+    let cornerY = -18;
+    const rectEl = node.querySelector('rect');
+    const polyEl = node.querySelector('polygon');
+    if (rectEl) {
+      const rx = parseFloat(rectEl.getAttribute('x') || '0') || 0;
+      const ry = parseFloat(rectEl.getAttribute('y') || '0') || 0;
+      const rw = parseFloat(rectEl.getAttribute('width') || '0') || 0;
+      if (rw > 0) {
+        cornerX = rx + rw - 4;
+        cornerY = ry + 4;
+      }
+    } else if (polyEl) {
+      const pts = (polyEl.getAttribute('points') || '')
+        .trim()
+        .split(/\s+/)
+        .map((pair) => pair.split(',').map(Number))
+        .filter((xy) => xy.length === 2 && Number.isFinite(xy[0]) && Number.isFinite(xy[1]));
+      if (pts.length > 0) {
+        const xs = pts.map((p) => p[0]);
+        const ys = pts.map((p) => p[1]);
+        cornerX = Math.max(...xs) - 4;
+        cornerY = Math.min(...ys) + 4;
+      }
+    }
+
+    const countMatch = labelTxt.match(/●\s*(\d+)\s*Offen/i);
+    const badgeNum = countMatch ? countMatch[1] : '';
+
+    const sphereGroup = doc.createElementNS(svgNs, 'g');
+    sphereGroup.setAttribute('class', 'open-issue-sphere');
+    sphereGroup.setAttribute('data-open-issue', 'true');
+
+    const outerCircle = doc.createElementNS(svgNs, 'circle');
+    outerCircle.setAttribute('cx', String(cornerX));
+    outerCircle.setAttribute('cy', String(cornerY));
+    outerCircle.setAttribute('r', badgeNum ? '9.5' : '7.5');
+    outerCircle.setAttribute('fill', '#dc2626');
+    outerCircle.setAttribute(
+      'stroke',
+      canvasSurface === 'dark' ? '#0f172a' : '#ffffff'
+    );
+    outerCircle.setAttribute('stroke-width', '2');
+    sphereGroup.appendChild(outerCircle);
+
+    if (badgeNum) {
+      const txtEl = doc.createElementNS(svgNs, 'text');
+      txtEl.setAttribute('x', String(cornerX));
+      txtEl.setAttribute('y', String(cornerY + 3.5));
+      txtEl.setAttribute('text-anchor', 'middle');
+      txtEl.setAttribute('font-size', '10');
+      txtEl.setAttribute('font-weight', '700');
+      txtEl.setAttribute('font-family', 'ui-monospace, SFMono-Regular, Menlo, monospace');
+      txtEl.setAttribute('fill', '#ffffff');
+      txtEl.textContent = badgeNum;
+      sphereGroup.appendChild(txtEl);
+    }
+
+    node.appendChild(sphereGroup);
+  }
+
+  if (openIssueSvgCount > 0) {
+    legendMap.set('open-issues', {
+      id: 'open-issues',
+      label: 'Offene Punkte / Rückfragen (●)',
+      fillColor: '#dc2626',
+      borderColor: '#ef4444',
+      textColor: '#ffffff',
+      count: openIssueSvgCount,
+    });
   }
 
   const serializer = new XMLSerializer();

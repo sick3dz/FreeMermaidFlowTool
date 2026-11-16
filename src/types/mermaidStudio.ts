@@ -26,6 +26,7 @@ export interface LogicAnalysisSummary {
 
 export type CallflowNodeRole = 'entry' | 'hub' | 'step' | 'terminal';
 export type CallflowDirectionFilter = 'both' | 'upstream' | 'downstream';
+export type CallflowHopDepth = 1 | 2 | 'all';
 
 export interface CallflowNode {
   id: string;
@@ -51,6 +52,15 @@ export interface CallflowGraph {
   terminalNodes: CallflowNode[];
 }
 
+export interface CallflowCycleEdge {
+  from: string;
+  to: string;
+  fromLabel: string;
+  toLabel: string;
+  label: string;
+  direction: 'upstream' | 'downstream';
+}
+
 export interface CallflowTraceResult {
   selectedNode: CallflowNode;
   entryPoints: CallflowNode[];
@@ -60,10 +70,129 @@ export interface CallflowTraceResult {
   upstreamNodeIds: Set<string>;
   downstreamNodeIds: Set<string>;
   activeNodeIds: Set<string>;
+  upstreamDepthByNodeId: Map<string, number>;
+  downstreamDepthByNodeId: Map<string, number>;
   upstreamEdges: CallflowEdge[];
   downstreamEdges: CallflowEdge[];
   activeEdges: CallflowEdge[];
+  cycleEdges: CallflowCycleEdge[];
 }
+
+export type ScriptOrigin = 'legacy-text' | 'visio-new';
+
+export interface ScriptChoiceOption {
+  choice: string;
+  targetNumber: string;
+  label?: string;
+}
+
+export interface ScriptRule {
+  id: string;
+  prio: number;
+  stepName: string;
+  sourceNumber: string;
+  targetNumber?: string;
+  choices: ScriptChoiceOption[];
+  condition?: string;
+  schedule?: string;
+  holiday?: string;
+  announcement?: string;
+  queueTarget?: string;
+  rawLine: string;
+}
+
+export interface ScriptModule {
+  scriptNumber: string;
+  scriptName: string;
+  isMaster: boolean;
+  origin?: ScriptOrigin;
+  visioPageName?: string;
+  sourceFilename?: string;
+  rawText: string;
+  rules: ScriptRule[];
+  outgoingNumbers: string[];
+}
+
+export interface ScriptManualLink {
+  id: string;
+  fromScriptNumber: string;
+  fromRuleId?: string;
+  toTargetNumber: string;
+  label?: string;
+  note?: string;
+}
+
+export type CallflowIssueType =
+  | 'missing-script'
+  | 'unclear-transition'
+  | 'manual-question';
+
+export type CallflowIssueStatus = 'open' | 'resolved';
+
+export type CallflowIssueResolution =
+  | 'external-endpoint'
+  | 'linked-target'
+  | 'answered';
+
+export interface CallflowOpenIssue {
+  id: string;
+  type: CallflowIssueType;
+  status: CallflowIssueStatus;
+  sourceScriptNumber: string;
+  targetNumber?: string;
+  ruleId?: string;
+  title: string;
+  question: string;
+  resolution?: CallflowIssueResolution;
+  resolutionNote?: string;
+  linkedTargetNumber?: string;
+  isManual?: boolean;
+  createdAt: number;
+  resolvedAt?: number;
+}
+
+export interface ResolvedIssueRecord {
+  resolution: CallflowIssueResolution;
+  note?: string;
+  linkedTargetNumber?: string;
+  resolvedAt: number;
+}
+
+export type MasterChecklistItemStatus = 'present' | 'missing' | 'external';
+
+export interface MasterScriptChecklistItem {
+  id: string;
+  orderIndex: number;
+  refKey: string;
+  displayName: string;
+  callerScriptNumber: string;
+  parentScriptNumber?: string;
+  depth?: number;
+  ruleId?: string;
+  prio?: number;
+  contextLabel: string;
+  status: MasterChecklistItemStatus;
+  matchedModuleNumber?: string;
+}
+
+export interface ScriptWorkspace {
+  modules: ScriptModule[];
+  missingTargets: string[];
+  externalEndpoints?: string[];
+  ignoredChecklistTargets?: string[];
+  resolvedIssues?: Record<string, ResolvedIssueRecord>;
+  manualQuestions?: CallflowOpenIssue[];
+  manualLinks?: ScriptManualLink[];
+  issues?: CallflowOpenIssue[];
+  openIssueCount?: number;
+  masterScriptNumber?: string;
+  masterChecklist?: MasterScriptChecklistItem[];
+  updatedAt: number;
+}
+
+export type CallflowViewLevel =
+  | { level: 'master' }
+  | { level: 'detail'; scriptNumber: string };
 
 export interface ThemeConfiguration {
   theme: MermaidBaseTheme;
@@ -114,6 +243,7 @@ export interface SavedDiagram {
   code: string;
   updatedAt: number;
   themeConfig: ThemeConfiguration;
+  scriptWorkspace?: ScriptWorkspace;
 }
 
 export interface ValidationState {

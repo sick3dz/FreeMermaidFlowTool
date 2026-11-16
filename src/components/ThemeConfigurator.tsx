@@ -146,7 +146,7 @@ export const ThemeConfigurator: React.FC<ThemeConfiguratorProps> = ({
     <aside
       className={`${
         isMobileView
-          ? 'w-full flex-1 bg-slate-950'
+          ? 'w-full min-w-0 flex-1 bg-slate-950'
           : 'w-80 xl:w-84 shrink-0 border-l border-slate-800 bg-slate-900/95'
       } flex flex-col h-full select-none overflow-hidden`}
     >
@@ -375,7 +375,19 @@ export const ThemeConfigurator: React.FC<ThemeConfiguratorProps> = ({
             </div>
             <button
               type="button"
-              onClick={() => handleFieldChange('useCustomColors', !themeConfig.useCustomColors)}
+              onClick={() => {
+                const nextUseCustom = !themeConfig.useCustomColors;
+                onChangeTheme({
+                  ...themeConfig,
+                  useCustomColors: nextUseCustom,
+                  theme:
+                    !nextUseCustom &&
+                    canvasSurface === 'dark' &&
+                    (themeConfig.theme === 'default' || themeConfig.theme === 'base')
+                      ? 'dark'
+                      : themeConfig.theme,
+                });
+              }}
               className={`px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
                 themeConfig.useCustomColors
                   ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'

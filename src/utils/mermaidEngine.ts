@@ -22,6 +22,99 @@ function ensureElkLayoutRegistered(): void {
 }
 
 /**
+ * Checks whether a CSS hex/rgb color is perceptually dark (relative luminance < 0.35).
+ */
+export function isColorDark(color: string | null | undefined): boolean {
+  if (!color) return false;
+  const trimmed = color.trim().toLowerCase();
+  if (trimmed === 'black') return true;
+  if (trimmed === 'white') return false;
+
+  let r = -1;
+  let g = -1;
+  let b = -1;
+
+  if (trimmed.startsWith('#')) {
+    const hex = trimmed.slice(1);
+    if (hex.length === 3 || hex.length === 4) {
+      r = parseInt(hex[0] + hex[0], 16);
+      g = parseInt(hex[1] + hex[1], 16);
+      b = parseInt(hex[2] + hex[2], 16);
+    } else if (hex.length === 6 || hex.length === 8) {
+      r = parseInt(hex.slice(0, 2), 16);
+      g = parseInt(hex.slice(2, 4), 16);
+      b = parseInt(hex.slice(4, 6), 16);
+    }
+  } else {
+    const rgbMatch = trimmed.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (rgbMatch) {
+      r = Number(rgbMatch[1]);
+      g = Number(rgbMatch[2]);
+      b = Number(rgbMatch[3]);
+    }
+  }
+
+  if (r < 0 || g < 0 || b < 0 || Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) {
+    return false;
+  }
+
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance < 0.42;
+}
+
+/**
+ * Builds complete Mermaid themeVariables including darkMode, background, arrowheadColor,
+ * defaultLinkColor, transitionColor, and signalColor so no edge or marker defaults to black.
+ */
+function buildCustomThemeVariables(themeConfig: ThemeConfiguration): Record<string, unknown> {
+  const darkMode =
+    isColorDark(themeConfig.background) || isColorDark(themeConfig.primaryColor);
+
+  return {
+    darkMode,
+    background: themeConfig.background,
+    fontFamily: themeConfig.fontFamily,
+    fontSize: `${themeConfig.fontSize}px`,
+    primaryColor: themeConfig.primaryColor,
+    primaryTextColor: themeConfig.primaryTextColor,
+    primaryBorderColor: themeConfig.primaryBorderColor,
+    lineColor: themeConfig.lineColor,
+    arrowheadColor: themeConfig.lineColor,
+    defaultLinkColor: themeConfig.lineColor,
+    textColor: themeConfig.primaryTextColor,
+    secondaryColor: themeConfig.secondaryColor,
+    tertiaryColor: themeConfig.tertiaryColor,
+    mainBkg: themeConfig.mainBkg,
+    nodeBorder: themeConfig.nodeBorder,
+    clusterBkg: themeConfig.clusterBkg,
+    clusterBorder: themeConfig.clusterBorder,
+    titleColor: themeConfig.titleColor,
+    edgeLabelBackground: themeConfig.edgeLabelBackground,
+    actorBkg: themeConfig.primaryColor,
+    actorBorder: themeConfig.primaryBorderColor,
+    actorTextColor: themeConfig.primaryTextColor,
+    actorLineColor: themeConfig.lineColor,
+    signalColor: themeConfig.lineColor,
+    signalTextColor: themeConfig.primaryTextColor,
+    labelBoxBkgColor: themeConfig.secondaryColor,
+    labelBoxBorderColor: themeConfig.primaryBorderColor,
+    labelTextColor: themeConfig.primaryTextColor,
+    loopTextColor: themeConfig.primaryTextColor,
+    noteBkgColor: themeConfig.tertiaryColor,
+    noteTextColor: themeConfig.primaryTextColor,
+    noteBorderColor: themeConfig.primaryBorderColor,
+    transitionColor: themeConfig.lineColor,
+    transitionLabelColor: themeConfig.primaryTextColor,
+    stateBkg: themeConfig.primaryColor,
+    stateLabelColor: themeConfig.primaryTextColor,
+    classText: themeConfig.primaryTextColor,
+    edgeColor: themeConfig.lineColor,
+    archEdgeColor: themeConfig.lineColor,
+    relationColor: themeConfig.lineColor,
+  };
+}
+
+/**
  * Configures the local Mermaid v11 engine with the active ThemeConfiguration,
  * including ELK vs Dagre layout engine and anti-overlap nodeSpacing / rankSpacing.
  */
@@ -92,36 +185,7 @@ export function configureMermaidEngine(
   };
 
   if (themeConfig.useCustomColors) {
-    baseConfig.themeVariables = {
-      fontFamily: themeConfig.fontFamily,
-      fontSize: `${themeConfig.fontSize}px`,
-      primaryColor: themeConfig.primaryColor,
-      primaryTextColor: themeConfig.primaryTextColor,
-      primaryBorderColor: themeConfig.primaryBorderColor,
-      lineColor: themeConfig.lineColor,
-      secondaryColor: themeConfig.secondaryColor,
-      tertiaryColor: themeConfig.tertiaryColor,
-      background: themeConfig.background,
-      mainBkg: themeConfig.mainBkg,
-      nodeBorder: themeConfig.nodeBorder,
-      clusterBkg: themeConfig.clusterBkg,
-      clusterBorder: themeConfig.clusterBorder,
-      titleColor: themeConfig.titleColor,
-      edgeLabelBackground: themeConfig.edgeLabelBackground,
-      actorBkg: themeConfig.primaryColor,
-      actorBorder: themeConfig.primaryBorderColor,
-      actorTextColor: themeConfig.primaryTextColor,
-      actorLineColor: themeConfig.lineColor,
-      signalColor: themeConfig.lineColor,
-      signalTextColor: themeConfig.primaryTextColor,
-      labelBoxBkgColor: themeConfig.secondaryColor,
-      labelBoxBorderColor: themeConfig.primaryBorderColor,
-      labelTextColor: themeConfig.primaryTextColor,
-      loopTextColor: themeConfig.primaryTextColor,
-      noteBkgColor: themeConfig.tertiaryColor,
-      noteTextColor: themeConfig.primaryTextColor,
-      noteBorderColor: themeConfig.primaryBorderColor,
-    };
+    baseConfig.themeVariables = buildCustomThemeVariables(themeConfig);
   }
 
   mermaid.initialize(baseConfig as Parameters<typeof mermaid.initialize>[0]);
@@ -379,20 +443,7 @@ export function buildInitDirectiveBlock(themeConfig: ThemeConfiguration): string
   };
 
   if (themeConfig.useCustomColors) {
-    initPayload.themeVariables = {
-      primaryColor: themeConfig.primaryColor,
-      primaryTextColor: themeConfig.primaryTextColor,
-      primaryBorderColor: themeConfig.primaryBorderColor,
-      lineColor: themeConfig.lineColor,
-      secondaryColor: themeConfig.secondaryColor,
-      tertiaryColor: themeConfig.tertiaryColor,
-      mainBkg: themeConfig.mainBkg,
-      nodeBorder: themeConfig.nodeBorder,
-      clusterBkg: themeConfig.clusterBkg,
-      clusterBorder: themeConfig.clusterBorder,
-      titleColor: themeConfig.titleColor,
-      edgeLabelBackground: themeConfig.edgeLabelBackground,
-    };
+    initPayload.themeVariables = buildCustomThemeVariables(themeConfig);
   }
 
   return `%%{init: ${JSON.stringify(initPayload)}}%%`;
@@ -659,7 +710,8 @@ export async function exportSvgToPngBlob(
           nativeRender.svg,
           fallbackOptions.code,
           fallbackOptions.smartColorMode,
-          fallbackOptions.canvasSurface
+          fallbackOptions.canvasSurface,
+          fallbackOptions.themeConfig.lineColor
         );
         return await rasterizeSvgStringToPng(colored.svg, scale, backgroundMode);
       }
