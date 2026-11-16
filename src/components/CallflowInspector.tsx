@@ -147,10 +147,19 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
 
   const masterChecklist = scriptWorkspace.masterChecklist || [];
   const ignoredTargets = scriptWorkspace.ignoredChecklistTargets || [];
-  const mainScriptLabel =
-    scriptWorkspace.masterScriptNumber ||
-    scriptWorkspace.modules[0]?.scriptNumber ||
-    'Main';
+  const mainModule = useMemo(() => {
+    const preferredKey = scriptWorkspace.masterScriptNumber
+      ? canonicalScriptMatchKey(scriptWorkspace.masterScriptNumber)
+      : '';
+    return (
+      scriptWorkspace.modules.find(
+        (m) => preferredKey && canonicalScriptMatchKey(m.scriptNumber) === preferredKey
+      ) ||
+      scriptWorkspace.modules.find((m) => m.isMaster) ||
+      scriptWorkspace.modules[0]
+    );
+  }, [scriptWorkspace.modules, scriptWorkspace.masterScriptNumber]);
+  const mainScriptLabel = mainModule?.scriptNumber || 'Main';
 
   const {
     checklistMissingCount,
@@ -161,18 +170,43 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
     nestedMissingCount,
     syncPercent,
   } = useMemo(() => {
+    const loadedModuleKeys = new Set(
+      scriptWorkspace.modules.map((m) => canonicalScriptMatchKey(m.scriptNumber))
+    );
+    const externalKeys = new Set(
+      (scriptWorkspace.externalEndpoints || []).map(canonicalScriptMatchKey)
+    );
+    const directMainTargetKeys = new Set<string>();
+    if (mainModule) {
+      mainModule.outgoingNumbers.forEach((t) =>
+        directMainTargetKeys.add(canonicalScriptMatchKey(t))
+      );
+      mainModule.rules.forEach((r) => {
+        if (r.targetNumber) directMainTargetKeys.add(canonicalScriptMatchKey(r.targetNumber));
+        r.choices.forEach((c) => {
+          if (c.targetNumber) directMainTargetKeys.add(canonicalScriptMatchKey(c.targetNumber));
+        });
+      });
+    }
+
     let missing = 0;
     let present = 0;
     let external = 0;
     let directMainMissing = 0;
 
     masterChecklist.forEach((item) => {
-      if (item.status === 'missing') {
+      const refKeyCanon = canonicalScriptMatchKey(item.refKey);
+      const isPresentInModules =
+        item.status === 'present' || loadedModuleKeys.has(refKeyCanon);
+      const isExternal =
+        item.status === 'external' || (!isPresentInModules && externalKeys.has(refKeyCanon));
+
+      if (!isPresentInModules && !isExternal) {
         missing += 1;
-        if ((item.depth || 1) === 1) {
+        if ((item.depth || 1) === 1 || directMainTargetKeys.has(refKeyCanon)) {
           directMainMissing += 1;
         }
-      } else if (item.status === 'present') {
+      } else if (isPresentInModules) {
         present += 1;
       } else {
         external += 1;
@@ -192,11 +226,21 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
       nestedMissingCount: missing - directMainMissing,
       syncPercent: pct,
     };
-  }, [masterChecklist]);
+  }, [
+    masterChecklist,
+    mainModule,
+    scriptWorkspace.modules,
+    scriptWorkspace.externalEndpoints,
+  ]);
 
   const filteredChecklistItems = useMemo(() => {
     if (checklistFilter === 'todo') {
-      return masterChecklist.filter((item) => item.status === 'missing');
+      return masterChecklist
+        .filter((item) => item.status === 'missing')
+        .sort((a, b) => {
+          const depthDiff = (a.depth || 1) - (b.depth || 1);
+          return depthDiff !== 0 ? depthDiff : a.orderIndex - b.orderIndex;
+        });
     }
     if (checklistFilter === 'synced') {
       return masterChecklist.filter((item) => item.status !== 'missing');
@@ -397,8 +441,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
             >
               {scriptWorkspace.modules.length > 0
                 ? checklistMissingCount > 0
-                  ? `${scriptWorkspace.modules.length} lokal · ${checklistMissingCount} offen`
-                  : `${scriptWorkspace.modules.length} Skripte synchron`
+                  ? `${scriptWorkspace.modules.length} lokal · ${checklistMissingCount} ausstehend`
+                  : `${scriptWorkspace.modules.length} Skripte vollständig`
                 : 'Einzel-Diagramm'}
             </span>
           </div>
@@ -490,7 +534,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   checklistMissingCount === 0 ? 'text-emerald-400' : 'text-amber-300'
                 }`}
               >
-                {checklistDoneCount} / {masterChecklist.length} synchron
+                {checklistDoneCount} / {masterChecklist.length} abgeglichen
               </span>
             )}
           </div>
@@ -538,7 +582,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {/* Real-Time Workspace Sync Status Strip (Referenced in Main vs. Local Modules) */}
+                  {/* Echtzeit-Abgleichs-Statusleiste (Main-Referenzen vs. lokale Skript-Module) */}
                   <div
                     role="status"
                     aria-live="polite"
@@ -562,9 +606,11 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                         >
                           {checklistMissingCount > 0
                             ? `${checklistMissingCount} ${
-                                checklistMissingCount === 1 ? 'Skript fehlt lokal' : 'Skripte fehlen lokal'
+                                checklistMissingCount === 1
+                                  ? 'Ausstehende Referenz'
+                                  : 'Ausstehende Referenzen'
                               }`
-                            : 'Workspace vollständig synchron'}
+                            : 'Alle Referenzen lokal geladen'}
                         </span>
                       </div>
                       <span
@@ -576,10 +622,10 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                       </span>
                     </div>
 
-                    {/* Multi-Segment Sync Progress Bar: Emerald = Loaded, Slate = External, Rose = Missing To-Do */}
+                    {/* Mehrteiliger Abgleichs-Fortschrittsbalken: Smaragd = Vorhanden, Grau = Extern, Rose = Ausstehend */}
                     <div
                       className="h-1.5 w-full rounded-sm bg-slate-800 overflow-hidden flex"
-                      title={`${checklistPresentCount} lokal geladen, ${checklistExternalCount} extern bestätigt, ${checklistMissingCount} fehlen lokal`}
+                      title={`${checklistPresentCount} lokal geladen, ${checklistExternalCount} extern bestätigt, ${checklistMissingCount} ausstehend`}
                     >
                       {checklistPresentCount > 0 && (
                         <div
@@ -609,7 +655,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
 
                     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[10px] font-mono tabular-nums">
                       <span className="text-emerald-400">
-                        {checklistPresentCount} geladen
+                        {checklistPresentCount} lokal geladen
                         {checklistExternalCount > 0 && (
                           <span className="text-slate-400"> · {checklistExternalCount} extern</span>
                         )}
@@ -617,16 +663,16 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                       {checklistMissingCount > 0 ? (
                         <span className="text-rose-300">
                           {directMainMissingCount > 0
-                            ? `Aus ${mainScriptLabel}: ${directMainMissingCount} To-Do`
+                            ? `Direkt aus ${mainScriptLabel}: ${directMainMissingCount} ausstehend`
                             : ''}
                           {directMainMissingCount > 0 && nestedMissingCount > 0 ? ' · ' : ''}
                           {nestedMissingCount > 0
-                            ? `Unter-Skripte: ${nestedMissingCount} To-Do`
+                            ? `Unter-Skripte: ${nestedMissingCount} ausstehend`
                             : ''}
                         </span>
                       ) : (
                         <span className="text-emerald-400/90">
-                          Alle Referenzen aus {mainScriptLabel} erfasst
+                          Alle Referenzen aus {mainScriptLabel} vorhanden
                         </span>
                       )}
                     </div>
@@ -651,7 +697,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                           <div className="flex items-center gap-1.5 mt-0.5">
                             {activeChecklistItem.status === 'missing' ? (
                               <AlertCircle
-                                className="w-3.5 h-3.5 text-rose-400 shrink-0"
+                                className="w-3.5 h-3.5 text-rose-400 shrink-0 motion-safe:animate-pulse"
                                 aria-hidden="true"
                               />
                             ) : (
@@ -669,9 +715,10 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                           </div>
                           {activeChecklistItem.status === 'missing' && (
                             <div className="text-[10px] font-mono text-rose-300 mt-0.5 truncate">
-                              To-Do · Referenziert in{' '}
-                              {activeChecklistItem.parentScriptNumber || mainScriptLabel}, fehlt im
-                              Workspace
+                              Ausstehende Referenz ·{' '}
+                              {(activeChecklistItem.depth || 1) === 1 ? 'Direkt aus ' : 'Aufgerufen in '}
+                              {activeChecklistItem.parentScriptNumber || mainScriptLabel}, lokal
+                              fehlend
                             </div>
                           )}
                         </div>
@@ -881,7 +928,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                     </div>
                   )}
 
-                  {/* Interactive To-Do Map Filter (Alle / To-Do / Geladen) */}
+                  {/* Interaktive Checklisten-Filterleiste (Alle / Ausstehend / Geladen) */}
                   <div className="grid grid-cols-3 gap-1 p-0.5 bg-slate-900 border border-slate-800 rounded-lg">
                     <button
                       type="button"
@@ -898,7 +945,12 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                       type="button"
                       onClick={() => {
                         setChecklistFilter('todo');
-                        const firstMissing = masterChecklist.find((it) => it.status === 'missing');
+                        const firstDirectMainMissing = masterChecklist.find(
+                          (it) => it.status === 'missing' && (it.depth || 1) === 1
+                        );
+                        const firstMissing =
+                          firstDirectMainMissing ||
+                          masterChecklist.find((it) => it.status === 'missing');
                         if (
                           firstMissing &&
                           activeChecklistItem &&
@@ -917,7 +969,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                           : 'text-slate-400 hover:text-slate-200'
                       }`}
                     >
-                      To-Do ({checklistMissingCount})
+                      Ausstehend ({checklistMissingCount})
                     </button>
                     <button
                       type="button"
@@ -932,14 +984,14 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                     </button>
                   </div>
 
-                  {/* Complete Ordered Top-Down Checklist / Real-Time To-Do Map */}
+                  {/* Vollständige Abgleichs-Checkliste (Main-Referenzen zuerst) */}
                   <div className="space-y-1 max-h-60 overflow-y-auto pr-0.5">
                     {filteredChecklistItems.length === 0 ? (
                       <div className="p-3 rounded-lg border border-slate-800 bg-slate-900/50 text-center space-y-1.5">
                         <p className="text-[11px] text-slate-300">
                           {checklistFilter === 'todo'
-                            ? `Alle aus „${mainScriptLabel}“ referenzierten Skripte sind lokal synchronisiert.`
-                            : 'Noch keine synchronisierten Skripte in dieser Liste.'}
+                            ? `Alle aus „${mainScriptLabel}“ referenzierten Skripte sind lokal geladen.`
+                            : 'Noch keine geladenen Skripte in dieser Ansicht.'}
                         </p>
                         <button
                           type="button"
@@ -961,12 +1013,10 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
 
                         const statusLabel =
                           item.status === 'missing'
-                            ? isMissingFromMain
-                              ? 'To-Do · Fehlt'
-                              : 'To-Do · Unter'
+                            ? 'Ausstehende Referenz'
                             : item.status === 'external'
                             ? 'Extern'
-                            : 'Synchron';
+                            : 'Vorhanden';
 
                         const statusColor =
                           item.status === 'missing'
@@ -990,8 +1040,11 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
 
                         const originLine =
                           depth === 1
-                            ? `Aus ${item.parentScriptNumber || mainScriptLabel} · ${item.contextLabel}`
-                            : item.contextLabel;
+                            ? `Direkt aus ${item.parentScriptNumber || mainScriptLabel} · ${item.contextLabel}`
+                            : `Unter-Skript ${item.parentScriptNumber || ''} · ${item.contextLabel.replace(
+                                /^aus \[[^\]]+\]\s*·\s*/i,
+                                ''
+                              )}`;
 
                         return (
                           <button
@@ -1017,7 +1070,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                               </span>
                               {item.status === 'missing' ? (
                                 <AlertCircle
-                                  className={`w-3.5 h-3.5 shrink-0 ${
+                                  className={`w-3.5 h-3.5 shrink-0 motion-safe:animate-pulse ${
                                     isMissingFromMain ? 'text-rose-400' : 'text-amber-300'
                                   }`}
                                   aria-hidden="true"
@@ -1047,7 +1100,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                             </div>
 
                             <span
-                              className={`text-[11px] font-mono font-medium whitespace-nowrap shrink-0 ${statusColor}`}
+                              className={`text-[10px] font-mono font-medium whitespace-nowrap shrink-0 ${statusColor}`}
                             >
                               {statusLabel}
                             </span>
