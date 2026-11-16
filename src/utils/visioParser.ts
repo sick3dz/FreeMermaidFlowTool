@@ -7,6 +7,7 @@ import {
 import {
   canonicalScriptMatchKey,
   isPlausibleNamedScriptTarget,
+  isValidScriptRef,
   normalizeScriptRef,
 } from './scriptCallflowParser';
 
@@ -33,25 +34,30 @@ function cleanVisioText(raw: string): string {
 }
 
 function extractFirstScriptTargetRef(text: string): string | undefined {
-  // Ignore common dates like DD.MM.YYYY or YYYY-MM-DD before extracting 4-digit script/CDN IDs
+  // Ignore dates, clock times, durations/units, and priority numbers before extracting 3-to-6-digit script/CDN IDs
   const withoutDates = text
     .replace(/\b\d{1,2}\.\d{1,2}\.\d{2,4}\b/g, ' ')
     .replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, ' ')
+    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ')
+    .replace(/\b\d+\s*(?:ms|sek(?:unden)?|sec|min(?:uten)?|std)\b/gi, ' ')
+    .replace(/\b\d+(?:[.,]\d+)?\s*%/g, ' ')
+    .replace(/\b\d+s\b/gi, ' ')
+    .replace(/\bprio(?:rit[aä]t)?\s*[:=]?\s*\d+\b/gi, ' ')
     .trim();
-  const numMatch = withoutDates.match(/\b(\d{4})\b/);
-  if (numMatch) return numMatch[1];
 
   const explicitNamed =
     withoutDates.match(
-      /\b(?:wohin|ziel|sprung|script|skript|subscript|execute|call|goto|schaltung|transfer|route)\s*[:=]?\s*([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/i
+      /\b(?:wohin|ziel|sprung|script|skript|subscript|execute|call|goto|schaltung|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|cdn)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/i
     ) ||
-    withoutDates.match(/(?:->|=>)\s*([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/);
-  if (
-    explicitNamed &&
-    isPlausibleNamedScriptTarget(explicitNamed[1])
-  ) {
+    withoutDates.match(
+      /(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/
+    );
+  if (explicitNamed && isValidScriptRef(explicitNamed[1])) {
     return normalizeScriptRef(explicitNamed[1]);
   }
+
+  const numMatch = withoutDates.match(/\b(\d{3,6})\b/);
+  if (numMatch) return numMatch[1];
 
   const namedScriptToken = withoutDates.match(
     /\b([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
@@ -297,11 +303,11 @@ function convertExtractedShapesToModule(params: {
       }
     });
 
-    // Also inspect shape's own text for explicit jump/Sprung/CDN/Target 4-digit numbers or named scripts
+    // Also inspect shape's own text for explicit jump/Sprung/CDN/Target 3-to-6-digit numbers or named scripts
     if (!targetNumber) {
       const explicitJump =
         txt.match(
-          /\b(?:wohin|ziel|sprung|cdn|transfer|route|weiter(?:leitung)?|nach|execute|call|script|skript)\s*[:=]?\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/i
+          /\b(?:wohin|ziel|sprung|cdn|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|weiter(?:leitung)?|nach|execute|call|script|skript)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/i
         ) ||
         txt.match(
           /\b([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
@@ -309,7 +315,7 @@ function convertExtractedShapesToModule(params: {
       if (
         explicitJump &&
         canonicalScriptMatchKey(explicitJump[1]) !== selfKey &&
-        (/^\d{4}$/.test(explicitJump[1]) || isPlausibleNamedScriptTarget(explicitJump[1]))
+        isValidScriptRef(explicitJump[1])
       ) {
         targetNumber = normalizeScriptRef(explicitJump[1]);
         outNumbers.add(targetNumber);

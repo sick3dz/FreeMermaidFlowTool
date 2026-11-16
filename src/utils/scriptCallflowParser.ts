@@ -117,8 +117,8 @@ export function normalizeScriptRef(raw: string): string {
     .trim()
     .replace(/^['"`\[\]()]+|['"`\[\]()]+$/g, '')
     .replace(/\s+/g, '_');
-  const fourDigit = cleaned.match(/^(\d{4})$/);
-  if (fourDigit) return fourDigit[1];
+  const numeric = cleaned.match(/^(\d{3,6})$/);
+  if (numeric) return numeric[1];
   return cleaned;
 }
 
@@ -128,7 +128,7 @@ export function canonicalScriptMatchKey(ref: string): string {
 
 export function toMermaidNodeSuffix(ref: string): string {
   const normalized = normalizeScriptRef(ref);
-  if (/^\d{4}$/.test(normalized)) return normalized;
+  if (/^\d{3,6}$/.test(normalized)) return normalized;
   return (
     normalized
       .replace(/ä/g, 'ae')
@@ -144,14 +144,22 @@ export function toMermaidNodeSuffix(ref: string): string {
   );
 }
 
+export function isNumericScriptRef(token: string): boolean {
+  return /^\d{3,6}$/.test(normalizeScriptRef(token));
+}
+
 export function isPlausibleNamedScriptTarget(token: string): boolean {
   const clean = normalizeScriptRef(token);
   if (!clean || clean.length < 3) return false;
-  if (/^\d{1,3}$/.test(clean)) return false;
+  if (/^\d+$/.test(clean)) return false;
   if (/^sys_/i.test(clean)) return false;
   if (/\.(?:wav|mp3|ogg|ulaw|alaw)$/i.test(clean)) return false;
   if (SCRIPT_NAME_STOPWORDS.has(clean.toLowerCase())) return false;
   return true;
+}
+
+export function isValidScriptRef(token: string): boolean {
+  return isNumericScriptRef(token) || isPlausibleNamedScriptTarget(token);
 }
 
 function sanitizeMermaidText(text: string): string {
@@ -182,7 +190,16 @@ function stripDatesAndTimes(text: string): string {
   return text
     .replace(/\b\d{1,2}\.\d{1,2}\.\d{2,4}\b/g, ' ')
     .replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, ' ')
-    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ');
+    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ')
+    .replace(/\b\d+\s*(?:ms|sek(?:unden)?|sec|min(?:uten)?|std)\b/gi, ' ')
+    .replace(/\b\d+(?:[.,]\d+)?\s*%/g, ' ')
+    .replace(/\b\d+s\b/gi, ' ');
+}
+
+function stripNumericNoiseForFreeText(text: string): string {
+  return stripDatesAndTimes(text)
+    .replace(/\bprio(?:rit[aä]t)?\s*[:=]?\s*\d+\b/gi, ' ')
+    .replace(/\b(?:musik(?:-?id)?|ansage(?:-?id)?|wait|wartezeit)\s*[:=]?\s*\d+\b/gi, ' ');
 }
 
 /**
@@ -226,14 +243,14 @@ function parseChoicesSegment(raw: string, ownNumber?: string): ScriptChoiceOptio
 
   if (!cleaned) return results;
 
-  // Pattern 1: `Taste 1 -> 2100`, `Taste 1 -> schaltung1script`, `1: schaltung2script`
+  // Pattern 1: `Taste 1 -> 210`, `Taste 1 -> 123456`, `Taste 1 -> schaltung1script`
   const pairRegex =
-    /(?:taste|dtmf|opt(?:ion)?|auswahl)?\s*([A-Za-z0-9*#]+)\s*(?:->|=>|:|=|nach|zu)\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b(?:\s*\(([^)]+)\))?/gi;
+    /(?:taste|dtmf|opt(?:ion)?|auswahl)?\s*([A-Za-z0-9*#]+)\s*(?:->|=>|:|=|nach|zu)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b(?:\s*\(([^)]+)\))?/gi;
   let m: RegExpExecArray | null;
   while ((m = pairRegex.exec(cleaned)) !== null) {
     const choice = m[1].trim();
     const rawTarget = m[2].trim();
-    if (!/^\d{4}$/.test(rawTarget) && !isPlausibleNamedScriptTarget(rawTarget)) continue;
+    if (!isValidScriptRef(rawTarget)) continue;
     const targetNumber = normalizeScriptRef(rawTarget);
     const label = m[3]?.trim();
     const key = `${choice}->${canonicalScriptMatchKey(targetNumber)}`;
@@ -243,12 +260,12 @@ function parseChoicesSegment(raw: string, ownNumber?: string): ScriptChoiceOptio
     }
   }
 
-  // Pattern 2: standalone 4-digit numbers or script names listed under Auswahl (e.g. `Auswahl: schaltung1script, 2200`)
+  // Pattern 2: standalone 3-to-6-digit numbers or script names listed under Auswahl
   if (results.length === 0) {
     const cleanForDigits = stripDatesAndTimes(cleaned);
-    const fourDigitMatches = Array.from(cleanForDigits.match(/\b\d{4}\b/g) || []);
-    fourDigitMatches.forEach((num, idx) => {
-      if (num === ownNumber && fourDigitMatches.length === 1) return;
+    const numericMatches = Array.from(cleanForDigits.match(/\b\d{3,6}\b/g) || []);
+    numericMatches.forEach((num, idx) => {
+      if (num === ownNumber && numericMatches.length === 1) return;
       const key = `${idx + 1}->${num}`;
       if (!seen.has(key)) {
         seen.add(key);
@@ -259,7 +276,7 @@ function parseChoicesSegment(raw: string, ownNumber?: string): ScriptChoiceOptio
     const listTokens = cleanForDigits
       .split(/[\s,;]+/)
       .map((t) => t.trim())
-      .filter((t) => !/^\d{4}$/.test(t) && /^[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,}$/.test(t));
+      .filter((t) => !isNumericScriptRef(t) && /^[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,}$/.test(t));
     listTokens.forEach((tok, idx) => {
       if (!isPlausibleNamedScriptTarget(tok)) return;
       const ref = normalizeScriptRef(tok);
@@ -267,7 +284,7 @@ function parseChoicesSegment(raw: string, ownNumber?: string): ScriptChoiceOptio
       const key = `${idx + 1}->${canonicalScriptMatchKey(ref)}`;
       if (!seen.has(key)) {
         seen.add(key);
-        results.push({ choice: `${fourDigitMatches.length + idx + 1}`, targetNumber: ref });
+        results.push({ choice: `${numericMatches.length + idx + 1}`, targetNumber: ref });
       }
     });
   }
@@ -275,7 +292,10 @@ function parseChoicesSegment(raw: string, ownNumber?: string): ScriptChoiceOptio
   return results;
 }
 
-function extractInlineKeyValuesFromText(line: string): {
+function extractInlineKeyValuesFromText(
+  line: string,
+  activeHeaderNumber?: string
+): {
   prio?: number;
   stepName?: string;
   sourceNumber?: string;
@@ -314,10 +334,10 @@ function extractInlineKeyValuesFromText(line: string): {
       const prioKv = part.match(/^(?:prio(?:rit[aä]t)?)\s*[:=]?\s*(\d+)/i);
       const nameKv = part.match(/^(?:name|bezeichnung|schritt|step|titel)\s*[:=]\s*(.+)$/i);
       const numKv = part.match(
-        /^(?:nummer|nr\.?|skript(?:nummer)?|script|id)\s*[:=]?\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b/i
+        /^(?:nummer|nr\.?|skript(?:nummer)?|script|id)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
       );
       const targetKv = part.match(
-        /^(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|target|next|goto|weiter(?:leitung)?|execute|call|run|sub(?:script)?)\s*[:=]?\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b/i
+        /^(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|target|next|goto|weiter(?:leitung)?|execute|call|run|sub(?:script)?)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
       );
       const choiceKv = part.match(
         /^(?:auswahl(?:nummern|optionen)?|option(?:en)?|choices?|dtmf|taste[n]?|men[uü])\s*[:=]?\s*(.+)$/i
@@ -335,18 +355,14 @@ function extractInlineKeyValuesFromText(line: string): {
       } else if (nameKv) {
         stepName = nameKv[1].trim();
         matchedExplicitFields = true;
-      } else if (numKv && (/^\d{4}$/.test(numKv[1]) || isPlausibleNamedScriptTarget(numKv[1]))) {
-        // Note: `Script: schaltung1script` inside a rule step when `sourceNumber` or `stepName` exists acts as target call if line also defines target/rule, else source
-        if (/^(?:script|skript)$/i.test(part.split(/[:=]/)[0].trim()) && !/^\d{4}$/.test(numKv[1])) {
+      } else if (numKv && isValidScriptRef(numKv[1])) {
+        if (/^(?:script|skript)$/i.test(part.split(/[:=]/)[0].trim()) && !isNumericScriptRef(numKv[1])) {
           targetNumber = normalizeScriptRef(numKv[1]);
         } else {
           sourceNumber = normalizeScriptRef(numKv[1]);
         }
         matchedExplicitFields = true;
-      } else if (
-        targetKv &&
-        (/^\d{4}$/.test(targetKv[1]) || isPlausibleNamedScriptTarget(targetKv[1]))
-      ) {
+      } else if (targetKv && isValidScriptRef(targetKv[1])) {
         targetNumber = normalizeScriptRef(targetKv[1]);
         matchedExplicitFields = true;
       } else if (choiceKv || tasteDirectKv) {
@@ -354,12 +370,13 @@ function extractInlineKeyValuesFromText(line: string): {
         matchedExplicitFields = true;
       } else if (condKv) {
         condition = condKv[1].trim();
+        const condClean = stripDatesAndTimes(condition);
         const condJump =
-          condition.match(/(?:->|=>)\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/) ||
-          condition.match(
-            /\b(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
+          condClean.match(/(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/) ||
+          condClean.match(
+            /\b(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
           );
-        if (condJump && (/^\d{4}$/.test(condJump[1]) || isPlausibleNamedScriptTarget(condJump[1]))) {
+        if (condJump && isValidScriptRef(condJump[1])) {
           const ref = normalizeScriptRef(condJump[1]);
           choices.push({
             choice: 'Bedingung',
@@ -374,26 +391,28 @@ function extractInlineKeyValuesFromText(line: string): {
         matchedExplicitFields = true;
       } else if (schedKv) {
         schedule = schedKv[1].trim();
+        const schedClean = stripDatesAndTimes(schedule);
         const schedJump =
-          schedule.match(/(?:->|=>)\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/) ||
-          schedule.match(
-            /\b(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
+          schedClean.match(/(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/) ||
+          schedClean.match(
+            /\b(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
           );
-        if (schedJump && (/^\d{4}$/.test(schedJump[1]) || isPlausibleNamedScriptTarget(schedJump[1]))) {
+        if (schedJump && isValidScriptRef(schedJump[1])) {
           choices.push({ choice: 'Zeitplan', targetNumber: normalizeScriptRef(schedJump[1]) });
         }
         matchedExplicitFields = true;
       } else if (holKv) {
         holiday = holKv[1].trim();
+        const holClean = stripDatesAndTimes(holiday);
         const holJump =
-          holiday.match(/(?:->|=>)\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/) ||
-          holiday.match(
-            /\b(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
+          holClean.match(/(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/) ||
+          holClean.match(
+            /\b(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
           ) ||
           (/^[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,}$/.test(holiday)
             ? ([holiday, holiday] as RegExpMatchArray)
             : null);
-        if (holJump && (/^\d{4}$/.test(holJump[1]) || isPlausibleNamedScriptTarget(holJump[1]))) {
+        if (holJump && isValidScriptRef(holJump[1])) {
           choices.push({ choice: 'Feiertag', targetNumber: normalizeScriptRef(holJump[1]) });
         }
         matchedExplicitFields = true;
@@ -402,7 +421,7 @@ function extractInlineKeyValuesFromText(line: string): {
         matchedExplicitFields = true;
       } else if (queueKv) {
         queueTarget = queueKv[1].trim();
-        const qJump = queueTarget.match(/\b(\d{4})\b/);
+        const qJump = queueTarget.match(/\b(\d{3,6})\b/);
         if (qJump && !targetNumber) {
           targetNumber = qJump[1];
         }
@@ -412,24 +431,42 @@ function extractInlineKeyValuesFromText(line: string): {
       }
     }
 
-    // Handle pure delimiter table row `1; Begrüßung; 1000; schaltung1script; 1->2100`
+    // Handle pure delimiter table row `1; Begrüßung; 100; 12345; 1->210`
     for (const tok of positional) {
-      if (prio === undefined && /^\d{1,3}$/.test(tok)) {
+      if (
+        prio === undefined &&
+        /^\d{1,3}$/.test(tok) &&
+        positional.indexOf(tok) === 0 &&
+        (!activeHeaderNumber ||
+          canonicalScriptMatchKey(tok) !== canonicalScriptMatchKey(activeHeaderNumber))
+      ) {
         prio = parseInt(tok, 10);
-      } else if (!sourceNumber && /^\d{4}$/.test(tok)) {
+      } else if (
+        !sourceNumber &&
+        isNumericScriptRef(tok) &&
+        (!activeHeaderNumber ||
+          canonicalScriptMatchKey(tok) === canonicalScriptMatchKey(activeHeaderNumber))
+      ) {
         sourceNumber = tok;
-      } else if (!targetNumber && /^\d{4}$/.test(tok)) {
+      } else if (!targetNumber && isNumericScriptRef(tok)) {
         targetNumber = tok;
+      } else if (targetNumber && isNumericScriptRef(tok)) {
+        if (
+          tok !== targetNumber &&
+          !choices.some((c) => c.targetNumber === tok)
+        ) {
+          choices.push({ choice: 'Sprung', targetNumber: tok });
+        }
       } else if (
         !targetNumber &&
         /(?:script|schaltung)/i.test(tok) &&
         isPlausibleNamedScriptTarget(tok)
       ) {
         targetNumber = normalizeScriptRef(tok);
-      } else if (!stepName && !/^\d{4}$/.test(tok) && !/->/.test(tok)) {
+      } else if (!stepName && !isNumericScriptRef(tok) && !/->/.test(tok)) {
         stepName = tok;
-      } else if (/\d{4}|->/.test(tok)) {
-        choices = choices.concat(parseChoicesSegment(tok, sourceNumber));
+      } else if (/\d{3,6}|->/.test(tok)) {
+        choices = choices.concat(parseChoicesSegment(tok, sourceNumber || activeHeaderNumber));
       }
     }
 
@@ -456,8 +493,14 @@ function extractInlineKeyValuesFromText(line: string): {
     prio = parseInt(singlePrioLine[1], 10);
     matchedExplicitFields = true;
     const rest = singlePrioLine[2]?.trim() || '';
-    if (rest && !/\b(?:wohin|ziel|sprung|auswahl|taste|zeitplan|feiertag|bedingung|ansage|queue)\b/i.test(rest) && !/->/.test(rest)) {
-      const numsInRest = Array.from(rest.match(/\b\d{4}\b/g) || []);
+    if (
+      rest &&
+      !/\b(?:wohin|ziel|sprung|auswahl|taste|zeitplan|feiertag|bedingung|ansage|queue)\b/i.test(
+        rest
+      ) &&
+      !/->/.test(rest)
+    ) {
+      const numsInRest = Array.from(stripNumericNoiseForFreeText(rest).match(/\b\d{3,6}\b/g) || []);
       if (numsInRest.length === 0) {
         stepName = rest;
         return { prio, stepName, choices, matchedExplicitFields };
@@ -469,10 +512,11 @@ function extractInlineKeyValuesFromText(line: string): {
   const attrCond = line.match(/^(?:bedingung|wenn|pr[uü]fung|condition)\s*[:=]\s*(.+)$/i);
   if (attrCond) {
     condition = attrCond[1].trim();
+    const condClean = stripDatesAndTimes(condition);
     const j =
-      condition.match(/(?:->|=>)\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/) ||
-      condition.match(/\b(\d{4})\b/);
-    if (j && (/^\d{4}$/.test(j[1]) || isPlausibleNamedScriptTarget(j[1]))) {
+      condClean.match(/(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/) ||
+      condClean.match(/\b(\d{3,6})\b/);
+    if (j && isValidScriptRef(j[1])) {
       choices.push({ choice: 'Bedingung', targetNumber: normalizeScriptRef(j[1]) });
     }
     return { choices, condition, matchedExplicitFields: true };
@@ -481,10 +525,11 @@ function extractInlineKeyValuesFromText(line: string): {
   const attrSched = line.match(/^(?:zeitplan|[oö]ffnungszeit(?:en)?|zeiten|schedule)\s*[:=]\s*(.+)$/i);
   if (attrSched) {
     schedule = attrSched[1].trim();
+    const schedClean = stripDatesAndTimes(schedule);
     const j =
-      schedule.match(/(?:->|=>)\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/) ||
-      schedule.match(/\b(\d{4})\b/);
-    if (j && (/^\d{4}$/.test(j[1]) || isPlausibleNamedScriptTarget(j[1]))) {
+      schedClean.match(/(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/) ||
+      schedClean.match(/\b(\d{3,6})\b/);
+    if (j && isValidScriptRef(j[1])) {
       choices.push({ choice: 'Zeitplan', targetNumber: normalizeScriptRef(j[1]) });
     }
     return { choices, schedule, matchedExplicitFields: true };
@@ -493,13 +538,14 @@ function extractInlineKeyValuesFromText(line: string): {
   const attrHol = line.match(/^(?:feiertag(?:e|sregel)?|holiday)\s*[:=]\s*(.+)$/i);
   if (attrHol) {
     holiday = attrHol[1].trim();
+    const holClean = stripDatesAndTimes(holiday);
     const j =
-      holiday.match(/(?:->|=>)\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/) ||
-      holiday.match(/\b(\d{4})\b/) ||
+      holClean.match(/(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/) ||
+      holClean.match(/\b(\d{3,6})\b/) ||
       (/^[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,}$/.test(holiday)
         ? ([holiday, holiday] as RegExpMatchArray)
         : null);
-    if (j && (/^\d{4}$/.test(j[1]) || isPlausibleNamedScriptTarget(j[1]))) {
+    if (j && isValidScriptRef(j[1])) {
       choices.push({ choice: 'Feiertag', targetNumber: normalizeScriptRef(j[1]) });
     }
     return { choices, holiday, matchedExplicitFields: true };
@@ -513,7 +559,7 @@ function extractInlineKeyValuesFromText(line: string): {
   const attrQueue = line.match(/^(?:queue|warteschlange|acd|skill|gruppe)\s*[:=]\s*(.+)$/i);
   if (attrQueue) {
     queueTarget = attrQueue[1].trim();
-    const qJump = queueTarget.match(/\b(\d{4})\b/);
+    const qJump = queueTarget.match(/\b(\d{3,6})\b/);
     return {
       choices,
       queueTarget,
@@ -528,9 +574,9 @@ function extractInlineKeyValuesFromText(line: string): {
   }
 
   const attrTarget = line.match(
-    /^(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|weiter(?:leitung)?|goto|next|execute|call|run|sub(?:script)?|skript|script)\s*[:=]?\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b(?:\s*\(([^)]+)\))?/i
+    /^(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|weiter(?:leitung)?|goto|next|execute|call|run|sub(?:script)?|skript|script)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b(?:\s*\(([^)]+)\))?/i
   );
-  if (attrTarget && (/^\d{4}$/.test(attrTarget[1]) || isPlausibleNamedScriptTarget(attrTarget[1]))) {
+  if (attrTarget && isValidScriptRef(attrTarget[1])) {
     return {
       choices,
       targetNumber: normalizeScriptRef(attrTarget[1]),
@@ -566,34 +612,33 @@ function extractInlineKeyValuesFromText(line: string): {
     ? line.slice(0, choiceBlockMatch.index).trim()
     : line;
 
-  const cleanLineForDigits = stripDatesAndTimes(lineWithoutChoices);
+  const cleanLineForDigits = stripNumericNoiseForFreeText(lineWithoutChoices);
 
   const explicitTarget =
     cleanLineForDigits.match(
-      /\b(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|weiter(?:leitung)?|next|goto|execute|call|run|sub(?:script)?|skript|script)\s*[:=]?\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/i
+      /\b(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|weiter(?:leitung)?|next|goto|execute|call|run|sub(?:script)?|skript|script)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/i
     ) ||
-    cleanLineForDigits.match(/(?:->|=>)\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})\b/);
-  if (
-    explicitTarget &&
-    (/^\d{4}$/.test(explicitTarget[1]) || isPlausibleNamedScriptTarget(explicitTarget[1]))
-  ) {
+    cleanLineForDigits.match(
+      /(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/
+    );
+  if (explicitTarget && isValidScriptRef(explicitTarget[1])) {
     targetNumber = normalizeScriptRef(explicitTarget[1]);
     matchedExplicitFields = true;
   }
 
   const explicitSource = cleanLineForDigits.match(
-    /\b(?:nummer|nr\.?|modul|cdn)\s*[:=]?\s*(\d{4})\b/i
+    /\b(?:nummer|nr\.?|modul|cdn)\s*[:=]?\s*(\d{3,6})\b/i
   );
   if (explicitSource) {
     sourceNumber = explicitSource[1];
     matchedExplicitFields = true;
   } else {
-    const fourDigits: string[] = Array.from(cleanLineForDigits.match(/\b\d{4}\b/g) || []);
-    if (fourDigits.length >= 2) {
-      sourceNumber = fourDigits[0] || '';
-      if (!targetNumber) targetNumber = fourDigits[1] || '';
-    } else if (fourDigits.length === 1) {
-      const singleNum = fourDigits[0] || '';
+    const numericTokens: string[] = Array.from(cleanLineForDigits.match(/\b\d{3,6}\b/g) || []);
+    if (numericTokens.length >= 2) {
+      sourceNumber = numericTokens[0] || '';
+      if (!targetNumber) targetNumber = numericTokens[1] || '';
+    } else if (numericTokens.length === 1) {
+      const singleNum = numericTokens[0] || '';
       if (!explicitTarget) {
         sourceNumber = singleNum;
       } else {
@@ -629,7 +674,7 @@ function extractInlineKeyValuesFromText(line: string): {
   const cleanedName = lineWithoutChoices
     .replace(/\bprio(?:rit[aä]t)?\s*[:=]?\s*\d+\b/gi, '')
     .replace(/\b(?:nummer|nr\.?|wohin|ziel|sprung|weiter|name|skript|script|execute|call)\s*[:=]?\s*/gi, '')
-    .replace(/\b\d{4}\b/g, '')
+    .replace(/\b\d{3,6}\b/g, '')
     .replace(/(?:->|=>|[:|])/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -657,12 +702,15 @@ function isAaccScriptText(text: string): boolean {
   const cleaned = stripScriptCommentsAndNoise(text);
   return (
     /\bsection\s+[A-Za-z0-9_]+/i.test(cleaned) ||
-    /\bCDN\s*[:=]?\s*\d{4}\b/i.test(cleaned) ||
+    /\bCDN\s*[:=]?\s*\d{3,6}\b/i.test(cleaned) ||
     (/\bassign\b[\s\S]{1,120}\bto\s+Sys_[A-Za-z0-9_]+/i.test(cleaned)) ||
     /\b(?:Sys_Team_Skillset|Sys_Ueberlauf_Skillset|Sys_Retour_Zentrale|Sys_SondStat|Sys_SondZeit)\b/i.test(
       cleaned
     ) ||
-    /\b(?:queue\s+to|route\s+call|give\s+announcement)\b/i.test(cleaned)
+    /\b(?:queue\s+to|route\s+call|give\s+(?:announcement|ran|ivr|music|cdn|script)|transfer\s+to)\b/i.test(
+      cleaned
+    ) ||
+    /\bif\b[\s\S]{1,120}\bthen\b/i.test(cleaned)
   );
 }
 
@@ -678,11 +726,11 @@ function parseAaccScriptBlocks(
   const withoutComments = stripScriptCommentsAndNoise(rawText);
   const rawLines = withoutComments.split(/\r?\n/);
 
-  // Split into individual script chunks whenever a new `CDN <4-digit>` header block starts
+  // Split into individual script chunks whenever a new `CDN <3-6-digit>` header block starts
   const chunks: Array<{ startIdx: number; endIdx: number }> = [];
   const cdnIndices: number[] = [];
   rawLines.forEach((l, idx) => {
-    if (/^\s*CDN\s*[:=]?\s*\d{4}\b/i.test(l)) {
+    if (/^\s*CDN\s*[:=]?\s*\d{3,6}\b/i.test(l)) {
       cdnIndices.push(idx);
     }
   });
@@ -705,11 +753,11 @@ function parseAaccScriptBlocks(
     const trimmedChunk = chunkText.trim();
     if (!trimmedChunk) return;
 
-    const cdnMatch = chunkText.match(/\bCDN\s*[:=]?\s*(\d{4})\b/i);
+    const cdnMatch = chunkText.match(/\bCDN\s*[:=]?\s*(\d{3,6})\b/i);
     const fallbackNum =
       options?.defaultScriptNumber?.trim()
         ? normalizeScriptRef(options.defaultScriptNumber)
-        : options?.sourceFilename?.match(/\b(\d{4})\b/)?.[1] ||
+        : options?.sourceFilename?.match(/\b(\d{3,6})\b/)?.[1] ||
           (chunks.length === 1 ? 'Main' : `900${chunkIdx}`);
     const scriptNumber = cdnMatch?.[1] || fallbackNum;
 
@@ -722,7 +770,12 @@ function parseAaccScriptBlocks(
     for (const line of nonEmptyBeforeSection) {
       if (
         !isMetadataOrChangelogLine(line) &&
-        !/^(?:CDN|Bereich|Abteilung|Team|section|assign)\b/i.test(line) &&
+        !/^(?:CDN|Bereich|Abteilung|Team|section|assign|if|else|end(?:\s*(?:if|section))?|give|transfer|route|queue|collect|execute|call|goto|subscript|open)\b/i.test(
+          line
+        ) &&
+        !/^(?:prio|zeitplan|feiertag|bedingung|ansage|taste)\b/i.test(line) &&
+        !line.includes('->') &&
+        !line.includes('=>') &&
         line.length >= 3
       ) {
         detectedName = line;
@@ -746,9 +799,9 @@ function parseAaccScriptBlocks(
 
     const teamSkillset = vars.get('Sys_Team_Skillset');
     const scriptName =
+      options?.defaultScriptName?.trim() ||
       detectedName ||
       teamSkillset ||
-      options?.defaultScriptName?.trim() ||
       (teamMatch ? teamMatch[1].trim() : '') ||
       `Skript ${scriptNumber}`;
 
@@ -761,7 +814,7 @@ function parseAaccScriptBlocks(
     const sondRouting = vars.get('Sys_SondRouting');
     const gesellschaft = vars.get('Sys_Gesellschaft');
     const retourZentrale = vars.get('Sys_Retour_Zentrale');
-    const cleanRetour = retourZentrale?.match(/\b(\d{4})\b/)?.[1];
+    const cleanRetour = retourZentrale?.match(/\b(\d{3,6})\b/)?.[1];
 
     if (sondStat || sondZeit || sondRouting || gesellschaft || teamMatch || bereichMatch) {
       const contextBits: string[] = [];
@@ -856,7 +909,7 @@ function parseAaccScriptBlocks(
       ) {
         continue;
       }
-      const cdnVal = val.match(/^\d{4}$/)?.[0];
+      const cdnVal = val.match(/^\d{3,6}$/)?.[0];
       if (cdnVal && cdnVal !== scriptNumber && !seenExtraTargets.has(cdnVal)) {
         seenExtraTargets.add(cdnVal);
         rules.push({
@@ -871,24 +924,106 @@ function parseAaccScriptBlocks(
       }
     }
 
-    // Procedural body lines (`queue to`, `route call`, `give announcement`, `execute`)
+    // Procedural body & IF-ELSE control-flow lines
+    const conditionStack: string[] = [];
+    let lastCollectRule: ScriptRule | null = null;
+
     for (const line of sliceLines) {
       const t = line.trim();
-      if (!t || /^assign\b/i.test(t) || /^section\b/i.test(t)) continue;
+      if (!t || /^assign\b/i.test(t) || /^(?:end\s+)?section\b/i.test(t)) {
+        if (/^end\s+section\b/i.test(t)) {
+          lastCollectRule = null;
+        }
+        continue;
+      }
 
-      const queueCmd = t.match(/\bqueue\s+to\s+(?:skillset|cdn)\s+([A-Za-z0-9_.-]+)/i);
-      const routeCmd = t.match(/\b(?:route\s+call|transfer|give\s+cdn|cdn)\s+(\d{4})\b/i);
-      const annCmd = t.match(/\b(?:give\s+announcement|open\s+voice\s+segment)\s+([A-Za-z0-9_.-]+)/i);
-      const execCmd = t.match(
-        /\b(?:execute|call(?:\s+script)?|subscript|give\s+script)\s+([A-Za-z0-9ÄÖÜäöüß_.-]+)/i
+      if (/^(?:end\s*if|endif)\b/i.test(t)) {
+        conditionStack.pop();
+        lastCollectRule = null;
+        continue;
+      }
+
+      if (/^else\b(?:\s+if\b(.*?)\bthen\b)?/i.test(t)) {
+        lastCollectRule = null;
+        const elseIfMatch = t.match(/^else\s+if\s+(.+?)\s+then(?:\s+(.*))?$/i);
+        const prevCond = conditionStack.pop();
+        if (elseIfMatch) {
+          conditionStack.push(elseIfMatch[1].trim());
+          const inlineBody = elseIfMatch[2]?.trim();
+          if (!inlineBody) continue;
+        } else {
+          conditionStack.push(prevCond ? `Sonst (nicht: ${prevCond})` : 'Sonst (ELSE)');
+          continue;
+        }
+      }
+
+      let actionSegment = t;
+      const ifThenMatch = t.match(/^if\s+(.+?)\s+then(?:\s+(.*))?$/i);
+      if (ifThenMatch) {
+        lastCollectRule = null;
+        conditionStack.push(ifThenMatch[1].trim());
+        const inlineBody = ifThenMatch[2]?.trim();
+        if (!inlineBody) continue;
+        actionSegment = inlineBody;
+      } else if (/^else\s+if\s+/i.test(t)) {
+        const elseIfInline = t.match(/^else\s+if\s+(.+?)\s+then\s+(.*)$/i);
+        if (elseIfInline) actionSegment = elseIfInline[2].trim();
+      }
+
+      const activeCondition =
+        conditionStack.length > 0 ? conditionStack[conditionStack.length - 1] : undefined;
+
+      // Choice mappings immediately following `COLLECT N DIGITS` (e.g. `1 -> 550`, `Taste 2 -> 123456`)
+      if (
+        /^(?:taste|dtmf|opt(?:ion)?|auswahl)?\s*[A-Za-z0-9*#]+\s*(?:->|=>)/i.test(actionSegment)
+      ) {
+        const parsedChoices = parseChoicesSegment(actionSegment, scriptNumber);
+        if (parsedChoices.length > 0) {
+          if (lastCollectRule) {
+            parsedChoices.forEach((c) => {
+              if (
+                !lastCollectRule!.choices.some(
+                  (ex) => ex.choice === c.choice && ex.targetNumber === c.targetNumber
+                )
+              ) {
+                lastCollectRule!.choices.push(c);
+              }
+            });
+          } else {
+            rules.push({
+              id: `${scriptNumber}-${ruleCounter++}`,
+              prio: ruleCounter + 20,
+              stepName: 'DTMF-Auswahl',
+              sourceNumber: scriptNumber,
+              condition: activeCondition,
+              choices: parsedChoices,
+              rawLine: t,
+            });
+          }
+          continue;
+        }
+      }
+
+      const queueCmd = actionSegment.match(
+        /\bqueue\s+to\s+(?:skillset|cdn)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
       );
+      const routeCmd = actionSegment.match(
+        /\b(?:route\s+call(?:\s+to)?|transfer(?:\s+to)?|give\s+cdn|cdn|goto)\s+["']?(\d{3,6})["']?\b/i
+      );
+      const annCmd = actionSegment.match(
+        /\b(?:give\s+(?:announcement|ran|ivr|music)|open\s+voice\s+segment)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+      );
+      const execCmd = actionSegment.match(
+        /\b(?:execute|call(?:\s+script)?|subscript|give\s+script)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+      );
+      const collectCmd = actionSegment.match(/\bcollect\s+(\d+)\s+digits?\b/i);
 
-      if (queueCmd || routeCmd || annCmd || execCmd) {
+      if (queueCmd || routeCmd || annCmd || execCmd || collectCmd) {
         const execTarget =
-          execCmd && isPlausibleNamedScriptTarget(execCmd[1])
+          execCmd && isValidScriptRef(execCmd[1])
             ? normalizeScriptRef(execCmd[1])
             : undefined;
-        rules.push({
+        const createdRule: ScriptRule = {
           id: `${scriptNumber}-${ruleCounter++}`,
           prio: ruleCounter + 20,
           stepName: execCmd
@@ -896,13 +1031,57 @@ function parseAaccScriptBlocks(
             : queueCmd
             ? `Queue-Anweisung`
             : routeCmd
-            ? `Weiterleitung CDN ${routeCmd[1]}`
-            : `Ansage`,
+            ? `Weiterleitung Ziel ${routeCmd[1]}`
+            : collectCmd
+            ? `DTMF-Eingabe (${collectCmd[1]} Ziffern)`
+            : `Ansage / RAN`,
           sourceNumber: scriptNumber,
           targetNumber: routeCmd ? routeCmd[1] : execTarget,
-          queueTarget: queueCmd && !/^\d{4}$/.test(queueCmd[1]) ? queueCmd[1] : undefined,
+          queueTarget:
+            queueCmd && !isNumericScriptRef(queueCmd[1]) ? queueCmd[1] : undefined,
           announcement: annCmd ? annCmd[1] : undefined,
+          condition: activeCondition,
           choices: [],
+          rawLine: t,
+        };
+        rules.push(createdRule);
+        lastCollectRule = collectCmd ? createdRule : null;
+        continue;
+      }
+
+      lastCollectRule = null;
+
+      // Support hybrid inline rules / schedules / holidays inside AACC blocks (e.g. `Prio 2: VIP -> 999`, `Zeitplan: Mo-Fr 08:00-18:00`)
+      const inline = extractInlineKeyValuesFromText(actionSegment, scriptNumber);
+      if (
+        inline.matchedExplicitFields &&
+        (inline.targetNumber ||
+          inline.choices.length > 0 ||
+          inline.queueTarget ||
+          inline.schedule ||
+          inline.holiday ||
+          inline.condition)
+      ) {
+        rules.push({
+          id: `${scriptNumber}-${ruleCounter++}`,
+          prio: inline.prio !== undefined ? inline.prio : ruleCounter + 20,
+          stepName:
+            inline.stepName ||
+            (inline.schedule
+              ? 'Zeitplan'
+              : inline.holiday
+              ? 'Feiertag'
+              : inline.targetNumber
+              ? `Aufruf ${inline.targetNumber}`
+              : 'Regel'),
+          sourceNumber: scriptNumber,
+          targetNumber: inline.targetNumber,
+          choices: inline.choices,
+          condition: inline.condition || activeCondition,
+          schedule: inline.schedule,
+          holiday: inline.holiday,
+          announcement: inline.announcement,
+          queueTarget: inline.queueTarget,
           rawLine: t,
         });
       }
@@ -930,7 +1109,9 @@ function parseAaccScriptBlocks(
       modules.push({
         scriptNumber,
         scriptName,
-        isMaster: /master|zentrale/i.test(scriptName) || scriptNumber === '0000',
+        isMaster:
+          /^(?:main|master(?:script)?|0000)$/i.test(canonicalScriptMatchKey(scriptNumber)) ||
+          /master|zentrale/i.test(scriptName),
         origin: options?.origin || 'legacy-text',
         sourceFilename: options?.sourceFilename,
         rawText: trimmedChunk,
@@ -977,13 +1158,13 @@ export function looksLikeRawCallflowScript(text: string): boolean {
     /\b(?:prio(?:rit[aä]t)?|wohin|ziel|sprung|auswahl|taste|zeitplan|feiertag|bedingung|ansage|queue|warteschlange|skript|script|masterscript|execute|call|nummer)\b/i.test(
       cleanedText
     ) || /^main$/im.test(cleanedText.trim());
-  const hasFourDigitNumbers = /\b\d{4}\b/.test(stripDatesAndTimes(cleanedText));
+  const hasNumericScriptRefs = /\b\d{3,6}\b/.test(stripNumericNoiseForFreeText(cleanedText));
   const hasNamedScripts =
     /\b[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*\b/i.test(
       cleanedText
     );
 
-  if (!hasKeywords && !hasFourDigitNumbers && !hasNamedScripts) return false;
+  if (!hasKeywords && !hasNumericScriptRefs && !hasNamedScripts) return false;
 
   const parsed = parseCallflowTextWithFallback(cleanedText, {
     defaultScriptNumber: 'Main',
@@ -997,7 +1178,7 @@ export function looksLikeRawCallflowScript(text: string): boolean {
 /**
  * Parses raw text (or file contents) containing one or multiple script definitions
  * (AACC orchestration scripts as well as single-line and multi-line free-text blocks)
- * with Prio, Name, 4-digit Number/CDN, Wohin/Ziel/Sprung, Auswahl/Taste, Zeitplan,
+ * with Prio, Name, 3-to-6-digit Number/CDN, Wohin/Ziel/Sprung, Auswahl/Taste, Zeitplan,
  * Feiertag, Bedingung, Ansage, and Queue/Skillset.
  * Automatically ignores /* ... * /, //, -- comments and changelog/revision lines.
  */
@@ -1010,14 +1191,131 @@ export function parseScriptTextBundle(
     origin?: ScriptOrigin;
   }
 ): ScriptModule[] {
+  const cleanedRawText = stripScriptCommentsAndNoise(rawText);
+
   if (isAaccScriptText(rawText)) {
+    // If the bundle mixes explicit `=== ... ===` / `Skript:` sections (e.g. AACC Main + CSV/table subscripts),
+    // split by explicit section headers so each block uses its matching parser.
+    const rawLinesForSplit = cleanedRawText.split(/\r?\n/);
+    const explicitSections: Array<{
+      num: string;
+      name: string;
+      isMaster: boolean;
+      lines: string[];
+    }> = [];
+    let currentSec: { num: string; name: string; isMaster: boolean; lines: string[] } | null = null;
+
+    for (const rl of rawLinesForSplit) {
+      const t = rl.trim();
+      const masterBare = t.match(
+        /^[=\-*#\s]*(main|master(?:script|\s*callflow)?)(?:\s*[:\-–]\s*(.*))?[=\-*\s]*$/i
+      );
+      const explicitHdr =
+        t.match(/^[=\-*#\s]*\[([^\]]+)\]\s*([^=\-*]*?)[=\-*\s]*$/) ||
+        t.match(
+          /^[=\-*#\s]*(?:master(?:callflow|script)?|skript|script|modul)\s*(?:nr\.?|nummer)?\s*[:#]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?(?:\s*[-:|]\s*|\s+)?([^=\-*]*?)[=\-*\s]*$/i
+        );
+      const bareFramed = t.match(
+        /^[=\-*#]{2,}\s*(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\s*[=\-*#]{2,}$/
+      );
+
+      let matchedSec: { num: string; name: string; isMaster: boolean } | null = null;
+      if (
+        masterBare &&
+        !t.includes('->') &&
+        !t.includes('=>') &&
+        !/\b(?:wohin|ziel|sprung|auswahl|taste)\b/i.test(t)
+      ) {
+        matchedSec = {
+          num: 'Main',
+          name: masterBare[2]?.trim() || 'Main',
+          isMaster: true,
+        };
+      } else if (
+        explicitHdr &&
+        !/\b(?:wohin|ziel|sprung|auswahl|taste|prio|zeitplan|feiertag|bedingung|ansage|queue)\b/i.test(
+          t
+        ) &&
+        !t.includes('->') &&
+        !t.includes('=>')
+      ) {
+        const ref = normalizeScriptRef(explicitHdr[1]);
+        if (isValidScriptRef(ref)) {
+          matchedSec = {
+            num: ref,
+            name: (explicitHdr[2] || '').trim() || ref,
+            isMaster: /^(?:main|master|0000)$/i.test(canonicalScriptMatchKey(ref)) || /master/i.test(t),
+          };
+        }
+      } else if (bareFramed && isValidScriptRef(bareFramed[1])) {
+        const ref = normalizeScriptRef(bareFramed[1]);
+        matchedSec = {
+          num: ref,
+          name: bareFramed[1].trim(),
+          isMaster: /^(?:main|master|0000)$/i.test(canonicalScriptMatchKey(ref)) || /master/i.test(ref),
+        };
+      }
+
+      if (matchedSec) {
+        if (currentSec) explicitSections.push(currentSec);
+        currentSec = { ...matchedSec, lines: [] };
+      } else if (currentSec) {
+        currentSec.lines.push(rl);
+      } else {
+        currentSec = {
+          num: options?.defaultScriptNumber ? normalizeScriptRef(options.defaultScriptNumber) : '',
+          name: options?.defaultScriptName?.trim() || '',
+          isMaster: false,
+          lines: [rl],
+        };
+      }
+    }
+    if (currentSec) explicitSections.push(currentSec);
+
+    const namedHeadersCount = explicitSections.filter((s) => Boolean(s.num)).length;
+    if (namedHeadersCount > 0 && explicitSections.length >= 1) {
+      const merged = new Map<string, ScriptModule>();
+      for (const sec of explicitSections) {
+        const secText = sec.lines.join('\n').trim();
+        if (!secText) continue;
+        const secOpts = {
+          ...options,
+          defaultScriptNumber: sec.num || options?.defaultScriptNumber,
+          defaultScriptName: sec.name || options?.defaultScriptName,
+        };
+        const secMods = isAaccScriptText(secText)
+          ? parseAaccScriptBlocks(secText, secOpts)
+          : parseScriptTextBundle(secText, secOpts);
+        secMods.forEach((m) => {
+          const mod = sec.isMaster ? { ...m, isMaster: true } : m;
+          const key = canonicalScriptMatchKey(mod.scriptNumber);
+          const prev = merged.get(key);
+          if (!prev) {
+            merged.set(key, mod);
+          } else {
+            const combinedRules = [...prev.rules, ...mod.rules];
+            const outSet = new Set<string>([...prev.outgoingNumbers, ...mod.outgoingNumbers]);
+            outSet.delete(prev.scriptNumber);
+            merged.set(key, {
+              ...prev,
+              isMaster: prev.isMaster || mod.isMaster,
+              rules: combinedRules,
+              outgoingNumbers: Array.from(outSet),
+            });
+          }
+        });
+      }
+      if (merged.size > 0) {
+        return Array.from(merged.values());
+      }
+    }
+
     const aaccModules = parseAaccScriptBlocks(rawText, options);
     if (aaccModules.length > 0) {
       return aaccModules;
     }
   }
 
-  const cleanedRawText = stripScriptCommentsAndNoise(rawText);
   const lines = cleanedRawText.split(/\r?\n/);
   const moduleMap = new Map<string, ScriptModule>();
 
@@ -1028,7 +1326,7 @@ export function parseScriptTextBundle(
   let currentHeaderIsMaster = false;
 
   if (!currentHeaderNumber && options?.sourceFilename) {
-    const fileNum = options.sourceFilename.match(/\b(\d{4})\b/);
+    const fileNum = options.sourceFilename.match(/\b(\d{3,6})\b/);
     if (fileNum) currentHeaderNumber = fileNum[1];
   }
   if (!currentHeaderName && options?.sourceFilename) {
@@ -1137,13 +1435,13 @@ export function parseScriptTextBundle(
       continue;
     }
 
-    // 1. Detect section/script header lines (`=== [1000] Hauptmenü ===`, `=== Masterscript ===`, `Skript: schaltung1script`)
+    // 1. Detect section/script header lines (`=== [100] Hauptmenü ===`, `=== Main ===`, `Skript: schaltung1script`)
     const headerMatch =
       line.match(/^[=\-*#\s]*\[([^\]]+)\]\s*([^=\-*]*?)[=\-*\s]*$/) ||
       line.match(
-        /^[=\-*#\s]*(?:master(?:callflow|script)?|skript|script|modul)\s*(?:nr\.?|nummer)?\s*[:#]?\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})(?:\s*[-:|]\s*|\s+)?([^=\-*]*?)[=\-*\s]*$/i
+        /^[=\-*#\s]*(?:master(?:callflow|script)?|skript|script|modul)\s*(?:nr\.?|nummer)?\s*[:#]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?(?:\s*[-:|]\s*|\s+)?([^=\-*]*?)[=\-*\s]*$/i
       ) ||
-      line.match(/^(\d{4})\s*[:\-–]\s*([A-Za-zÄÖÜäöüß][^->|;]{2,})$/);
+      line.match(/^(\d{3,6})\s*[:\-–]\s*([A-Za-zÄÖÜäöüß][^->|;]{2,})$/);
 
     const masterBareHeader = line.match(
       /^[=\-*#\s]*(main|master(?:script|\s*callflow)?)(?:\s*[:\-–]\s*(.*))?[=\-*\s]*$/i
@@ -1174,7 +1472,7 @@ export function parseScriptTextBundle(
     ) {
       flushPendingRule();
       const rawRef = normalizeScriptRef(headerMatch[1]);
-      if (/^\d{4}$/.test(rawRef) || isPlausibleNamedScriptTarget(rawRef)) {
+      if (isValidScriptRef(rawRef)) {
         currentHeaderNumber = rawRef;
         currentHeaderName = (headerMatch[2] || '').trim() || `Skript ${currentHeaderNumber}`;
         currentHeaderIsMaster =
@@ -1187,22 +1485,24 @@ export function parseScriptTextBundle(
       }
     }
 
-    // Bare `=== Schaltung1 ===` or `=== Main ===` header line wrapped with === / --- / #
+    // Bare `=== Schaltung1 ===`, `=== 550 ===`, or `=== Main ===` header line wrapped with === / --- / #
     const bareFramedHeader = line.match(
-      /^[=\-*#]{2,}\s*([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\s*[=\-*#]{2,}$/
+      /^[=\-*#]{2,}\s*(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\s*[=\-*#]{2,}$/
     );
-    if (bareFramedHeader && isPlausibleNamedScriptTarget(bareFramedHeader[1])) {
+    if (bareFramedHeader && isValidScriptRef(bareFramedHeader[1])) {
       flushPendingRule();
       currentHeaderNumber = normalizeScriptRef(bareFramedHeader[1]);
       currentHeaderName = bareFramedHeader[1].trim();
-      currentHeaderIsMaster = /^(?:main|master)$/i.test(currentHeaderNumber) || /master/i.test(currentHeaderNumber);
+      currentHeaderIsMaster =
+        /^(?:main|master|0000)$/i.test(canonicalScriptMatchKey(currentHeaderNumber)) ||
+        /master/i.test(currentHeaderNumber);
       autoPrioCounter = 1;
       ensureModule(currentHeaderNumber, currentHeaderName, currentHeaderIsMaster);
       continue;
     }
 
-    // Standalone `Nummer: 1000` header line when no target exists yet
-    const standaloneNumHeader = line.match(/^(?:nummer|nr\.?|skriptnummer)\s*[:=]\s*(\d{4})$/i);
+    // Standalone `Nummer: 100` / `Nummer: 123456` header line when no target exists yet
+    const standaloneNumHeader = line.match(/^(?:nummer|nr\.?|skriptnummer)\s*[:=]\s*(\d{3,6})$/i);
     if (standaloneNumHeader && !pendingRule) {
       currentHeaderNumber = standaloneNumHeader[1];
       autoPrioCounter = 1;
@@ -1210,7 +1510,7 @@ export function parseScriptTextBundle(
       continue;
     }
 
-    const parsedLine = extractInlineKeyValuesFromText(line);
+    const parsedLine = extractInlineKeyValuesFromText(line, currentHeaderNumber || undefined);
     const hasDelimiter = /[|;\t]/.test(line);
 
     // Check if this line is a pure attribute continuation belonging to `pendingRule`
@@ -1403,25 +1703,21 @@ export function parseCallflowTextWithFallback(
 
   const outMap = new Map<string, string>();
   const rules: ScriptRule[] = cleanedLines.map((line, idx) => {
-    const withoutDates = stripDatesAndTimes(line).trim();
-    const numMatch = withoutDates.match(/\b(\d{4})\b/);
-    const arrowMatch = withoutDates.match(
-      /(?:->|=>|\b(?:wohin|ziel|sprung|execute|call|script|skript)\s*[:=]?)\s*(\d{4}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b/i
+    const withoutNoise = stripNumericNoiseForFreeText(line).trim();
+    const numMatch = withoutNoise.match(/\b(\d{3,6})\b/);
+    const arrowMatch = withoutNoise.match(
+      /(?:->|=>|\b(?:wohin|ziel|sprung|execute|call|script|skript)\s*[:=]?)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
     );
-    const namedMatch = withoutDates.match(
+    const namedMatch = withoutNoise.match(
       /\b([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
     );
     const singleTokenCandidate =
-      /^[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,}$/.test(withoutDates) &&
-      isPlausibleNamedScriptTarget(withoutDates)
-        ? withoutDates
+      /^[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,}$/.test(withoutNoise) &&
+      isPlausibleNamedScriptTarget(withoutNoise)
+        ? withoutNoise
         : undefined;
 
-    const arrowTarget =
-      arrowMatch &&
-      (/^\d{4}$/.test(arrowMatch[1]) || isPlausibleNamedScriptTarget(arrowMatch[1]))
-        ? arrowMatch[1]
-        : undefined;
+    const arrowTarget = arrowMatch && isValidScriptRef(arrowMatch[1]) ? arrowMatch[1] : undefined;
 
     const rawTargetRef =
       arrowTarget ||
@@ -2415,7 +2711,7 @@ export function buildScriptDetailMermaid(
     }
     prevStepId = stepId;
 
-    if (rule.queueTarget && !/^\d{4}$/.test(rule.queueTarget)) {
+    if (rule.queueTarget && !isNumericScriptRef(rule.queueTarget)) {
       const qKey = sanitizeNodeKey(rule.queueTarget);
       const qId = `QUEUE_${qKey}`;
       queueNodes.set(qId, {
