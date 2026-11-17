@@ -60,6 +60,7 @@ export async function readScriptFileText(file: File): Promise<string> {
 export interface DotSHeaderMetadata {
   scriptNumber?: string;
   scriptName?: string;
+  cdnAlias?: string;
   description?: string;
   isMasterHint: boolean;
 }
@@ -89,18 +90,34 @@ export function extractDotSHeaderMetadata(
     : '';
   const numFromFilename = cleanBasename.match(/(?:^|[\s_-])(\d{3,6})(?:$|[\s_-])/)?.[1];
   const looksMasterFile = /\b(?:main|master(?:script)?)\b/i.test(cleanBasename);
+  const isDotS = filename ? isAvayaDotSFilename(filename) : false;
 
-  let derivedRef: string | undefined = cdnFromComment || numFromFilename;
-  if (!derivedRef && looksMasterFile) {
+  const basenameToken = cleanBasename.replace(/\s+/g, '_');
+  const validBasenameRef =
+    basenameToken && isValidScriptRef(basenameToken)
+      ? normalizeScriptRef(basenameToken)
+      : undefined;
+
+  let derivedRef: string | undefined;
+  if (looksMasterFile) {
     derivedRef = 'Main';
-  } else if (!derivedRef && nameFromComment && isValidScriptRef(nameFromComment)) {
+  } else if (isDotS && validBasenameRef) {
+    // In Avaya .s exports, the filename (<Scriptname>.s) is the canonical script identifier
+    derivedRef = validBasenameRef;
+  } else if (nameFromComment && isValidScriptRef(nameFromComment)) {
     derivedRef = normalizeScriptRef(nameFromComment);
-  } else if (!derivedRef && cleanBasename) {
-    const tokenCandidate = cleanBasename.replace(/\s+/g, '_');
-    if (isValidScriptRef(tokenCandidate)) {
-      derivedRef = normalizeScriptRef(tokenCandidate);
-    }
+  } else if (validBasenameRef) {
+    derivedRef = validBasenameRef;
+  } else {
+    derivedRef = cdnFromComment || numFromFilename;
   }
+
+  const cdnAliasCandidate = cdnFromComment || numFromFilename;
+  const cdnAlias =
+    cdnAliasCandidate &&
+    (!derivedRef || canonicalScriptMatchKey(cdnAliasCandidate) !== canonicalScriptMatchKey(derivedRef))
+      ? cdnAliasCandidate
+      : undefined;
 
   const cleanFilenameLabel = cleanBasename.replace(/[_-]+/g, ' ').trim();
   const derivedName =
@@ -111,6 +128,7 @@ export function extractDotSHeaderMetadata(
   return {
     scriptNumber: derivedRef,
     scriptName: derivedName,
+    cdnAlias,
     description: descFromComment,
     isMasterHint:
       looksMasterFile ||
@@ -160,6 +178,14 @@ export async function importCallflowFile(
     sourceFilename: file.name,
     origin: 'legacy-text',
     isMasterHint: options?.isMasterHint ?? dotSMeta.isMasterHint,
+  }).map((mod, idx) => {
+    if (idx === 0 && dotSMeta.cdnAlias && !mod.cdnAlias) {
+      return {
+        ...mod,
+        cdnAlias: dotSMeta.cdnAlias,
+      };
+    }
+    return mod;
   });
 
   return {
@@ -207,6 +233,9 @@ function buildNormalizedFolderAliases(baseName: string): string[] {
   const normRef = canonicalScriptMatchKey(normalizeScriptRef(trimmed));
   if (normRef) aliases.add(normRef);
 
+  const collapsed = trimmed.toLowerCase().replace(/[\s_-]+/g, '');
+  if (collapsed) aliases.add(collapsed);
+
   // Strip common prefix/suffix patterns like "script_4910", "skript-4910", "cdn_4910", "4910_script"
   const stripped = trimmed
     .replace(/^(?:avaya[\s_-]*)?(?:script|skript|cdn|flow|sub|modul)[\s_-]+/i, '')
@@ -214,6 +243,8 @@ function buildNormalizedFolderAliases(baseName: string): string[] {
     .trim();
   if (stripped) {
     aliases.add(canonicalScriptMatchKey(stripped));
+    const strippedCollapsed = stripped.toLowerCase().replace(/[\s_-]+/g, '');
+    if (strippedCollapsed) aliases.add(strippedCollapsed);
   }
 
   // If the basename contains a standalone 3-6 digit script number, register it as a fallback alias
@@ -370,13 +401,17 @@ export async function autoResolveConnectedScriptsFromFolder(
   while (safetyRounds < MAX_ROUNDS) {
     safetyRounds++;
 
-    const presentKeys = new Set(
-      currentModules.map((m) => canonicalScriptMatchKey(m.scriptNumber))
-    );
+    const presentKeys = new Set<string>();
+    for (const m of currentModules) {
+      presentKeys.add(canonicalScriptMatchKey(m.scriptNumber));
+      if (m.cdnAlias) {
+        presentKeys.add(canonicalScriptMatchKey(m.cdnAlias));
+      }
+    }
 
     const checklistState = detectMasterScriptChecklist(
       currentModules,
-      options?.externalEndpoints || [],
+      [],
       [],
       options?.masterScriptNumber,
       options?.ignoredChecklistTargets || []
@@ -391,7 +426,9 @@ export async function autoResolveConnectedScriptsFromFolder(
       if (!clean) return;
       const key = canonicalScriptMatchKey(clean);
       if (!key) return;
-      if (presentKeys.has(key) || externalSet.has(key) || ignoredSet.has(key)) return;
+      if (presentKeys.has(key) || ignoredSet.has(key)) return;
+      // Only skip externalSet if no matching .s file exists in the folder pool
+      if (externalSet.has(key) && !findMatchingFileInFolderPool(pool, clean)) return;
       if (attemptedRefKeys.has(key) || seenInRound.has(key)) return;
       seenInRound.add(key);
       pendingTargets.push(clean);
@@ -412,6 +449,11 @@ export async function autoResolveConnectedScriptsFromFolder(
       for (const rule of mod.rules) {
         if (rule.targetNumber) {
           enqueueCandidate(rule.targetNumber);
+        }
+        for (const ch of rule.choices) {
+          if (ch.targetNumber) {
+            enqueueCandidate(ch.targetNumber);
+          }
         }
       }
     }
@@ -434,7 +476,7 @@ export async function autoResolveConnectedScriptsFromFolder(
 
       try {
         const imported = await importCallflowFile(matchedEntry.file, {
-          overridePrimaryScriptNumber: targetRef,
+          overridePrimaryScriptNumber: matchedEntry.baseName || targetRef,
           overridePrimaryScriptName: matchedEntry.baseName || targetRef,
           isMasterHint: false,
         });
@@ -467,9 +509,13 @@ export async function autoResolveConnectedScriptsFromFolder(
     }
   }
 
-  const finalPresentKeys = new Set(
-    currentModules.map((m) => canonicalScriptMatchKey(m.scriptNumber))
-  );
+  const finalPresentKeys = new Set<string>();
+  for (const m of currentModules) {
+    finalPresentKeys.add(canonicalScriptMatchKey(m.scriptNumber));
+    if (m.cdnAlias) {
+      finalPresentKeys.add(canonicalScriptMatchKey(m.cdnAlias));
+    }
+  }
   const unmatchedTargetRefs = Array.from(unmatchedTargetRefsMap.entries())
     .filter(([k]) => !finalPresentKeys.has(k))
     .map(([, ref]) => ref);

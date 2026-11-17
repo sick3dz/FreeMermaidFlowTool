@@ -115,6 +115,10 @@ export interface ScriptRule {
 export interface ScriptModule {
   scriptNumber: string;
   scriptName: string;
+  cdnAlias?: string;
+  entryDnisNumbers?: string[];
+  entryOrganizationName?: string;
+  isAnnouncementEndpoint?: boolean;
   isMaster: boolean;
   origin?: ScriptOrigin;
   visioPageName?: string;
@@ -216,6 +220,7 @@ export interface ScriptWorkspace {
   masterScriptNumber?: string;
   masterChecklist?: MasterScriptChecklistItem[];
   nodeOffsets?: Record<string, NodePositionOffset>;
+  treatUnresolvedAsEndpoint?: boolean;
   updatedAt: number;
 }
 

@@ -21,6 +21,7 @@ import {
   buildScriptWorkspace,
   canonicalScriptMatchKey,
   detectMasterScriptChecklist,
+  isAnnouncementOrEndpointTargetName,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
 } from '../utils/scriptCallflowParser';
@@ -130,7 +131,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       if (idx !== primaryIdx) return m;
       return {
         ...m,
-        isMaster: true,
+        isMaster: modules.length === 1 ? true : m.isMaster,
         outgoingNumbers: m.outgoingNumbers.filter(
           (t) => canonicalScriptMatchKey(t) !== canonicalScriptMatchKey(m.scriptNumber)
         ),
@@ -160,14 +161,26 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       []
     );
 
-    const targets: DraftConfirmedTarget[] = previewChecklist.masterChecklist.map((item) => ({
-      refKey: item.refKey,
-      displayName: item.displayName,
-      contextLabel: item.contextLabel,
-      triggeredNumbers: item.triggeredNumbers,
-      decision: item.status === 'present' ? 'present' : 'request',
-      isAlreadyPresent: item.status === 'present',
-    }));
+    const isFullExportOrFolderResolved =
+      Boolean(effectivePool && effectivePool.entries.length > 0) ||
+      normalizedModules.length >= 2;
+
+    const targets: DraftConfirmedTarget[] = previewChecklist.masterChecklist.map((item) => {
+      const isPresent = item.status === 'present';
+      const autoEndpoint =
+        !isPresent &&
+        (isFullExportOrFolderResolved ||
+          isAnnouncementOrEndpointTargetName(item.refKey) ||
+          isAnnouncementOrEndpointTargetName(item.displayName));
+      return {
+        refKey: item.refKey,
+        displayName: item.displayName,
+        contextLabel: item.contextLabel,
+        triggeredNumbers: item.triggeredNumbers,
+        decision: isPresent ? 'present' : autoEndpoint ? 'external' : 'request',
+        isAlreadyPresent: isPresent,
+      };
+    });
 
     setParsedModules(normalizedModules);
     setActiveMasterNumber(primaryScriptNumber);
@@ -345,6 +358,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       ignoredChecklistTargets,
       manualLinks,
       masterScriptNumber: activeMasterNumber,
+      treatUnresolvedAsEndpoint: Boolean(folderPool) || parsedModules.length >= 2,
     });
 
     const primaryMod =

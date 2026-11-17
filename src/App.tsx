@@ -2007,8 +2007,10 @@ export default function App() {
         isMasterHint: isAutoStart || canonicalScriptMatchKey(normalizedTarget) === 'main',
       });
 
-      const hasRules = incoming.some((m) => m.rules.length > 0);
-      if (incoming.length === 0 || !hasRules) return null;
+      const hasRulesOrAnnouncement = incoming.some(
+        (m) => m.rules.length > 0 || Boolean(m.isAnnouncementEndpoint)
+      );
+      if (incoming.length === 0 || !hasRulesOrAnnouncement) return null;
 
       const targetKey = canonicalScriptMatchKey(
         normalizedTarget || incoming[0].scriptNumber
@@ -2043,14 +2045,17 @@ export default function App() {
         })
           .then((summary) => {
             setLastFolderResolveSummary(summary);
-            if (summary.loadedScriptNumbers.length > 0) {
-              const autoWs = buildScriptWorkspace(summary.modules, {
-                ...nextWs,
-                masterScriptNumber: nextWs.masterScriptNumber,
-              });
-              setScriptWorkspace(autoWs);
-              refreshDiagramFromWorkspace(autoWs);
-            }
+            const combinedEndpoints = Array.from(
+              new Set([...(nextWs.externalEndpoints || []), ...summary.unmatchedTargetRefs])
+            );
+            const autoWs = buildScriptWorkspace(summary.modules, {
+              ...nextWs,
+              externalEndpoints: combinedEndpoints,
+              masterScriptNumber: nextWs.masterScriptNumber,
+              treatUnresolvedAsEndpoint: true,
+            });
+            setScriptWorkspace(autoWs);
+            refreshDiagramFromWorkspace(autoWs);
           })
           .finally(() => {
             setIsAutoResolvingFolder(false);
@@ -2086,6 +2091,7 @@ export default function App() {
             ? result.modules[0].scriptNumber
             : scriptWorkspace.masterScriptNumber;
 
+        let nextExternalEndpoints = [...(scriptWorkspace.externalEndpoints || [])];
         if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
           setIsAutoResolvingFolder(true);
           try {
@@ -2099,6 +2105,9 @@ export default function App() {
               }
             );
             merged = summary.modules;
+            nextExternalEndpoints = Array.from(
+              new Set([...nextExternalEndpoints, ...summary.unmatchedTargetRefs])
+            );
             setLastFolderResolveSummary(summary);
           } finally {
             setIsAutoResolvingFolder(false);
@@ -2107,8 +2116,12 @@ export default function App() {
 
         const nextWs = buildScriptWorkspace(merged, {
           ...scriptWorkspace,
+          externalEndpoints: nextExternalEndpoints,
           masterScriptNumber: effectiveMaster,
           ignoredChecklistTargets: nextIgnored,
+          treatUnresolvedAsEndpoint:
+            Boolean(assignedFolderPool && assignedFolderPool.entries.length > 0) ||
+            merged.length >= 2,
         });
         if (wasEmpty) {
           pendingAutoFitRef.current = true;
@@ -2171,14 +2184,19 @@ export default function App() {
         );
         setLastFolderResolveSummary(summary);
 
+        const combinedEndpoints = Array.from(
+          new Set([...(scriptWorkspace.externalEndpoints || []), ...summary.unmatchedTargetRefs])
+        );
+
         const nextWs = buildScriptWorkspace(summary.modules, {
-          externalEndpoints: scriptWorkspace.externalEndpoints,
+          externalEndpoints: combinedEndpoints,
           ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
           resolvedIssues: scriptWorkspace.resolvedIssues,
           manualQuestions: scriptWorkspace.manualQuestions,
           manualLinks: scriptWorkspace.manualLinks,
           masterScriptNumber: scriptWorkspace.masterScriptNumber,
           nodeOffsets: scriptWorkspace.nodeOffsets,
+          treatUnresolvedAsEndpoint: true,
         });
 
         pendingAutoFitRef.current = true;
@@ -2222,7 +2240,9 @@ export default function App() {
         setLastFolderResolveSummary(summary);
 
         const nextWs = buildScriptWorkspace(summary.modules, {
+          externalEndpoints: summary.unmatchedTargetRefs,
           masterScriptNumber: primaryNumber,
+          treatUnresolvedAsEndpoint: true,
         });
         pendingAutoFitRef.current = true;
         setIsVisualEditMode(true);
@@ -2292,6 +2312,7 @@ export default function App() {
       }
 
       let autoLoadedFromFolderCount = 0;
+      let nextExternalEndpoints = [...(scriptWorkspace.externalEndpoints || [])];
       if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
         const summary = await autoResolveConnectedScriptsFromFolder(
           currentModules,
@@ -2304,18 +2325,24 @@ export default function App() {
         );
         currentModules = summary.modules;
         autoLoadedFromFolderCount = summary.loadedScriptNumbers.length;
+        nextExternalEndpoints = Array.from(
+          new Set([...nextExternalEndpoints, ...summary.unmatchedTargetRefs])
+        );
         setLastFolderResolveSummary(summary);
       }
 
       const wasEmpty = scriptWorkspace.modules.length === 0;
       const nextWs = buildScriptWorkspace(currentModules, {
-        externalEndpoints: scriptWorkspace.externalEndpoints,
+        externalEndpoints: nextExternalEndpoints,
         ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
         resolvedIssues: scriptWorkspace.resolvedIssues,
         manualQuestions: scriptWorkspace.manualQuestions,
         manualLinks: scriptWorkspace.manualLinks,
         masterScriptNumber: scriptWorkspace.masterScriptNumber,
         nodeOffsets: scriptWorkspace.nodeOffsets,
+        treatUnresolvedAsEndpoint:
+          Boolean(assignedFolderPool && assignedFolderPool.entries.length > 0) ||
+          currentModules.length >= 2,
       });
 
       if (wasEmpty) {
@@ -2621,19 +2648,23 @@ export default function App() {
   const convertRawScriptTextInEditor = useCallback(
     (rawText: string, mode: 'replace' | 'merge' = 'replace'): boolean => {
       const parsed = parseCallflowTextWithFallback(rawText, {
-        defaultScriptNumber: 'Main',
-        defaultScriptName: 'Main',
         origin: 'legacy-text',
       });
       if (parsed.length === 0) return false;
-      const parsedRules = parsed.reduce((sum, m) => sum + m.rules.length, 0);
-      if (parsedRules === 0) return false;
 
       const combinedModules =
         mode === 'merge' ? mergeScriptModules(scriptWorkspace.modules, parsed) : parsed;
       const nextWs = buildScriptWorkspace(
         combinedModules,
-        mode === 'merge' ? scriptWorkspace : undefined
+        mode === 'merge'
+          ? {
+              ...scriptWorkspace,
+              treatUnresolvedAsEndpoint:
+                scriptWorkspace.treatUnresolvedAsEndpoint || combinedModules.length >= 2,
+            }
+          : {
+              treatUnresolvedAsEndpoint: combinedModules.length >= 2,
+            }
       );
       skipAutoConvertRef.current = false;
       setRawScriptDraft({
