@@ -268,30 +268,65 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="flex items-center gap-1.5 text-[11px] font-semibold text-sky-300 mb-1">
-                  <Clock className="w-3.5 h-3.5" />
-                  <span>Zeitplan / Öffnungszeiten</span>
-                </label>
+              <div className="sm:col-span-2 p-2.5 rounded-lg bg-slate-900/80 border border-sky-500/30 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-[11px] font-semibold text-sky-300">
+                    <Clock className="w-3.5 h-3.5" />
+                    <span>Öffnungszeiten / Zeitplan (wird im Knoten &amp; in der Zeiten-Liste angezeigt)</span>
+                  </label>
+                  {schedule && (
+                    <button
+                      type="button"
+                      onClick={() => setSchedule('')}
+                      className="text-[10px] text-slate-400 hover:text-rose-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      Leeren
+                    </button>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={schedule}
                   onChange={(e) => setSchedule(e.target.value)}
-                  placeholder="z.B. Mo-Fr 08:00-18:00"
-                  className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
+                  placeholder="z.B. Mo–Fr 08:00–17:00 oder Mo–Do 08–18, Fr 08–16"
+                  className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
                 />
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] text-slate-400 mr-1">Schnellwahl:</span>
+                  {[
+                    'Mo–Fr 08:00–17:00',
+                    'Mo–Fr 08:00–18:00',
+                    'Mo–Do 08:00–17:00, Fr 08:00–15:00',
+                    'Sa–So geschlossen',
+                    'Feiertags-Prüfung aktiv',
+                    '24/7 erreichbar',
+                  ].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setSchedule(preset)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                        schedule === preset
+                          ? 'bg-sky-500/25 border-sky-400/60 text-sky-200'
+                          : 'bg-slate-950 hover:bg-slate-800 border-slate-800 text-slate-300'
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
               </div>
 
-              <div>
+              <div className="sm:col-span-2">
                 <label className="flex items-center gap-1.5 text-[11px] font-semibold text-indigo-300 mb-1">
                   <GitBranch className="w-3.5 h-3.5" />
-                  <span>Bedingung (IF / Status / Überlauf)</span>
+                  <span>Bedingung / Feiertag / Sonderstatus (IF / Überlauf)</span>
                 </label>
                 <input
                   type="text"
                   value={condition}
                   onChange={(e) => setCondition(e.target.value)}
-                  placeholder="z.B. Feiertag aktiv oder Wartezeit > 30s"
+                  placeholder="z.B. Feiertag aktiv, Sys_SondStat oder Wartezeit > 30s"
                   className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
                 />
               </div>

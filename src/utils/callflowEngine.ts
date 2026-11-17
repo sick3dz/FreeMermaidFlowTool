@@ -649,28 +649,49 @@ export function resolveClickedNodeIdFromSvgElement(
   return null;
 }
 
+function getSvgEdgeElementMeta(el: Element): string {
+  const nestedDataId =
+    el.getAttribute('data-id') ||
+    el.querySelector('[data-id]')?.getAttribute('data-id') ||
+    '';
+  return `${el.getAttribute('id') || ''} ${nestedDataId} ${el.getAttribute('class') || ''}`;
+}
+
+function createEdgeMetaMatcher(edge: CallflowEdge) {
+  const fromEsc = edge.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const toEsc = edge.to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Mermaid 12 puts `LS_<from> LE_<to>` in class and `L_<from>_<to>_<counter>` in id/data-id
+  const exactLsLeRegex = new RegExp(`(?:^|\\s)LS_${fromEsc}\\s+LE_${toEsc}(?:\\s|$)`);
+  const exactLRegex = new RegExp(
+    `(?:^|[-\\s])L[-_]${fromEsc}[-_]${toEsc}(?:[-_]\\d+(?:[-_]\\d+)?)?(?=$|\\s)`,
+    'i'
+  );
+  const genericPattern = new RegExp(
+    `(?:^|[-_L\\s])${fromEsc}[-_]${toEsc}(?:[-_]\\d+|\\s|$)`,
+    'i'
+  );
+  return {
+    edge,
+    score: edge.from.length + edge.to.length,
+    matches(meta: string): boolean {
+      return (
+        exactLsLeRegex.test(meta) ||
+        exactLRegex.test(meta) ||
+        genericPattern.test(meta) ||
+        meta.includes(`-${edge.from}-${edge.to}-`) ||
+        meta.includes(`_${edge.from}_${edge.to}_`)
+      );
+    },
+  };
+}
+
 /**
  * Checks whether an SVG edge element belongs to any edge in `allowedEdges` (works for Dagre & ELK).
  */
 function matchesSvgEdge(edgeEl: Element, allowedEdges: CallflowEdge[]): boolean {
-  const edgeMeta = `${edgeEl.getAttribute('id') || ''} ${edgeEl.getAttribute('data-id') || ''} ${
-    edgeEl.getAttribute('class') || ''
-  }`;
-
+  const edgeMeta = getSvgEdgeElementMeta(edgeEl);
   for (const activeEdge of allowedEdges) {
-    const fromEsc = activeEdge.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const toEsc = activeEdge.to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = new RegExp(
-      `(?:^|[-_L])${fromEsc}[-_]${toEsc}(?:[-_\\s\\d]|$)|L[-_]${fromEsc}[-_]${toEsc}`,
-      'i'
-    );
-    if (
-      pattern.test(edgeMeta) ||
-      edgeMeta.includes(`-${activeEdge.from}-${activeEdge.to}-`) ||
-      edgeMeta.includes(`_${activeEdge.from}_${activeEdge.to}_`) ||
-      edgeMeta.includes(`L_${activeEdge.from}_${activeEdge.to}`) ||
-      edgeMeta.includes(`L-${activeEdge.from}-${activeEdge.to}`)
-    ) {
+    if (createEdgeMetaMatcher(activeEdge).matches(edgeMeta)) {
       return true;
     }
   }
@@ -1231,13 +1252,22 @@ export function applyNodeOffsetsToSvg(
     // Shift connected edges and edge labels
     const edgeElements = Array.from(
       svgEl.querySelectorAll('g.edgePaths > *, g.edgePath, path.flowchart-link')
+    ).filter(
+      (el) =>
+        !el.classList.contains('callflow-edge-hit') &&
+        !(el.tagName.toLowerCase() === 'path' && el.parentElement?.classList.contains('edgePath'))
     );
     const edgeLabelElements = Array.from(
       svgEl.querySelectorAll('g.edgeLabels > *, g.edgeLabel')
     );
 
+    const exportMatchers = graph.edges
+      .map((e) => createEdgeMetaMatcher(e))
+      .sort((a, b) => b.score - a.score);
+
     edgeElements.forEach((edgeEl, idx) => {
-      const matchedEdge = graph.edges.find((e) => matchesSvgEdge(edgeEl, [e]));
+      const meta = getSvgEdgeElementMeta(edgeEl);
+      const matchedEdge = exportMatchers.find((m) => m.matches(meta))?.edge;
       if (!matchedEdge) return;
       const fromOff = activeOffsets[matchedEdge.from] || { dx: 0, dy: 0 };
       const toOff = activeOffsets[matchedEdge.to] || { dx: 0, dy: 0 };
@@ -1881,35 +1911,15 @@ export function buildLiveSvgDomIndex(
     });
   });
 
-  // Pre-compile edge matchers once for O(E) setup instead of repeated regex compilation
-  const compiledEdges = graph.edges.map((edge) => {
-    const fromEsc = edge.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const toEsc = edge.to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return {
-      edge,
-      pattern: new RegExp(
-        `(?:^|[-_L])${fromEsc}[-_]${toEsc}(?:[-_\\s\\d]|$)|L[-_]${fromEsc}[-_]${toEsc}`,
-        'i'
-      ),
-      dashToken: `-${edge.from}-${edge.to}-`,
-      underToken: `_${edge.from}_${edge.to}_`,
-      lUnderToken: `L_${edge.from}_${edge.to}`,
-      lDashToken: `L-${edge.from}-${edge.to}`,
-    };
-  });
+  // Pre-compile edge matchers once (longest node IDs first to prevent prefix collisions)
+  const compiledEdges = graph.edges
+    .map((edge) => createEdgeMetaMatcher(edge))
+    .sort((a, b) => b.score - a.score);
 
   const matchEdgeMeta = (el: Element): CallflowEdge | null => {
-    const meta = `${el.getAttribute('id') || ''} ${el.getAttribute('data-id') || ''} ${
-      el.getAttribute('class') || ''
-    }`;
+    const meta = getSvgEdgeElementMeta(el);
     for (const item of compiledEdges) {
-      if (
-        item.pattern.test(meta) ||
-        meta.includes(item.dashToken) ||
-        meta.includes(item.underToken) ||
-        meta.includes(item.lUnderToken) ||
-        meta.includes(item.lDashToken)
-      ) {
+      if (item.matches(meta)) {
         return item.edge;
       }
     }
@@ -1918,7 +1928,11 @@ export function buildLiveSvgDomIndex(
 
   const edgeElements = Array.from(
     svgEl.querySelectorAll('g.edgePaths > *, g.edgePath, path.flowchart-link')
-  ).filter((el) => !el.classList.contains('callflow-edge-hit')) as SVGElement[];
+  ).filter(
+    (el) =>
+      !el.classList.contains('callflow-edge-hit') &&
+      !(el.tagName.toLowerCase() === 'path' && el.parentElement?.classList.contains('edgePath'))
+  ) as SVGElement[];
   const edgeLabelElements = Array.from(
     svgEl.querySelectorAll('g.edgeLabels > *, g.edgeLabel')
   ) as SVGElement[];
@@ -1930,6 +1944,8 @@ export function buildLiveSvgDomIndex(
 
   const locksLayer = doc.createElementNS(svgNs, 'g');
   locksLayer.setAttribute('class', 'callflow-edge-locks-layer');
+
+  const usedLabelEls = new Set<SVGElement>();
 
   edgeElements.forEach((edgeEl, idx) => {
     const matched = matchEdgeMeta(edgeEl);
@@ -1944,11 +1960,34 @@ export function buildLiveSvgDomIndex(
     const edgeTx = edgeTr.x;
     const edgeTy = edgeTr.y;
 
+    const edgeOwnDataId =
+      edgeEl.getAttribute('data-id') ||
+      edgeEl.getAttribute('id')?.replace(/^.*-(L[-_].+)$/i, '$1') ||
+      '';
+
     const matchedLabel =
+      (edgeOwnDataId
+        ? edgeLabelElements.find((l) => {
+            if (usedLabelEls.has(l)) return false;
+            const lid =
+              l.getAttribute('data-id') ||
+              l.querySelector('[data-id]')?.getAttribute('data-id') ||
+              '';
+            return lid === edgeOwnDataId;
+          })
+        : null) ||
       edgeLabelElements.find((l) => {
+        if (usedLabelEls.has(l)) return false;
         const m = matchEdgeMeta(l);
         return m && m.from === matched.from && m.to === matched.to;
-      }) || (edgeLabelElements.length === edgeElements.length ? edgeLabelElements[idx] : null);
+      }) ||
+      (edgeLabelElements.length === edgeElements.length && !usedLabelEls.has(edgeLabelElements[idx])
+        ? edgeLabelElements[idx]
+        : null);
+
+    if (matchedLabel) {
+      usedLabelEls.add(matchedLabel);
+    }
 
     const labelText =
       matched.label ||

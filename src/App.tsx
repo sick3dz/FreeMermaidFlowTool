@@ -568,12 +568,18 @@ export default function App() {
     callflowHopDepth,
   ]);
 
+  const hasBaseRenderedSvgRef = useRef<boolean>(false);
+  const scriptWorkspaceFallbackRef = useRef<ScriptWorkspace>(scriptWorkspace);
+  scriptWorkspaceFallbackRef.current = scriptWorkspace;
+
   // Debounced Local Mermaid v11 Parsing & Base SVG Rendering (0ms when initializing empty canvas)
   useEffect(() => {
     let isCancelled = false;
-    const delayMs = baseRenderedSvg === null && effectiveMermaidCode.trim().length > 0 ? 0 : 120;
+    const delayMs =
+      !hasBaseRenderedSvgRef.current && effectiveMermaidCode.trim().length > 0 ? 0 : 120;
     const timer = window.setTimeout(async () => {
       if (!effectiveMermaidCode.trim()) {
+        hasBaseRenderedSvgRef.current = false;
         setMasterRenderError(null);
         setBaseRenderedSvg(null);
         setValidation({
@@ -588,22 +594,24 @@ export default function App() {
       const result = await renderLocalMermaidDiagram(effectiveMermaidCode, themeConfig);
       if (isCancelled) return;
       if (result.svg !== null) {
+        hasBaseRenderedSvgRef.current = true;
         setValidation(result.validation);
         setMasterRenderError(null);
         setBaseRenderedSvg(result.svg);
       } else if (
-        scriptWorkspace.modules.length > 0 &&
+        scriptWorkspaceFallbackRef.current.modules.length > 0 &&
         callflowViewLevel.level === 'master' &&
         !isolateSubgraphMode
       ) {
         // Fallback to guaranteed-valid simplified Master overview if production script syntax edge case occurs
         const fallbackCode = buildSafeFallbackMasterMermaid(
-          scriptWorkspace,
+          scriptWorkspaceFallbackRef.current,
           currentDirection || 'LR'
         );
         const fallbackResult = await renderLocalMermaidDiagram(fallbackCode, themeConfig);
         if (isCancelled) return;
         if (fallbackResult.svg !== null) {
+          hasBaseRenderedSvgRef.current = true;
           setValidation(fallbackResult.validation);
           setMasterRenderError(null);
           setBaseRenderedSvg(fallbackResult.svg);
@@ -628,8 +636,7 @@ export default function App() {
   }, [
     effectiveMermaidCode,
     themeConfig,
-    baseRenderedSvg,
-    scriptWorkspace,
+    scriptWorkspace.modules.length,
     callflowViewLevel.level,
     isolateSubgraphMode,
     currentDirection,
@@ -1978,20 +1985,23 @@ export default function App() {
   const handleSubmitChecklistDetailScript = useCallback(
     (targetRef: string, rawText: string, origin: ScriptOrigin): ScriptWorkspace | null => {
       const trimmed = rawText.trim();
-      const normalizedTarget = normalizeScriptRef(targetRef);
-      if (!trimmed || !normalizedTarget) return null;
+      if (!trimmed) return null;
+      const isAutoStart = !targetRef || targetRef === '__auto__';
+      const normalizedTarget = isAutoStart ? '' : normalizeScriptRef(targetRef);
 
       const incoming = parseCallflowTextWithFallback(trimmed, {
-        defaultScriptNumber: normalizedTarget,
-        defaultScriptName: normalizedTarget,
+        defaultScriptNumber: normalizedTarget || undefined,
+        defaultScriptName: normalizedTarget || undefined,
         origin,
-        isMasterHint: canonicalScriptMatchKey(normalizedTarget) === 'main',
+        isMasterHint: isAutoStart || canonicalScriptMatchKey(normalizedTarget) === 'main',
       });
 
       const hasRules = incoming.some((m) => m.rules.length > 0);
       if (incoming.length === 0 || !hasRules) return null;
 
-      const targetKey = canonicalScriptMatchKey(normalizedTarget);
+      const targetKey = canonicalScriptMatchKey(
+        normalizedTarget || incoming[0].scriptNumber
+      );
       const nextIgnored = (scriptWorkspace.ignoredChecklistTargets || []).filter(
         (t) => canonicalScriptMatchKey(t) !== targetKey
       );
@@ -1999,6 +2009,10 @@ export default function App() {
       const merged = mergeScriptModules(scriptWorkspace.modules, incoming);
       const nextWs = buildScriptWorkspace(merged, {
         ...scriptWorkspace,
+        masterScriptNumber:
+          wasEmpty && isAutoStart
+            ? incoming[0].scriptNumber
+            : scriptWorkspace.masterScriptNumber,
         ignoredChecklistTargets: nextIgnored,
       });
       if (wasEmpty) {
@@ -2014,23 +2028,29 @@ export default function App() {
 
   const handleSubmitChecklistVisioFile = useCallback(
     async (targetRef: string, file: File): Promise<ScriptWorkspace | null> => {
-      const normalizedTarget = normalizeScriptRef(targetRef);
-      if (!normalizedTarget) return null;
+      const isAutoStart = !targetRef || targetRef === '__auto__';
+      const normalizedTarget = isAutoStart ? '' : normalizeScriptRef(targetRef);
       try {
         const result = await importCallflowFile(file, {
-          overridePrimaryScriptNumber: normalizedTarget,
-          overridePrimaryScriptName: normalizedTarget,
-          isMasterHint: canonicalScriptMatchKey(normalizedTarget) === 'main',
+          overridePrimaryScriptNumber: normalizedTarget || undefined,
+          overridePrimaryScriptName: normalizedTarget || undefined,
+          isMasterHint: isAutoStart || canonicalScriptMatchKey(normalizedTarget) === 'main',
         });
         if (result.modules.length === 0) return null;
         const wasEmpty = scriptWorkspace.modules.length === 0;
-        const targetKey = canonicalScriptMatchKey(normalizedTarget);
+        const targetKey = canonicalScriptMatchKey(
+          normalizedTarget || result.modules[0].scriptNumber
+        );
         const nextIgnored = (scriptWorkspace.ignoredChecklistTargets || []).filter(
           (t) => canonicalScriptMatchKey(t) !== targetKey
         );
         const merged = mergeScriptModules(scriptWorkspace.modules, result.modules);
         const nextWs = buildScriptWorkspace(merged, {
           ...scriptWorkspace,
+          masterScriptNumber:
+            wasEmpty && isAutoStart
+              ? result.modules[0].scriptNumber
+              : scriptWorkspace.masterScriptNumber,
           ignoredChecklistTargets: nextIgnored,
         });
         if (wasEmpty) {

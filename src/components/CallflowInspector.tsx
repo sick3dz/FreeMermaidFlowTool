@@ -7,6 +7,7 @@ import {
   BookOpen,
   Check,
   CheckCircle2,
+  Clock,
   Copy,
   Download,
   Edit3,
@@ -45,8 +46,10 @@ import {
 import {
   analyzeWorkspaceLogicHealth,
   buildWorkspaceRoutingMatrix,
+  buildWorkspaceScheduleOverview,
   canonicalScriptMatchKey,
   exportMigrationDocumentationMarkdown,
+  exportOpeningHoursCsv,
   exportRoutingMatrixCsv,
   extractScriptNumberFromNodeId,
   extractWorkspaceResourceRegistry,
@@ -173,9 +176,13 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
   const prevModulesCountRef = useRef<number>(scriptWorkspace.modules.length);
 
   // Top-Down Masterscript Checklist Wizard & Sync Map state
-  const [inspectorTab, setInspectorTab] = useState<'overview' | 'health' | 'registry' | 'matrix'>(
-    'overview'
-  );
+  const [inspectorTab, setInspectorTab] = useState<
+    'overview' | 'schedules' | 'health' | 'registry' | 'matrix'
+  >('overview');
+  const [scheduleFilter, setScheduleFilter] = useState<
+    'all' | 'with-hours' | 'holiday' | 'without-hours'
+  >('all');
+  const [scheduleSearch, setScheduleSearch] = useState('');
   const [healthFilter, setHealthFilter] = useState<'all' | 'error' | 'warning'>('all');
   const [registrySubTab, setRegistrySubTab] = useState<
     'skillsets' | 'announcements' | 'variables' | 'crossrefs'
@@ -291,6 +298,53 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
         }
       }
     }
+  };
+
+  const scheduleOverviewRows = useMemo(
+    () => buildWorkspaceScheduleOverview(scriptWorkspace),
+    [scriptWorkspace]
+  );
+  const scheduleWithHoursCount = useMemo(
+    () => scheduleOverviewRows.filter((r) => r.hasSchedule).length,
+    [scheduleOverviewRows]
+  );
+  const scheduleHolidayCount = useMemo(
+    () => scheduleOverviewRows.filter((r) => r.hasHoliday).length,
+    [scheduleOverviewRows]
+  );
+  const scheduleWithoutHoursCount = useMemo(
+    () => scheduleOverviewRows.filter((r) => !r.hasSchedule && !r.hasHoliday).length,
+    [scheduleOverviewRows]
+  );
+  const filteredScheduleRows = useMemo(() => {
+    const q = scheduleSearch.trim().toLowerCase();
+    return scheduleOverviewRows.filter((r) => {
+      if (scheduleFilter === 'with-hours' && !r.hasSchedule) return false;
+      if (scheduleFilter === 'holiday' && !r.hasHoliday) return false;
+      if (scheduleFilter === 'without-hours' && (r.hasSchedule || r.hasHoliday)) return false;
+      if (!q) return true;
+      return (
+        r.scriptNumber.toLowerCase().includes(q) ||
+        r.scriptName.toLowerCase().includes(q) ||
+        r.stepName.toLowerCase().includes(q) ||
+        r.openingHours.toLowerCase().includes(q) ||
+        r.holidayAndSpecial.toLowerCase().includes(q) ||
+        r.closedOrOverflowAction.toLowerCase().includes(q)
+      );
+    });
+  }, [scheduleOverviewRows, scheduleFilter, scheduleSearch]);
+
+  const handleDownloadOpeningHoursCsv = () => {
+    const csv = exportOpeningHoursCsv(scriptWorkspace);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `callflow-oeffnungszeiten-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const handleDownloadCsvMatrix = () => {
@@ -768,11 +822,11 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-4 gap-1 px-3 py-2 border-b border-slate-800 bg-slate-950/90 shrink-0">
+        <div className="grid grid-cols-5 gap-1 px-2.5 py-2 border-b border-slate-800 bg-slate-950/90 shrink-0">
           <button
             type="button"
             onClick={() => setInspectorTab('overview')}
-            className={`px-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+            className={`px-1 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
               inspectorTab === 'overview'
                 ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
@@ -793,8 +847,34 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
 
           <button
             type="button"
+            onClick={() => setInspectorTab('schedules')}
+            className={`px-1 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+              inspectorTab === 'schedules'
+                ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <Clock className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Zeiten</span>
+            </div>
+            <span
+              className={`text-[10px] font-mono tabular-nums ${
+                scheduleWithHoursCount + scheduleHolidayCount > 0
+                  ? 'text-sky-300'
+                  : 'text-slate-400'
+              }`}
+            >
+              {scheduleWithHoursCount + scheduleHolidayCount > 0
+                ? `${scheduleWithHoursCount + scheduleHolidayCount} aktiv`
+                : `${scheduleOverviewRows.length} Skripte`}
+            </span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setInspectorTab('health')}
-            className={`px-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+            className={`px-1 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
               inspectorTab === 'health'
                 ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
@@ -802,7 +882,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
           >
             <div className="flex items-center gap-1">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">Logik-Prüfung</span>
+              <span className="truncate">Prüfung</span>
             </div>
             <span
               className={`text-[10px] font-mono tabular-nums ${
@@ -820,7 +900,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
           <button
             type="button"
             onClick={() => setInspectorTab('registry')}
-            className={`px-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+            className={`px-1 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
               inspectorTab === 'registry'
                 ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
@@ -838,7 +918,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
           <button
             type="button"
             onClick={() => setInspectorTab('matrix')}
-            className={`px-1.5 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+            className={`px-1 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
               inspectorTab === 'matrix'
                 ? 'bg-indigo-600/25 text-indigo-200 border border-indigo-500/40'
                 : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
@@ -999,9 +1079,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                     type="button"
                     disabled={!guidedMainDraft.trim()}
                     onClick={() => {
-                      const targetRef = scriptWorkspace.masterScriptNumber || 'Main';
                       const updatedWs = onSubmitChecklistDetailScript(
-                        targetRef,
+                        '__auto__',
                         guidedMainDraft,
                         'legacy-text'
                       );
@@ -1018,7 +1097,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                     className="flex-1 py-2 px-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <FileText className="w-3.5 h-3.5" />
-                    <span>Main einlesen &amp; weiter zu Schritt 2</span>
+                    <span>Start-Skript einlesen &amp; weiter zu Schritt 2</span>
                   </button>
 
                   {onSubmitChecklistVisioFile && (
@@ -1036,7 +1115,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                           setGuidedMainFeedback(null);
                           try {
                             const updatedWs = await onSubmitChecklistVisioFile(
-                              scriptWorkspace.masterScriptNumber || 'Main',
+                              '__auto__',
                               file
                             );
                             if (!updatedWs) {
@@ -1808,6 +1887,229 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   {filteredMatrixRows.length === 0 && (
                     <div className="text-xs text-slate-500 py-2">
                       Keine passenden Routing-Regeln gefunden.
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+        )}
+
+        {/* TAB: Öffnungszeiten & Feiertags-Übersichtsliste (Free Mode Tab 'schedules' & Guided Step 3) */}
+        {((workspaceMode === 'free' && inspectorTab === 'schedules') ||
+          (workspaceMode === 'guided' && guidedStep === 3)) && (
+          <section className="space-y-3 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Clock className="w-4 h-4 text-sky-400 shrink-0" />
+                <span className="text-xs font-semibold text-slate-100 truncate">
+                  Öffnungszeiten &amp; Feiertags-Übersicht
+                </span>
+              </div>
+              <span className="text-[11px] font-mono text-slate-400 tabular-nums shrink-0">
+                {scheduleWithHoursCount} mit Zeiten · {scheduleHolidayCount} Feiertag
+              </span>
+            </div>
+
+            {scriptWorkspace.modules.length === 0 ? (
+              <div className="text-[11px] text-slate-400 py-2 leading-relaxed">
+                Laden Sie zuerst Skripte in den Arbeitsbereich. Alle im Skript erkannten oder
+                manuell hinterlegten Öffnungszeiten (<span className="font-mono text-slate-200">Mo–Fr 08:00–17:00</span>)
+                und Feiertags-Regeln erscheinen hier als zentrale Liste und können direkt bearbeitet werden.
+              </div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={handleDownloadOpeningHoursCsv}
+                    className="w-full py-2 px-3 bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Öffnungszeiten-Liste für Excel speichern (.csv)</span>
+                  </button>
+                </div>
+
+                {/* Filter-Leiste */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setScheduleFilter('all')}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors tabular-nums whitespace-nowrap shrink-0 cursor-pointer ${
+                      scheduleFilter === 'all'
+                        ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Alle ({scheduleOverviewRows.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setScheduleFilter('with-hours')}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors tabular-nums whitespace-nowrap shrink-0 cursor-pointer ${
+                      scheduleFilter === 'with-hours'
+                        ? 'bg-sky-600/20 border-sky-500/45 text-sky-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Mit Zeiten ({scheduleWithHoursCount})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setScheduleFilter('holiday')}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors tabular-nums whitespace-nowrap shrink-0 cursor-pointer ${
+                      scheduleFilter === 'holiday'
+                        ? 'bg-amber-600/20 border-amber-500/45 text-amber-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Feiertag ({scheduleHolidayCount})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setScheduleFilter('without-hours')}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors tabular-nums whitespace-nowrap shrink-0 cursor-pointer ${
+                      scheduleFilter === 'without-hours'
+                        ? 'bg-slate-800 border-slate-600 text-slate-100'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    24/7 ({scheduleWithoutHoursCount})
+                  </button>
+                </div>
+
+                {/* Suche */}
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={scheduleSearch}
+                    onChange={(e) => setScheduleSearch(e.target.value)}
+                    placeholder="Skript, Öffnungszeiten (z.B. Mo-Fr) oder Feiertag suchen..."
+                    className="w-full pl-8 pr-7 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-sky-500"
+                  />
+                  {scheduleSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setScheduleSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Liste der Skripte & Öffnungszeiten */}
+                <div className="space-y-2 max-h-[500px] overflow-y-auto pr-0.5">
+                  {filteredScheduleRows.map((row) => {
+                    const nodeId = `S_${toMermaidNodeSuffix(row.scriptNumber)}`;
+                    return (
+                      <div
+                        key={row.id}
+                        className={`p-2.5 rounded-lg border space-y-1.5 text-[11px] ${
+                          row.hasSchedule
+                            ? 'bg-slate-900/95 border-sky-500/35'
+                            : row.hasHoliday
+                            ? 'bg-slate-900/95 border-amber-500/35'
+                            : 'bg-slate-900/80 border-slate-800'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            onClick={() => jumpToScriptInInspector(row.scriptNumber, false, true)}
+                            className="font-mono font-semibold text-slate-100 hover:text-sky-300 truncate cursor-pointer text-left"
+                          >
+                            [{row.scriptNumber}] {row.scriptName}
+                          </button>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-medium whitespace-nowrap shrink-0 ${
+                              row.hasSchedule
+                                ? 'bg-sky-500/20 text-sky-200 border border-sky-500/40'
+                                : row.hasHoliday
+                                ? 'bg-amber-500/20 text-amber-200 border border-amber-500/40'
+                                : 'bg-slate-800 text-slate-400'
+                            }`}
+                          >
+                            {row.hasSchedule
+                              ? '🕒 Öffnungszeiten'
+                              : row.hasHoliday
+                              ? '📅 Feiertag'
+                              : '24/7 / Keine Angabe'}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span className="text-slate-400">Öffnungszeiten:</span>
+                          <span
+                            className={`font-mono font-medium ${
+                              row.hasSchedule ? 'text-sky-300' : 'text-slate-400'
+                            }`}
+                          >
+                            {row.openingHours}
+                          </span>
+                        </div>
+
+                        {row.holidayAndSpecial !== '—' && (
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                            <span className="text-slate-400">Feiertag / Sonderzeit:</span>
+                            <span className="font-mono text-amber-300">
+                              {row.holidayAndSpecial}
+                            </span>
+                          </div>
+                        )}
+
+                        {row.closedOrOverflowAction !== '—' && (
+                          <div className="text-slate-300 truncate">
+                            <span className="text-slate-500">Aktion / Ziel: </span>
+                            <span className="font-mono text-slate-200">
+                              {row.closedOrOverflowAction}
+                            </span>
+                          </div>
+                        )}
+
+                        <div className="flex items-center justify-between gap-1.5 pt-1 border-t border-slate-800/80">
+                          <button
+                            type="button"
+                            onClick={() => jumpToScriptInInspector(row.scriptNumber, false, true)}
+                            className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                          >
+                            Im Diagramm zeigen
+                          </button>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => jumpToScriptInInspector(row.scriptNumber, true, true)}
+                              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300 text-[10px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                            >
+                              Ebene 2
+                            </button>
+                            {onOpenNodeEditor && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (viewLevel.level !== 'master') {
+                                    onSwitchViewLevel({ level: 'master' });
+                                  }
+                                  onOpenNodeEditor(nodeId);
+                                }}
+                                className="px-2.5 py-1 rounded bg-sky-600/25 hover:bg-sky-600/40 border border-sky-500/45 text-sky-200 text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                              >
+                                <Edit3 className="w-3 h-3" />
+                                <span>
+                                  {row.hasSchedule ? 'Zeiten ändern' : 'Zeiten angeben'}
+                                </span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {filteredScheduleRows.length === 0 && (
+                    <div className="text-xs text-slate-500 py-2">
+                      Keine passenden Einträge in der Öffnungszeiten-Liste gefunden.
                     </div>
                   )}
                 </div>

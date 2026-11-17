@@ -8,6 +8,7 @@ import {
   CallflowOpenIssue,
   CallflowResourceRegistry,
   CallflowRoutingMatrixRow,
+  CallflowScheduleSummaryRow,
   CallflowSkillsetRegistryItem,
   CallflowVariableRegistryItem,
   CallflowViewLevel,
@@ -885,6 +886,158 @@ function parseValueTriggerNumbers(rawValueExpr: string): string[] {
   return nums;
 }
 
+const DAY_TOKEN_MAP: Record<string, string> = {
+  monday: 'Mo',
+  mon: 'Mo',
+  montag: 'Mo',
+  mo: 'Mo',
+  tuesday: 'Di',
+  tue: 'Di',
+  dienstag: 'Di',
+  di: 'Di',
+  wednesday: 'Mi',
+  wed: 'Mi',
+  mittwoch: 'Mi',
+  mi: 'Mi',
+  thursday: 'Do',
+  thu: 'Do',
+  donnerstag: 'Do',
+  do: 'Do',
+  friday: 'Fr',
+  fri: 'Fr',
+  freitag: 'Fr',
+  fr: 'Fr',
+  saturday: 'Sa',
+  sat: 'Sa',
+  samstag: 'Sa',
+  sa: 'Sa',
+  sunday: 'So',
+  sun: 'So',
+  sonntag: 'So',
+  so: 'So',
+};
+
+function normalizeDayToken(raw: string): string {
+  const key = raw.trim().toLowerCase().replace(/\.$/, '');
+  return DAY_TOKEN_MAP[key] || raw.trim();
+}
+
+function normalizeClockToken(raw: string): string {
+  const m = raw.trim().match(/^(\d{1,2})(?:[:.](\d{2}))?$/);
+  if (!m) return raw.trim();
+  const hh = m[1].padStart(2, '0');
+  const mm = m[2] || '00';
+  return `${hh}:${mm}`;
+}
+
+/**
+ * Extracts human-readable opening hours (`schedule`) and holiday/special state (`holiday`)
+ * from Avaya OCL conditions (`DAY OF WEEK`, `TIME OF DAY`, `HOLIDAY`, `Sys_SondZeit`) or German prose.
+ */
+export function extractReadableScheduleAndHolidayFromText(rawText: string): {
+  schedule?: string;
+  holiday?: string;
+} {
+  if (!rawText) return {};
+  const text = rawText.replace(/\s+/g, ' ').trim();
+  if (!text) return {};
+
+  const scheduleParts: string[] = [];
+  const holidayParts: string[] = [];
+
+  // 1. AACC `DAY OF WEEK` ranges / lists (e.g. `DAY OF WEEK EQUALS MONDAY..FRIDAY` or `DAY OF WEEK IN SATURDAY, SUNDAY`)
+  const dowRangeMatch = text.match(
+    /\bday\s+of\s+week\s*(?:equals|is|in|=|:)?\s*([A-Za-zÄÖÜäöüß]+)\s*(?:\.\.|to|bis|-|–)\s*([A-Za-zÄÖÜäöüß]+)/i
+  );
+  if (dowRangeMatch) {
+    scheduleParts.push(
+      `${normalizeDayToken(dowRangeMatch[1])}–${normalizeDayToken(dowRangeMatch[2])}`
+    );
+  } else {
+    const dowSingleMatch = text.match(
+      /\bday\s+of\s+week\s*(?:equals|is|in|=|:)?\s*([A-Za-zÄÖÜäöüß]+(?:\s*(?:,|or|oder)\s*[A-Za-zÄÖÜäöüß]+)*)/i
+    );
+    if (dowSingleMatch) {
+      const days = dowSingleMatch[1]
+        .split(/\s*(?:,|or|oder)\s*/i)
+        .map(normalizeDayToken)
+        .filter(Boolean);
+      if (days.length > 0) scheduleParts.push(days.join(', '));
+    }
+  }
+
+  // 2. German day ranges (e.g. `Mo-Fr`, `Mo - Do`, `Montag bis Freitag`, `Sa-So`)
+  if (scheduleParts.length === 0) {
+    const deDayRange = text.match(
+      /\b(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Mo|Di|Mi|Do|Fr|Sa|So)\.?[\s]*(?:-+|–|\.\.|bis|to)[\s]*(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Mo|Di|Mi|Do|Fr|Sa|So)\b/i
+    );
+    if (deDayRange) {
+      scheduleParts.push(`${normalizeDayToken(deDayRange[1])}–${normalizeDayToken(deDayRange[2])}`);
+    }
+  }
+
+  // 3. AACC `TIME OF DAY` or general clock range (`08:00..17:00`, `08:00 TO 18:00`, `08:00-17:00`)
+  const todRangeMatch = text.match(
+    /\b(?:time\s+of\s+day\s*(?:equals|is|in|=|:)?\s*)?(\d{1,2}[:.]\d{2})\s*(?:\.\.|to|bis|-|–)\s*(\d{1,2}[:.]\d{2})(?:\s*Uhr)?/i
+  );
+  if (todRangeMatch) {
+    scheduleParts.push(
+      `${normalizeClockToken(todRangeMatch[1])}–${normalizeClockToken(todRangeMatch[2])}`
+    );
+  } else {
+    const todCompareMatch = text.match(
+      /\btime\s+of\s+day\s*(<=|<|>=|>|before|after)\s*(\d{1,2}(?:[:.]\d{2})?)/i
+    );
+    if (todCompareMatch) {
+      const op = todCompareMatch[1].toLowerCase();
+      const prefix = op === 'before' || op === '<' || op === '<=' ? 'vor ' : 'ab ';
+      scheduleParts.push(`${prefix}${normalizeClockToken(todCompareMatch[2])} Uhr`);
+    } else {
+      const shortUhrRange = text.match(
+        /\b(\d{1,2})\s*(?:-+|–|bis)\s*(\d{1,2})\s*Uhr\b/i
+      );
+      if (shortUhrRange) {
+        scheduleParts.push(
+          `${normalizeClockToken(shortUhrRange[1])}–${normalizeClockToken(shortUhrRange[2])}`
+        );
+      }
+    }
+  }
+
+  // 4. Explicit keywords for business hours / after-hours if no exact clock was given
+  if (
+    scheduleParts.length === 0 &&
+    /\b(?:out\s+of\s+hours|after\s+hours|au[sß]erhalb\s+der\s+[oö]ffnungszeiten|geschlossen|nachtschaltung|wochenende)\b/i.test(
+      text
+    )
+  ) {
+    if (/\bwochenende\b/i.test(text)) {
+      scheduleParts.push('Wochenende (Sa–So)');
+    } else if (/\bnachtschaltung\b/i.test(text)) {
+      scheduleParts.push('Nachtschaltung');
+    } else {
+      scheduleParts.push('Außerhalb Öffnungszeiten');
+    }
+  }
+
+  // 5. Holiday / Special status detection
+  if (/\b(?:feiertag(?:e|sliste|spr[uü]fung)?|holiday|bundesfeiertag|sondertag)\b/i.test(text)) {
+    const notHol = /\b(?:not\s+holiday|kein\s+feiertag)\b/i.test(text);
+    holidayParts.push(notHol ? 'Kein Feiertag (Regulär)' : 'Feiertags-Prüfung aktiv');
+  }
+  const sondMatch = text.match(/\b(Sys_Sond(?:Zeit|Stat|Routing))\s*(?:[:=]\s*([^\s·,;]+))?/i);
+  if (sondMatch) {
+    holidayParts.push(
+      sondMatch[2] ? `${sondMatch[1]}=${sondMatch[2]}` : sondMatch[1]
+    );
+  }
+
+  return {
+    schedule: scheduleParts.length > 0 ? scheduleParts.join(' ') : undefined,
+    holiday: holidayParts.length > 0 ? holidayParts.join(' · ') : undefined,
+  };
+}
+
 function parseAaccScriptBlocks(
   rawText: string,
   options?: {
@@ -957,26 +1110,23 @@ function parseAaccScriptBlocks(
         ? normalizeScriptRef(options.defaultScriptNumber)
         : headerCommentCdn ||
           fileDigitRef ||
-          (chunkIsMaster
+          fileTokenRef ||
+          (headerCommentScriptName && isValidScriptRef(headerCommentScriptName)
+            ? normalizeScriptRef(headerCommentScriptName)
+            : chunkIsMaster
             ? 'Main'
-            : fileTokenRef ||
-              (headerCommentScriptName && isValidScriptRef(headerCommentScriptName)
-                ? normalizeScriptRef(headerCommentScriptName)
-                : chunks.length === 1
-                ? 'Main'
-                : `900${chunkIdx}`));
+            : chunks.length === 1
+            ? 'Start'
+            : `900${chunkIdx}`);
     const hasExplicitMasterHeader =
       chunkIsMaster &&
       (/\bVALUE\s+['"]?[0-9xX*]{2,15}['"]?\s*[:=]/i.test(trimmedChunk) ||
         /\b(?:DNIS_Range[A-Za-z0-9_]*|src_route_number|Sys_brand)\b/i.test(trimmedChunk) ||
         /\b02131[\s\-/]?(?:290|210|6099)/i.test(trimmedChunk));
     const scriptNumber =
-      (hasExplicitMasterHeader || chunkIsMaster) &&
-      (!options?.defaultScriptNumber ||
-        /^(?:main|master(?:script)?)$/i.test(options.defaultScriptNumber)) &&
-      (!cdnMatch || hasExplicitMasterHeader)
-        ? 'Main'
-        : cdnMatch?.[1] || fallbackNum;
+      cdnMatch?.[1] ||
+      fallbackNum ||
+      (hasExplicitMasterHeader || chunkIsMaster ? 'Main' : `900${chunkIdx}`);
 
     // Extract descriptive name: non-key-value line right before `CDN`, header comments, or `assign ... to Sys_Team_Skillset`
     let detectedName = '';
@@ -1200,6 +1350,16 @@ function parseAaccScriptBlocks(
       if (notOos) return `Skillset aktiv (${notOos[1].trim()})`;
       const oos = trimmed.match(/^out\s+of\s+service\s+["']?(.+?)["']?$/i);
       if (oos) return `Skillset Out of Service (${oos[1].trim()})`;
+      const extractedTime = extractReadableScheduleAndHolidayFromText(trimmed);
+      if (extractedTime.schedule && extractedTime.holiday) {
+        return `Öffnungszeiten ${extractedTime.schedule} · ${extractedTime.holiday}`;
+      }
+      if (extractedTime.schedule) {
+        return `Öffnungszeiten: ${extractedTime.schedule}`;
+      }
+      if (extractedTime.holiday) {
+        return extractedTime.holiday;
+      }
       return trimmed.replace(/\s+/g, ' ');
     };
 
@@ -1471,6 +1631,10 @@ function parseAaccScriptBlocks(
           ? 'Voice-Prompt'
           : 'Ansage / RAN';
 
+        const detectedTime = extractReadableScheduleAndHolidayFromText(
+          `${stackCond || ''} ${caseLabel || ''} ${rawLine}`
+        );
+
         const createdRule: ScriptRule = {
           id: `${scriptNumber}-${ruleCounter++}`,
           prio: ruleCounter + 20,
@@ -1484,6 +1648,8 @@ function parseAaccScriptBlocks(
           sectionName: currentSection,
           eventName: currentEvent,
           announcement: formattedAnnouncement,
+          schedule: detectedTime.schedule,
+          holiday: detectedTime.holiday,
           condition: combinedCondition,
           choices: [],
           rawLine,
@@ -2408,17 +2574,29 @@ export function parseScriptTextBundle(
         : undefined;
 
     const resolvedTarget = parsedLine.targetNumber || bareTargetToken;
-    const effectiveSource = parsedLine.sourceNumber || currentHeaderNumber || resolvedTarget;
+    const fileDerivedRef = options?.sourceFilename
+      ? options.sourceFilename.replace(/\.[^.]+$/, '').replace(/\s+/g, '_').trim()
+      : '';
+    const fallbackModNum =
+      options?.defaultScriptNumber?.trim()
+        ? normalizeScriptRef(options.defaultScriptNumber)
+        : fileDerivedRef && isValidScriptRef(fileDerivedRef)
+        ? normalizeScriptRef(fileDerivedRef)
+        : 'Main';
+    const effectiveSource =
+      parsedLine.sourceNumber || currentHeaderNumber || fallbackModNum || resolvedTarget;
     if (
       !effectiveSource &&
       !resolvedTarget &&
       parsedLine.choices.length === 0 &&
-      !parsedLine.queueTarget
+      !parsedLine.queueTarget &&
+      !parsedLine.schedule &&
+      !parsedLine.holiday
     ) {
       continue;
     }
 
-    const modNumber = effectiveSource || 'Main';
+    const modNumber = effectiveSource || fallbackModNum;
     const resolvedPrio =
       parsedLine.prio !== undefined && Number.isFinite(parsedLine.prio)
         ? parsedLine.prio
@@ -2433,6 +2611,10 @@ export function parseScriptTextBundle(
             ? currentHeaderName
             : `Regel Prio ${resolvedPrio}`);
 
+    const detectedTimeFromCond = extractReadableScheduleAndHolidayFromText(
+      parsedLine.condition || ''
+    );
+
     pendingRule = {
       modNumber,
       prio: resolvedPrio,
@@ -2440,8 +2622,8 @@ export function parseScriptTextBundle(
       targetNumber: resolvedTarget,
       choices: [...parsedLine.choices],
       condition: parsedLine.condition,
-      schedule: parsedLine.schedule,
-      holiday: parsedLine.holiday,
+      schedule: parsedLine.schedule || detectedTimeFromCond.schedule,
+      holiday: parsedLine.holiday || detectedTimeFromCond.holiday,
       announcement: parsedLine.announcement,
       queueTarget: parsedLine.queueTarget,
       rawLines: [line],
@@ -2500,9 +2682,19 @@ export function parseCallflowTextWithFallback(
     return structured;
   }
 
-  const defaultRef = normalizeScriptRef(options?.defaultScriptNumber || 'Main') || 'Main';
+  const fileBaseCandidate = options?.sourceFilename
+    ? options.sourceFilename.replace(/\.[^.]+$/, '').replace(/\s+/g, '_').trim()
+    : '';
+  const defaultRef =
+    normalizeScriptRef(
+      options?.defaultScriptNumber ||
+        (fileBaseCandidate && isValidScriptRef(fileBaseCandidate) ? fileBaseCandidate : 'Main')
+    ) || 'Main';
   const defaultKey = canonicalScriptMatchKey(defaultRef);
-  const defaultName = options?.defaultScriptName?.trim() || defaultRef;
+  const defaultName =
+    options?.defaultScriptName?.trim() ||
+    (options?.sourceFilename ? options.sourceFilename.replace(/\.[^.]+$/, '').trim() : '') ||
+    defaultRef;
   const origin: ScriptOrigin = options?.origin || 'legacy-text';
   const isMaster =
     options?.isMasterHint ??
@@ -2834,6 +3026,21 @@ export function detectMasterScriptChecklist(
   };
 
   traverseModule(masterMod, 1);
+
+  // Also traverse any other root / unvisited modules in logical callflow order so multi-script
+  // imports connect and populate the checklist automatically without requiring a synthetic "Main" script
+  modules.forEach((mod) => {
+    const modKey = canonicalScriptMatchKey(mod.scriptNumber);
+    if (!visitedModuleKeys.has(modKey) && (incomingCount.get(modKey) || 0) === 0) {
+      traverseModule(mod, 1);
+    }
+  });
+  modules.forEach((mod) => {
+    const modKey = canonicalScriptMatchKey(mod.scriptNumber);
+    if (!visitedModuleKeys.has(modKey)) {
+      traverseModule(mod, 1);
+    }
+  });
 
   return {
     masterScriptNumber: masterMod.scriptNumber,
@@ -3325,10 +3532,51 @@ export function extractScriptNumberFromNodeId(
   return suffix;
 }
 
+export function getModuleOpeningHoursSummary(mod: ScriptModule): {
+  scheduleText: string;
+  holidayText: string;
+  combinedBadge: string;
+} {
+  const schedules: string[] = [];
+  const holidays: string[] = [];
+
+  for (const r of mod.rules) {
+    if (r.schedule && r.schedule.trim()) {
+      const s = r.schedule.trim();
+      if (!schedules.includes(s)) schedules.push(s);
+    }
+    if (r.holiday && r.holiday.trim()) {
+      const h = r.holiday.trim();
+      if (!holidays.includes(h)) holidays.push(h);
+    }
+    if ((!r.schedule || !r.holiday) && r.condition) {
+      const det = extractReadableScheduleAndHolidayFromText(r.condition);
+      if (det.schedule && !schedules.includes(det.schedule)) {
+        schedules.push(det.schedule);
+      }
+      if (det.holiday && !holidays.includes(det.holiday)) {
+        holidays.push(det.holiday);
+      }
+    }
+  }
+
+  const scheduleText = schedules.slice(0, 2).join(' · ');
+  const holidayText = holidays.slice(0, 2).join(' · ');
+  const badgeParts: string[] = [];
+  if (scheduleText) badgeParts.push(scheduleText);
+  if (holidayText) badgeParts.push(holidayText);
+
+  return {
+    scheduleText,
+    holidayText,
+    combinedBadge: badgeParts.join(' | '),
+  };
+}
+
 /**
  * EBENE 1: Generates the clean Master-Callflow Overview Mermaid diagram combining
  * text scripts and graphical Visio flows (free script names like `Main`/`Schaltung1` and numbers)
- * in one unified map with red open-issue markers.
+ * in one unified map with red open-issue markers and `🕒` opening hours badges.
  */
 export function buildMasterOverviewMermaid(
   workspace: ScriptWorkspace,
@@ -3395,9 +3643,14 @@ export function buildMasterOverviewMermaid(
     const showBothNameAndRef =
       canonicalScriptMatchKey(mod.scriptName) !== canonicalScriptMatchKey(mod.scriptNumber) &&
       mod.scriptName !== `Skript ${mod.scriptNumber}`;
-    const label = showBothNameAndRef
+    const baseLabel = showBothNameAndRef
       ? `${openTag}[${safeRef}] ${safeName}`
       : `${openTag}${safeRef}`;
+    const hoursSummary = getModuleOpeningHoursSummary(mod);
+    const hoursBadge = hoursSummary.combinedBadge
+      ? `<br/>🕒 ${sanitizeMermaidText(hoursSummary.combinedBadge)}`
+      : '';
+    const label = `${baseLabel}${hoursBadge}`;
 
     if (mod.isMaster || inCount === 0) {
       lines.push(`    ${id}(["▶ ${label}"])${openClassSuffix}`);
@@ -3863,9 +4116,13 @@ export function buildScriptDetailMermaid(
     if (rule.isFaxRoute) {
       metaParts.push('Typ: Fax-Routing (4-stellig)');
     }
-    if (rule.schedule) metaParts.push(`Zeitplan: ${sanitizeMermaidText(rule.schedule)}`);
+    if (rule.schedule) {
+      metaParts.push(`🕒 Öffnungszeiten: ${sanitizeMermaidText(rule.schedule)}`);
+    }
+    if (rule.holiday) {
+      metaParts.push(`📅 Feiertag: ${sanitizeMermaidText(rule.holiday)}`);
+    }
     if (rule.condition) metaParts.push(`Bedingung: ${sanitizeMermaidText(rule.condition)}`);
-    if (rule.holiday) metaParts.push(`Feiertag: ${sanitizeMermaidText(rule.holiday)}`);
     if (rule.announcement) metaParts.push(`Ansage: ${sanitizeMermaidText(rule.announcement)}`);
     if (rule.skillsetPriority !== undefined) {
       metaParts.push(`Queue-Prio: ${rule.skillsetPriority}`);
@@ -4759,6 +5016,24 @@ export function exportMigrationDocumentationMarkdown(
     md.push('');
   }
 
+  // 2.4 Öffnungszeiten & Feiertags-Übersicht
+  const scheduleRows = buildWorkspaceScheduleOverview(workspace);
+  md.push('### 2.4 Öffnungszeiten & Feiertags-Übersicht');
+  if (scheduleRows.length === 0) {
+    md.push('_Keine Skripte im Arbeitsbereich vorhanden._');
+  } else {
+    md.push(
+      '| Skript | Schritt / Regel | Öffnungszeiten | Feiertag / Sonderzeit | Aktion / Überlauf / Ziel |'
+    );
+    md.push('| --- | --- | --- | --- | --- |');
+    scheduleRows.forEach((sr) => {
+      md.push(
+        `| \`[${sr.scriptNumber}]\` ${sr.scriptName} | ${sr.prio !== undefined ? `Prio ${sr.prio}: ` : ''}${sr.stepName} | ${sr.openingHours} | ${sr.holidayAndSpecial} | ${sr.closedOrOverflowAction} |`
+      );
+    });
+  }
+  md.push('');
+
   // 3. Logik-Prüfung
   md.push('## 3. Automatische Logik- & Qualitätsprüfung');
   md.push('');
@@ -4798,6 +5073,151 @@ export function exportMigrationDocumentationMarkdown(
   md.push('');
 
   return md.join('\n');
+}
+
+/**
+ * Erstellt die strukturierte Öffnungszeiten- und Feiertags-Übersichtsliste über alle Skripte im Callflow.
+ */
+export function buildWorkspaceScheduleOverview(
+  workspace: ScriptWorkspace
+): CallflowScheduleSummaryRow[] {
+  const rows: CallflowScheduleSummaryRow[] = [];
+  const modules = workspace.modules || [];
+
+  for (const mod of modules) {
+    const sortedRules = [...mod.rules].sort((a, b) => a.prio - b.prio);
+    const matchingRules: Array<{
+      rule: ScriptRule;
+      scheduleText: string;
+      holidayText: string;
+    }> = [];
+
+    for (const r of sortedRules) {
+      const det = extractReadableScheduleAndHolidayFromText(r.condition || '');
+      const sched = (r.schedule || det.schedule || '').trim();
+      const hol = (r.holiday || det.holiday || '').trim();
+      if (sched || hol) {
+        matchingRules.push({
+          rule: r,
+          scheduleText: sched,
+          holidayText: hol,
+        });
+      }
+    }
+
+    if (matchingRules.length > 0) {
+      for (const item of matchingRules) {
+        const { rule, scheduleText, holidayText } = item;
+        const targets: string[] = [];
+        if (rule.targetNumber) targets.push(rule.targetNumber);
+        rule.choices.forEach((c) => {
+          if (c.targetNumber && !targets.includes(c.targetNumber)) {
+            targets.push(c.targetNumber);
+          }
+        });
+
+        const actionBits: string[] = [];
+        if (rule.queueTarget) actionBits.push(`Queue: ${rule.queueTarget}`);
+        if (rule.announcement) actionBits.push(`Ansage: ${rule.announcement}`);
+        if (targets.length > 0) actionBits.push(`Wohin: ${targets.join(', ')}`);
+        if (rule.isDisconnect) actionBits.push('Anruf trennen');
+
+        rows.push({
+          id: `${mod.scriptNumber}:${rule.id}`,
+          scriptNumber: mod.scriptNumber,
+          scriptName: mod.scriptName,
+          isMaster: mod.isMaster,
+          prio: rule.prio,
+          ruleId: rule.id,
+          stepName: rule.stepName || 'Zeit- / Feiertagsregel',
+          openingHours: scheduleText || '— (nur Feiertag/Sonderstatus)',
+          holidayAndSpecial: holidayText || '—',
+          closedOrOverflowAction: actionBits.join(' · ') || 'Standard-Folgeschritt',
+          targetNumbers: targets,
+          hasSchedule: Boolean(scheduleText),
+          hasHoliday: Boolean(holidayText),
+        });
+      }
+    } else {
+      const firstRule = sortedRules[0];
+      const targets = [...mod.outgoingNumbers];
+      const actionBits: string[] = [];
+      const firstQueue = sortedRules.find((r) => Boolean(r.queueTarget))?.queueTarget;
+      const firstAnn = sortedRules.find((r) => Boolean(r.announcement))?.announcement;
+      if (firstQueue) actionBits.push(`Queue: ${firstQueue}`);
+      if (firstAnn) actionBits.push(`Ansage: ${firstAnn}`);
+      if (targets.length > 0) actionBits.push(`Ziele: ${targets.slice(0, 4).join(', ')}`);
+
+      rows.push({
+        id: `${mod.scriptNumber}:module`,
+        scriptNumber: mod.scriptNumber,
+        scriptName: mod.scriptName,
+        isMaster: mod.isMaster,
+        prio: firstRule?.prio,
+        ruleId: firstRule?.id,
+        stepName: firstRule?.stepName || mod.scriptName,
+        openingHours: 'Keine Zeitbeschränkung (24/7)',
+        holidayAndSpecial: '—',
+        closedOrOverflowAction: actionBits.join(' · ') || '—',
+        targetNumbers: targets,
+        hasSchedule: false,
+        hasHoliday: false,
+      });
+    }
+  }
+
+  return rows;
+}
+
+/**
+ * Exportiert die Öffnungszeiten- und Feiertags-Übersicht als UTF-8 CSV (mit BOM für Excel).
+ */
+export function exportOpeningHoursCsv(workspace: ScriptWorkspace): string {
+  const rows = buildWorkspaceScheduleOverview(workspace);
+  const escapeCsvCell = (val: string | number): string => {
+    const str = String(val ?? '').replace(/\r?\n/g, ' ');
+    if (/[;"\t]/.test(str)) {
+      return `"${str.replace(/"/g, '""')}"`;
+    }
+    return str;
+  };
+
+  const headers = [
+    'Skript-Nr.',
+    'Skript-Name',
+    'Prio',
+    'Schritt / Regel',
+    'Öffnungszeiten',
+    'Feiertag / Sonderzeit',
+    'Aktion / Überlauf / Ziel',
+    'Status',
+  ];
+
+  const lines = [
+    headers.map(escapeCsvCell).join(';'),
+    ...rows.map((r) =>
+      [
+        r.scriptNumber,
+        r.scriptName,
+        r.prio ?? '—',
+        r.stepName,
+        r.openingHours,
+        r.holidayAndSpecial,
+        r.closedOrOverflowAction,
+        r.hasSchedule && r.hasHoliday
+          ? 'Öffnungszeiten + Feiertag'
+          : r.hasSchedule
+          ? 'Öffnungszeiten hinterlegt'
+          : r.hasHoliday
+          ? 'Feiertag / Sonderzeit'
+          : 'Ohne Zeitangabe (24/7)',
+      ]
+        .map(escapeCsvCell)
+        .join(';')
+    ),
+  ];
+
+  return `\uFEFF${lines.join('\r\n')}`;
 }
 
 export interface EditableNodeConnectionItem {
@@ -5515,52 +5935,106 @@ export function updateWorkspaceNodeFromEdit(
   let updatedRules: ScriptRule[] = [];
   if (existingMod && existingMod.rules.length > 0) {
     const sorted = [...existingMod.rules].sort((a, b) => a.prio - b.prio);
-    const firstRule = sorted[0];
 
-    const newRulesFromConnections: ScriptRule[] = [];
-    const choiceList: ScriptChoiceOption[] = [];
-    let firstDirectTarget: string | undefined;
+    if (sorted.length === 1) {
+      const firstRule = sorted[0];
+      const newRulesFromConnections: ScriptRule[] = [];
+      const choiceList: ScriptChoiceOption[] = [];
+      let firstDirectTarget: string | undefined;
 
-    validConnections.forEach((conn, idx) => {
-      const targetNorm = normalizeScriptRef(conn.toTargetNumber);
-      const tasteMatch = conn.label.match(/^(?:taste\s*)?([0-9*#]+)$/i);
-      if (conn.kind === 'choice' || updates.blockType === 'dtmf' || tasteMatch) {
-        choiceList.push({
-          choice: tasteMatch ? tasteMatch[1] : conn.label.trim() || String(idx + 1),
-          targetNumber: targetNorm,
-        });
-      } else if (!firstDirectTarget) {
-        firstDirectTarget = targetNorm;
-      } else {
-        newRulesFromConnections.push({
-          id: `${toMermaidNodeSuffix(cleanScriptNum)}-r-${idx + 2}`,
-          prio: idx + 2,
+      validConnections.forEach((conn, idx) => {
+        const targetNorm = normalizeScriptRef(conn.toTargetNumber);
+        const tasteMatch = conn.label.match(/^(?:taste\s*)?([0-9*#]+)$/i);
+        if (conn.kind === 'choice' || updates.blockType === 'dtmf' || tasteMatch) {
+          choiceList.push({
+            choice: tasteMatch ? tasteMatch[1] : conn.label.trim() || String(idx + 1),
+            targetNumber: targetNorm,
+          });
+        } else if (!firstDirectTarget) {
+          firstDirectTarget = targetNorm;
+        } else {
+          newRulesFromConnections.push({
+            id: `${toMermaidNodeSuffix(cleanScriptNum)}-r-${idx + 2}`,
+            prio: idx + 2,
+            stepName: conn.label.trim() || `Weiterleitung → ${targetNorm}`,
+            sourceNumber: cleanScriptNum,
+            targetNumber: targetNorm,
+            choices: [],
+            rawLine: `Prio ${idx + 2}: Wohin -> ${targetNorm}`,
+          });
+        }
+      });
+
+      updatedRules = [
+        {
+          ...firstRule,
+          sourceNumber: cleanScriptNum,
+          stepName:
+            firstRule.stepName === existingMod.scriptName || !firstRule.stepName
+              ? cleanTitle
+              : firstRule.stepName,
+          announcement: cleanAnn || undefined,
+          queueTarget: cleanQueue || undefined,
+          schedule: cleanSched || undefined,
+          condition: cleanCond || undefined,
+          targetNumber: firstDirectTarget,
+          choices: choiceList,
+        },
+        ...newRulesFromConnections,
+      ];
+    } else {
+      // Multi-rule script: preserve all existing rules & metadata while updating schedule, queue, announcement, condition & connections
+      const schedRuleId = (sorted.find((r) => Boolean(r.schedule)) || sorted[0]).id;
+      const annRuleId = (sorted.find((r) => Boolean(r.announcement)) || sorted[0]).id;
+      const queueRuleId = (sorted.find((r) => Boolean(r.queueTarget)) || sorted[0]).id;
+      const condRuleId = (sorted.find((r) => Boolean(r.condition)) || sorted[0]).id;
+
+      const updatedRuleTargetByRuleId = new Map<string, string>();
+      const updatedChoicesByRuleId = new Map<string, ScriptChoiceOption[]>();
+      const extraConnections: EditableNodeConnectionItem[] = [];
+
+      validConnections.forEach((conn) => {
+        const targetNorm = normalizeScriptRef(conn.toTargetNumber);
+        if (conn.kind === 'rule-target' && conn.ruleId) {
+          updatedRuleTargetByRuleId.set(conn.ruleId, targetNorm);
+        } else if (conn.kind === 'choice' && conn.ruleId) {
+          const list = updatedChoicesByRuleId.get(conn.ruleId) || [];
+          const cleanChoice = conn.label.replace(/^Taste\s+/i, '').trim() || conn.choiceKey || '1';
+          list.push({ choice: cleanChoice, targetNumber: targetNorm });
+          updatedChoicesByRuleId.set(conn.ruleId, list);
+        } else if (conn.kind !== 'manual-link') {
+          extraConnections.push(conn);
+        }
+      });
+
+      updatedRules = sorted.map((r) => ({
+        ...r,
+        sourceNumber: cleanScriptNum,
+        schedule: r.id === schedRuleId ? cleanSched || undefined : r.schedule,
+        announcement: r.id === annRuleId ? cleanAnn || undefined : r.announcement,
+        queueTarget: r.id === queueRuleId ? cleanQueue || undefined : r.queueTarget,
+        condition: r.id === condRuleId ? cleanCond || undefined : r.condition,
+        targetNumber: r.targetNumber
+          ? updatedRuleTargetByRuleId.get(r.id)
+          : undefined,
+        choices: r.choices.length > 0 ? updatedChoicesByRuleId.get(r.id) || [] : [],
+      }));
+
+      let maxPrio = updatedRules.reduce((m, r) => Math.max(m, r.prio), 0);
+      extraConnections.forEach((conn, idx) => {
+        const targetNorm = normalizeScriptRef(conn.toTargetNumber);
+        maxPrio += 1;
+        updatedRules.push({
+          id: `${toMermaidNodeSuffix(cleanScriptNum)}-r-${Date.now().toString(36)}-${idx}`,
+          prio: maxPrio,
           stepName: conn.label.trim() || `Weiterleitung → ${targetNorm}`,
           sourceNumber: cleanScriptNum,
           targetNumber: targetNorm,
           choices: [],
-          rawLine: `Prio ${idx + 2}: Wohin -> ${targetNorm}`,
+          rawLine: `Prio ${maxPrio}: Wohin -> ${targetNorm}`,
         });
-      }
-    });
-
-    updatedRules = [
-      {
-        ...firstRule,
-        sourceNumber: cleanScriptNum,
-        stepName:
-          firstRule.stepName === existingMod.scriptName || !firstRule.stepName
-            ? cleanTitle
-            : firstRule.stepName,
-        announcement: cleanAnn || undefined,
-        queueTarget: cleanQueue || undefined,
-        schedule: cleanSched || undefined,
-        condition: cleanCond || undefined,
-        targetNumber: firstDirectTarget,
-        choices: choiceList,
-      },
-      ...newRulesFromConnections,
-    ];
+      });
+    }
   } else {
     // Creating a module from a previously missing/external node
     const firstTarget = validConnections[0]?.toTargetNumber

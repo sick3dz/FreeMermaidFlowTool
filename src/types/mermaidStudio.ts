@@ -365,6 +365,22 @@ export interface CallflowRoutingMatrixRow {
   targetStatus: string;
 }
 
+export interface CallflowScheduleSummaryRow {
+  id: string;
+  scriptNumber: string;
+  scriptName: string;
+  isMaster: boolean;
+  prio?: number;
+  ruleId?: string;
+  stepName: string;
+  openingHours: string;
+  holidayAndSpecial: string;
+  closedOrOverflowAction: string;
+  targetNumbers: string[];
+  hasSchedule: boolean;
+  hasHoliday: boolean;
+}
+
 export interface OfflineWorkspaceSeed {
   seedId: string;
   exportedAt: string;

@@ -83,17 +83,15 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       (m) => canonicalScriptMatchKey(m.scriptNumber) === 'main' || m.isMaster
     );
     const primaryIdx = mainIdx >= 0 ? mainIdx : 0;
+    const primaryScriptNumber = modules[primaryIdx]?.scriptNumber || 'Main';
 
     const normalizedModules = modules.map((m, idx) => {
       if (idx !== primaryIdx) return m;
       return {
         ...m,
-        scriptNumber: 'Main',
-        scriptName: 'Main',
         isMaster: true,
-        rules: m.rules.map((r) => ({ ...r, sourceNumber: 'Main' })),
         outgoingNumbers: m.outgoingNumbers.filter(
-          (t) => canonicalScriptMatchKey(t) !== 'main'
+          (t) => canonicalScriptMatchKey(t) !== canonicalScriptMatchKey(m.scriptNumber)
         ),
       };
     });
@@ -102,7 +100,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       normalizedModules,
       [],
       [],
-      'Main',
+      primaryScriptNumber,
       []
     );
 
@@ -116,7 +114,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     }));
 
     setParsedModules(normalizedModules);
-    setActiveMasterNumber('Main');
+    setActiveMasterNumber(primaryScriptNumber);
     setDraftTargets(targets);
     setErrorMsg(null);
     setStep(2);
@@ -126,14 +124,12 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     const trimmed = rawMasterText.trim();
     if (!trimmed) {
       setErrorMsg(
-        'Bitte zuerst den Text für „Main“ einfügen oder einen grafischen Export wählen.'
+        'Bitte zuerst den Skript-Text einfügen oder eine Export-Datei (.s, .txt, .vsdx) wählen.'
       );
       return;
     }
 
     const modules = parseCallflowTextWithFallback(trimmed, {
-      defaultScriptNumber: 'Main',
-      defaultScriptName: 'Main',
       origin: 'legacy-text',
       isMasterHint: true,
     });
@@ -151,8 +147,6 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     setIsParsingFile(true);
     try {
       const result = await importCallflowFile(file, {
-        overridePrimaryScriptNumber: 'Main',
-        overridePrimaryScriptName: 'Main',
         isMasterHint: true,
       });
       if (result.decodedText !== undefined) {
@@ -231,11 +225,16 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       externalEndpoints,
       ignoredChecklistTargets,
       manualLinks,
-      masterScriptNumber: 'Main',
+      masterScriptNumber: activeMasterNumber,
     });
 
+    const primaryMod =
+      parsedModules.find(
+        (m) => canonicalScriptMatchKey(m.scriptNumber) === canonicalScriptMatchKey(activeMasterNumber)
+      ) || parsedModules[0];
+
     onStartNewCallflow({
-      title: 'Main',
+      title: primaryMod?.scriptName || activeMasterNumber || 'Callflow',
       workspace,
     });
     resetAllAndClose();
@@ -263,11 +262,11 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
             </h2>
             <div className="flex items-center gap-2 text-xs text-slate-400 mt-0.5 font-mono tabular-nums">
               <span className={step === 1 ? 'text-indigo-400 font-semibold' : 'text-emerald-400'}>
-                01. Main (Masterscript)
+                01. Start-Skript importieren
               </span>
               <span aria-hidden="true">·</span>
               <span className={step === 2 ? 'text-indigo-400 font-semibold' : 'text-slate-500'}>
-                02. Ziele bestätigen
+                02. Logische Folge-Ziele bestätigen
               </span>
             </div>
           </div>
@@ -290,8 +289,9 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                 <div className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
                   <span>
-                    Beim Start eines neuen Callflows wird der aktuelle Arbeitsbereich durch das neue
-                    Masterscript <span className="font-mono text-slate-100">Main</span> ersetzt.
+                    Beim Start eines neuen Callflows wird der aktuelle Arbeitsbereich durch das neu
+                    importierte Start-Skript ersetzt. Alle Skripte behalten ihre echte Nummer /
+                    Bezeichnung und verbinden sich logisch anhand ihrer Sprungbefehle.
                   </span>
                 </div>
               )}
@@ -317,11 +317,12 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
               >
                 <div className="space-y-0.5 min-w-0">
                   <div className="text-xs font-semibold text-slate-100">
-                    Masterscript „Main“ als Avaya `.s`-Skript oder grafischen Export laden
+                    Start- oder Masterscript als Avaya `.s`-Skript oder grafischen Export laden
                   </div>
                   <p className="text-[11px] text-slate-400">
                     Orchestration-Designer-Exporte (`.s`, `.txt`, `.aacc`) sowie grafische Exporte
-                    (`.vsdx`, `.vdx`, `.svg`) werden inklusive Umlaut-Kodierung automatisch erkannt.
+                    (`.vsdx`, `.vdx`, `.svg`) behalten ihre echte CDN / Skriptnummer und verketten
+                    sich automatisch entlang der Telefonschaltung.
                   </p>
                 </div>
                 <div className="shrink-0">
@@ -351,8 +352,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
               {/* Raw Text Input */}
               <div className="space-y-2">
                 <span className="text-xs font-medium text-slate-200 block">
-                  Oder Text-Skript für <span className="font-mono text-indigo-300">Main</span>{' '}
-                  direkt einfügen
+                  Oder Text-Skript direkt einfügen (Nummer / Name wird automatisch aus CDN oder Header erkannt)
                 </span>
 
                 <textarea
