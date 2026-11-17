@@ -5411,5 +5411,348 @@ export function deleteNodeFromWorkspace(
   });
 }
 
+function isPureConnectionStubRule(rule: ScriptRule): boolean {
+  return (
+    !rule.targetNumber &&
+    rule.choices.length === 0 &&
+    !rule.announcement &&
+    !rule.queueTarget &&
+    !rule.schedule &&
+    !rule.holiday &&
+    !rule.condition &&
+    (/-conn-/.test(rule.id) || /^(?:Weiterleitung|Sprung|Taste\s+[0-9*#]+)\s*→/i.test(rule.stepName))
+  );
+}
+
+/**
+ * Disconnects a single transition edge (`fromNodeId -> toNodeId`) cleanly inside the ScriptWorkspace
+ * across Master Overview, Orga/Fax groupings, manual links, and Detail Step views.
+ */
+export function disconnectEdgeInWorkspace(
+  workspace: ScriptWorkspace,
+  viewLevel: CallflowViewLevel,
+  fromNodeId: string,
+  toNodeId: string
+): ScriptWorkspace {
+  if (!fromNodeId || !toNodeId) return workspace;
+
+  // Case 1: Detail view connecting a STEP_<mod>_<idx> to a JUMP_<target> / S_<target>
+  const stepMatch = fromNodeId.match(/^STEP_([A-Za-z0-9_]+)_(\d+)$/);
+  if (viewLevel.level === 'detail' && stepMatch) {
+    const stepIndex = Math.max(0, parseInt(stepMatch[2], 10) - 1);
+    const toRef =
+      extractScriptNumberFromNodeId(toNodeId, workspace.modules) ||
+      toNodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
+    const toKey = canonicalScriptMatchKey(toRef);
+    const activeKey = canonicalScriptMatchKey(viewLevel.scriptNumber);
+
+    const nextModules = workspace.modules.map((mod) => {
+      if (canonicalScriptMatchKey(mod.scriptNumber) !== activeKey) return mod;
+      const sorted = [...mod.rules].sort((a, b) => a.prio - b.prio);
+      const targetRule = sorted[stepIndex];
+      if (!targetRule) return mod;
+
+      const updatedRule: ScriptRule = {
+        ...targetRule,
+        targetNumber:
+          targetRule.targetNumber && canonicalScriptMatchKey(targetRule.targetNumber) === toKey
+            ? undefined
+            : targetRule.targetNumber,
+        choices: targetRule.choices.filter(
+          (ch) => canonicalScriptMatchKey(ch.targetNumber) !== toKey
+        ),
+      };
+
+      const updatedRules = mod.rules
+        .map((r) => (r.id === targetRule.id ? updatedRule : r))
+        .filter((r) => !(r.id === targetRule.id && isPureConnectionStubRule(r)));
+
+      return { ...mod, rules: updatedRules };
+    });
+
+    const nextLinks = (workspace.manualLinks || []).filter(
+      (lnk) =>
+        !(
+          canonicalScriptMatchKey(lnk.fromScriptNumber) === activeKey &&
+          canonicalScriptMatchKey(lnk.toTargetNumber) === toKey
+        )
+    );
+
+    return buildScriptWorkspace(nextModules, {
+      ...workspace,
+      manualLinks: nextLinks,
+    });
+  }
+
+  // Case 2: Detail view disconnecting an incoming caller `INC_<caller> -> SELF_<mod>`
+  if (fromNodeId.startsWith('INC_')) {
+    const fromRef = fromNodeId.replace(/^INC_/, '');
+    const toRef =
+      extractScriptNumberFromNodeId(toNodeId, workspace.modules) ||
+      (viewLevel.level === 'detail' ? viewLevel.scriptNumber : toNodeId.replace(/^(?:S|SELF)_/, ''));
+    const fromKey = canonicalScriptMatchKey(fromRef);
+    const toKey = canonicalScriptMatchKey(toRef);
+
+    const nextModules = workspace.modules.map((mod) => {
+      if (canonicalScriptMatchKey(mod.scriptNumber) !== toKey && canonicalScriptMatchKey(mod.scriptNumber) !== fromKey) {
+        return mod;
+      }
+      if (canonicalScriptMatchKey(mod.scriptNumber) !== fromKey) return mod;
+      const nextRules = mod.rules
+        .map((r) => ({
+          ...r,
+          targetNumber:
+            r.targetNumber && canonicalScriptMatchKey(r.targetNumber) === toKey
+              ? undefined
+              : r.targetNumber,
+          choices: r.choices.filter(
+            (ch) => canonicalScriptMatchKey(ch.targetNumber) !== toKey
+          ),
+        }))
+        .filter((r) => !isPureConnectionStubRule(r));
+      return { ...mod, rules: nextRules };
+    });
+
+    const nextLinks = (workspace.manualLinks || []).filter(
+      (lnk) =>
+        !(
+          canonicalScriptMatchKey(lnk.fromScriptNumber) === fromKey &&
+          canonicalScriptMatchKey(lnk.toTargetNumber) === toKey
+        )
+    );
+
+    return buildScriptWorkspace(nextModules, {
+      ...workspace,
+      manualLinks: nextLinks,
+    });
+  }
+
+  const fromRef =
+    extractScriptNumberFromNodeId(fromNodeId, workspace.modules) ||
+    fromNodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
+  const toRef =
+    extractScriptNumberFromNodeId(toNodeId, workspace.modules) ||
+    toNodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
+  const fromKey = canonicalScriptMatchKey(fromRef);
+  const toKey = canonicalScriptMatchKey(toRef);
+
+  const isFromOrg = fromNodeId.startsWith('ORG_');
+  const orgSuffix = isFromOrg ? fromNodeId.slice(4) : '';
+  const isFromFax = fromNodeId === 'FAX_BUNDLE';
+  const isToFax = toNodeId === 'FAX_BUNDLE';
+
+  const ruleMatchesOrg = (r: ScriptRule): boolean => {
+    if (!isFromOrg) return true;
+    const ruleOrgKey = toMermaidNodeSuffix(r.orgaCode || r.organizationName || r.brandName || 'Orga');
+    return ruleOrgKey === orgSuffix;
+  };
+
+  const nextModules = workspace.modules.map((mod) => {
+    if (canonicalScriptMatchKey(mod.scriptNumber) !== fromKey) return mod;
+    const nextRules = mod.rules
+      .map((r) => {
+        if (isToFax) {
+          if (r.isFaxRoute && ruleMatchesOrg(r)) {
+            return { ...r, isFaxRoute: undefined, targetNumber: undefined };
+          }
+          return r;
+        }
+        if (isFromFax) {
+          if (r.isFaxRoute && r.targetNumber && canonicalScriptMatchKey(r.targetNumber) === toKey) {
+            return { ...r, targetNumber: undefined };
+          }
+          return r;
+        }
+        if (!ruleMatchesOrg(r)) return r;
+
+        return {
+          ...r,
+          targetNumber:
+            r.targetNumber && canonicalScriptMatchKey(r.targetNumber) === toKey
+              ? undefined
+              : r.targetNumber,
+          choices: r.choices.filter(
+            (ch) => canonicalScriptMatchKey(ch.targetNumber) !== toKey
+          ),
+        };
+      })
+      .filter((r) => !isPureConnectionStubRule(r));
+
+    return { ...mod, rules: nextRules };
+  });
+
+  const nextLinks = (workspace.manualLinks || []).filter(
+    (lnk) =>
+      !(
+        canonicalScriptMatchKey(lnk.fromScriptNumber) === fromKey &&
+        canonicalScriptMatchKey(lnk.toTargetNumber) === toKey
+      )
+  );
+
+  return buildScriptWorkspace(nextModules, {
+    ...workspace,
+    manualLinks: nextLinks,
+  });
+}
+
+/**
+ * Updates the display label / choice key of an existing edge inside the ScriptWorkspace.
+ */
+export function updateEdgeLabelInWorkspace(
+  workspace: ScriptWorkspace,
+  viewLevel: CallflowViewLevel,
+  fromNodeId: string,
+  toNodeId: string,
+  newLabel: string
+): ScriptWorkspace {
+  const cleanLabel = newLabel.trim();
+  if (!fromNodeId || !toNodeId || !cleanLabel) return workspace;
+
+  const tasteMatch = cleanLabel.match(/^(?:taste\s*)?([0-9*#]+)$/i);
+
+  const stepMatch = fromNodeId.match(/^STEP_([A-Za-z0-9_]+)_(\d+)$/);
+  if (viewLevel.level === 'detail' && stepMatch) {
+    const stepIndex = Math.max(0, parseInt(stepMatch[2], 10) - 1);
+    const toRef =
+      extractScriptNumberFromNodeId(toNodeId, workspace.modules) ||
+      toNodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
+    const toKey = canonicalScriptMatchKey(toRef);
+    const activeKey = canonicalScriptMatchKey(viewLevel.scriptNumber);
+
+    const nextModules = workspace.modules.map((mod) => {
+      if (canonicalScriptMatchKey(mod.scriptNumber) !== activeKey) return mod;
+      const sorted = [...mod.rules].sort((a, b) => a.prio - b.prio);
+      const targetRule = sorted[stepIndex];
+      if (!targetRule) return mod;
+
+      const updatedChoices = targetRule.choices.map((ch) =>
+        canonicalScriptMatchKey(ch.targetNumber) === toKey
+          ? {
+              ...ch,
+              choice: tasteMatch ? tasteMatch[1] : cleanLabel,
+              label: cleanLabel,
+            }
+          : ch
+      );
+      const updatedRule: ScriptRule = {
+        ...targetRule,
+        stepName:
+          targetRule.targetNumber && canonicalScriptMatchKey(targetRule.targetNumber) === toKey
+            ? cleanLabel
+            : targetRule.stepName,
+        choices: updatedChoices,
+      };
+      return {
+        ...mod,
+        rules: mod.rules.map((r) => (r.id === targetRule.id ? updatedRule : r)),
+      };
+    });
+
+    return buildScriptWorkspace(nextModules, workspace);
+  }
+
+  const fromRef =
+    extractScriptNumberFromNodeId(fromNodeId, workspace.modules) ||
+    fromNodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
+  const toRef =
+    extractScriptNumberFromNodeId(toNodeId, workspace.modules) ||
+    toNodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
+  const fromKey = canonicalScriptMatchKey(fromRef);
+  const toKey = canonicalScriptMatchKey(toRef);
+
+  // 1. Update matching manualLinks if present
+  let matchedManual = false;
+  const nextLinks = (workspace.manualLinks || []).map((lnk) => {
+    if (
+      canonicalScriptMatchKey(lnk.fromScriptNumber) === fromKey &&
+      canonicalScriptMatchKey(lnk.toTargetNumber) === toKey
+    ) {
+      matchedManual = true;
+      return { ...lnk, label: cleanLabel };
+    }
+    return lnk;
+  });
+
+  if (matchedManual) {
+    return buildScriptWorkspace(workspace.modules, {
+      ...workspace,
+      manualLinks: nextLinks,
+    });
+  }
+
+  // 2. Otherwise update matching choice or append/update manual link / rule tag cleanly
+  let updatedRuleAny = false;
+  const nextModules = workspace.modules.map((mod) => {
+    if (canonicalScriptMatchKey(mod.scriptNumber) !== fromKey) return mod;
+    const nextRules = mod.rules.map((r) => {
+      const hasMatchingChoice = r.choices.some(
+        (ch) => canonicalScriptMatchKey(ch.targetNumber) === toKey
+      );
+      const hasMatchingTarget =
+        r.targetNumber && canonicalScriptMatchKey(r.targetNumber) === toKey;
+
+      if (!hasMatchingChoice && !hasMatchingTarget) return r;
+      updatedRuleAny = true;
+
+      if (hasMatchingChoice) {
+        return {
+          ...r,
+          choices: r.choices.map((ch) =>
+            canonicalScriptMatchKey(ch.targetNumber) === toKey
+              ? {
+                  ...ch,
+                  choice: tasteMatch ? tasteMatch[1] : cleanLabel,
+                  label: cleanLabel,
+                }
+              : ch
+          ),
+        };
+      }
+
+      // Convert direct target into a labeled rule or choice tag so Master & Detail reflect the label
+      if (tasteMatch) {
+        return {
+          ...r,
+          stepName: `Taste ${tasteMatch[1]} → ${toRef}`,
+          targetNumber: undefined,
+          choices: [
+            ...r.choices,
+            { choice: tasteMatch[1], targetNumber: r.targetNumber!, label: cleanLabel },
+          ],
+        };
+      }
+
+      return {
+        ...r,
+        stepName: cleanLabel,
+        targetNumber: undefined,
+        choices: [
+          ...r.choices,
+          { choice: cleanLabel, targetNumber: r.targetNumber!, label: cleanLabel },
+        ],
+      };
+    });
+    return { ...mod, rules: nextRules };
+  });
+
+  if (updatedRuleAny) {
+    return buildScriptWorkspace(nextModules, workspace);
+  }
+
+  return buildScriptWorkspace(workspace.modules, {
+    ...workspace,
+    manualLinks: [
+      ...nextLinks,
+      {
+        id: `lnk-lbl-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        fromScriptNumber: fromRef,
+        toTargetNumber: toRef,
+        label: cleanLabel,
+      },
+    ],
+  });
+}
+
+
 
 

@@ -65,3 +65,72 @@
   background-image: radial-gradient(rgba(71, 85, 105, 0.18) 1px, transparent 1px);
   background-size: 20px 20px;
 }
+
+/* 4-Side Hover Node Connection Ports & Magnetic Snap Targets */
+.mermaid-canvas-stage svg .callflow-connect-port {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 130ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mermaid-canvas-stage svg.is-visual-edit g.node:hover .callflow-connect-port,
+.mermaid-canvas-stage svg.is-visual-edit g.actor:hover .callflow-connect-port,
+.mermaid-canvas-stage svg.is-visual-edit g.statediagram-state:hover .callflow-connect-port,
+.mermaid-canvas-stage svg.is-visual-edit g.classGroup:hover .callflow-connect-port,
+.mermaid-canvas-stage svg.is-visual-edit .callflow-connect-port:hover,
+.mermaid-canvas-stage svg.is-wire-connecting .callflow-connect-port {
+  opacity: 0.92;
+  pointer-events: all;
+}
+
+.mermaid-canvas-stage svg .callflow-connect-port .callflow-port-body {
+  transition: transform 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.mermaid-canvas-stage svg .callflow-connect-port:hover .callflow-port-body {
+  transform: scale(1.28);
+}
+
+.mermaid-canvas-stage svg .callflow-connect-port .callflow-port-halo {
+  opacity: 0;
+  transition: opacity 120ms ease, transform 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.mermaid-canvas-stage svg .callflow-connect-port.is-snap-target {
+  opacity: 1 !important;
+  pointer-events: all;
+}
+
+.mermaid-canvas-stage svg .callflow-connect-port.is-snap-target .callflow-port-body {
+  transform: scale(1.42);
+}
+
+.mermaid-canvas-stage svg .callflow-connect-port.is-snap-target .callflow-port-outer {
+  fill: #10b981;
+  stroke: #d1fae5;
+}
+
+.mermaid-canvas-stage svg .callflow-connect-port.is-snap-target .callflow-port-halo {
+  opacity: 0.95;
+  transform: scale(1.2);
+}
+
+/* Comfortable clickable hit-paths for connection lines */
+.mermaid-canvas-stage svg .callflow-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 16px;
+  stroke-linecap: round;
+  cursor: pointer;
+  pointer-events: stroke;
+}
+
+.mermaid-canvas-stage svg g.edgeLabels > *,
+.mermaid-canvas-stage svg g.edgeLabel {
+  cursor: pointer;
+}
+

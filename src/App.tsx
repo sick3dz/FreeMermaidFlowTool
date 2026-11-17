@@ -32,6 +32,7 @@ import {
   Scan,
   Sun,
   Trash2,
+  Unlink,
   Wand2,
   ZoomIn,
   ZoomOut,
@@ -80,13 +81,20 @@ import {
   applyNodeOffsetsToSvg,
   buildIsolatedPathMermaidCode,
   buildLiveSvgDomIndex,
+  disconnectEdgeInMermaidCode,
+  findNearestMagneticPort,
   generateInteractiveCallflowHtml,
   InteractiveCallflowHtmlView,
   LiveSvgDomIndex,
   parseCallflowGraph,
+  PortSide,
+  resolveClickedEdgeFromSvgElement,
   resolveClickedNodeIdFromSvgElement,
+  SelectedCallflowEdge,
+  setMagneticSnapTargetInDom,
   shiftLiveConnectedEdgesForDrag,
   traceCallflowForNode,
+  updateEdgeLabelInMermaidCode,
 } from './utils/callflowEngine';
 import {
   addBuildingBlockToWorkspace,
@@ -98,6 +106,7 @@ import {
   canonicalScriptMatchKey,
   connectNodesInWorkspace,
   deleteNodeFromWorkspace,
+  disconnectEdgeInWorkspace,
   EditableCallflowNodeSnapshot,
   EditableNodeConnectionItem,
   extractScriptNumberFromNodeId,
@@ -109,6 +118,7 @@ import {
   reopenIssueInWorkspace,
   toMermaidNodeSuffix,
   unignoreChecklistTargetInWorkspace,
+  updateEdgeLabelInWorkspace,
   updateWorkspaceNodeFromEdit,
 } from './utils/scriptCallflowParser';
 import { parseVisioFileToModules } from './utils/visioParser';
@@ -370,6 +380,7 @@ export default function App() {
     curX: number;
     curY: number;
     hoverTargetNodeId: string | null;
+    snappedPortSide?: PortSide | null;
   } | null>(null);
   const [recentConnectionBanner, setRecentConnectionBanner] = useState<{
     fromNodeId: string;
@@ -378,6 +389,10 @@ export default function App() {
     toLabel: string;
     labelDraft: string;
   } | null>(null);
+  const [selectedCallflowEdge, setSelectedCallflowEdge] = useState<
+    (SelectedCallflowEdge & { labelDraft: string }) | null
+  >(null);
+  const snappedPortRef = useRef<{ nodeId: string; side: PortSide } | null>(null);
   const nodeDragRef = useRef<{
     active: boolean;
     mode: 'move-node' | 'connect-wire';
@@ -499,13 +514,21 @@ export default function App() {
     return mod;
   }, [callflowTrace, scriptWorkspace.modules, callflowViewLevel]);
 
-  // Reset selectedCallflowNodeId if code changes and node no longer exists
+  // Reset selectedCallflowNodeId / selectedCallflowEdge if code changes and item no longer exists
   useEffect(() => {
     if (selectedCallflowNodeId && !callflowGraph.nodes.has(selectedCallflowNodeId)) {
       setSelectedCallflowNodeId(null);
       setIsolateSubgraphMode(false);
     }
-  }, [callflowGraph, selectedCallflowNodeId]);
+    if (
+      selectedCallflowEdge &&
+      !callflowGraph.edges.some(
+        (ed) => ed.from === selectedCallflowEdge.from && ed.to === selectedCallflowEdge.to
+      )
+    ) {
+      setSelectedCallflowEdge(null);
+    }
+  }, [callflowGraph, selectedCallflowNodeId, selectedCallflowEdge]);
 
   // Determine effective Mermaid code to render (either full code or isolated sub-callflow)
   const currentDirection = useMemo(() => getDiagramDirection(code), [code]);
@@ -711,12 +734,13 @@ export default function App() {
       callflowTrace && !isolateSubgraphMode ? callflowTrace : null,
       canvasSurface,
       callflowDirectionFilter,
-      callflowHopDepth
+      callflowHopDepth,
+      selectedCallflowEdge
     );
     applyLiveNodeOffsetsToDom(index, activeNodeOffsets, isVisualEditMode);
   }, [baseColoredSvg, callflowGraph]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Fast-path: update Spotlight in-place on selection/filter changes (zero SVG rebuild)
+  // Fast-path: update Spotlight in-place on selection/filter/edge changes (zero SVG rebuild)
   useLayoutEffect(() => {
     const index = liveSvgIndexRef.current;
     if (!index) return;
@@ -725,9 +749,17 @@ export default function App() {
       callflowTrace && !isolateSubgraphMode ? callflowTrace : null,
       canvasSurface,
       callflowDirectionFilter,
-      callflowHopDepth
+      callflowHopDepth,
+      selectedCallflowEdge
     );
-  }, [callflowTrace, isolateSubgraphMode, canvasSurface, callflowDirectionFilter, callflowHopDepth]);
+  }, [
+    callflowTrace,
+    isolateSubgraphMode,
+    canvasSurface,
+    callflowDirectionFilter,
+    callflowHopDepth,
+    selectedCallflowEdge,
+  ]);
 
   // Fast-path: update Node Offsets & Connection Ports in-place (zero SVG rebuild)
   useLayoutEffect(() => {
@@ -736,27 +768,89 @@ export default function App() {
     applyLiveNodeOffsetsToDom(index, activeNodeOffsets, isVisualEditMode);
   }, [activeNodeOffsets, isVisualEditMode]);
 
-  // Global Escape handler to reliably deselect node / close active wire / clear isolated filter
+  // Global Escape & Delete/Backspace shortcut handler
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      if (nodeDragRef.current.active && nodeDragRef.current.mode === 'connect-wire') {
-        nodeDragRef.current.active = false;
-        setActiveWirePreview(null);
+      if (e.key === 'Escape') {
+        if (nodeDragRef.current.active && nodeDragRef.current.mode === 'connect-wire') {
+          nodeDragRef.current.active = false;
+          snappedPortRef.current = null;
+          if (liveSvgIndexRef.current) {
+            setMagneticSnapTargetInDom(liveSvgIndexRef.current, null, false);
+          }
+          setActiveWirePreview(null);
+          return;
+        }
+        if (editingNodeSnapshot) {
+          setEditingNodeSnapshot(null);
+          return;
+        }
+        if (selectedCallflowEdge) {
+          setSelectedCallflowEdge(null);
+          return;
+        }
+        if (selectedCallflowNodeId || isolateSubgraphMode) {
+          setSelectedCallflowNodeId(null);
+          setIsolateSubgraphMode(false);
+        }
         return;
       }
-      if (editingNodeSnapshot) {
-        setEditingNodeSnapshot(null);
-        return;
-      }
-      if (selectedCallflowNodeId || isolateSubgraphMode) {
-        setSelectedCallflowNodeId(null);
-        setIsolateSubgraphMode(false);
+
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedCallflowEdge) {
+        const activeEl = document.activeElement as HTMLElement | null;
+        const tag = activeEl?.tagName?.toUpperCase() || '';
+        if (
+          tag === 'INPUT' ||
+          tag === 'TEXTAREA' ||
+          tag === 'SELECT' ||
+          activeEl?.isContentEditable
+        ) {
+          return;
+        }
+        e.preventDefault();
+        if (scriptWorkspace.modules.length > 0) {
+          const nextWs = disconnectEdgeInWorkspace(
+            scriptWorkspace,
+            callflowViewLevel,
+            selectedCallflowEdge.from,
+            selectedCallflowEdge.to
+          );
+          setScriptWorkspace(nextWs);
+          if (callflowViewLevel.level === 'detail') {
+            setCode(
+              buildScriptDetailMermaid(
+                nextWs,
+                callflowViewLevel.scriptNumber,
+                currentDirection || 'LR'
+              )
+            );
+          } else {
+            setCode(buildMasterOverviewMermaid(nextWs, currentDirection || 'LR'));
+          }
+        } else {
+          skipAutoConvertRef.current = true;
+          setCode((prev) =>
+            disconnectEdgeInMermaidCode(
+              prev,
+              selectedCallflowEdge.from,
+              selectedCallflowEdge.to
+            )
+          );
+        }
+        setSelectedCallflowEdge(null);
       }
     };
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [editingNodeSnapshot, selectedCallflowNodeId, isolateSubgraphMode]);
+  }, [
+    editingNodeSnapshot,
+    selectedCallflowNodeId,
+    isolateSubgraphMode,
+    selectedCallflowEdge,
+    scriptWorkspace,
+    callflowViewLevel,
+    currentDirection,
+  ]);
 
   // Keep diagram line/theme contrast synced when toggling Dark/Light canvas surface
   const handleChangeCanvasSurface = useCallback((nextSurface: 'dark' | 'light') => {
@@ -1104,6 +1198,7 @@ export default function App() {
 
   const toggleNodeSelectionClean = useCallback(
     (nodeId: string) => {
+      setSelectedCallflowEdge(null);
       setSelectedCallflowNodeId((prev) => {
         const next = prev === nodeId ? null : nodeId;
         if (next) {
@@ -1131,8 +1226,10 @@ export default function App() {
     const targetEl = e.target as Element;
     const portEl = targetEl?.closest?.('[data-port-node-id]');
     const clickedNodeId = resolveClickedNodeIdFromSvgElement(targetEl, callflowGraph);
+    const clickedEdgeHit =
+      !portEl && !clickedNodeId ? resolveClickedEdgeFromSvgElement(targetEl) : null;
 
-    // 1. Check if starting a Drag-to-Connect wire (either from a connection port dot or in 'connect' tool mode)
+    // 1. Check if starting a Drag-to-Connect wire (either from a 4-side port dot or in 'connect' tool mode)
     const wireSourceNodeId =
       portEl?.getAttribute('data-port-node-id') ||
       (isVisualEditMode && visualEditTool === 'connect' ? clickedNodeId : null);
@@ -1142,9 +1239,21 @@ export default function App() {
     if (wireSourceNodeId && canvasViewportRef.current) {
       e.stopPropagation();
       const vpRect = canvasViewportRef.current.getBoundingClientRect();
-      const startX = e.clientX - vpRect.left;
-      const startY = e.clientY - vpRect.top;
+      let startX = e.clientX - vpRect.left;
+      let startY = e.clientY - vpRect.top;
+      if (portEl) {
+        const portRect = portEl.getBoundingClientRect();
+        if (portRect.width > 0 || portRect.height > 0) {
+          startX = (portRect.left + portRect.right) / 2 - vpRect.left;
+          startY = (portRect.top + portRect.bottom) / 2 - vpRect.top;
+        }
+      }
       const fromLabel = callflowGraph.nodes.get(wireSourceNodeId)?.label || wireSourceNodeId;
+
+      snappedPortRef.current = null;
+      if (liveSvgIndexRef.current) {
+        setMagneticSnapTargetInDom(liveSvgIndexRef.current, null, true);
+      }
 
       nodeDragRef.current = {
         active: true,
@@ -1172,6 +1281,7 @@ export default function App() {
         curX: startX,
         curY: startY,
         hoverTargetNodeId: null,
+        snappedPortSide: null,
       });
       startedInteraction = 'connect-wire';
     } else if (isVisualEditMode && visualEditTool === 'move' && clickedNodeId) {
@@ -1241,18 +1351,61 @@ export default function App() {
 
         if (st.mode === 'connect-wire' && canvasViewportRef.current) {
           const vpRect = canvasViewportRef.current.getBoundingClientRect();
-          const curX = ev.clientX - vpRect.left;
-          const curY = ev.clientY - vpRect.top;
+          const elAtCursor = document.elementFromPoint(ev.clientX, ev.clientY);
+          const hoveredId = resolveClickedNodeIdFromSvgElement(elAtCursor, callflowGraph);
+          const magneticSnap = liveSvgIndexRef.current
+            ? findNearestMagneticPort(
+                liveSvgIndexRef.current,
+                ev.clientX,
+                ev.clientY,
+                st.nodeId,
+                28,
+                hoveredId
+              )
+            : null;
+
+          const curX = magneticSnap
+            ? magneticSnap.clientX - vpRect.left
+            : ev.clientX - vpRect.left;
+          const curY = magneticSnap
+            ? magneticSnap.clientY - vpRect.top
+            : ev.clientY - vpRect.top;
+
           if (wireLineRef.current) {
             wireLineRef.current.setAttribute('x2', String(curX));
             wireLineRef.current.setAttribute('y2', String(curY));
           }
-          const elAtCursor = document.elementFromPoint(ev.clientX, ev.clientY);
-          const hoveredId = resolveClickedNodeIdFromSvgElement(elAtCursor, callflowGraph);
-          const nextHover = hoveredId && hoveredId !== st.nodeId ? hoveredId : null;
+
+          const nextSnapTarget = magneticSnap
+            ? { nodeId: magneticSnap.nodeId, side: magneticSnap.side }
+            : null;
+          const prevSnap = snappedPortRef.current;
+          if (
+            prevSnap?.nodeId !== nextSnapTarget?.nodeId ||
+            prevSnap?.side !== nextSnapTarget?.side
+          ) {
+            snappedPortRef.current = nextSnapTarget;
+            if (liveSvgIndexRef.current) {
+              setMagneticSnapTargetInDom(liveSvgIndexRef.current, nextSnapTarget, true);
+            }
+          }
+
+          const nextHover =
+            magneticSnap?.nodeId ||
+            (hoveredId && hoveredId !== st.nodeId ? hoveredId : null);
+          const nextSide = magneticSnap?.side ?? null;
+
           setActiveWirePreview((prev) =>
-            prev && prev.hoverTargetNodeId !== nextHover
-              ? { ...prev, curX, curY, hoverTargetNodeId: nextHover }
+            prev &&
+            (prev.hoverTargetNodeId !== nextHover ||
+              (prev.snappedPortSide ?? null) !== nextSide)
+              ? {
+                  ...prev,
+                  curX,
+                  curY,
+                  hoverTargetNodeId: nextHover,
+                  snappedPortSide: nextSide,
+                }
               : prev
           );
           return;
@@ -1335,10 +1488,12 @@ export default function App() {
     const handleWindowBlur = () => {
       cleanupListeners();
       nodeDragRef.current.active = false;
+      snappedPortRef.current = null;
       isPanningRef.current = false;
       setIsPanning(false);
       setActiveWirePreview(null);
       if (liveSvgIndexRef.current) {
+        setMagneticSnapTargetInDom(liveSvgIndexRef.current, null, false);
         applyLiveNodeOffsetsToDom(liveSvgIndexRef.current, activeNodeOffsetsRef.current, isVisualEditMode);
       }
     };
@@ -1353,11 +1508,17 @@ export default function App() {
         if (st.mode === 'connect-wire') {
           const dropEl =
             document.elementFromPoint(ev.clientX, ev.clientY) || (ev.target as Element);
-          const targetNodeId = resolveClickedNodeIdFromSvgElement(dropEl, callflowGraph);
+          const resolvedDropNodeId = resolveClickedNodeIdFromSvgElement(dropEl, callflowGraph);
+          const targetNodeId = snappedPortRef.current?.nodeId || resolvedDropNodeId;
+          snappedPortRef.current = null;
+          if (liveSvgIndexRef.current) {
+            setMagneticSnapTargetInDom(liveSvgIndexRef.current, null, false);
+          }
           setActiveWirePreview(null);
           if (targetNodeId && targetNodeId !== st.nodeId) {
             const fromLabel = callflowGraph.nodes.get(st.nodeId)?.label || st.nodeId;
             const toLabel = callflowGraph.nodes.get(targetNodeId)?.label || targetNodeId;
+            setSelectedCallflowEdge(null);
             if (scriptWorkspace.modules.length > 0) {
               const nextWs = connectNodesInWorkspace(
                 scriptWorkspace,
@@ -1413,9 +1574,22 @@ export default function App() {
             toggleNodeSelectionClean(clickedIdAtUp);
           }
         } else {
-          // Clicking empty canvas reliably clears selection & isolated path filter
-          setSelectedCallflowNodeId(null);
-          setIsolateSubgraphMode(false);
+          const edgeHit =
+            resolveClickedEdgeFromSvgElement(targetAtUp) || clickedEdgeHit;
+          if (edgeHit) {
+            setSelectedCallflowNodeId(null);
+            setIsolateSubgraphMode(false);
+            setRecentConnectionBanner(null);
+            setSelectedCallflowEdge({
+              ...edgeHit,
+              labelDraft: edgeHit.label,
+            });
+          } else {
+            // Clicking empty canvas reliably clears node selection, isolated path filter & edge selection
+            setSelectedCallflowNodeId(null);
+            setIsolateSubgraphMode(false);
+            setSelectedCallflowEdge(null);
+          }
         }
       }
     };
@@ -1506,15 +1680,25 @@ export default function App() {
     setZoom(cam.zoom);
 
     if (wasTap) {
-      const tappedId = resolveClickedNodeIdFromSvgElement(
-        e.target as Element,
-        callflowGraph
-      );
+      const tappedEl = e.target as Element;
+      const tappedId = resolveClickedNodeIdFromSvgElement(tappedEl, callflowGraph);
       if (tappedId) {
         toggleNodeSelectionClean(tappedId);
       } else {
-        setSelectedCallflowNodeId(null);
-        setIsolateSubgraphMode(false);
+        const tappedEdge = resolveClickedEdgeFromSvgElement(tappedEl);
+        if (tappedEdge) {
+          setSelectedCallflowNodeId(null);
+          setIsolateSubgraphMode(false);
+          setRecentConnectionBanner(null);
+          setSelectedCallflowEdge({
+            ...tappedEdge,
+            labelDraft: tappedEdge.label,
+          });
+        } else {
+          setSelectedCallflowNodeId(null);
+          setIsolateSubgraphMode(false);
+          setSelectedCallflowEdge(null);
+        }
       }
     }
   };
@@ -1939,56 +2123,86 @@ export default function App() {
         return;
       }
       if (scriptWorkspace.modules.length > 0) {
-        // Update the most recently added rule or manualLink between fromNodeId and toNodeId
-        const fromRef =
-          extractScriptNumberFromNodeId(
-            recentConnectionBanner.fromNodeId,
-            scriptWorkspace.modules
-          ) || recentConnectionBanner.fromNodeId.replace(/^S_/, '');
-        const toRef =
-          extractScriptNumberFromNodeId(
-            recentConnectionBanner.toNodeId,
-            scriptWorkspace.modules
-          ) || recentConnectionBanner.toNodeId.replace(/^(?:S|JUMP|INC|SELF)_/, '');
-        const fromKey = canonicalScriptMatchKey(fromRef);
-        const toKey = canonicalScriptMatchKey(toRef);
-        const tasteMatch = clean.match(/^(?:taste\s*)?([0-9*#]+)$/i);
-
-        const nextModules = scriptWorkspace.modules.map((mod) => {
-          if (canonicalScriptMatchKey(mod.scriptNumber) !== fromKey) return mod;
-          const idx = [...mod.rules]
-            .reverse()
-            .findIndex(
-              (r) =>
-                (r.targetNumber && canonicalScriptMatchKey(r.targetNumber) === toKey) ||
-                r.choices.some((c) => canonicalScriptMatchKey(c.targetNumber) === toKey)
-            );
-          if (idx === -1) return mod;
-          const realIdx = mod.rules.length - 1 - idx;
-          const targetRule = mod.rules[realIdx];
-          const updatedRule = tasteMatch
-            ? {
-                ...targetRule,
-                stepName: `Taste ${tasteMatch[1]} → ${toRef}`,
-                targetNumber: undefined,
-                choices: [{ choice: tasteMatch[1], targetNumber: toRef, label: clean }],
-              }
-            : {
-                ...targetRule,
-                stepName: `${clean} → ${toRef}`,
-              };
-          return {
-            ...mod,
-            rules: mod.rules.map((r, i) => (i === realIdx ? updatedRule : r)),
-          };
-        });
-        const nextWs = buildScriptWorkspace(nextModules, scriptWorkspace);
+        const nextWs = updateEdgeLabelInWorkspace(
+          scriptWorkspace,
+          callflowViewLevel,
+          recentConnectionBanner.fromNodeId,
+          recentConnectionBanner.toNodeId,
+          clean
+        );
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
+      } else {
+        skipAutoConvertRef.current = true;
+        setCode((prev) =>
+          updateEdgeLabelInMermaidCode(
+            prev,
+            recentConnectionBanner.fromNodeId,
+            recentConnectionBanner.toNodeId,
+            clean
+          )
+        );
       }
       setRecentConnectionBanner(null);
     },
-    [recentConnectionBanner, scriptWorkspace, refreshDiagramFromWorkspace]
+    [recentConnectionBanner, scriptWorkspace, callflowViewLevel, refreshDiagramFromWorkspace]
+  );
+
+  const handleDisconnectSelectedEdge = useCallback(() => {
+    if (!selectedCallflowEdge) return;
+    if (scriptWorkspace.modules.length > 0) {
+      const nextWs = disconnectEdgeInWorkspace(
+        scriptWorkspace,
+        callflowViewLevel,
+        selectedCallflowEdge.from,
+        selectedCallflowEdge.to
+      );
+      setScriptWorkspace(nextWs);
+      refreshDiagramFromWorkspace(nextWs);
+    } else {
+      skipAutoConvertRef.current = true;
+      setCode((prev) =>
+        disconnectEdgeInMermaidCode(
+          prev,
+          selectedCallflowEdge.from,
+          selectedCallflowEdge.to
+        )
+      );
+    }
+    setSelectedCallflowEdge(null);
+  }, [selectedCallflowEdge, scriptWorkspace, callflowViewLevel, refreshDiagramFromWorkspace]);
+
+  const handleSaveSelectedEdgeLabel = useCallback(
+    (overrideLabel?: string) => {
+      if (!selectedCallflowEdge) return;
+      const clean = (overrideLabel ?? selectedCallflowEdge.labelDraft).trim();
+      if (!clean) return;
+      if (scriptWorkspace.modules.length > 0) {
+        const nextWs = updateEdgeLabelInWorkspace(
+          scriptWorkspace,
+          callflowViewLevel,
+          selectedCallflowEdge.from,
+          selectedCallflowEdge.to,
+          clean
+        );
+        setScriptWorkspace(nextWs);
+        refreshDiagramFromWorkspace(nextWs);
+      } else {
+        skipAutoConvertRef.current = true;
+        setCode((prev) =>
+          updateEdgeLabelInMermaidCode(
+            prev,
+            selectedCallflowEdge.from,
+            selectedCallflowEdge.to,
+            clean
+          )
+        );
+      }
+      setSelectedCallflowEdge((prev) =>
+        prev ? { ...prev, label: clean, labelDraft: clean } : null
+      );
+    },
+    [selectedCallflowEdge, scriptWorkspace, callflowViewLevel, refreshDiagramFromWorkspace]
   );
 
   const handleStartNewCallflow = useCallback(
@@ -3423,11 +3637,21 @@ export default function App() {
                 | '';
               if (!rawBlock) return;
               e.preventDefault();
-              const droppedOnNodeId = resolveClickedNodeIdFromSvgElement(
+              const directDropNodeId = resolveClickedNodeIdFromSvgElement(
                 e.target as Element,
                 callflowGraph
               );
-              handleAddBuildingBlock(rawBlock, droppedOnNodeId);
+              const magneticDockNodeId =
+                !directDropNodeId && liveSvgIndexRef.current
+                  ? findNearestMagneticPort(
+                      liveSvgIndexRef.current,
+                      e.clientX,
+                      e.clientY,
+                      '',
+                      36
+                    )?.nodeId || null
+                  : null;
+              handleAddBuildingBlock(rawBlock, directDropNodeId || magneticDockNodeId);
             }}
             onDoubleClick={(e) => {
               if (isCanvasOverlayTarget(e.target) || !coloredSvg) return;
@@ -3615,6 +3839,88 @@ export default function App() {
               </div>
             )}
 
+            {/* Floating Edge Action Bar: Click any connection line to edit label or detach cleanly */}
+            {selectedCallflowEdge && (
+              <div
+                data-canvas-ui="true"
+                onMouseDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
+                onTouchMove={(e) => e.stopPropagation()}
+                onTouchEnd={(e) => e.stopPropagation()}
+                className="absolute top-3 left-1/2 -translate-x-1/2 z-30 px-3.5 py-2.5 rounded-xl bg-slate-900/95 border border-amber-500/75 text-xs flex flex-wrap items-center gap-2.5 shadow-2xl max-w-[calc(100%-1.5rem)]"
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="w-2.5 h-2.5 rounded-xs bg-amber-400 shrink-0" />
+                  <span className="text-slate-400 shrink-0">Verbindung:</span>
+                  <strong className="font-mono text-indigo-300 truncate max-w-[140px]">
+                    {callflowGraph.nodes.get(selectedCallflowEdge.from)?.label ||
+                      selectedCallflowEdge.from}
+                  </strong>
+                  <ArrowRight className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <strong className="font-mono text-emerald-300 truncate max-w-[140px]">
+                    {callflowGraph.nodes.get(selectedCallflowEdge.to)?.label ||
+                      selectedCallflowEdge.to}
+                  </strong>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1">
+                  {['Taste 1', 'Überlauf', 'Feiertag', 'Sprung'].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => handleSaveSelectedEdgeLabel(preset)}
+                      className="px-2 py-0.5 rounded bg-slate-800 hover:bg-indigo-600 text-[11px] text-slate-200 hover:text-white transition-colors cursor-pointer"
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                  <input
+                    type="text"
+                    value={selectedCallflowEdge.labelDraft}
+                    onChange={(e) =>
+                      setSelectedCallflowEdge((prev) =>
+                        prev ? { ...prev, labelDraft: e.target.value } : null
+                      )
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        handleSaveSelectedEdgeLabel();
+                      }
+                    }}
+                    placeholder="Beschriftung ändern..."
+                    className="w-32 px-2 py-0.5 bg-slate-950 border border-slate-700 rounded text-[11px] text-slate-100 focus:outline-none focus:border-amber-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleSaveSelectedEdgeLabel()}
+                    className="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold cursor-pointer"
+                  >
+                    Speichern
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1.5 ml-auto">
+                  <button
+                    type="button"
+                    onClick={handleDisconnectSelectedEdge}
+                    title="Verbindung sauber lösen (Taste: Entf)"
+                    className="px-2.5 py-1 rounded-md bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-semibold flex items-center gap-1.5 shadow-sm transition-colors whitespace-nowrap cursor-pointer"
+                  >
+                    <Unlink className="w-3.5 h-3.5" />
+                    <span>Verbindung lösen</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedCallflowEdge(null)}
+                    aria-label="Auswahl schließen"
+                    className="px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] cursor-pointer"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Quick Label Customization Banner after dragging a new Connection Wire */}
             {recentConnectionBanner && (
               <div
@@ -3688,7 +3994,10 @@ export default function App() {
                     markerHeight="6"
                     orient="auto-start-reverse"
                   >
-                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#6366f1" />
+                    <path
+                      d="M 0 0 L 10 5 L 0 10 z"
+                      fill={activeWirePreview.hoverTargetNodeId ? '#10b981' : '#6366f1'}
+                    />
                   </marker>
                 </defs>
                 <line
@@ -3708,6 +4017,16 @@ export default function App() {
                   r="5"
                   fill="#6366f1"
                 />
+                {activeWirePreview.snappedPortSide && (
+                  <circle
+                    cx={activeWirePreview.curX}
+                    cy={activeWirePreview.curY}
+                    r="8"
+                    fill="rgba(16, 185, 129, 0.25)"
+                    stroke="#10b981"
+                    strokeWidth="2.5"
+                  />
+                )}
               </svg>
             )}
 
