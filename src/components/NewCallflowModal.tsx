@@ -30,6 +30,7 @@ interface DraftConfirmedTarget {
   refKey: string;
   displayName: string;
   contextLabel: string;
+  triggeredNumbers?: string[];
   decision: MasterTargetDecision;
   isAlreadyPresent?: boolean;
   isManualAdd?: boolean;
@@ -106,6 +107,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       refKey: item.refKey,
       displayName: item.displayName,
       contextLabel: item.contextLabel,
+      triggeredNumbers: item.triggeredNumbers,
       decision: item.status === 'present' ? 'present' : 'request',
       isAlreadyPresent: item.status === 'present',
     }));
@@ -365,7 +367,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                     setRawMasterText(e.target.value);
                     if (errorMsg) setErrorMsg(null);
                   }}
-                  placeholder={`Text für „Main“ hier einfügen...\nBeispiel:\nPrio 1 | Zeitplan Mo-Fr | Wohin: Schaltung1\nPrio 2 | Feiertag | Ziel: Feiertag_Ansage\nTaste 1 -> Vertrieb_VIP\nTaste 2 -> 3757`}
+                  placeholder={`Text für „Main“ (oder AACC-Masterscript mit VALUE / DNIS_Range) hier einfügen...\nHinweis: /* ... */ Altlast-Kommentare werden automatisch ignoriert.\n\nBeispiel:\nIF DNIS_Range_Rheinland THEN assign 290xxxx to src_route_number assign Rheinland to Sys_brand END IF\nVALUE 101 : execute Script Vertrieb_Service\nVALUE 4501 : execute Script Fax_Eingang`}
                   className="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none resize-y"
                 />
               </div>
@@ -483,6 +485,11 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                             <div className="text-[11px] text-slate-400 truncate">
                               {item.contextLabel}
                             </div>
+                            {item.triggeredNumbers && item.triggeredNumbers.length > 0 && (
+                              <div className="text-[10px] font-mono tabular-nums text-indigo-300 truncate mt-0.5">
+                                Rufnummern: {item.triggeredNumbers.join(', ')}
+                              </div>
+                            )}
                           </div>
                         </label>
 

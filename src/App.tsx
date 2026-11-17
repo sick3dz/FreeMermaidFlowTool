@@ -16,6 +16,7 @@ import {
   GitBranch,
   Globe,
   Grid,
+  HardDriveDownload,
   Layers,
   Maximize2,
   Minimize2,
@@ -112,17 +113,14 @@ import { ExportModal } from './components/ExportModal';
 import { MultiScriptModal } from './components/MultiScriptModal';
 import { NewCallflowModal } from './components/NewCallflowModal';
 import { NodeInlineEditorModal } from './components/NodeInlineEditorModal';
+import { OfflineDownloadModal } from './components/OfflineDownloadModal';
+import {
+  readStudioStorage,
+  STUDIO_STORAGE_KEYS,
+  writeStudioStorage,
+} from './utils/offlineAppExporter';
 
-const STORAGE_KEYS = {
-  ACTIVE_CODE: 'mermaid_studio_local_active_code_v3',
-  ACTIVE_TITLE: 'mermaid_studio_local_active_title_v3',
-  ACTIVE_THEME: 'mermaid_studio_local_active_theme_v2',
-  SMART_COLOR_MODE: 'mermaid_studio_local_smart_color_mode_v2',
-  CANVAS_SURFACE: 'mermaid_studio_local_canvas_surface_v2',
-  SAVED_LIST: 'mermaid_studio_local_saved_diagrams_v1',
-  SCRIPT_WORKSPACE: 'mermaid_studio_local_script_workspace_v2',
-  WORKSPACE_MODE: 'mermaid_studio_local_workspace_mode_v1',
-};
+const STORAGE_KEYS = STUDIO_STORAGE_KEYS;
 
 const QUICK_SYNTAX_TOKENS: Array<{ label: string; token: string; hint: string }> = [
   { label: '-->', token: ' --> ', hint: 'Gerichteter Pfeil' },
@@ -167,18 +165,18 @@ const CLARITY_MODE_OPTIONS: Array<{
 ];
 
 export default function App() {
-  // Initial state starts empty (or restores user's own workspace from localStorage)
+  // Initial state starts empty (or restores user's own workspace from localStorage / offline seed)
   const [diagramTitle, setDiagramTitle] = useState<string>(() => {
-    return localStorage.getItem(STORAGE_KEYS.ACTIVE_TITLE) || 'Neuer Callflow';
+    return readStudioStorage(STORAGE_KEYS.ACTIVE_TITLE) || 'Neuer Callflow';
   });
 
   const [code, setCode] = useState<string>(() => {
-    return localStorage.getItem(STORAGE_KEYS.ACTIVE_CODE) ?? '';
+    return readStudioStorage(STORAGE_KEYS.ACTIVE_CODE) ?? '';
   });
 
   const [themeConfig, setThemeConfig] = useState<ThemeConfiguration>(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEYS.ACTIVE_THEME);
+      const raw = readStudioStorage(STORAGE_KEYS.ACTIVE_THEME);
       if (raw) {
         return { ...DEFAULT_THEME_CONFIG, ...JSON.parse(raw) };
       }
@@ -189,7 +187,7 @@ export default function App() {
   });
 
   const [smartColorMode, setSmartColorMode] = useState<SmartColorMode>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.SMART_COLOR_MODE);
+    const saved = readStudioStorage(STORAGE_KEYS.SMART_COLOR_MODE);
     if (
       saved === 'semantic' ||
       saved === 'clusters' ||
@@ -202,13 +200,13 @@ export default function App() {
   });
 
   const [canvasSurface, setCanvasSurface] = useState<'dark' | 'light'>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.CANVAS_SURFACE);
+    const saved = readStudioStorage(STORAGE_KEYS.CANVAS_SURFACE);
     return saved === 'light' ? 'light' : 'dark';
   });
 
   const [savedDiagrams, setSavedDiagrams] = useState<SavedDiagram[]>(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEYS.SAVED_LIST);
+      const raw = readStudioStorage(STORAGE_KEYS.SAVED_LIST);
       if (raw) return JSON.parse(raw);
     } catch {
       // ignore
@@ -226,7 +224,7 @@ export default function App() {
   // Two-Level Multi-Script Callflow Workspace
   const [scriptWorkspace, setScriptWorkspace] = useState<ScriptWorkspace>(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEYS.SCRIPT_WORKSPACE);
+      const raw = readStudioStorage(STORAGE_KEYS.SCRIPT_WORKSPACE);
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed && Array.isArray(parsed.modules)) {
@@ -269,7 +267,7 @@ export default function App() {
 
   // Workspace Mode: 'guided' (default, clutter-free 3-step assistant starting with Main) vs 'free' (full Mermaid Studio)
   const [workspaceMode, setWorkspaceMode] = useState<'guided' | 'free'>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.WORKSPACE_MODE);
+    const saved = readStudioStorage(STORAGE_KEYS.WORKSPACE_MODE);
     return saved === 'free' ? 'free' : 'guided';
   });
   const [guidedStep, setGuidedStep] = useState<1 | 2 | 3>(() =>
@@ -327,6 +325,7 @@ export default function App() {
     tab: 'templates' | 'snippets' | 'saved' | 'help';
   }>({ isOpen: false, tab: 'templates' });
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [isOfflineModalOpen, setIsOfflineModalOpen] = useState<boolean>(false);
 
   // PC Visual Drag-and-Drop Callflow Editor State
   const [isVisualEditMode, setIsVisualEditMode] = useState<boolean>(false);
@@ -403,19 +402,15 @@ export default function App() {
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
 
-  // Persist active work to localStorage
+  // Persist active work to localStorage (or memory fallback)
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.ACTIVE_CODE, code);
-      localStorage.setItem(STORAGE_KEYS.ACTIVE_TITLE, diagramTitle);
-      localStorage.setItem(STORAGE_KEYS.ACTIVE_THEME, JSON.stringify(themeConfig));
-      localStorage.setItem(STORAGE_KEYS.SMART_COLOR_MODE, smartColorMode);
-      localStorage.setItem(STORAGE_KEYS.CANVAS_SURFACE, canvasSurface);
-      localStorage.setItem(STORAGE_KEYS.SCRIPT_WORKSPACE, JSON.stringify(scriptWorkspace));
-      localStorage.setItem(STORAGE_KEYS.WORKSPACE_MODE, workspaceMode);
-    } catch {
-      // ignore storage quota errors
-    }
+    writeStudioStorage(STORAGE_KEYS.ACTIVE_CODE, code);
+    writeStudioStorage(STORAGE_KEYS.ACTIVE_TITLE, diagramTitle);
+    writeStudioStorage(STORAGE_KEYS.ACTIVE_THEME, JSON.stringify(themeConfig));
+    writeStudioStorage(STORAGE_KEYS.SMART_COLOR_MODE, smartColorMode);
+    writeStudioStorage(STORAGE_KEYS.CANVAS_SURFACE, canvasSurface);
+    writeStudioStorage(STORAGE_KEYS.SCRIPT_WORKSPACE, JSON.stringify(scriptWorkspace));
+    writeStudioStorage(STORAGE_KEYS.WORKSPACE_MODE, workspaceMode);
   }, [code, diagramTitle, themeConfig, smartColorMode, canvasSurface, scriptWorkspace, workspaceMode]);
 
   const handleChangeWorkspaceMode = useCallback((nextMode: 'guided' | 'free') => {
@@ -1767,11 +1762,7 @@ export default function App() {
     const updated = [newEntry, ...savedDiagrams];
     setSavedDiagrams(updated);
     setDiagramTitle(title);
-    try {
-      localStorage.setItem(STORAGE_KEYS.SAVED_LIST, JSON.stringify(updated));
-    } catch {
-      // ignore
-    }
+    writeStudioStorage(STORAGE_KEYS.SAVED_LIST, JSON.stringify(updated));
   };
 
   const handleLoadSavedDiagram = (saved: SavedDiagram) => {
@@ -1804,11 +1795,7 @@ export default function App() {
   const handleDeleteSavedDiagram = (id: string) => {
     const updated = savedDiagrams.filter((item) => item.id !== id);
     setSavedDiagrams(updated);
-    try {
-      localStorage.setItem(STORAGE_KEYS.SAVED_LIST, JSON.stringify(updated));
-    } catch {
-      // ignore
-    }
+    writeStudioStorage(STORAGE_KEYS.SAVED_LIST, JSON.stringify(updated));
   };
 
   const handleImportFileContent = (title: string, importedCode: string) => {
@@ -2170,6 +2157,15 @@ export default function App() {
                 <span className="hidden sm:inline">Neu starten</span>
               </button>
             )}
+          <button
+            type="button"
+            onClick={() => setIsOfflineModalOpen(true)}
+            title="Komplette App als einzelne HTML-Datei für 100 % lokalen Offline-Betrieb (ohne Internet) herunterladen"
+            className="px-2.5 lg:px-3 py-1.5 lg:py-2 text-xs font-medium text-emerald-200 bg-emerald-950/50 hover:bg-emerald-900/60 border border-emerald-500/40 hover:border-emerald-400/70 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <HardDriveDownload className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <span className="hidden sm:inline">Offline-App</span>
+          </button>
           <button
             type="button"
             onClick={() => setIsExportModalOpen(true)}
@@ -3891,6 +3887,19 @@ export default function App() {
         hasExistingWorkspace={scriptWorkspace.modules.length > 0 || code.trim().length > 0}
         onClose={() => setIsNewCallflowModalOpen(false)}
         onStartNewCallflow={handleStartNewCallflow}
+      />
+
+      <OfflineDownloadModal
+        isOpen={isOfflineModalOpen}
+        onClose={() => setIsOfflineModalOpen(false)}
+        diagramTitle={diagramTitle}
+        code={code}
+        themeConfig={themeConfig}
+        smartColorMode={smartColorMode}
+        canvasSurface={canvasSurface}
+        workspaceMode={workspaceMode}
+        scriptWorkspace={scriptWorkspace}
+        savedDiagrams={savedDiagrams}
       />
 
       <NodeInlineEditorModal

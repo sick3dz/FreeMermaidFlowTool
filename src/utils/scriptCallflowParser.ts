@@ -214,14 +214,51 @@ function stripNumericNoiseForFreeText(text: string): string {
 }
 
 /**
+ * Strips /* ... * / comments safely (including multi-line, nested /* /* ... * / * /,
+ * and unclosed /* ... EOF alt-last blocks) while preserving line breaks.
+ */
+function stripBlockCommentsSafely(input: string): string {
+  let result = '';
+  let i = 0;
+  let depth = 0;
+  const len = input.length;
+
+  while (i < len) {
+    const two = input.slice(i, i + 2);
+    if (two === '/*') {
+      depth += 1;
+      i += 2;
+      continue;
+    }
+    if (two === '*/' && depth > 0) {
+      depth -= 1;
+      if (depth === 0) {
+        result += ' ';
+      }
+      i += 2;
+      continue;
+    }
+    if (depth > 0) {
+      if (input[i] === '\n') {
+        result += '\n';
+      }
+      i += 1;
+      continue;
+    }
+    result += input[i];
+    i += 1;
+  }
+
+  return result;
+}
+
+/**
  * Strips multi-line /* ... * / and (* ... *) comments, inline // or -- comments,
  * and changelog/revision metadata lines before parsing active routing logic.
  */
 function stripScriptCommentsAndNoise(rawText: string): string {
-  const withoutBlockComments = rawText
-    .replace(/\/\*[\s\S]*?\*\//g, (match) => (match.includes('\n') ? '\n' : ' '))
-    .replace(/\(\*[\s\S]*?\*\)/g, (match) => (match.includes('\n') ? '\n' : ' '))
-    .replace(/\/\*[\s\S]*$/g, ' ');
+  const withoutBlockComments = stripBlockCommentsSafely(rawText)
+    .replace(/\(\*[\s\S]*?\*\)/g, (match) => (match.includes('\n') ? '\n' : ' '));
 
   return withoutBlockComments
     .split(/\r?\n/)
@@ -240,6 +277,75 @@ function stripScriptCommentsAndNoise(rawText: string): string {
       return noInline;
     })
     .join('\n');
+}
+
+interface AaccOrgaContext {
+  organizationName?: string;
+  orgaCode?: string;
+  brandName?: string;
+  srcRouteNumber?: string;
+}
+
+const KNOWN_ORGA_PREFIXES: Array<{ code: string; name: string; namePattern: RegExp }> = [
+  { code: '290', name: 'Rheinland', namePattern: /\brheinland\b|rheinland(?:_?vers)?/i },
+  { code: '210', name: 'CreditLife', namePattern: /\bcredit[\s_-]?life\b/i },
+  { code: '6099', name: 'Rhion', namePattern: /\brhion\b/i },
+];
+
+function detectOrgaFromText(text: string | undefined): {
+  organizationName?: string;
+  orgaCode?: string;
+} {
+  if (!text) return {};
+  const cleaned = text.trim();
+  if (!cleaned) return {};
+
+  // 1. Check 02131 + Orga prefix or Orga prefix + xxxx/digits
+  const prefixMatch = cleaned.match(
+    /(?:^|[^0-9])(?:0?2131[\s\-/]*)?(6099|290|210)(?:[xX*]{1,6}|\d{0,6})?(?=$|[^0-9])/
+  );
+  if (prefixMatch && prefixMatch[1]) {
+    const code = prefixMatch[1];
+    const found = KNOWN_ORGA_PREFIXES.find((o) => o.code === code);
+    if (found) {
+      return { orgaCode: found.code, organizationName: found.name };
+    }
+  }
+
+  // 2. Check organization name keywords (e.g. Sys_brand = Rheinland, DNIS_Range_CreditLife)
+  for (const orga of KNOWN_ORGA_PREFIXES) {
+    if (orga.namePattern.test(cleaned)) {
+      return { orgaCode: orga.code, organizationName: orga.name };
+    }
+  }
+
+  return {};
+}
+
+function mergeOrgaContext(
+  base?: AaccOrgaContext | null,
+  override?: AaccOrgaContext | null
+): AaccOrgaContext {
+  const organizationName = override?.organizationName || base?.organizationName;
+  const orgaCode = override?.orgaCode || base?.orgaCode;
+  const brandName = override?.brandName || base?.brandName;
+  const srcRouteNumber = override?.srcRouteNumber || base?.srcRouteNumber;
+  return { organizationName, orgaCode, brandName, srcRouteNumber };
+}
+
+function extractAssignStatements(text: string): Array<{ value: string; variable: string }> {
+  const results: Array<{ value: string; variable: string }> = [];
+  const assignPattern =
+    /\bassign\s+(.+?)\s+to\s+([A-Za-z0-9_]+)(?=\s*(?:assign\b|end\s*if\b|endif\b|else\b|;|$))/gi;
+  let m: RegExpExecArray | null;
+  while ((m = assignPattern.exec(text)) !== null) {
+    const rawVal = m[1].replace(/\s+/g, ' ').trim().replace(/^['"]|['"]$/g, '');
+    const varName = m[2].trim();
+    if (rawVal && varName) {
+      results.push({ value: rawVal, variable: varName });
+    }
+  }
+  return results;
 }
 
 function parseChoicesSegment(raw: string, ownNumber?: string): ScriptChoiceOption[] {
@@ -348,7 +454,7 @@ function extractInlineKeyValuesFromText(
         /^(?:nummer|nr\.?|skript(?:nummer)?|script|id)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
       );
       const targetKv = part.match(
-        /^(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|target|next|goto|weiter(?:leitung)?|execute|call|run|sub(?:script)?)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
+        /^(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|target|next|goto|weiter(?:leitung)?|execute(?:\s+script)?|call(?:\s+script)?|run|sub(?:script)?)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
       );
       const choiceKv = part.match(
         /^(?:auswahl(?:nummern|optionen)?|option(?:en)?|choices?|dtmf|taste[n]?|men[uü])\s*[:=]?\s*(.+)$/i
@@ -585,7 +691,7 @@ function extractInlineKeyValuesFromText(
   }
 
   const attrTarget = line.match(
-    /^(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|weiter(?:leitung)?|goto|next|execute|call|run|sub(?:script)?|skript|script)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b(?:\s*\(([^)]+)\))?/i
+    /^(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|weiter(?:leitung)?|goto|next|execute(?:\s+script)?|call(?:\s+script)?|run|sub(?:script)?|skript|script)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b(?:\s*\(([^)]+)\))?/i
   );
   if (attrTarget && isValidScriptRef(attrTarget[1])) {
     return {
@@ -627,7 +733,7 @@ function extractInlineKeyValuesFromText(
 
   const explicitTarget =
     cleanLineForDigits.match(
-      /\b(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|weiter(?:leitung)?|next|goto|execute|call|run|sub(?:script)?|skript|script)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/i
+      /\b(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|weiter(?:leitung)?|next|goto|execute(?:\s+script)?|call(?:\s+script)?|run|sub(?:script)?|skript|script)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/i
     ) ||
     cleanLineForDigits.match(
       /(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/
@@ -714,15 +820,43 @@ function isAaccScriptText(text: string): boolean {
   return (
     /\bsection\s+[A-Za-z0-9_]+/i.test(cleaned) ||
     /\bCDN\s*[:=]?\s*\d{3,6}\b/i.test(cleaned) ||
-    (/\bassign\b[\s\S]{1,120}\bto\s+Sys_[A-Za-z0-9_]+/i.test(cleaned)) ||
-    /\b(?:Sys_Team_Skillset|Sys_Ueberlauf_Skillset|Sys_Retour_Zentrale|Sys_SondStat|Sys_SondZeit)\b/i.test(
+    (/\bassign\b[\s\S]{1,120}\bto\s+(?:Sys_[A-Za-z0-9_]+|src_route_number)\b/i.test(cleaned)) ||
+    /\b(?:Sys_Team_Skillset|Sys_Ueberlauf_Skillset|Sys_Retour_Zentrale|Sys_SondStat|Sys_SondZeit|Sys_brand|src_route_number)\b/i.test(
       cleaned
     ) ||
-    /\b(?:queue\s+to|route\s+call|give\s+(?:announcement|ran|ivr|music|cdn|script)|transfer\s+to)\b/i.test(
+    /\b(?:queue\s+to|route\s+call|give\s+(?:announcement|ran|ivr|music|cdn|script)|transfer\s+to|execute\s+script)\b/i.test(
       cleaned
     ) ||
-    /\bif\b[\s\S]{1,120}\bthen\b/i.test(cleaned)
+    /\bVALUE\s+['"]?[0-9xX*]{2,15}['"]?\s*[:=]/i.test(cleaned) ||
+    /\b(?:DNIS_Range[A-Za-z0-9_]*|WHERE\s+(?:DNIS|CDN|CLID|CALLING|CALLED|src_route_number)\b)/i.test(
+      cleaned
+    ) ||
+    /\bif\b[\s\S]{1,160}\bthen\b/i.test(cleaned)
   );
+}
+
+function hasAaccMasterRoutingSignals(text: string): boolean {
+  return (
+    /\bVALUE\s+['"]?[0-9xX*]{2,15}['"]?\s*[:=]/i.test(text) ||
+    /\bexecute\s+script\b/i.test(text) ||
+    /\b(?:DNIS_Range[A-Za-z0-9_]*|src_route_number|Sys_brand)\b/i.test(text) ||
+    /\b02131[\s\-/]?(?:290|210|6099)/i.test(text) ||
+    /\bfax(?:routing)?\b/i.test(text)
+  );
+}
+
+function parseValueTriggerNumbers(rawValueExpr: string): string[] {
+  const tokens = rawValueExpr
+    .split(/[\s,;]+|\bor\b/i)
+    .map((t) => t.trim().replace(/^['"`()]+|['"`()]+$/g, ''))
+    .filter(Boolean);
+  const nums: string[] = [];
+  for (const tok of tokens) {
+    if (/^(?:\d{2,14}|(?:0?2131)?(?:290|210|6099)[xX*\d]{1,6})$/.test(tok)) {
+      if (!nums.includes(tok)) nums.push(tok);
+    }
+  }
+  return nums;
 }
 
 function parseAaccScriptBlocks(
@@ -736,15 +870,19 @@ function parseAaccScriptBlocks(
 ): ScriptModule[] {
   const withoutComments = stripScriptCommentsAndNoise(rawText);
   const rawLines = withoutComments.split(/\r?\n/);
+  const isSingleMasterDocument = hasAaccMasterRoutingSignals(withoutComments);
 
-  // Split into individual script chunks whenever a new `CDN <3-6-digit>` header block starts
+  // Split into individual script chunks whenever a top-level `CDN <3-6-digit>` header block starts
+  // (unless the file is a Masterscript containing VALUE/DNIS_Range/Fax-CDN routing lines)
   const chunks: Array<{ startIdx: number; endIdx: number }> = [];
   const cdnIndices: number[] = [];
-  rawLines.forEach((l, idx) => {
-    if (/^\s*CDN\s*[:=]?\s*\d{3,6}\b/i.test(l)) {
-      cdnIndices.push(idx);
-    }
-  });
+  if (!isSingleMasterDocument) {
+    rawLines.forEach((l, idx) => {
+      if (/^\s*CDN\s*[:=]?\s*\d{3,6}\b/i.test(l)) {
+        cdnIndices.push(idx);
+      }
+    });
+  }
 
   if (cdnIndices.length <= 1) {
     chunks.push({ startIdx: 0, endIdx: rawLines.length });
@@ -764,13 +902,20 @@ function parseAaccScriptBlocks(
     const trimmedChunk = chunkText.trim();
     if (!trimmedChunk) return;
 
-    const cdnMatch = chunkText.match(/\bCDN\s*[:=]?\s*(\d{3,6})\b/i);
+    const chunkIsMaster = hasAaccMasterRoutingSignals(trimmedChunk);
+    const topCdnHeaderMatch = chunkText.match(/^\s*CDN\s*[:=]?\s*(\d{3,6})\b/im);
+    const inlineCdnMatch = chunkIsMaster ? null : chunkText.match(/\bCDN\s*[:=]?\s*(\d{3,6})\b/i);
+    const cdnMatch = topCdnHeaderMatch || inlineCdnMatch;
+
     const fallbackNum =
       options?.defaultScriptNumber?.trim()
         ? normalizeScriptRef(options.defaultScriptNumber)
         : options?.sourceFilename?.match(/\b(\d{3,6})\b/)?.[1] ||
-          (chunks.length === 1 ? 'Main' : `900${chunkIdx}`);
-    const scriptNumber = cdnMatch?.[1] || fallbackNum;
+          (chunks.length === 1 || chunkIsMaster ? 'Main' : `900${chunkIdx}`);
+    const scriptNumber =
+      chunkIsMaster && (!options?.defaultScriptNumber || /^(?:main|master(?:script)?)$/i.test(options.defaultScriptNumber))
+        ? 'Main'
+        : cdnMatch?.[1] || fallbackNum;
 
     // Extract descriptive name: non-key-value line right before `CDN`, or `assign ... to Sys_Team_Skillset`
     let detectedName = '';
@@ -781,10 +926,11 @@ function parseAaccScriptBlocks(
     for (const line of nonEmptyBeforeSection) {
       if (
         !isMetadataOrChangelogLine(line) &&
-        !/^(?:CDN|Bereich|Abteilung|Team|section|assign|if|else|end(?:\s*(?:if|section))?|give|transfer|route|queue|collect|execute|call|goto|subscript|open)\b/i.test(
+        !/^(?:CDN|Bereich|Abteilung|Team|section|assign|if|else|end(?:\s*(?:if|section))?|give|transfer|route|queue|collect|execute|call|goto|subscript|open|where|select|case|value|default|otherwise|dnis|fax(?:routing)?)\b/i.test(
           line
         ) &&
         !/^(?:prio|zeitplan|feiertag|bedingung|ansage|taste)\b/i.test(line) &&
+        !/^(?:02131|290|210|6099)\b/.test(line) &&
         !line.includes('->') &&
         !line.includes('=>') &&
         line.length >= 3
@@ -798,19 +944,16 @@ function parseAaccScriptBlocks(
     const bereichMatch = chunkText.match(/\bBereich\s*:\s*([^\n\r]+)/i);
     const abteilungMatch = chunkText.match(/\bAbteilung\s*:\s*([^\n\r]+)/i);
 
-    // Parse all `assign <VALUE> to <VAR>` statements (handles wrapped lines cleanly)
+    // Parse top-level `assign <VALUE> to <VAR>` statements for classic AACC sub-scripts
     const vars = new Map<string, string>();
-    const assignRegex = /\bassign\s+([\s\S]{1,120}?)\s+to\s+([A-Za-z0-9_]+)\b/gi;
-    let am: RegExpExecArray | null;
-    while ((am = assignRegex.exec(chunkText)) !== null) {
-      const val = am[1].replace(/\s+/g, ' ').trim();
-      const varName = am[2].trim();
-      vars.set(varName, val);
+    for (const item of extractAssignStatements(chunkText)) {
+      vars.set(item.variable, item.value);
     }
 
     const teamSkillset = vars.get('Sys_Team_Skillset');
     const scriptName =
       options?.defaultScriptName?.trim() ||
+      (chunkIsMaster && scriptNumber === 'Main' ? 'Main (Masterscript)' : '') ||
       detectedName ||
       teamSkillset ||
       (teamMatch ? teamMatch[1].trim() : '') ||
@@ -908,13 +1051,13 @@ function parseAaccScriptBlocks(
       });
     }
 
-    // Rule 4+: Any additional CDN jumps or procedural commands after Init
+    // Rule 4+: Any additional CDN jumps in classic Sys_* variables
     const seenExtraTargets = new Set<string>();
     if (cleanRetour) seenExtraTargets.add(cleanRetour);
 
     for (const [varName, val] of vars.entries()) {
       if (
-        /^(?:Sys_Retour_Zentrale|Sys_Team_Skillset|Sys_Ueberlauf_Skillset|Sys_SondStat|Sys_SondZeit|Sys_Team_Prio|Sys_Ueberlauf_Prio|Sys_Ueberlauf_Zeit|Sys_Musik|Sys_Gesellschaft|Sys_Besetztgrund|Sys_WS_Prozent|Sys_WS_Absolut|Sys_UeberlaufRouting|Sys_SondRouting)$/i.test(
+        /^(?:Sys_Retour_Zentrale|Sys_Team_Skillset|Sys_Ueberlauf_Skillset|Sys_SondStat|Sys_SondZeit|Sys_Team_Prio|Sys_Ueberlauf_Prio|Sys_Ueberlauf_Zeit|Sys_Musik|Sys_Gesellschaft|Sys_Besetztgrund|Sys_WS_Prozent|Sys_WS_Absolut|Sys_UeberlaufRouting|Sys_SondRouting|Sys_brand|src_route_number)$/i.test(
           varName
         )
       ) {
@@ -935,54 +1078,405 @@ function parseAaccScriptBlocks(
       }
     }
 
-    // Procedural body & IF-ELSE control-flow lines
-    const conditionStack: string[] = [];
+    // Procedural body, DNIS_Range IF-ELSE blocks, WHERE/VALUE cases, and Fax-CDN routing
+    interface ConditionFrame {
+      condText: string;
+      orga: AaccOrgaContext;
+      isFaxCond: boolean;
+      hadInlineRules: boolean;
+    }
+
+    const conditionStack: ConditionFrame[] = [];
+    const orgaRegistry = new Map<string, AaccOrgaContext>();
     let lastCollectRule: ScriptRule | null = null;
+    let pendingValueTrigger: {
+      valueNumbers: string[];
+      rawTrigger: string;
+      orga: AaccOrgaContext;
+      isFax: boolean;
+    } | null = null;
+
+    const getStackOrga = (): AaccOrgaContext => {
+      let acc: AaccOrgaContext = {};
+      for (const f of conditionStack) {
+        acc = mergeOrgaContext(acc, f.orga);
+      }
+      return acc;
+    };
+
+    const registerOrga = (ctx: AaccOrgaContext) => {
+      const key = canonicalScriptMatchKey(ctx.orgaCode || ctx.organizationName || ctx.brandName || '');
+      if (!key) return;
+      const prev = orgaRegistry.get(key);
+      orgaRegistry.set(key, mergeOrgaContext(prev, ctx));
+    };
+
+    const resolveOrgaForRule = (
+      localCtx: AaccOrgaContext,
+      valueNums: string[],
+      lineText: string,
+      targetScript?: string
+    ): AaccOrgaContext => {
+      let merged = mergeOrgaContext(getStackOrga(), localCtx);
+
+      // 1. Check VALUE numbers for 02131 + 290/210/6099 or 290xxxx/210xxxx/6099xxxx
+      if (!merged.organizationName || !merged.orgaCode) {
+        for (const v of valueNums) {
+          const fromVal = detectOrgaFromText(v);
+          if (fromVal.organizationName) {
+            merged = mergeOrgaContext(merged, fromVal);
+            break;
+          }
+        }
+      }
+
+      // 2. Check target script name or line text (e.g. Rheinland_Vertrieb, Rhion_Service, CL_...)
+      if (!merged.organizationName || !merged.orgaCode) {
+        const fromTarget = detectOrgaFromText(`${targetScript || ''} ${lineText}`);
+        if (fromTarget.organizationName) {
+          merged = mergeOrgaContext(merged, fromTarget);
+        }
+      }
+
+      // 3. Match against discovered DNIS_Range Sys_brand / src_route_number registry
+      if (merged.orgaCode && orgaRegistry.has(canonicalScriptMatchKey(merged.orgaCode))) {
+        merged = mergeOrgaContext(orgaRegistry.get(canonicalScriptMatchKey(merged.orgaCode)), merged);
+      } else if (
+        merged.organizationName &&
+        orgaRegistry.has(canonicalScriptMatchKey(merged.organizationName))
+      ) {
+        merged = mergeOrgaContext(
+          orgaRegistry.get(canonicalScriptMatchKey(merged.organizationName)),
+          merged
+        );
+      } else if (!merged.brandName && targetScript) {
+        for (const regCtx of orgaRegistry.values()) {
+          if (
+            regCtx.brandName &&
+            new RegExp(`\\b${regCtx.brandName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(
+              targetScript
+            )
+          ) {
+            merged = mergeOrgaContext(regCtx, merged);
+            break;
+          }
+        }
+      }
+
+      // Ensure brandName -> organizationName fallback for known codes
+      if (!merged.organizationName && merged.brandName) {
+        const fromBrand = detectOrgaFromText(merged.brandName);
+        if (fromBrand.organizationName) {
+          merged = mergeOrgaContext(merged, fromBrand);
+        } else {
+          merged.organizationName = merged.brandName;
+        }
+      }
+
+      return merged;
+    };
+
+    const applyAssignmentsToOrga = (text: string, targetOrga: AaccOrgaContext): AaccOrgaContext => {
+      let next = { ...targetOrga };
+      const assigns = extractAssignStatements(text);
+      for (const a of assigns) {
+        if (/^src_route_number$/i.test(a.variable)) {
+          next.srcRouteNumber = a.value;
+          const det = detectOrgaFromText(a.value);
+          if (det.organizationName) {
+            next = mergeOrgaContext(next, det);
+          }
+        } else if (/^Sys_brand$/i.test(a.variable)) {
+          next.brandName = a.value;
+          const det = detectOrgaFromText(a.value);
+          if (det.organizationName) {
+            next = mergeOrgaContext(next, det);
+          } else if (!next.organizationName) {
+            next.organizationName = a.value;
+          }
+        }
+      }
+      if (next.organizationName || next.orgaCode || next.brandName || next.srcRouteNumber) {
+        registerOrga(next);
+      }
+      return next;
+    };
+
+    const processActionSegment = (
+      actionSegment: string,
+      rawLine: string,
+      explicitValueNums: string[] = [],
+      explicitIsFax = false
+    ): boolean => {
+      const valueNumbers =
+        explicitValueNums.length > 0
+          ? explicitValueNums
+          : pendingValueTrigger?.valueNumbers || [];
+      const stackFax = conditionStack.some((f) => f.isFaxCond);
+      const lineHasFaxKeyword = /\bfax(?:routing)?\b/i.test(actionSegment);
+      const has4DigitValue = valueNumbers.some((v) => /^\d{4}$/.test(v));
+      const faxCdnMatch = actionSegment.match(
+        /\b(?:fax(?:routing)?\s*(?:cdn)?|cdn)\s*[:=]?\s*(\d{4})\b/i
+      );
+
+      const execCmd = actionSegment.match(
+        /\b(?:execute(?:\s+script)?|call(?:\s+script)?|subscript|give\s+script)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+      );
+      const queueCmd = actionSegment.match(
+        /\bqueue\s+to\s+(?:skillset|cdn)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+      );
+      const routeCmd = actionSegment.match(
+        /\b(?:route\s+call(?:\s+to)?|transfer(?:\s+to)?|give\s+cdn|cdn|goto)\s*[:=]?\s*["']?(\d{3,6})["']?\b/i
+      );
+      const annCmd = actionSegment.match(
+        /\b(?:give\s+(?:announcement|ran|ivr|music)|open\s+voice\s+segment)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+      );
+      const collectCmd = actionSegment.match(/\bcollect\s+(\d+)\s+digits?\b/i);
+
+      const isFaxRoute =
+        explicitIsFax ||
+        pendingValueTrigger?.isFax ||
+        stackFax ||
+        lineHasFaxKeyword ||
+        has4DigitValue ||
+        Boolean(faxCdnMatch);
+
+      if (faxCdnMatch && faxCdnMatch[1] && !valueNumbers.includes(faxCdnMatch[1])) {
+        valueNumbers.push(faxCdnMatch[1]);
+      }
+
+      const execTarget =
+        execCmd && isValidScriptRef(execCmd[1]) ? normalizeScriptRef(execCmd[1]) : undefined;
+      const routeTarget =
+        routeCmd && routeCmd[1] && !isFaxRoute ? routeCmd[1] : undefined;
+      const resolvedTarget = execTarget || routeTarget;
+
+      if (execCmd || queueCmd || routeCmd || annCmd || collectCmd || isFaxRoute) {
+        const orga = resolveOrgaForRule(
+          pendingValueTrigger?.orga || {},
+          valueNumbers,
+          rawLine,
+          resolvedTarget
+        );
+        const activeCondition =
+          conditionStack.length > 0
+            ? conditionStack[conditionStack.length - 1].condText
+            : undefined;
+        const valDisplay = valueNumbers.length > 0 ? valueNumbers.join(', ') : '';
+
+        const stepLabel = isFaxRoute && !execTarget
+          ? `Fax-Routing (4-stellig)${valDisplay ? `: ${valDisplay}` : ''}`
+          : execTarget
+          ? `${valDisplay ? `VALUE ${valDisplay} → ` : 'Subskript: '}${execTarget}`
+          : queueCmd
+          ? 'Queue-Anweisung'
+          : routeCmd
+          ? `Weiterleitung Ziel ${routeCmd[1]}`
+          : collectCmd
+          ? `DTMF-Eingabe (${collectCmd[1]} Ziffern)`
+          : 'Ansage / RAN';
+
+        const createdRule: ScriptRule = {
+          id: `${scriptNumber}-${ruleCounter++}`,
+          prio: ruleCounter + 20,
+          stepName: stepLabel,
+          sourceNumber: scriptNumber,
+          targetNumber: resolvedTarget,
+          queueTarget:
+            queueCmd && !isNumericScriptRef(queueCmd[1]) ? queueCmd[1] : undefined,
+          announcement: annCmd ? annCmd[1] : undefined,
+          condition: activeCondition,
+          choices: [],
+          rawLine,
+          organizationName: orga.organizationName,
+          orgaCode: orga.orgaCode,
+          brandName: orga.brandName,
+          srcRouteNumber: orga.srcRouteNumber,
+          valueNumbers: valueNumbers.length > 0 ? [...valueNumbers] : undefined,
+          isFaxRoute: isFaxRoute || undefined,
+        };
+        rules.push(createdRule);
+        lastCollectRule = collectCmd ? createdRule : null;
+        pendingValueTrigger = null;
+        if (conditionStack.length > 0) {
+          conditionStack[conditionStack.length - 1].hadInlineRules = true;
+        }
+        return true;
+      }
+
+      return false;
+    };
 
     for (const line of sliceLines) {
       const t = line.trim();
-      if (!t || /^assign\b/i.test(t) || /^(?:end\s+)?section\b/i.test(t)) {
+      if (!t || /^(?:end\s+)?section\b/i.test(t)) {
         if (/^end\s+section\b/i.test(t)) {
           lastCollectRule = null;
+          pendingValueTrigger = null;
         }
         continue;
       }
 
+      // Handle END IF / ENDIF (or trailing end if after inline assignments)
       if (/^(?:end\s*if|endif)\b/i.test(t)) {
-        conditionStack.pop();
+        const closed = conditionStack.pop();
+        if (
+          closed &&
+          !closed.hadInlineRules &&
+          (closed.orga.organizationName || closed.orga.srcRouteNumber || closed.orga.brandName)
+        ) {
+          registerOrga(closed.orga);
+        }
         lastCollectRule = null;
         continue;
       }
 
+      // Handle WHERE <field> EQUALS / SELECT <field> (AACC CASE/WHERE headers)
+      const whereMatch = t.match(/^(?:where|select|case)\s+(.+?)(?:\s+(?:equals|is|in)\b(.*))?$/i);
+      if (whereMatch && !/\bexecute\b/i.test(t)) {
+        const condBody = `${whereMatch[1]} ${whereMatch[2] || ''}`.trim();
+        const det = detectOrgaFromText(condBody);
+        if (det.organizationName || /\bfax/i.test(condBody)) {
+          // Reset prior sibling WHERE frame if any
+          if (conditionStack.length > 0 && /^where|select|case:/i.test(conditionStack[conditionStack.length - 1].condText)) {
+            conditionStack.pop();
+          }
+          conditionStack.push({
+            condText: `where:${condBody}`,
+            orga: det,
+            isFaxCond: /\bfax/i.test(condBody),
+            hadInlineRules: false,
+          });
+        }
+        continue;
+      }
+
+      // Handle ELSE / ELSE IF
       if (/^else\b(?:\s+if\b(.*?)\bthen\b)?/i.test(t)) {
         lastCollectRule = null;
         const elseIfMatch = t.match(/^else\s+if\s+(.+?)\s+then(?:\s+(.*))?$/i);
-        const prevCond = conditionStack.pop();
+        const prevFrame = conditionStack.pop();
         if (elseIfMatch) {
-          conditionStack.push(elseIfMatch[1].trim());
-          const inlineBody = elseIfMatch[2]?.trim();
-          if (!inlineBody) continue;
+          const condExpr = elseIfMatch[1].trim();
+          const inlineBody = elseIfMatch[2]?.trim() || '';
+          const hasEndIf = /\bend\s*if\b|\bendif\b/i.test(inlineBody);
+          const cleanInline = inlineBody.replace(/\b(?:end\s*if|endif)\b/gi, '').trim();
+          let orga: AaccOrgaContext = detectOrgaFromText(condExpr);
+          if (cleanInline) {
+            orga = applyAssignmentsToOrga(cleanInline, orga);
+          }
+          const frame: ConditionFrame = {
+            condText: condExpr,
+            orga,
+            isFaxCond: /\bfax/i.test(condExpr),
+            hadInlineRules: false,
+          };
+          conditionStack.push(frame);
+          if (cleanInline) {
+            const actionPart = cleanInline
+              .replace(/\bassign\s+.+?\s+to\s+[A-Za-z0-9_]+/gi, '')
+              .trim();
+            if (actionPart) {
+              processActionSegment(actionPart, t);
+            }
+          }
+          if (hasEndIf) {
+            conditionStack.pop();
+          }
+          continue;
         } else {
-          conditionStack.push(prevCond ? `Sonst (nicht: ${prevCond})` : 'Sonst (ELSE)');
+          conditionStack.push({
+            condText: prevFrame ? `Sonst (nicht: ${prevFrame.condText})` : 'Sonst (ELSE)',
+            orga: {},
+            isFaxCond: false,
+            hadInlineRules: false,
+          });
           continue;
         }
       }
 
-      let actionSegment = t;
+      // Handle IF ... THEN (including inline `assign x to src_route_number assign NAME to Sys_brand end if`)
       const ifThenMatch = t.match(/^if\s+(.+?)\s+then(?:\s+(.*))?$/i);
       if (ifThenMatch) {
         lastCollectRule = null;
-        conditionStack.push(ifThenMatch[1].trim());
-        const inlineBody = ifThenMatch[2]?.trim();
-        if (!inlineBody) continue;
-        actionSegment = inlineBody;
-      } else if (/^else\s+if\s+/i.test(t)) {
-        const elseIfInline = t.match(/^else\s+if\s+(.+?)\s+then\s+(.*)$/i);
-        if (elseIfInline) actionSegment = elseIfInline[2].trim();
+        const condExpr = ifThenMatch[1].trim();
+        const inlineBody = ifThenMatch[2]?.trim() || '';
+        const hasEndIf = /\bend\s*if\b|\bendif\b/i.test(inlineBody);
+        const cleanInline = inlineBody.replace(/\b(?:end\s*if|endif)\b/gi, '').trim();
+
+        let orga: AaccOrgaContext = detectOrgaFromText(condExpr);
+        if (cleanInline) {
+          orga = applyAssignmentsToOrga(cleanInline, orga);
+        }
+
+        const frame: ConditionFrame = {
+          condText: condExpr,
+          orga,
+          isFaxCond: /\bfax/i.test(condExpr),
+          hadInlineRules: false,
+        };
+        conditionStack.push(frame);
+
+        if (cleanInline) {
+          const actionPart = cleanInline
+            .replace(/\bassign\s+.+?\s+to\s+[A-Za-z0-9_]+/gi, '')
+            .trim();
+          if (actionPart) {
+            processActionSegment(actionPart, t);
+          }
+        }
+        if (hasEndIf) {
+          conditionStack.pop();
+        }
+        continue;
       }
 
+      // Handle standalone `assign ... to ...` lines inside/outside IF blocks
+      if (/^assign\b/i.test(t)) {
+        const assigns = extractAssignStatements(t);
+        const hasRoutingVar = assigns.some((a) =>
+          /^(?:src_route_number|Sys_brand)$/i.test(a.variable)
+        );
+        if (hasRoutingVar) {
+          if (conditionStack.length > 0) {
+            const top = conditionStack[conditionStack.length - 1];
+            top.orga = applyAssignmentsToOrga(t, top.orga);
+          } else {
+            applyAssignmentsToOrga(t, {});
+          }
+        }
+        continue;
+      }
+
+      // Handle `VALUE <3-or-4-digit Rufnummer> : execute Script <NAME>` (single-line or multi-line)
+      const valueMatch = t.match(/^VALUE\s+(.+?)\s*:\s*(.*)$/i);
+      if (valueMatch) {
+        const rawVals = valueMatch[1].trim();
+        const afterColon = (valueMatch[2] || '').trim();
+        const valueNums = parseValueTriggerNumbers(rawVals);
+        const orgaFromVal = resolveOrgaForRule({}, valueNums, t, afterColon);
+        const isFaxVal =
+          /\bfax(?:routing)?\b/i.test(t) ||
+          valueNums.some((v) => /^\d{4}$/.test(v));
+
+        if (!afterColon) {
+          pendingValueTrigger = {
+            valueNumbers: valueNums,
+            rawTrigger: t,
+            orga: orgaFromVal,
+            isFax: isFaxVal,
+          };
+          continue;
+        }
+
+        if (processActionSegment(afterColon, t, valueNums, isFaxVal)) {
+          continue;
+        }
+      }
+
+      const actionSegment = t;
       const activeCondition =
-        conditionStack.length > 0 ? conditionStack[conditionStack.length - 1] : undefined;
+        conditionStack.length > 0 ? conditionStack[conditionStack.length - 1].condText : undefined;
 
       // Choice mappings immediately following `COLLECT N DIGITS` (e.g. `1 -> 550`, `Taste 2 -> 123456`)
       if (
@@ -1015,48 +1509,7 @@ function parseAaccScriptBlocks(
         }
       }
 
-      const queueCmd = actionSegment.match(
-        /\bqueue\s+to\s+(?:skillset|cdn)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
-      );
-      const routeCmd = actionSegment.match(
-        /\b(?:route\s+call(?:\s+to)?|transfer(?:\s+to)?|give\s+cdn|cdn|goto)\s+["']?(\d{3,6})["']?\b/i
-      );
-      const annCmd = actionSegment.match(
-        /\b(?:give\s+(?:announcement|ran|ivr|music)|open\s+voice\s+segment)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
-      );
-      const execCmd = actionSegment.match(
-        /\b(?:execute|call(?:\s+script)?|subscript|give\s+script)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
-      );
-      const collectCmd = actionSegment.match(/\bcollect\s+(\d+)\s+digits?\b/i);
-
-      if (queueCmd || routeCmd || annCmd || execCmd || collectCmd) {
-        const execTarget =
-          execCmd && isValidScriptRef(execCmd[1])
-            ? normalizeScriptRef(execCmd[1])
-            : undefined;
-        const createdRule: ScriptRule = {
-          id: `${scriptNumber}-${ruleCounter++}`,
-          prio: ruleCounter + 20,
-          stepName: execCmd
-            ? `Subskript: ${execCmd[1]}`
-            : queueCmd
-            ? `Queue-Anweisung`
-            : routeCmd
-            ? `Weiterleitung Ziel ${routeCmd[1]}`
-            : collectCmd
-            ? `DTMF-Eingabe (${collectCmd[1]} Ziffern)`
-            : `Ansage / RAN`,
-          sourceNumber: scriptNumber,
-          targetNumber: routeCmd ? routeCmd[1] : execTarget,
-          queueTarget:
-            queueCmd && !isNumericScriptRef(queueCmd[1]) ? queueCmd[1] : undefined,
-          announcement: annCmd ? annCmd[1] : undefined,
-          condition: activeCondition,
-          choices: [],
-          rawLine: t,
-        };
-        rules.push(createdRule);
-        lastCollectRule = collectCmd ? createdRule : null;
+      if (processActionSegment(actionSegment, t)) {
         continue;
       }
 
@@ -1098,6 +1551,38 @@ function parseAaccScriptBlocks(
       }
     }
 
+    // If the Masterscript had DNIS_Range Orga declarations (290 Rheinland, 210 CreditLife, 6099 Rhion)
+    // but some VALUE rules weren't inside IF blocks, try matching Orga from targetScript or add Orga context if no rules referenced it yet
+    if (orgaRegistry.size > 0) {
+      for (const orgaCtx of orgaRegistry.values()) {
+        const hasRuleWithOrga = rules.some(
+          (r) =>
+            (orgaCtx.orgaCode && r.orgaCode === orgaCtx.orgaCode) ||
+            (orgaCtx.organizationName &&
+              canonicalScriptMatchKey(r.organizationName || '') ===
+                canonicalScriptMatchKey(orgaCtx.organizationName))
+        );
+        if (!hasRuleWithOrga) {
+          const labelBits = [
+            orgaCtx.organizationName || orgaCtx.brandName || 'Orga-Bereich',
+            orgaCtx.srcRouteNumber || (orgaCtx.orgaCode ? `02131 ${orgaCtx.orgaCode}xxxx` : ''),
+          ].filter(Boolean);
+          rules.push({
+            id: `${scriptNumber}-${ruleCounter++}`,
+            prio: ruleCounter + 5,
+            stepName: `DNIS-Range: ${labelBits.join(' · ')}`,
+            sourceNumber: scriptNumber,
+            choices: [],
+            rawLine: `DNIS_Range ${labelBits.join(' ')}`,
+            organizationName: orgaCtx.organizationName || orgaCtx.brandName,
+            orgaCode: orgaCtx.orgaCode,
+            brandName: orgaCtx.brandName,
+            srcRouteNumber: orgaCtx.srcRouteNumber,
+          });
+        }
+      }
+    }
+
     if (rules.length > 0) {
       const outSet = new Set<string>();
       rules.forEach((r) => {
@@ -1121,6 +1606,7 @@ function parseAaccScriptBlocks(
         scriptNumber,
         scriptName,
         isMaster:
+          chunkIsMaster ||
           /^(?:main|master(?:script)?|0000)$/i.test(canonicalScriptMatchKey(scriptNumber)) ||
           /master|zentrale/i.test(scriptName),
         origin: options?.origin || 'legacy-text',
@@ -1717,7 +2203,7 @@ export function parseCallflowTextWithFallback(
     const withoutNoise = stripNumericNoiseForFreeText(line).trim();
     const numMatch = withoutNoise.match(/\b(\d{3,6})\b/);
     const arrowMatch = withoutNoise.match(
-      /(?:->|=>|\b(?:wohin|ziel|sprung|execute|call|script|skript)\s*[:=]?)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
+      /(?:->|=>|\b(?:wohin|ziel|sprung|execute(?:\s+script)?|call(?:\s+script)?|script|skript)\s*[:=]?)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
     );
     const namedMatch = withoutNoise.match(
       /\b([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
@@ -1882,18 +2368,133 @@ export function detectMasterScriptChecklist(
     };
 
     const sortedRules = [...mod.rules].sort((a, b) => a.prio - b.prio);
+
+    interface AggregatedTargetRef {
+      rawRef: string;
+      firstRuleId?: string;
+      firstPrio?: number;
+      firstSnippet: string;
+      choiceTags: string[];
+      valueNumbers: string[];
+      orgaLabels: string[];
+      brandNames: string[];
+      isFaxRoute: boolean;
+    }
+
+    const aggregatedMap = new Map<string, AggregatedTargetRef>();
+
+    const recordAggregatedTarget = (
+      rawRef: string,
+      rule: ScriptRule,
+      choiceTag?: string
+    ) => {
+      const clean = normalizeScriptRef(rawRef);
+      const key = canonicalScriptMatchKey(clean);
+      if (!clean || key === modKey) return;
+
+      let entry = aggregatedMap.get(key);
+      if (!entry) {
+        entry = {
+          rawRef: clean,
+          firstRuleId: rule.id,
+          firstPrio: rule.prio,
+          firstSnippet: rule.stepName ? rule.stepName.slice(0, 32) : `Prio ${rule.prio}`,
+          choiceTags: [],
+          valueNumbers: [],
+          orgaLabels: [],
+          brandNames: [],
+          isFaxRoute: false,
+        };
+        aggregatedMap.set(key, entry);
+      }
+
+      if (choiceTag && !entry.choiceTags.includes(choiceTag)) {
+        entry.choiceTags.push(choiceTag);
+      }
+      (rule.valueNumbers || []).forEach((v) => {
+        if (!entry!.valueNumbers.includes(v)) entry!.valueNumbers.push(v);
+      });
+      if (rule.organizationName) {
+        const orgLabel = rule.orgaCode
+          ? `${rule.organizationName} (${rule.orgaCode})`
+          : rule.organizationName;
+        if (!entry.orgaLabels.includes(orgLabel)) entry.orgaLabels.push(orgLabel);
+      }
+      if (rule.brandName && !entry.brandNames.includes(rule.brandName)) {
+        entry.brandNames.push(rule.brandName);
+      }
+      if (rule.isFaxRoute) {
+        entry.isFaxRoute = true;
+      }
+    };
+
     sortedRules.forEach((rule) => {
-      const stepSnippet = rule.stepName ? rule.stepName.slice(0, 32) : `Prio ${rule.prio}`;
       if (rule.targetNumber) {
-        pushTargetRef(rule.targetNumber, `Prio ${rule.prio} · ${stepSnippet}`, rule.id, rule.prio);
+        recordAggregatedTarget(rule.targetNumber, rule);
       }
       rule.choices.forEach((ch) => {
         const chTag = /^(?:Feiertag|Zeitplan|Bedingung|Sprung)$/i.test(ch.choice)
           ? ch.choice
           : `Taste ${ch.choice}`;
-        pushTargetRef(ch.targetNumber, `Prio ${rule.prio} · ${chTag}`, rule.id, rule.prio);
+        recordAggregatedTarget(ch.targetNumber, rule, chTag);
       });
     });
+
+    for (const agg of aggregatedMap.values()) {
+      const cleanRef = agg.rawRef;
+      const key = canonicalScriptMatchKey(cleanRef);
+      if (seenTargetKeys.has(key) || ignoredKeys.has(key)) continue;
+      seenTargetKeys.add(key);
+
+      const matchedMod = moduleByKey.get(key);
+      const status = matchedMod
+        ? 'present'
+        : externalKeys.has(key)
+        ? 'external'
+        : 'missing';
+
+      let contextLabel: string;
+      if (agg.valueNumbers.length > 0 || agg.orgaLabels.length > 0 || agg.isFaxRoute) {
+        const parts: string[] = [];
+        if (agg.isFaxRoute) parts.push('Fax (4-stellig)');
+        if (agg.orgaLabels.length > 0) parts.push(agg.orgaLabels.join('/'));
+        if (agg.valueNumbers.length > 0) {
+          const preview = agg.valueNumbers.slice(0, 4).join(', ');
+          const extra = agg.valueNumbers.length > 4 ? ` (+${agg.valueNumbers.length - 4})` : '';
+          parts.push(`VALUE: ${preview}${extra}`);
+        }
+        contextLabel = parts.join(' · ');
+      } else if (agg.choiceTags.length > 0) {
+        contextLabel = `Prio ${agg.firstPrio ?? 1} · ${agg.choiceTags.slice(0, 2).join(', ')}`;
+      } else {
+        contextLabel = `Prio ${agg.firstPrio ?? 1} · ${agg.firstSnippet}`;
+      }
+
+      checklist.push({
+        id: `mchk:${masterKey}:${checklist.length + 1}:${key}`,
+        orderIndex: checklist.length + 1,
+        refKey: matchedMod ? matchedMod.scriptNumber : cleanRef,
+        displayName: matchedMod ? matchedMod.scriptName : cleanRef,
+        callerScriptNumber: mod.scriptNumber,
+        parentScriptNumber: mod.scriptNumber,
+        depth,
+        ruleId: agg.firstRuleId,
+        prio: agg.firstPrio,
+        contextLabel:
+          depth > 1 ? `aus [${mod.scriptNumber}] · ${contextLabel}` : contextLabel,
+        status,
+        matchedModuleNumber: matchedMod?.scriptNumber,
+        triggeredNumbers: agg.valueNumbers.length > 0 ? agg.valueNumbers : undefined,
+        organizationNames: agg.orgaLabels.length > 0 ? agg.orgaLabels : undefined,
+        brandNames: agg.brandNames.length > 0 ? agg.brandNames : undefined,
+        isFaxRoute: agg.isFaxRoute || undefined,
+      });
+
+      if (matchedMod && !visitedModuleKeys.has(key)) {
+        visitedModuleKeys.add(key);
+        pendingNested.push({ mod: matchedMod, nextDepth: depth + 1 });
+      }
+    }
 
     manualLinks
       .filter((lnk) => canonicalScriptMatchKey(lnk.fromScriptNumber) === modKey && lnk.toTargetNumber)
@@ -2385,6 +2986,10 @@ export function extractScriptNumberFromNodeId(
   modules?: ScriptModule[]
 ): string | null {
   if (!nodeId) return null;
+  if (nodeId.startsWith('ORG_') || nodeId === 'FAX_BUNDLE') {
+    const master = modules?.find((m) => m.isMaster) || modules?.[0];
+    return master ? master.scriptNumber : 'Main';
+  }
   const match = nodeId.match(/^(?:S|JUMP|INC|SELF)_([A-Za-z0-9_]+)$/);
   if (!match) return null;
   const suffix = match[1];
@@ -2498,42 +3103,204 @@ export function buildMasterOverviewMermaid(
 
   const edgePairMap = new Map<
     string,
-    { fromSuffix: string; toSuffix: string; tags: string[]; isChoiceOnly: boolean }
+    { fromNodeId: string; toNodeId: string; tags: string[]; isChoiceOnly: boolean }
   >();
 
-  const addAggregatedEdge = (fromRef: string, toRef: string, tag: string, isChoice: boolean) => {
-    const toKey = canonicalScriptMatchKey(toRef);
-    if (ignoredKeySet.has(toKey) && !knownKeyToMod.has(toKey)) return;
-    const fromSuffix = toMermaidNodeSuffix(fromRef);
-    const toSuffix = toMermaidNodeSuffix(toRef);
-    const key = `${fromSuffix}->${toSuffix}`;
+  const addAggregatedRawEdge = (
+    fromNodeId: string,
+    toNodeId: string,
+    tag: string,
+    isChoice: boolean
+  ) => {
+    const key = `${fromNodeId}->${toNodeId}`;
     const existing = edgePairMap.get(key);
     if (existing) {
       if (tag && !existing.tags.includes(tag)) existing.tags.push(tag);
       if (!isChoice) existing.isChoiceOnly = false;
     } else {
       edgePairMap.set(key, {
-        fromSuffix,
-        toSuffix,
+        fromNodeId,
+        toNodeId,
         tags: tag ? [tag] : [],
         isChoiceOnly: isChoice,
       });
     }
   };
 
+  const addAggregatedEdge = (fromRef: string, toRef: string, tag: string, isChoice: boolean) => {
+    const toKey = canonicalScriptMatchKey(toRef);
+    if (ignoredKeySet.has(toKey) && !knownKeyToMod.has(toKey)) return;
+    const fromSuffix = toMermaidNodeSuffix(fromRef);
+    const toSuffix = toMermaidNodeSuffix(toRef);
+    addAggregatedRawEdge(`S_${fromSuffix}`, `S_${toSuffix}`, tag, isChoice);
+  };
+
+  // Detect Orga-grouped Masterscript rules (02131 + 290 Rheinland / 210 CreditLife / 6099 Rhion) & 4-digit Fax routings
+  const orgaNodesMap = new Map<
+    string,
+    {
+      nodeId: string;
+      orgName: string;
+      orgaCode?: string;
+      brandName?: string;
+      srcRouteNumber?: string;
+      masterModRef: string;
+    }
+  >();
+  const faxNumbersCollected: string[] = [];
+  const faxCallers = new Set<string>();
+  const faxScriptTargets = new Set<string>();
+
   workspace.modules.forEach((mod) => {
+    const modHasMasterRouting =
+      mod.isMaster &&
+      mod.rules.some(
+        (r) =>
+          Boolean(r.organizationName || r.orgaCode || r.brandName || r.isFaxRoute) ||
+          Boolean(r.valueNumbers && r.valueNumbers.length > 0)
+      );
+
+    if (!modHasMasterRouting) {
+      mod.rules.forEach((rule) => {
+        if (rule.targetNumber) {
+          const tag =
+            rule.valueNumbers && rule.valueNumbers.length > 0
+              ? `VALUE ${rule.valueNumbers.join(', ')}`
+              : `P${rule.prio}`;
+          addAggregatedEdge(mod.scriptNumber, rule.targetNumber, tag, false);
+        }
+        rule.choices.forEach((ch) => {
+          const isNamed = /^(?:Feiertag|Zeitplan|Bedingung|Sprung)$/i.test(ch.choice);
+          const tag = isNamed ? ch.choice : `Taste ${ch.choice}`;
+          addAggregatedEdge(mod.scriptNumber, ch.targetNumber, tag, true);
+        });
+      });
+      return;
+    }
+
+    const masterNodeId = `S_${toMermaidNodeSuffix(mod.scriptNumber)}`;
+
     mod.rules.forEach((rule) => {
-      if (rule.targetNumber) {
-        const tag = `P${rule.prio}`;
-        addAggregatedEdge(mod.scriptNumber, rule.targetNumber, tag, false);
+      const hasOrga = Boolean(rule.organizationName || rule.orgaCode || rule.brandName);
+      let sourceNodeForRule = masterNodeId;
+
+      if (hasOrga) {
+        const orgKey = canonicalScriptMatchKey(
+          rule.orgaCode || rule.organizationName || rule.brandName || ''
+        );
+        const orgNodeId = `ORG_${toMermaidNodeSuffix(
+          rule.orgaCode || rule.organizationName || rule.brandName || 'Orga'
+        )}`;
+        if (!orgaNodesMap.has(orgKey)) {
+          orgaNodesMap.set(orgKey, {
+            nodeId: orgNodeId,
+            orgName: rule.organizationName || rule.brandName || 'Orga',
+            orgaCode: rule.orgaCode,
+            brandName: rule.brandName,
+            srcRouteNumber: rule.srcRouteNumber,
+            masterModRef: mod.scriptNumber,
+          });
+        } else {
+          const prev = orgaNodesMap.get(orgKey)!;
+          if (!prev.brandName && rule.brandName) prev.brandName = rule.brandName;
+          if (!prev.srcRouteNumber && rule.srcRouteNumber) prev.srcRouteNumber = rule.srcRouteNumber;
+        }
+        sourceNodeForRule = orgNodeId;
       }
+
+      if (rule.isFaxRoute) {
+        (rule.valueNumbers || []).forEach((v) => {
+          if (!faxNumbersCollected.includes(v)) faxNumbersCollected.push(v);
+        });
+        faxCallers.add(sourceNodeForRule);
+        if (rule.targetNumber) {
+          const tKey = canonicalScriptMatchKey(rule.targetNumber);
+          if (!ignoredKeySet.has(tKey) || knownKeyToMod.has(tKey)) {
+            faxScriptTargets.add(rule.targetNumber);
+          }
+        }
+        return;
+      }
+
+      if (rule.targetNumber) {
+        const toKey = canonicalScriptMatchKey(rule.targetNumber);
+        if (!ignoredKeySet.has(toKey) || knownKeyToMod.has(toKey)) {
+          const valTags =
+            rule.valueNumbers && rule.valueNumbers.length > 0
+              ? rule.valueNumbers.map((v) => `${v}`)
+              : [`P${rule.prio}`];
+          valTags.forEach((vt) => {
+            addAggregatedRawEdge(
+              sourceNodeForRule,
+              `S_${toMermaidNodeSuffix(rule.targetNumber!)}`,
+              vt,
+              false
+            );
+          });
+        }
+      }
+
       rule.choices.forEach((ch) => {
+        const toKey = canonicalScriptMatchKey(ch.targetNumber);
+        if (ignoredKeySet.has(toKey) && !knownKeyToMod.has(toKey)) return;
         const isNamed = /^(?:Feiertag|Zeitplan|Bedingung|Sprung)$/i.test(ch.choice);
         const tag = isNamed ? ch.choice : `Taste ${ch.choice}`;
-        addAggregatedEdge(mod.scriptNumber, ch.targetNumber, tag, true);
+        addAggregatedRawEdge(
+          sourceNodeForRule,
+          `S_${toMermaidNodeSuffix(ch.targetNumber)}`,
+          tag,
+          true
+        );
       });
     });
   });
+
+  // Emit Orga group nodes & connect Main -> Orga
+  if (orgaNodesMap.size > 0) {
+    for (const org of orgaNodesMap.values()) {
+      const prefixInfo = org.orgaCode ? `02131 ${org.orgaCode}xxxx` : org.srcRouteNumber || '';
+      const brandInfo =
+        org.brandName && canonicalScriptMatchKey(org.brandName) !== canonicalScriptMatchKey(org.orgName)
+          ? `Brand: ${sanitizeMermaidText(org.brandName)}`
+          : '';
+      const detailParts = [prefixInfo, brandInfo].filter(Boolean).join(' · ');
+      const orgLabel = detailParts
+        ? `🏢 ${sanitizeMermaidText(org.orgName)}<br/>${sanitizeMermaidText(detailParts)}`
+        : `🏢 ${sanitizeMermaidText(org.orgName)}`;
+      lines.push(`    ${org.nodeId}{{"${orgLabel}"}}`);
+      const edgeLbl = org.srcRouteNumber
+        ? `DNIS ${sanitizeMermaidText(org.srcRouteNumber)}`
+        : org.orgaCode
+        ? `02131 ${org.orgaCode}`
+        : 'DNIS-Range';
+      addAggregatedRawEdge(
+        `S_${toMermaidNodeSuffix(org.masterModRef)}`,
+        org.nodeId,
+        edgeLbl,
+        false
+      );
+    }
+  }
+
+  // Emit bundled 4-digit Fax Endpoint if any Fax routings were detected
+  if (faxCallers.size > 0) {
+    const faxPreview = faxNumbersCollected.slice(0, 6).join(', ');
+    const faxExtra =
+      faxNumbersCollected.length > 6 ? ` (+${faxNumbersCollected.length - 6})` : '';
+    const faxCdnLine = faxPreview ? `<br/>Fax-CDN: ${sanitizeMermaidText(faxPreview)}${faxExtra}` : '';
+    lines.push(`    FAX_BUNDLE[("■ 📠 Fax-Routing (4-stellig)${faxCdnLine}")]`);
+    for (const callerNodeId of faxCallers) {
+      addAggregatedRawEdge(callerNodeId, 'FAX_BUNDLE', 'Fax (4-stellig)', false);
+    }
+    for (const targetRef of faxScriptTargets) {
+      addAggregatedRawEdge(
+        'FAX_BUNDLE',
+        `S_${toMermaidNodeSuffix(targetRef)}`,
+        'execute Script',
+        false
+      );
+    }
+  }
 
   (workspace.manualLinks || []).forEach((lnk) => {
     if (lnk.fromScriptNumber && lnk.toTargetNumber) {
@@ -2548,9 +3315,13 @@ export function buildMasterOverviewMermaid(
 
   for (const edge of edgePairMap.values()) {
     const arrow = edge.isChoiceOnly ? '-.->' : '-->';
-    const label = edge.tags.slice(0, 4).join(' · ') + (edge.tags.length > 4 ? ' …' : '');
+    const isNumberList = edge.tags.every((t) => /^\d{2,10}$/.test(t));
+    const maxShow = isNumberList ? 5 : 4;
+    const joined = edge.tags.slice(0, maxShow).join(isNumberList ? ', ' : ' · ');
+    const suffixExtra = edge.tags.length > maxShow ? ` (+${edge.tags.length - maxShow})` : '';
+    const label = joined ? `${isNumberList ? 'VALUE ' : ''}${joined}${suffixExtra}` : '';
     const labelPart = label ? `|${label.replace(/\|/g, '/')}|` : '';
-    lines.push(`    S_${edge.fromSuffix} ${arrow}${labelPart} S_${edge.toSuffix}`);
+    lines.push(`    ${edge.fromNodeId} ${arrow}${labelPart} ${edge.toNodeId}`);
   }
 
   if (workspace.missingTargets.length > 0 || hasOpenIssueNodes) {
@@ -2706,6 +3477,24 @@ export function buildScriptDetailMermaid(
     const metaParts: string[] = [
       `${isStepOpen ? '● OFFEN · ' : ''}Prio ${rule.prio}: ${sanitizeMermaidText(rule.stepName)}`,
     ];
+    if (rule.organizationName) {
+      const orgTag = rule.orgaCode
+        ? `${rule.organizationName} (02131 ${rule.orgaCode})`
+        : rule.organizationName;
+      metaParts.push(`Orga: ${sanitizeMermaidText(orgTag)}`);
+    }
+    if (
+      rule.brandName &&
+      canonicalScriptMatchKey(rule.brandName) !== canonicalScriptMatchKey(rule.organizationName || '')
+    ) {
+      metaParts.push(`Sys_brand: ${sanitizeMermaidText(rule.brandName)}`);
+    }
+    if (rule.srcRouteNumber) {
+      metaParts.push(`Route: ${sanitizeMermaidText(rule.srcRouteNumber)}`);
+    }
+    if (rule.isFaxRoute) {
+      metaParts.push('Typ: Fax-Routing (4-stellig)');
+    }
     if (rule.schedule) metaParts.push(`Zeitplan: ${sanitizeMermaidText(rule.schedule)}`);
     if (rule.condition) metaParts.push(`Bedingung: ${sanitizeMermaidText(rule.condition)}`);
     if (rule.holiday) metaParts.push(`Feiertag: ${sanitizeMermaidText(rule.holiday)}`);

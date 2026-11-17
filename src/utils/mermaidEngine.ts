@@ -1,5 +1,4 @@
 import mermaid from 'mermaid';
-import elkLayouts from '@mermaid-js/layout-elk';
 import {
   DiagramDirection,
   SmartColorMode,
@@ -10,15 +9,27 @@ import { applySmartLogicColoring } from './smartColorEngine';
 
 let renderCounter = 0;
 let elkRegistered = false;
+let elkRegisterPromise: Promise<void> | null = null;
 
-function ensureElkLayoutRegistered(): void {
+async function ensureElkLayoutRegistered(): Promise<void> {
   if (elkRegistered) return;
-  try {
-    mermaid.registerLayoutLoaders(elkLayouts);
-    elkRegistered = true;
-  } catch {
-    // ignore if already registered
+  if (!elkRegisterPromise) {
+    elkRegisterPromise = import('@mermaid-js/layout-elk')
+      .then((mod) => {
+        const elkLayouts = mod.default;
+        if (elkLayouts) {
+          mermaid.registerLayoutLoaders(elkLayouts);
+        }
+        elkRegistered = true;
+      })
+      .catch(() => {
+        // ignore if already registered or failed
+      })
+      .finally(() => {
+        elkRegisterPromise = null;
+      });
   }
+  await elkRegisterPromise;
 }
 
 /**
@@ -122,7 +133,6 @@ export function configureMermaidEngine(
   themeConfig: ThemeConfiguration,
   forceNativeSvgLabels = false
 ): void {
-  ensureElkLayoutRegistered();
 
   const nodeSpacing = Number.isFinite(themeConfig.nodeSpacing) ? themeConfig.nodeSpacing : 55;
   const rankSpacing = Number.isFinite(themeConfig.rankSpacing) ? themeConfig.rankSpacing : 70;
@@ -293,6 +303,9 @@ export async function renderLocalMermaidDiagram(
   const startTime = performance.now();
 
   try {
+    if (themeConfig.layoutEngine === 'elk') {
+      await ensureElkLayoutRegistered();
+    }
     configureMermaidEngine(themeConfig, forceNativeSvgLabels);
 
     // Step 1: Parse and validate user's exact code first for accurate line numbers

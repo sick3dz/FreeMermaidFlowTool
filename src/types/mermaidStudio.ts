@@ -99,6 +99,12 @@ export interface ScriptRule {
   announcement?: string;
   queueTarget?: string;
   rawLine: string;
+  organizationName?: string;
+  orgaCode?: string;
+  brandName?: string;
+  srcRouteNumber?: string;
+  valueNumbers?: string[];
+  isFaxRoute?: boolean;
 }
 
 export interface ScriptModule {
@@ -173,6 +179,10 @@ export interface MasterScriptChecklistItem {
   contextLabel: string;
   status: MasterChecklistItemStatus;
   matchedModuleNumber?: string;
+  triggeredNumbers?: string[];
+  organizationNames?: string[];
+  brandNames?: string[];
+  isFaxRoute?: boolean;
 }
 
 export interface NodePositionOffset {
@@ -348,5 +358,18 @@ export interface CallflowRoutingMatrixRow {
   queueTarget: string;
   targetsAndChoices: string;
   targetStatus: string;
+}
+
+export interface OfflineWorkspaceSeed {
+  seedId: string;
+  exportedAt: string;
+  diagramTitle: string;
+  code: string;
+  themeConfig: ThemeConfiguration;
+  smartColorMode: SmartColorMode;
+  canvasSurface: 'dark' | 'light';
+  workspaceMode: 'guided' | 'free';
+  scriptWorkspace: ScriptWorkspace;
+  savedDiagrams: SavedDiagram[];
 }
 

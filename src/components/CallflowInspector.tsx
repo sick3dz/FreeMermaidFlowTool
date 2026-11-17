@@ -1946,6 +1946,13 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                               </span>
                             )}
                           </div>
+                          {activeChecklistItem.triggeredNumbers &&
+                            activeChecklistItem.triggeredNumbers.length > 0 && (
+                              <div className="text-[10px] font-mono tabular-nums text-indigo-300 mt-1 break-words">
+                                {activeChecklistItem.isFaxRoute ? 'Fax-CDN (4-stellig): ' : 'Rufnummern (VALUE): '}
+                                {activeChecklistItem.triggeredNumbers.join(', ')}
+                              </div>
+                            )}
                           {activeChecklistItem.status === 'missing' && (
                             <div className="text-[10px] font-mono text-rose-300 mt-0.5 truncate">
                               Ausstehende Referenz ·{' '}
