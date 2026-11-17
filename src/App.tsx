@@ -498,15 +498,24 @@ export default function App() {
     let isCancelled = false;
     const delayMs = baseRenderedSvg === null && effectiveMermaidCode.trim().length > 0 ? 0 : 120;
     const timer = window.setTimeout(async () => {
-      const result = await renderLocalMermaidDiagram(effectiveMermaidCode, themeConfig);
-      if (isCancelled) return;
-      setValidation(result.validation);
-      if (result.svg !== null) {
-        setMasterRenderError(null);
-        setBaseRenderedSvg(result.svg);
-      } else if (!effectiveMermaidCode.trim()) {
+      if (!effectiveMermaidCode.trim()) {
         setMasterRenderError(null);
         setBaseRenderedSvg(null);
+        setValidation({
+          isValid: true,
+          diagramType: 'Leer',
+          errorMessage: null,
+          errorLine: null,
+          lastRenderMs: 0,
+        });
+        return;
+      }
+      const result = await renderLocalMermaidDiagram(effectiveMermaidCode, themeConfig);
+      if (isCancelled) return;
+      if (result.svg !== null) {
+        setValidation(result.validation);
+        setMasterRenderError(null);
+        setBaseRenderedSvg(result.svg);
       } else if (
         scriptWorkspace.modules.length > 0 &&
         callflowViewLevel.level === 'master' &&
@@ -520,14 +529,17 @@ export default function App() {
         const fallbackResult = await renderLocalMermaidDiagram(fallbackCode, themeConfig);
         if (isCancelled) return;
         if (fallbackResult.svg !== null) {
+          setValidation(fallbackResult.validation);
           setMasterRenderError(null);
           setBaseRenderedSvg(fallbackResult.svg);
         } else {
+          setValidation(result.validation);
           setMasterRenderError(
             result.validation.errorMessage || 'Das Master-Diagramm konnte nicht gerendert werden.'
           );
         }
       } else {
+        setValidation(result.validation);
         setMasterRenderError(
           result.validation.errorMessage || 'Das Diagramm konnte nicht gerendert werden.'
         );
@@ -3215,7 +3227,7 @@ export default function App() {
             }`}
           >
             {/* Canvas Overlay Stack: Active Trace Banner + Non-destructive Syntax Warning */}
-            {(callflowTrace || !validation.isValid) && (
+            {(callflowTrace || (!validation.isValid && effectiveMermaidCode.trim().length > 0)) && (
               <div
                 data-canvas-ui="true"
                 onMouseDown={(e) => e.stopPropagation()}
@@ -3342,7 +3354,7 @@ export default function App() {
                   </div>
                 )}
 
-                {!validation.isValid && (
+                {!validation.isValid && effectiveMermaidCode.trim().length > 0 && (
                   <button
                     type="button"
                     onClick={() => {
@@ -3477,7 +3489,7 @@ export default function App() {
                 onTouchStart={(e) => e.stopPropagation()}
                 className="max-w-lg w-full mx-auto my-auto p-6 rounded-2xl bg-slate-900/95 border border-slate-800 text-slate-200 space-y-4 shadow-2xl text-center"
               >
-                {validation.isValid && !masterRenderError ? (
+                {(validation.isValid || !effectiveMermaidCode.trim()) && !masterRenderError ? (
                   <>
                     <div className="w-8 h-8 mx-auto rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
                     <div className="space-y-1">
@@ -3922,7 +3934,7 @@ export default function App() {
         >
           <div className="flex items-center gap-1">
             <Eye className="w-4 h-4" />
-            {!validation.isValid && (
+            {!validation.isValid && effectiveMermaidCode.trim().length > 0 && (
               <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
             )}
           </div>

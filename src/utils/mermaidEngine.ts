@@ -291,9 +291,9 @@ export async function renderLocalMermaidDiagram(
     return {
       svg: null,
       validation: {
-        isValid: false,
+        isValid: true,
         diagramType: 'Leer',
-        errorMessage: 'Der Editor enthält noch keinen Mermaid-Code.',
+        errorMessage: null,
         errorLine: null,
         lastRenderMs: 0,
       },
