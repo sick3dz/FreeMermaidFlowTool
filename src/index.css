@@ -77,9 +77,18 @@
 .mermaid-canvas-stage svg.is-visual-edit g.actor:hover .callflow-connect-port,
 .mermaid-canvas-stage svg.is-visual-edit g.statediagram-state:hover .callflow-connect-port,
 .mermaid-canvas-stage svg.is-visual-edit g.classGroup:hover .callflow-connect-port,
-.mermaid-canvas-stage svg.is-visual-edit .callflow-connect-port:hover,
-.mermaid-canvas-stage svg.is-wire-connecting .callflow-connect-port {
+.mermaid-canvas-stage svg.is-visual-edit .callflow-connect-port:hover {
   opacity: 0.92;
+  pointer-events: all;
+}
+
+.mermaid-canvas-stage svg.is-wire-connecting .callflow-connect-port[data-port-occupied="false"] {
+  opacity: 0.88;
+  pointer-events: all;
+}
+
+.mermaid-canvas-stage svg.is-wire-connecting .callflow-connect-port[data-port-occupied="true"] {
+  opacity: 0.25;
   pointer-events: all;
 }
 
@@ -132,5 +141,52 @@
 .mermaid-canvas-stage svg g.edgeLabels > *,
 .mermaid-canvas-stage svg g.edgeLabel {
   cursor: pointer;
+}
+
+/* Docked Connection Padlock ("Schloss-Symbol") directly at line endpoint */
+.mermaid-canvas-stage svg .callflow-edge-lock {
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  transition: opacity 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mermaid-canvas-stage svg.is-visual-edit .callflow-edge-lock.is-visible,
+.mermaid-canvas-stage svg.is-visual-edit .callflow-edge-lock:hover {
+  opacity: 1;
+  pointer-events: all;
+}
+
+.mermaid-canvas-stage svg .callflow-edge-lock .callflow-lock-badge {
+  transition: transform 120ms cubic-bezier(0.16, 1, 0.3, 1);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.mermaid-canvas-stage svg .callflow-edge-lock:hover .callflow-lock-badge {
+  transform: scale(1.18);
+}
+
+.mermaid-canvas-stage svg .callflow-edge-lock .callflow-lock-open {
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.mermaid-canvas-stage svg .callflow-edge-lock .callflow-lock-closed {
+  opacity: 1;
+  transition: opacity 100ms ease;
+}
+
+.mermaid-canvas-stage svg .callflow-edge-lock:hover .callflow-lock-open {
+  opacity: 1;
+}
+
+.mermaid-canvas-stage svg .callflow-edge-lock:hover .callflow-lock-closed {
+  opacity: 0;
+}
+
+.mermaid-canvas-stage svg .callflow-edge-lock:hover .callflow-lock-bg {
+  fill: #be123c;
+  stroke: #fecdd3;
 }
 

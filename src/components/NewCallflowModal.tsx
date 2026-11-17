@@ -22,7 +22,10 @@ import {
   normalizeScriptRef,
   parseCallflowTextWithFallback,
 } from '../utils/scriptCallflowParser';
-import { isVisioFilename, parseVisioFileToModules } from '../utils/visioParser';
+import {
+  CALLFLOW_CHECKLIST_ACCEPT,
+  importCallflowFile,
+} from '../utils/callflowFileImporter';
 
 export type MasterTargetDecision = 'request' | 'external' | 'ignore' | 'present';
 
@@ -147,31 +150,23 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     setErrorMsg(null);
     setIsParsingFile(true);
     try {
-      if (isVisioFilename(file.name)) {
-        const mods = await parseVisioFileToModules(file, {
-          overridePrimaryScriptNumber: 'Main',
-        });
-        if (mods.length === 0) {
-          setErrorMsg(`In „${file.name}“ wurden keine grafischen Elemente erkannt.`);
-          return;
-        }
-        prepareStep2FromModules(mods);
-      } else {
-        const text = await file.text();
-        setRawMasterText(text);
-        const mods = parseCallflowTextWithFallback(text, {
-          defaultScriptNumber: 'Main',
-          defaultScriptName: 'Main',
-          sourceFilename: file.name,
-          origin: 'legacy-text',
-          isMasterHint: true,
-        });
-        if (mods.length === 0) {
-          setErrorMsg(`In „${file.name}“ konnten keine Regeln erkannt werden.`);
-          return;
-        }
-        prepareStep2FromModules(mods);
+      const result = await importCallflowFile(file, {
+        overridePrimaryScriptNumber: 'Main',
+        overridePrimaryScriptName: 'Main',
+        isMasterHint: true,
+      });
+      if (result.decodedText !== undefined) {
+        setRawMasterText(result.decodedText);
       }
+      if (result.modules.length === 0) {
+        setErrorMsg(
+          result.sourceKind === 'visio'
+            ? `In „${file.name}“ wurden keine grafischen Elemente erkannt.`
+            : `In „${file.name}“ konnten keine Avaya-OCL-Befehle oder Routing-Regeln erkannt werden.`
+        );
+        return;
+      }
+      prepareStep2FromModules(result.modules);
     } catch (err) {
       setErrorMsg(
         err instanceof Error
@@ -322,18 +317,18 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
               >
                 <div className="space-y-0.5 min-w-0">
                   <div className="text-xs font-semibold text-slate-100">
-                    Masterscript „Main“ als grafischen Avaya-Export oder Datei laden
+                    Masterscript „Main“ als Avaya `.s`-Skript oder grafischen Export laden
                   </div>
                   <p className="text-[11px] text-slate-400">
-                    Grafische Exporte (`.vsdx`, `.vdx`, `.svg`) oder Textdateien (`.txt`, `.aacc`)
-                    werden automatisch erkannt.
+                    Orchestration-Designer-Exporte (`.s`, `.txt`, `.aacc`) sowie grafische Exporte
+                    (`.vsdx`, `.vdx`, `.svg`) werden inklusive Umlaut-Kodierung automatisch erkannt.
                   </p>
                 </div>
                 <div className="shrink-0">
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".vsdx,.vdx,.svg,.xml,.txt,.aacc"
+                    accept={CALLFLOW_CHECKLIST_ACCEPT}
                     className="hidden"
                     onChange={(e) => {
                       const file = e.target.files?.[0];

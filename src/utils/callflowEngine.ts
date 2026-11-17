@@ -414,7 +414,7 @@ export function traceCallflowForNode(
     });
   };
 
-  // 2. Upstream BFS with shortest hop distance & cycle detection
+  // 2. Upstream BFS (hop distances + reachable subgraph edges)
   const upstreamNodeIds = new Set<string>();
   const upstreamDepthByNodeId = new Map<string, number>([[targetNodeId, 0]]);
   const queueUp: Array<{ id: string; depth: number }> = [{ id: targetNodeId, depth: 0 }];
@@ -424,24 +424,36 @@ export function traceCallflowForNode(
     const { id: curr, depth } = queueUp.shift()!;
     for (const edge of graph.edges) {
       if (edge.to !== curr) continue;
-      const existingDepth = upstreamDepthByNodeId.get(edge.from);
-      if (existingDepth === undefined) {
+      upstreamEdges.push(edge);
+      if (!upstreamDepthByNodeId.has(edge.from)) {
         const nextDepth = depth + 1;
         upstreamDepthByNodeId.set(edge.from, nextDepth);
         upstreamNodeIds.add(edge.from);
-        upstreamEdges.push(edge);
         queueUp.push({ id: edge.from, depth: nextDepth });
-      } else {
-        upstreamEdges.push(edge);
-        // If edge goes back to target or a shallower/equal depth node, mark as cycle/back-edge
-        if (edge.from === targetNodeId || existingDepth <= depth) {
-          registerCycle(edge, 'upstream');
-        }
       }
     }
   }
 
-  // 3. Downstream BFS with shortest hop distance & cycle detection
+  // 2b. True 3-color DFS back-edge detection on upstream subgraph (0=unvisited, 1=onStack, 2=done)
+  // Prevents normal converging DAG branches from being falsely marked as red cycles
+  const upState = new Map<string, 0 | 1 | 2>();
+  const dfsUp = (u: string) => {
+    upState.set(u, 1);
+    for (const edge of graph.edges) {
+      if (edge.to !== u) continue;
+      const v = edge.from;
+      const st = upState.get(v) || 0;
+      if (st === 1) {
+        registerCycle(edge, 'upstream');
+      } else if (st === 0) {
+        dfsUp(v);
+      }
+    }
+    upState.set(u, 2);
+  };
+  dfsUp(targetNodeId);
+
+  // 3. Downstream BFS (hop distances + reachable subgraph edges)
   const downstreamNodeIds = new Set<string>();
   const downstreamDepthByNodeId = new Map<string, number>([[targetNodeId, 0]]);
   const queueDown: Array<{ id: string; depth: number }> = [{ id: targetNodeId, depth: 0 }];
@@ -451,21 +463,33 @@ export function traceCallflowForNode(
     const { id: curr, depth } = queueDown.shift()!;
     for (const edge of graph.edges) {
       if (edge.from !== curr) continue;
-      const existingDepth = downstreamDepthByNodeId.get(edge.to);
-      if (existingDepth === undefined) {
+      downstreamEdges.push(edge);
+      if (!downstreamDepthByNodeId.has(edge.to)) {
         const nextDepth = depth + 1;
         downstreamDepthByNodeId.set(edge.to, nextDepth);
         downstreamNodeIds.add(edge.to);
-        downstreamEdges.push(edge);
         queueDown.push({ id: edge.to, depth: nextDepth });
-      } else {
-        downstreamEdges.push(edge);
-        if (edge.to === targetNodeId || existingDepth <= depth) {
-          registerCycle(edge, 'downstream');
-        }
       }
     }
   }
+
+  // 3b. True 3-color DFS back-edge detection on downstream subgraph
+  const downState = new Map<string, 0 | 1 | 2>();
+  const dfsDown = (u: string) => {
+    downState.set(u, 1);
+    for (const edge of graph.edges) {
+      if (edge.from !== u) continue;
+      const v = edge.to;
+      const st = downState.get(v) || 0;
+      if (st === 1) {
+        registerCycle(edge, 'downstream');
+      } else if (st === 0) {
+        dfsDown(v);
+      }
+    }
+    downState.set(u, 2);
+  };
+  dfsDown(targetNodeId);
 
   const activeNodeIds = new Set<string>([
     targetNodeId,
@@ -787,8 +811,8 @@ export function applyCallflowSpotlightToSvg(
           : Array.from(edgeEl.querySelectorAll('path'));
       const activeStroke = isCycleEdge
         ? isDark
-          ? '#fb7185'
-          : '#e11d48'
+          ? '#94a3b8'
+          : '#64748b'
         : directionFilter === 'downstream'
         ? isDark
           ? '#34d399'
@@ -798,7 +822,7 @@ export function applyCallflowSpotlightToSvg(
         : '#0284c7';
       pathNodes.forEach((p) => {
         (p as SVGElement).style.stroke = activeStroke;
-        (p as SVGElement).style.strokeWidth = '3px';
+        (p as SVGElement).style.strokeWidth = isCycleEdge ? '2.5px' : '3px';
         p.setAttribute('stroke', activeStroke);
         if (isCycleEdge) {
           (p as SVGElement).style.strokeDasharray = '6 4';
@@ -844,6 +868,216 @@ function parseTranslateFromTransform(transformAttr: string | null): { x: number;
   };
 }
 
+interface NormalizedSvgPath {
+  parts: string[];
+  pairs: Array<{
+    xIdx: number;
+    yIdx: number;
+    xPrefix: string;
+    yPrefix: string;
+    origX: number;
+    origY: number;
+    t: number;
+  }>;
+  startPt: { x: number; y: number };
+  endPt: { x: number; y: number };
+  prevPt: { x: number; y: number };
+  prevPairIdx: number;
+}
+
+/**
+ * Normalizes any SVG path (`M/m, L/l, H/h, V/v, C/c, S/s, Q/q, T/t, A/a, Z/z`) into explicit
+ * absolute `(x, y)` coordinates so orthogonal Mermaid edge segments stay cleanly docked during drag & export.
+ */
+function normalizeSvgPathToAbsolute(origD: string): NormalizedSvgPath {
+  const tokenRegex = /([A-Za-z])|([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)/gi;
+  const rawTokens: Array<{ type: 'cmd' | 'num'; raw: string; val?: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = tokenRegex.exec(origD)) !== null) {
+    if (m[1]) {
+      rawTokens.push({ type: 'cmd', raw: m[1] });
+    } else if (m[2]) {
+      rawTokens.push({ type: 'num', raw: m[2], val: parseFloat(m[2]) });
+    }
+  }
+
+  const outTokens: Array<{ type: 'cmd' | 'num'; raw: string; val?: number; isPairX?: boolean; isPairY?: boolean }> = [];
+  let curX = 0;
+  let curY = 0;
+  let subStartX = 0;
+  let subStartY = 0;
+  let currentCmd = 'M';
+  let idx = 0;
+
+  const pushNum = (n: number, isPairX = false, isPairY = false) => {
+    const rounded = Number(n.toFixed(2));
+    outTokens.push({ type: 'num', raw: rounded.toString(), val: rounded, isPairX, isPairY });
+  };
+
+  while (idx < rawTokens.length) {
+    const tk = rawTokens[idx];
+    if (tk.type === 'cmd') {
+      currentCmd = tk.raw;
+      idx++;
+      if (currentCmd.toUpperCase() === 'Z') {
+        outTokens.push({ type: 'cmd', raw: 'Z' });
+        curX = subStartX;
+        curY = subStartY;
+      }
+      continue;
+    }
+
+    const upper = currentCmd.toUpperCase();
+    const isRel = currentCmd !== upper;
+    const baseX = isRel ? curX : 0;
+    const baseY = isRel ? curY : 0;
+
+    if (upper === 'M' && idx + 1 < rawTokens.length && rawTokens[idx + 1].type === 'num') {
+      const nx = baseX + (rawTokens[idx].val ?? 0);
+      const ny = baseY + (rawTokens[idx + 1].val ?? 0);
+      outTokens.push({ type: 'cmd', raw: 'M' });
+      pushNum(nx, true, false);
+      pushNum(ny, false, true);
+      curX = nx;
+      curY = ny;
+      subStartX = nx;
+      subStartY = ny;
+      // Subsequent pairs after M act as implicit L
+      currentCmd = isRel ? 'l' : 'L';
+      idx += 2;
+    } else if ((upper === 'L' || upper === 'T') && idx + 1 < rawTokens.length && rawTokens[idx + 1].type === 'num') {
+      const nx = baseX + (rawTokens[idx].val ?? 0);
+      const ny = baseY + (rawTokens[idx + 1].val ?? 0);
+      outTokens.push({ type: 'cmd', raw: upper });
+      pushNum(nx, true, false);
+      pushNum(ny, false, true);
+      curX = nx;
+      curY = ny;
+      idx += 2;
+    } else if (upper === 'H') {
+      const nx = baseX + (rawTokens[idx].val ?? 0);
+      outTokens.push({ type: 'cmd', raw: 'L' });
+      pushNum(nx, true, false);
+      pushNum(curY, false, true);
+      curX = nx;
+      idx += 1;
+    } else if (upper === 'V') {
+      const ny = baseY + (rawTokens[idx].val ?? 0);
+      outTokens.push({ type: 'cmd', raw: 'L' });
+      pushNum(curX, true, false);
+      pushNum(ny, false, true);
+      curY = ny;
+      idx += 1;
+    } else if (upper === 'C' && idx + 5 < rawTokens.length) {
+      const x1 = baseX + (rawTokens[idx].val ?? 0);
+      const y1 = baseY + (rawTokens[idx + 1].val ?? 0);
+      const x2 = baseX + (rawTokens[idx + 2].val ?? 0);
+      const y2 = baseY + (rawTokens[idx + 3].val ?? 0);
+      const nx = baseX + (rawTokens[idx + 4].val ?? 0);
+      const ny = baseY + (rawTokens[idx + 5].val ?? 0);
+      outTokens.push({ type: 'cmd', raw: 'C' });
+      pushNum(x1, true, false);
+      pushNum(y1, false, true);
+      pushNum(x2, true, false);
+      pushNum(y2, false, true);
+      pushNum(nx, true, false);
+      pushNum(ny, false, true);
+      curX = nx;
+      curY = ny;
+      idx += 6;
+    } else if ((upper === 'S' || upper === 'Q') && idx + 3 < rawTokens.length) {
+      const x1 = baseX + (rawTokens[idx].val ?? 0);
+      const y1 = baseY + (rawTokens[idx + 1].val ?? 0);
+      const nx = baseX + (rawTokens[idx + 2].val ?? 0);
+      const ny = baseY + (rawTokens[idx + 3].val ?? 0);
+      outTokens.push({ type: 'cmd', raw: upper });
+      pushNum(x1, true, false);
+      pushNum(y1, false, true);
+      pushNum(nx, true, false);
+      pushNum(ny, false, true);
+      curX = nx;
+      curY = ny;
+      idx += 4;
+    } else if (upper === 'A' && idx + 6 < rawTokens.length) {
+      const rx = rawTokens[idx].val ?? 0;
+      const ry = rawTokens[idx + 1].val ?? 0;
+      const rot = rawTokens[idx + 2].val ?? 0;
+      const laf = rawTokens[idx + 3].val ?? 0;
+      const sf = rawTokens[idx + 4].val ?? 0;
+      const nx = baseX + (rawTokens[idx + 5].val ?? 0);
+      const ny = baseY + (rawTokens[idx + 6].val ?? 0);
+      outTokens.push({ type: 'cmd', raw: 'A' });
+      pushNum(rx);
+      pushNum(ry);
+      pushNum(rot);
+      pushNum(laf);
+      pushNum(sf);
+      pushNum(nx, true, false);
+      pushNum(ny, false, true);
+      curX = nx;
+      curY = ny;
+      idx += 7;
+    } else {
+      idx++;
+    }
+  }
+
+  const parts: string[] = [];
+  const prefixes: string[] = [];
+  for (let k = 0; k < outTokens.length; k++) {
+    const tk = outTokens[k];
+    const prev = k > 0 ? outTokens[k - 1] : null;
+    const prefix =
+      k === 0 ? '' : tk.type === 'cmd' ? ' ' : prev && prev.type === 'cmd' ? '' : ',';
+    prefixes.push(prefix);
+    parts.push(prefix + tk.raw);
+  }
+
+  const rawPairs: Array<{ xIdx: number; yIdx: number; origX: number; origY: number }> = [];
+  for (let k = 0; k + 1 < outTokens.length; k++) {
+    if (outTokens[k].isPairX && outTokens[k + 1].isPairY) {
+      rawPairs.push({
+        xIdx: k,
+        yIdx: k + 1,
+        origX: outTokens[k].val ?? 0,
+        origY: outTokens[k + 1].val ?? 0,
+      });
+    }
+  }
+
+  const totalPairs = rawPairs.length;
+  const pairs = rawPairs.map((p, pIdx) => ({
+    xIdx: p.xIdx,
+    yIdx: p.yIdx,
+    xPrefix: prefixes[p.xIdx],
+    yPrefix: prefixes[p.yIdx],
+    origX: p.origX,
+    origY: p.origY,
+    t: totalPairs <= 1 ? 0 : pIdx / (totalPairs - 1),
+  }));
+
+  const startPt =
+    pairs.length > 0 ? { x: pairs[0].origX, y: pairs[0].origY } : { x: 0, y: 0 };
+  const endPt =
+    pairs.length > 0
+      ? { x: pairs[pairs.length - 1].origX, y: pairs[pairs.length - 1].origY }
+      : { x: 0, y: 0 };
+
+  // Find a previous anchor distinctly away from endPt so endpoint vector direction is accurate
+  let prevPairIdx = Math.max(0, pairs.length - 2);
+  let prevPt = startPt;
+  for (let pIdx = pairs.length - 2; pIdx >= 0; pIdx--) {
+    const candidate = { x: pairs[pIdx].origX, y: pairs[pIdx].origY };
+    if (Math.hypot(endPt.x - candidate.x, endPt.y - candidate.y) > 4) {
+      prevPt = candidate;
+      prevPairIdx = pIdx;
+      break;
+    }
+  }
+
+  return { parts, pairs, startPt, endPt, prevPt, prevPairIdx };
+}
+
 function shiftAbsoluteSvgPathD(
   d: string,
   dxFrom: number,
@@ -851,80 +1085,16 @@ function shiftAbsoluteSvgPathD(
   dxTo: number,
   dyTo: number
 ): string {
-  // Tokenize SVG path into commands and numbers. Mermaid v11 flowcharts emit uppercase absolute commands (M, L, C, Q, S).
-  const tokenRegex = /([A-Za-z])|([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)/gi;
-  const tokens: Array<{ type: 'cmd' | 'num'; raw: string; val?: number }> = [];
-  let m: RegExpExecArray | null;
-  while ((m = tokenRegex.exec(d)) !== null) {
-    if (m[1]) {
-      tokens.push({ type: 'cmd', raw: m[1] });
-    } else if (m[2]) {
-      tokens.push({ type: 'num', raw: m[2], val: parseFloat(m[2]) });
-    }
+  const norm = normalizeSvgPathToAbsolute(d);
+  if (norm.pairs.length === 0) return d;
+
+  for (const pair of norm.pairs) {
+    const shiftX = dxFrom * (1 - pair.t) + dxTo * pair.t;
+    const shiftY = dyFrom * (1 - pair.t) + dyTo * pair.t;
+    norm.parts[pair.xIdx] = `${pair.xPrefix}${Number((pair.origX + shiftX).toFixed(2))}`;
+    norm.parts[pair.yIdx] = `${pair.yPrefix}${Number((pair.origY + shiftY).toFixed(2))}`;
   }
-
-  // Collect indices of (x, y) coordinate pairs in absolute commands
-  const pairTokenIndices: Array<{ xIdx: number; yIdx: number }> = [];
-  let currentCmd = 'M';
-  let i = 0;
-  while (i < tokens.length) {
-    const tk = tokens[i];
-    if (tk.type === 'cmd') {
-      currentCmd = tk.raw;
-      i++;
-      continue;
-    }
-    const upper = currentCmd.toUpperCase();
-    const isRelative = currentCmd !== upper;
-    if (upper === 'Z') {
-      i++;
-      continue;
-    }
-    if (upper === 'H' || upper === 'V') {
-      i++;
-      continue;
-    }
-    if (upper === 'A') {
-      // Arc: rx ry x-axis-rotation large-arc-flag sweep-flag x y (7 numbers)
-      if (!isRelative && i + 6 < tokens.length) {
-        pairTokenIndices.push({ xIdx: i + 5, yIdx: i + 6 });
-      }
-      i += 7;
-      continue;
-    }
-    // M, L, T, C, S, Q all consist of (x, y) coordinate pairs
-    if (!isRelative && i + 1 < tokens.length && tokens[i + 1].type === 'num') {
-      pairTokenIndices.push({ xIdx: i, yIdx: i + 1 });
-      i += 2;
-    } else {
-      i++;
-    }
-  }
-
-  if (pairTokenIndices.length === 0) return d;
-
-  const totalPairs = pairTokenIndices.length;
-  pairTokenIndices.forEach((pair, idx) => {
-    const t = totalPairs <= 1 ? 0 : idx / (totalPairs - 1);
-    const shiftX = dxFrom * (1 - t) + dxTo * t;
-    const shiftY = dyFrom * (1 - t) + dyTo * t;
-    const xVal = (tokens[pair.xIdx].val ?? 0) + shiftX;
-    const yVal = (tokens[pair.yIdx].val ?? 0) + shiftY;
-    tokens[pair.xIdx].raw = Number(xVal.toFixed(2)).toString();
-    tokens[pair.yIdx].raw = Number(yVal.toFixed(2)).toString();
-  });
-
-  let out = '';
-  for (let k = 0; k < tokens.length; k++) {
-    const tk = tokens[k];
-    if (tk.type === 'cmd') {
-      out += (k > 0 ? ' ' : '') + tk.raw;
-    } else {
-      const prev = k > 0 ? tokens[k - 1] : null;
-      out += (prev && prev.type === 'cmd' ? '' : ',') + tk.raw;
-    }
-  }
-  return out;
+  return norm.parts.join('');
 }
 
 /**
@@ -1166,6 +1336,10 @@ interface ParsedLivePathData {
     origY: number;
     t: number;
   }>;
+  startPt: { x: number; y: number };
+  endPt: { x: number; y: number };
+  prevPt: { x: number; y: number };
+  prevPairIdx: number;
 }
 
 export interface LiveSvgPortHandle {
@@ -1175,12 +1349,23 @@ export interface LiveSvgPortHandle {
   el: SVGGElement;
 }
 
+export interface NodeLocalBox {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  cx: number;
+  cy: number;
+}
+
 export interface LiveSvgNodeHandle {
   nodeId: string;
   groupEl: SVGGElement;
   baseTx: number;
   baseTy: number;
   restTransform: string;
+  box: NodeLocalBox;
+  occupiedPortCounts: Record<PortSide, number>;
   shapeEls: SVGElement[];
   origShapeStyles: Array<{
     fillAttr: string | null;
@@ -1207,6 +1392,8 @@ export interface LiveSvgEdgeHandle {
   to: string;
   labelText: string;
   edgeEl: SVGElement;
+  edgeTx: number;
+  edgeTy: number;
   origOpacity: string;
   paths: ParsedLivePathData[];
   hitPaths: ParsedLivePathData[];
@@ -1215,6 +1402,10 @@ export interface LiveSvgEdgeHandle {
   labelBaseTx: number;
   labelBaseTy: number;
   labelRestTransform: string;
+  lockEl: SVGGElement | null;
+  origEndPt: { x: number; y: number };
+  origPrevPt: { x: number; y: number };
+  prevT: number;
 }
 
 export interface LiveSvgDomIndex {
@@ -1234,75 +1425,7 @@ function parseLivePathTokens(pathEl: SVGPathElement): ParsedLivePathData {
   const origStyleStrokeWidth = pathEl.style.strokeWidth || '';
   const origStyleDasharray = pathEl.style.strokeDasharray || '';
 
-  const tokenRegex = /([A-Za-z])|([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)/gi;
-  const rawTokens: Array<{ type: 'cmd' | 'num'; raw: string; val?: number }> = [];
-  let m: RegExpExecArray | null;
-  while ((m = tokenRegex.exec(origD)) !== null) {
-    if (m[1]) {
-      rawTokens.push({ type: 'cmd', raw: m[1] });
-    } else if (m[2]) {
-      rawTokens.push({ type: 'num', raw: m[2], val: parseFloat(m[2]) });
-    }
-  }
-
-  const parts: string[] = [];
-  const prefixes: string[] = [];
-  for (let k = 0; k < rawTokens.length; k++) {
-    const tk = rawTokens[k];
-    const prev = k > 0 ? rawTokens[k - 1] : null;
-    const prefix =
-      k === 0
-        ? ''
-        : tk.type === 'cmd'
-        ? ' '
-        : prev && prev.type === 'cmd'
-        ? ''
-        : ',';
-    prefixes.push(prefix);
-    parts.push(prefix + tk.raw);
-  }
-
-  const pairIndices: Array<{ xIdx: number; yIdx: number }> = [];
-  let currentCmd = 'M';
-  let i = 0;
-  while (i < rawTokens.length) {
-    const tk = rawTokens[i];
-    if (tk.type === 'cmd') {
-      currentCmd = tk.raw;
-      i++;
-      continue;
-    }
-    const upper = currentCmd.toUpperCase();
-    const isRelative = currentCmd !== upper;
-    if (upper === 'Z' || upper === 'H' || upper === 'V') {
-      i++;
-      continue;
-    }
-    if (upper === 'A') {
-      if (!isRelative && i + 6 < rawTokens.length) {
-        pairIndices.push({ xIdx: i + 5, yIdx: i + 6 });
-      }
-      i += 7;
-      continue;
-    }
-    if (!isRelative && i + 1 < rawTokens.length && rawTokens[i + 1].type === 'num') {
-      pairIndices.push({ xIdx: i, yIdx: i + 1 });
-      i += 2;
-    } else {
-      i++;
-    }
-  }
-
-  const totalPairs = pairIndices.length;
-  const pairs = pairIndices.map((p, idx) => ({
-    xIdx: p.xIdx,
-    yIdx: p.yIdx,
-    xPrefix: prefixes[p.xIdx],
-    yPrefix: prefixes[p.yIdx],
-    origX: rawTokens[p.xIdx].val ?? 0,
-    origY: rawTokens[p.yIdx].val ?? 0,
-    t: totalPairs <= 1 ? 0 : idx / (totalPairs - 1),
-  }));
+  const norm = normalizeSvgPathToAbsolute(origD);
 
   return {
     pathEl,
@@ -1311,15 +1434,19 @@ function parseLivePathTokens(pathEl: SVGPathElement): ParsedLivePathData {
     origStyleStroke,
     origStyleStrokeWidth,
     origStyleDasharray,
-    parts,
-    pairs,
+    parts: norm.parts,
+    pairs: norm.pairs,
+    startPt: norm.startPt,
+    endPt: norm.endPt,
+    prevPt: norm.prevPt,
+    prevPairIdx: norm.prevPairIdx,
   };
 }
 
 function getNodeLocalBox(
   nodeGroup: SVGGElement,
   shapeEls: SVGElement[]
-): { minX: number; maxX: number; minY: number; maxY: number; cx: number; cy: number } {
+): NodeLocalBox {
   for (const s of shapeEls) {
     try {
       const box = (s as SVGGraphicsElement).getBBox?.();
@@ -1376,17 +1503,18 @@ function getNodeLocalBox(
 function createFourPortHandles(
   nodeGroup: SVGGElement,
   nodeId: string,
-  shapeEls: SVGElement[]
+  box: NodeLocalBox
 ): Record<PortSide, LiveSvgPortHandle> {
   // Remove any stale legacy or previously built port handles on re-index
   nodeGroup.querySelectorAll('.callflow-connect-port').forEach((el) => el.remove());
 
-  const box = getNodeLocalBox(nodeGroup, shapeEls);
+  // Place ports slightly outside the node border (+6px) so they never sit directly on top of arrowheads
+  const rimPad = 6;
   const coords: Record<PortSide, { x: number; y: number }> = {
-    top: { x: box.cx, y: box.minY },
-    right: { x: box.maxX, y: box.cy },
-    bottom: { x: box.cx, y: box.maxY },
-    left: { x: box.minX, y: box.cy },
+    top: { x: box.cx, y: box.minY - rimPad },
+    right: { x: box.maxX + rimPad, y: box.cy },
+    bottom: { x: box.cx, y: box.maxY + rimPad },
+    left: { x: box.minX - rimPad, y: box.cy },
   };
 
   const svgNs = 'http://www.w3.org/2000/svg';
@@ -1398,6 +1526,7 @@ function createFourPortHandles(
     portGroup.setAttribute('class', 'callflow-connect-port');
     portGroup.setAttribute('data-port-node-id', nodeId);
     portGroup.setAttribute('data-port-side', side);
+    portGroup.setAttribute('data-port-occupied', 'false');
     portGroup.setAttribute(
       'transform',
       `translate(${Number(pt.x.toFixed(1))}, ${Number(pt.y.toFixed(1))})`
@@ -1410,7 +1539,7 @@ function createFourPortHandles(
     portGroup.appendChild(portTitle);
 
     const hitCircle = doc.createElementNS(svgNs, 'circle');
-    hitCircle.setAttribute('r', '13');
+    hitCircle.setAttribute('r', '12');
     hitCircle.setAttribute('fill', 'transparent');
     hitCircle.setAttribute('data-port-node-id', nodeId);
     hitCircle.setAttribute('data-port-side', side);
@@ -1423,7 +1552,7 @@ function createFourPortHandles(
 
     const haloCircle = doc.createElementNS(svgNs, 'circle');
     haloCircle.setAttribute('class', 'callflow-port-halo');
-    haloCircle.setAttribute('r', '11');
+    haloCircle.setAttribute('r', '10.5');
     haloCircle.setAttribute('fill', 'rgba(16, 185, 129, 0.18)');
     haloCircle.setAttribute('stroke', '#10b981');
     haloCircle.setAttribute('stroke-width', '2');
@@ -1433,7 +1562,7 @@ function createFourPortHandles(
 
     const outerCircle = doc.createElementNS(svgNs, 'circle');
     outerCircle.setAttribute('class', 'callflow-port-outer');
-    outerCircle.setAttribute('r', '6.5');
+    outerCircle.setAttribute('r', '6');
     outerCircle.setAttribute('fill', '#4f46e5');
     outerCircle.setAttribute('stroke', '#e0e7ff');
     outerCircle.setAttribute('stroke-width', '2');
@@ -1442,7 +1571,7 @@ function createFourPortHandles(
     bodyGroup.appendChild(outerCircle);
 
     const innerDot = doc.createElementNS(svgNs, 'circle');
-    innerDot.setAttribute('r', '2.2');
+    innerDot.setAttribute('r', '2.1');
     innerDot.setAttribute('fill', '#ffffff');
     innerDot.setAttribute('data-port-node-id', nodeId);
     innerDot.setAttribute('data-port-side', side);
@@ -1484,6 +1613,187 @@ export function resolveClickedEdgeFromSvgElement(
 }
 
 /**
+ * Resolves a clicked padlock badge (`[data-lock-from][data-lock-to]`) in O(1).
+ */
+export function resolveClickedLockFromSvgElement(
+  targetEl: Element | null
+): SelectedCallflowEdge | null {
+  if (!targetEl) return null;
+  const lockHolder = targetEl.closest('[data-lock-from][data-lock-to]');
+  if (!lockHolder) return null;
+  const from = lockHolder.getAttribute('data-lock-from') || '';
+  const to = lockHolder.getAttribute('data-lock-to') || '';
+  if (!from || !to) return null;
+  const label = lockHolder.getAttribute('data-lock-label') || '';
+  return { from, to, label };
+}
+
+export interface MagneticSnapResult {
+  nodeId: string;
+  side: PortSide;
+  clientX: number;
+  clientY: number;
+  dist: number;
+  isFreeSide: boolean;
+}
+
+function detectClosestNodePortSide(
+  node: LiveSvgNodeHandle,
+  svgPointX: number,
+  svgPointY: number
+): PortSide {
+  const lx = svgPointX - node.baseTx;
+  const ly = svgPointY - node.baseTy;
+  const anchors: Record<PortSide, { x: number; y: number }> = {
+    top: { x: node.box.cx, y: node.box.minY },
+    right: { x: node.box.maxX, y: node.box.cy },
+    bottom: { x: node.box.cx, y: node.box.maxY },
+    left: { x: node.box.minX, y: node.box.cy },
+  };
+  let bestSide: PortSide = 'top';
+  let bestDist = Infinity;
+  (['top', 'right', 'bottom', 'left'] as PortSide[]).forEach((side) => {
+    const a = anchors[side];
+    const d = Math.hypot(lx - a.x, ly - a.y);
+    if (d < bestDist) {
+      bestDist = d;
+      bestSide = side;
+    }
+  });
+  return bestSide;
+}
+
+function computeLockPositionOnSegment(
+  endPt: { x: number; y: number },
+  prevPt: { x: number; y: number },
+  edgeTx: number,
+  edgeTy: number
+): { x: number; y: number } {
+  const ex = edgeTx + endPt.x;
+  const ey = edgeTy + endPt.y;
+  const px = edgeTx + prevPt.x;
+  const py = edgeTy + prevPt.y;
+  const vx = px - ex;
+  const vy = py - ey;
+  const len = Math.hypot(vx, vy);
+  if (len > 2) {
+    const step = Math.min(18, Math.max(11, len * 0.36));
+    return {
+      x: Number((ex + (vx / len) * step).toFixed(2)),
+      y: Number((ey + (vy / len) * step).toFixed(2)),
+    };
+  }
+  return {
+    x: Number(ex.toFixed(2)),
+    y: Number((ey - 11).toFixed(2)),
+  };
+}
+
+function createEdgeLockBadge(
+  doc: Document,
+  svgNs: string,
+  from: string,
+  to: string,
+  labelText: string,
+  pos: { x: number; y: number }
+): SVGGElement {
+  const g = doc.createElementNS(svgNs, 'g');
+  g.setAttribute('class', 'callflow-edge-lock');
+  g.setAttribute('data-lock-from', from);
+  g.setAttribute('data-lock-to', to);
+  g.setAttribute('data-lock-label', labelText);
+  g.setAttribute('transform', `translate(${pos.x}, ${pos.y})`);
+
+  const titleEl = doc.createElementNS(svgNs, 'title');
+  titleEl.textContent = labelText
+    ? `Schloss: Verbindung "${labelText}" (${from} → ${to}) per Klick lösen`
+    : `Schloss: Verbindung (${from} → ${to}) per Klick lösen`;
+  g.appendChild(titleEl);
+
+  const hitCircle = doc.createElementNS(svgNs, 'circle');
+  hitCircle.setAttribute('r', '14');
+  hitCircle.setAttribute('fill', 'transparent');
+  hitCircle.setAttribute('data-lock-from', from);
+  hitCircle.setAttribute('data-lock-to', to);
+  hitCircle.setAttribute('data-lock-label', labelText);
+  g.appendChild(hitCircle);
+
+  const badge = doc.createElementNS(svgNs, 'g');
+  badge.setAttribute('class', 'callflow-lock-badge');
+  badge.setAttribute('data-lock-from', from);
+  badge.setAttribute('data-lock-to', to);
+  badge.setAttribute('data-lock-label', labelText);
+
+  const bgCircle = doc.createElementNS(svgNs, 'circle');
+  bgCircle.setAttribute('class', 'callflow-lock-bg');
+  bgCircle.setAttribute('r', '9.5');
+  bgCircle.setAttribute('fill', '#0f172a');
+  bgCircle.setAttribute('stroke', '#fbbf24');
+  bgCircle.setAttribute('stroke-width', '1.8');
+  bgCircle.setAttribute('data-lock-from', from);
+  bgCircle.setAttribute('data-lock-to', to);
+  bgCircle.setAttribute('data-lock-label', labelText);
+  badge.appendChild(bgCircle);
+
+  // Closed padlock icon (default state)
+  const closedGroup = doc.createElementNS(svgNs, 'g');
+  closedGroup.setAttribute('class', 'callflow-lock-closed');
+  closedGroup.setAttribute('transform', 'translate(-5.5, -5.5) scale(0.46)');
+  closedGroup.setAttribute('data-lock-from', from);
+  closedGroup.setAttribute('data-lock-to', to);
+
+  const closedRect = doc.createElementNS(svgNs, 'rect');
+  closedRect.setAttribute('x', '4');
+  closedRect.setAttribute('y', '11');
+  closedRect.setAttribute('width', '16');
+  closedRect.setAttribute('height', '10');
+  closedRect.setAttribute('rx', '2.5');
+  closedRect.setAttribute('fill', '#fbbf24');
+  closedRect.setAttribute('stroke', '#fef3c7');
+  closedRect.setAttribute('stroke-width', '1.5');
+  closedGroup.appendChild(closedRect);
+
+  const closedShackle = doc.createElementNS(svgNs, 'path');
+  closedShackle.setAttribute('d', 'M7 11V7a5 5 0 0 1 10 0v4');
+  closedShackle.setAttribute('fill', 'none');
+  closedShackle.setAttribute('stroke', '#fef3c7');
+  closedShackle.setAttribute('stroke-width', '2.4');
+  closedShackle.setAttribute('stroke-linecap', 'round');
+  closedGroup.appendChild(closedShackle);
+  badge.appendChild(closedGroup);
+
+  // Open padlock icon (hover/unlock state)
+  const openGroup = doc.createElementNS(svgNs, 'g');
+  openGroup.setAttribute('class', 'callflow-lock-open');
+  openGroup.setAttribute('transform', 'translate(-5.5, -5.5) scale(0.46)');
+  openGroup.setAttribute('data-lock-from', from);
+  openGroup.setAttribute('data-lock-to', to);
+
+  const openRect = doc.createElementNS(svgNs, 'rect');
+  openRect.setAttribute('x', '4');
+  openRect.setAttribute('y', '11');
+  openRect.setAttribute('width', '16');
+  openRect.setAttribute('height', '10');
+  openRect.setAttribute('rx', '2.5');
+  openRect.setAttribute('fill', '#ffe4e6');
+  openRect.setAttribute('stroke', '#ffffff');
+  openRect.setAttribute('stroke-width', '1.5');
+  openGroup.appendChild(openRect);
+
+  const openShackle = doc.createElementNS(svgNs, 'path');
+  openShackle.setAttribute('d', 'M7 11V7a5 5 0 0 1 9.5-2.2');
+  openShackle.setAttribute('fill', 'none');
+  openShackle.setAttribute('stroke', '#ffffff');
+  openShackle.setAttribute('stroke-width', '2.4');
+  openShackle.setAttribute('stroke-linecap', 'round');
+  openGroup.appendChild(openShackle);
+  badge.appendChild(openGroup);
+
+  g.appendChild(badge);
+  return g as SVGGElement;
+}
+
+/**
  * Builds a reusable in-memory DOM index ONCE whenever a new base SVG mounts,
  * eliminating DOMParser/XMLSerializer overhead during Pan, Zoom, Selection, and Dragging.
  */
@@ -1503,8 +1813,8 @@ export function buildLiveSvgDomIndex(
     }
   }
 
-  // Clean up any stale hit-paths from an earlier index pass on the same SVG element
-  svgEl.querySelectorAll('.callflow-edge-hit').forEach((el) => el.remove());
+  // Clean up any stale hit-paths or padlock overlays from an earlier index pass
+  svgEl.querySelectorAll('.callflow-edge-hit, .callflow-edge-locks-layer').forEach((el) => el.remove());
 
   const nodes = new Map<string, LiveSvgNodeHandle>();
   const nodeGroups = Array.from(
@@ -1550,7 +1860,8 @@ export function buildLiveSvgDomIndex(
       fontWeight: h.style.fontWeight || '',
     }));
 
-    const ports = createFourPortHandles(groupEl, matchedId, shapeEls);
+    const box = getNodeLocalBox(groupEl, shapeEls);
+    const ports = createFourPortHandles(groupEl, matchedId, box);
 
     nodes.set(matchedId, {
       nodeId: matchedId,
@@ -1558,6 +1869,8 @@ export function buildLiveSvgDomIndex(
       baseTx: x,
       baseTy: y,
       restTransform: rest,
+      box,
+      occupiedPortCounts: { top: 0, right: 0, bottom: 0, left: 0 },
       shapeEls,
       origShapeStyles,
       textEls,
@@ -1615,6 +1928,9 @@ export function buildLiveSvgDomIndex(
   const svgNs = 'http://www.w3.org/2000/svg';
   const doc = svgEl.ownerDocument;
 
+  const locksLayer = doc.createElementNS(svgNs, 'g');
+  locksLayer.setAttribute('class', 'callflow-edge-locks-layer');
+
   edgeElements.forEach((edgeEl, idx) => {
     const matched = matchEdgeMeta(edgeEl);
     if (!matched) return;
@@ -1623,6 +1939,10 @@ export function buildLiveSvgDomIndex(
         ? [edgeEl]
         : Array.from(edgeEl.querySelectorAll('path:not(.callflow-edge-hit)'))
     ) as SVGPathElement[];
+
+    const edgeTr = parseTranslateFromTransform(edgeEl.getAttribute('transform'));
+    const edgeTx = edgeTr.x;
+    const edgeTy = edgeTr.y;
 
     const matchedLabel =
       edgeLabelElements.find((l) => {
@@ -1640,6 +1960,7 @@ export function buildLiveSvgDomIndex(
       matchedLabel.setAttribute('data-callflow-edge-label', labelText);
     }
 
+    const parsedPaths = pathNodes.map((p) => parseLivePathTokens(p));
     const hitPathEls: SVGPathElement[] = [];
     pathNodes.forEach((p) => {
       const dAttr = p.getAttribute('d');
@@ -1652,12 +1973,48 @@ export function buildLiveSvgDomIndex(
       hitEl.setAttribute('data-callflow-edge-label', labelText);
       const hitTitle = doc.createElementNS(svgNs, 'title');
       hitTitle.textContent = labelText
-        ? `Verbindung "${labelText}" anklicken zum Bearbeiten oder Lösen`
-        : `Verbindung ${matched.from} → ${matched.to} anklicken zum Bearbeiten oder Lösen`;
+        ? `Verbindung "${labelText}" anklicken zum Bearbeiten oder per Schloss am Knoten lösen`
+        : `Verbindung ${matched.from} → ${matched.to} anklicken zum Bearbeiten oder per Schloss am Knoten lösen`;
       hitEl.appendChild(hitTitle);
       p.parentNode.insertBefore(hitEl, p.nextSibling);
       hitPathEls.push(hitEl);
     });
+
+    const mainPath = parsedPaths[0];
+    const origStartPt = mainPath ? mainPath.startPt : { x: 0, y: 0 };
+    const origEndPt = mainPath ? mainPath.endPt : { x: 0, y: 0 };
+    const origPrevPt = mainPath ? mainPath.prevPt : origStartPt;
+    const prevT =
+      mainPath && mainPath.prevPairIdx >= 0 && mainPath.pairs[mainPath.prevPairIdx]
+        ? mainPath.pairs[mainPath.prevPairIdx].t
+        : 0.7;
+
+    // Record occupied port sides on both source & target nodes so new wires auto-pick free sides
+    const fromNode = nodes.get(matched.from);
+    if (fromNode && mainPath) {
+      const side = detectClosestNodePortSide(
+        fromNode,
+        edgeTx + origStartPt.x,
+        edgeTy + origStartPt.y
+      );
+      fromNode.occupiedPortCounts[side] += 1;
+    }
+    const toNode = nodes.get(matched.to);
+    if (toNode && mainPath) {
+      const side = detectClosestNodePortSide(
+        toNode,
+        edgeTx + origEndPt.x,
+        edgeTy + origEndPt.y
+      );
+      toNode.occupiedPortCounts[side] += 1;
+    }
+
+    let lockEl: SVGGElement | null = null;
+    if (mainPath) {
+      const lockPos = computeLockPositionOnSegment(origEndPt, origPrevPt, edgeTx, edgeTy);
+      lockEl = createEdgeLockBadge(doc, svgNs, matched.from, matched.to, labelText, lockPos);
+      locksLayer.appendChild(lockEl);
+    }
 
     const labelTransform = matchedLabel
       ? parseTranslateFromTransform(matchedLabel.getAttribute('transform'))
@@ -1668,14 +2025,20 @@ export function buildLiveSvgDomIndex(
       to: matched.to,
       labelText,
       edgeEl,
+      edgeTx,
+      edgeTy,
       origOpacity: edgeEl.style.opacity || '',
-      paths: pathNodes.map((p) => parseLivePathTokens(p)),
+      paths: parsedPaths,
       hitPaths: hitPathEls.map((hp) => parseLivePathTokens(hp)),
       labelEl: matchedLabel,
       origLabelOpacity: matchedLabel ? matchedLabel.style.opacity || '' : '',
       labelBaseTx: labelTransform.x,
       labelBaseTy: labelTransform.y,
       labelRestTransform: labelTransform.rest,
+      lockEl,
+      origEndPt,
+      origPrevPt,
+      prevT,
     };
 
     allEdges.push(handle);
@@ -1688,6 +2051,26 @@ export function buildLiveSvgDomIndex(
       edgesByNode.set(matched.to, toArr);
     }
   });
+
+  // Mark port occupancy attributes so free sides appear prominently when dragging new wires
+  nodes.forEach((node) => {
+    (['top', 'right', 'bottom', 'left'] as PortSide[]).forEach((side) => {
+      const count = node.occupiedPortCounts[side];
+      const portEl = node.ports[side].el;
+      portEl.setAttribute('data-port-occupied', count > 0 ? 'true' : 'false');
+      const titleEl = portEl.querySelector('title');
+      if (titleEl) {
+        titleEl.textContent =
+          count > 0
+            ? `Seite belegt (${count} Pfeil${count > 1 ? 'e' : ''}) — beim Andocken wird automatisch eine freie Seite gewählt oder versetzt`
+            : 'Freier Andockpunkt — hierher ziehen für überschneidungsfreies Andocken';
+      }
+    });
+  });
+
+  if (locksLayer.childNodes.length > 0) {
+    svgEl.appendChild(locksLayer);
+  }
 
   const clusters = Array.from(svgEl.querySelectorAll('g.cluster')) as SVGElement[];
 
@@ -1702,20 +2085,39 @@ export function buildLiveSvgDomIndex(
   };
 }
 
+function applyTangentialScreenOffset(
+  side: PortSide,
+  px: number,
+  py: number,
+  occupiedCount: number
+): { x: number; y: number } {
+  if (occupiedCount <= 0) return { x: px, y: py };
+  // Alternate ±15px, ±27px tangentially along the node rim so new wires never land on top of existing arrowheads
+  const tier = Math.ceil(occupiedCount / 2);
+  const sign = occupiedCount % 2 === 1 ? 1 : -1;
+  const shift = sign * (15 + (tier - 1) * 12);
+  if (side === 'top' || side === 'bottom') {
+    return { x: px + shift, y: py };
+  }
+  return { x: px, y: py + shift };
+}
+
 /**
- * Magnetic snap search across all 4-side node ports within `snapRadiusPx` screen pixels.
- * Also snaps onto the closest facing port if the cursor is inside a target node's bounding box.
+ * Magnetic snap search across 4-side node ports within `snapRadiusPx` screen pixels.
+ * Strongly prioritizes UNOCCUPIED port sides so new lines never overlap existing arrowheads;
+ * if all 4 sides already have arrows, applies a clean tangential rim offset.
  */
 export function findNearestMagneticPort(
   index: LiveSvgDomIndex,
   clientX: number,
   clientY: number,
   excludeNodeId: string,
-  snapRadiusPx: number = 28,
+  snapRadiusPx: number = 30,
   hoveredNodeId: string | null = null
-): { nodeId: string; side: PortSide; clientX: number; clientY: number; dist: number } | null {
-  let best: { nodeId: string; side: PortSide; clientX: number; clientY: number; dist: number } | null = null;
+): MagneticSnapResult | null {
   const sides: PortSide[] = ['top', 'right', 'bottom', 'left'];
+  let bestFree: MagneticSnapResult | null = null;
+  let bestOccupied: MagneticSnapResult | null = null;
 
   index.nodes.forEach((node) => {
     if (node.nodeId === excludeNodeId) return;
@@ -1723,37 +2125,86 @@ export function findNearestMagneticPort(
       const port = node.ports[side];
       const rect = port.el.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) continue;
-      const px = rect.left + rect.width / 2;
-      const py = rect.top + rect.height / 2;
-      const dist = Math.hypot(px - clientX, py - clientY);
-      if (dist <= snapRadiusPx && (!best || dist < best.dist)) {
-        best = { nodeId: node.nodeId, side, clientX: px, clientY: py, dist };
+      const baseX = rect.left + rect.width / 2;
+      const baseY = rect.top + rect.height / 2;
+      const dist = Math.hypot(baseX - clientX, baseY - clientY);
+      if (dist > snapRadiusPx) continue;
+      const occupiedCount = node.occupiedPortCounts[side];
+      if (occupiedCount === 0) {
+        if (!bestFree || dist < bestFree.dist) {
+          bestFree = {
+            nodeId: node.nodeId,
+            side,
+            clientX: baseX,
+            clientY: baseY,
+            dist,
+            isFreeSide: true,
+          };
+        }
+      } else {
+        const shifted = applyTangentialScreenOffset(side, baseX, baseY, occupiedCount);
+        if (!bestOccupied || dist < bestOccupied.dist) {
+          bestOccupied = {
+            nodeId: node.nodeId,
+            side,
+            clientX: shifted.x,
+            clientY: shifted.y,
+            dist,
+            isFreeSide: false,
+          };
+        }
       }
     }
   });
 
-  if (best) return best;
+  if (bestFree) return bestFree;
 
-  // If cursor is inside a target node box but slightly farther than 28px from its border port,
-  // magnet-snap cleanly to the closest border port on that hovered node.
+  // If cursor is inside a target node box, automatically select a FREE port side on that node
+  // (or tangential offset if all 4 sides are already occupied) rather than snapping onto an existing arrowhead.
   if (hoveredNodeId && hoveredNodeId !== excludeNodeId) {
     const hoveredNode = index.nodes.get(hoveredNodeId);
     if (hoveredNode) {
+      let hoveredFree: MagneticSnapResult | null = null;
+      let hoveredOcc: MagneticSnapResult | null = null;
       for (const side of sides) {
         const port = hoveredNode.ports[side];
         const rect = port.el.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0) continue;
-        const px = rect.left + rect.width / 2;
-        const py = rect.top + rect.height / 2;
-        const dist = Math.hypot(px - clientX, py - clientY);
-        if (!best || dist < best.dist) {
-          best = { nodeId: hoveredNodeId, side, clientX: px, clientY: py, dist };
+        const baseX = rect.left + rect.width / 2;
+        const baseY = rect.top + rect.height / 2;
+        const dist = Math.hypot(baseX - clientX, baseY - clientY);
+        const occupiedCount = hoveredNode.occupiedPortCounts[side];
+        if (occupiedCount === 0) {
+          if (!hoveredFree || dist < hoveredFree.dist) {
+            hoveredFree = {
+              nodeId: hoveredNodeId,
+              side,
+              clientX: baseX,
+              clientY: baseY,
+              dist,
+              isFreeSide: true,
+            };
+          }
+        } else {
+          const shifted = applyTangentialScreenOffset(side, baseX, baseY, occupiedCount);
+          if (!hoveredOcc || dist < hoveredOcc.dist) {
+            hoveredOcc = {
+              nodeId: hoveredNodeId,
+              side,
+              clientX: shifted.x,
+              clientY: shifted.y,
+              dist,
+              isFreeSide: false,
+            };
+          }
         }
       }
+      if (hoveredFree) return hoveredFree;
+      if (hoveredOcc) return hoveredOcc;
     }
   }
 
-  return best;
+  return bestOccupied;
 }
 
 /**
@@ -1775,6 +2226,26 @@ export function setMagneticSnapTargetInDom(
     if (portEl) {
       portEl.classList.add('is-snap-target');
     }
+  }
+}
+
+/**
+ * Reveals padlock badges cleanly when hovering a line, hovering a docked node, or selecting an edge.
+ */
+export function setHoveredLockTargetsInDom(
+  index: LiveSvgDomIndex,
+  hoveredEdge: SelectedCallflowEdge | null,
+  hoveredNodeId: string | null,
+  selectedEdge: SelectedCallflowEdge | null
+): void {
+  for (let i = 0; i < index.allEdges.length; i++) {
+    const edge = index.allEdges[i];
+    if (!edge.lockEl) continue;
+    const isVisible =
+      (selectedEdge !== null && edge.from === selectedEdge.from && edge.to === selectedEdge.to) ||
+      (hoveredEdge !== null && edge.from === hoveredEdge.from && edge.to === hoveredEdge.to) ||
+      (hoveredNodeId !== null && (edge.to === hoveredNodeId || edge.from === hoveredNodeId));
+    edge.lockEl.classList.toggle('is-visible', isVisible);
   }
 }
 
@@ -1831,6 +2302,19 @@ function updateLiveEdgeGeometry(
       'transform',
       `translate(${nextLx}, ${nextLy})${edge.labelRestTransform ? ` ${edge.labelRestTransform}` : ''}`
     );
+  }
+
+  if (edge.lockEl) {
+    const curEnd = {
+      x: edge.origEndPt.x + (hasShift ? dxTo : 0),
+      y: edge.origEndPt.y + (hasShift ? dyTo : 0),
+    };
+    const curPrev = {
+      x: edge.origPrevPt.x + (hasShift ? dxFrom * (1 - edge.prevT) + dxTo * edge.prevT : 0),
+      y: edge.origPrevPt.y + (hasShift ? dyFrom * (1 - edge.prevT) + dyTo * edge.prevT : 0),
+    };
+    const nextLockPos = computeLockPositionOnSegment(curEnd, curPrev, edge.edgeTx, edge.edgeTy);
+    edge.lockEl.setAttribute('transform', `translate(${nextLockPos.x}, ${nextLockPos.y})`);
   }
 }
 
@@ -2094,8 +2578,8 @@ export function applyLiveSpotlightToDom(
       if (edge.labelEl) edge.labelEl.style.opacity = '1';
       const activeStroke = isCycleEdge
         ? isDark
-          ? '#fb7185'
-          : '#e11d48'
+          ? '#94a3b8'
+          : '#64748b'
         : directionFilter === 'downstream'
         ? isDark
           ? '#34d399'
@@ -2105,7 +2589,7 @@ export function applyLiveSpotlightToDom(
         : '#0284c7';
       edge.paths.forEach((p) => {
         p.pathEl.style.stroke = activeStroke;
-        p.pathEl.style.strokeWidth = '3px';
+        p.pathEl.style.strokeWidth = isCycleEdge ? '2.5px' : '3px';
         p.pathEl.setAttribute('stroke', activeStroke);
         p.pathEl.style.strokeDasharray = isCycleEdge ? '6 4' : p.origStyleDasharray;
       });
@@ -2858,7 +3342,7 @@ export function generateInteractiveCallflowHtml(
         return;
       }
 
-      // BFS with depth & cycle edge tracking
+      // BFS with depth + true 3-color DFS back-edge detection (no false positives on DAG convergence)
       const upDepth = new Map([[activeNodeId, 0]]);
       const qUp = [{ id: activeNodeId, depth: 0 }];
       const upEdgesAll = [];
@@ -2869,20 +3353,30 @@ export function generateInteractiveCallflowHtml(
         const { id: c, depth } = qUp.shift();
         GRAPH.edges.forEach(e => {
           if (e.to !== c) return;
-          const prevD = upDepth.get(e.from);
-          if (prevD === undefined) {
+          upEdgesAll.push(e);
+          if (!upDepth.has(e.from)) {
             upDepth.set(e.from, depth + 1);
-            upEdgesAll.push(e);
             qUp.push({ id: e.from, depth: depth + 1 });
-          } else {
-            upEdgesAll.push(e);
-            if (e.from === activeNodeId || prevD <= depth) {
-              const k = 'up:' + e.from + '->' + e.to;
-              if (!cycleKeys.has(k)) { cycleKeys.add(k); cycles.push(e); }
-            }
           }
         });
       }
+
+      const upState = new Map();
+      const dfsUp = (u) => {
+        upState.set(u, 1);
+        GRAPH.edges.forEach(e => {
+          if (e.to !== u) return;
+          const st = upState.get(e.from) || 0;
+          if (st === 1) {
+            const k = 'up:' + e.from + '->' + e.to;
+            if (!cycleKeys.has(k)) { cycleKeys.add(k); cycles.push(e); }
+          } else if (st === 0) {
+            dfsUp(e.from);
+          }
+        });
+        upState.set(u, 2);
+      };
+      dfsUp(activeNodeId);
 
       const downDepth = new Map([[activeNodeId, 0]]);
       const qDown = [{ id: activeNodeId, depth: 0 }];
@@ -2892,20 +3386,30 @@ export function generateInteractiveCallflowHtml(
         const { id: c, depth } = qDown.shift();
         GRAPH.edges.forEach(e => {
           if (e.from !== c) return;
-          const prevD = downDepth.get(e.to);
-          if (prevD === undefined) {
+          downEdgesAll.push(e);
+          if (!downDepth.has(e.to)) {
             downDepth.set(e.to, depth + 1);
-            downEdgesAll.push(e);
             qDown.push({ id: e.to, depth: depth + 1 });
-          } else {
-            downEdgesAll.push(e);
-            if (e.to === activeNodeId || prevD <= depth) {
-              const k = 'down:' + e.from + '->' + e.to;
-              if (!cycleKeys.has(k)) { cycleKeys.add(k); cycles.push(e); }
-            }
           }
         });
       }
+
+      const downState = new Map();
+      const dfsDown = (u) => {
+        downState.set(u, 1);
+        GRAPH.edges.forEach(e => {
+          if (e.from !== u) return;
+          const st = downState.get(e.to) || 0;
+          if (st === 1) {
+            const k = 'down:' + e.from + '->' + e.to;
+            if (!cycleKeys.has(k)) { cycleKeys.add(k); cycles.push(e); }
+          } else if (st === 0) {
+            dfsDown(e.to);
+          }
+        });
+        downState.set(u, 2);
+      };
+      dfsDown(activeNodeId);
 
       const maxHops = hopDepth === 'all' ? Infinity : Number(hopDepth);
       const visibleNodes = new Set([activeNodeId]);
@@ -2945,14 +3449,14 @@ export function generateInteractiveCallflowHtml(
           edgeEl.style.opacity = '1';
           const isCyc = cycleOnlyEdges.length > 0 && matchesEdge(edgeEl, cycleOnlyEdges);
           const strokeCol = isCyc
-            ? (IS_DARK ? '#fb7185' : '#e11d48')
+            ? (IS_DARK ? '#94a3b8' : '#64748b')
             : directionFilter === 'downstream'
             ? (IS_DARK ? '#34d399' : '#059669')
             : (IS_DARK ? '#38bdf8' : '#0284c7');
           const paths = edgeEl.tagName.toLowerCase() === 'path' ? [edgeEl] : Array.from(edgeEl.querySelectorAll('path'));
           paths.forEach(p => {
             p.style.stroke = strokeCol;
-            p.style.strokeWidth = '3px';
+            p.style.strokeWidth = isCyc ? '2.5px' : '3px';
             if (isCyc) p.style.strokeDasharray = '6 4';
           });
         } else {

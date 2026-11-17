@@ -98,6 +98,11 @@ export interface ScriptRule {
   holiday?: string;
   announcement?: string;
   queueTarget?: string;
+  sectionName?: string;
+  eventName?: string;
+  waitSeconds?: number;
+  skillsetPriority?: number;
+  isDisconnect?: boolean;
   rawLine: string;
   organizationName?: string;
   orgaCode?: string;

@@ -18,7 +18,10 @@ import {
   parseCallflowTextWithFallback,
   SAMPLE_MULTI_SCRIPT_TEXT,
 } from '../utils/scriptCallflowParser';
-import { isVisioFilename, parseVisioFileToModules } from '../utils/visioParser';
+import {
+  CALLFLOW_FILE_ACCEPT,
+  importCallflowFile,
+} from '../utils/callflowFileImporter';
 
 interface MultiScriptModalProps {
   isOpen: boolean;
@@ -128,36 +131,34 @@ export const MultiScriptModal: React.FC<MultiScriptModalProps> = ({
     let currentModules = [...workspace.modules];
     let parsedCount = 0;
     let visioFilesCount = 0;
+    let dotSFilesCount = 0;
+    const failedFiles: string[] = [];
 
     for (const file of fileArr) {
       const singleTargetOverride =
         fileArr.length === 1 && defaultNumber.trim() ? defaultNumber.trim() : undefined;
-      if (isVisioFilename(file.name)) {
-        const visioMods = await parseVisioFileToModules(file, {
+      try {
+        const result = await importCallflowFile(file, {
           overridePrimaryScriptNumber: singleTargetOverride,
+          overridePrimaryScriptName:
+            fileArr.length === 1 && defaultName.trim() ? defaultName.trim() : undefined,
         });
-        if (visioMods.length > 0) {
-          currentModules = mergeScriptModules(currentModules, visioMods);
-          parsedCount += visioMods.length;
-          visioFilesCount++;
+        if (result.modules.length > 0) {
+          currentModules = mergeScriptModules(currentModules, result.modules);
+          parsedCount += result.modules.length;
+          if (result.sourceKind === 'visio') visioFilesCount++;
+          if (result.sourceKind === 'aacc-s') dotSFilesCount++;
+        } else {
+          failedFiles.push(file.name);
         }
-      } else {
-        const content = await file.text();
-        const parsed = parseCallflowTextWithFallback(content, {
-          defaultScriptNumber: singleTargetOverride,
-          sourceFilename: file.name,
-          origin: 'legacy-text',
-        });
-        if (parsed.length > 0) {
-          currentModules = mergeScriptModules(currentModules, parsed);
-          parsedCount += parsed.length;
-        }
+      } catch {
+        failedFiles.push(file.name);
       }
     }
 
     if (parsedCount === 0) {
       showNotice(
-        'In den gewählten Dateien wurden keine grafischen Shapes oder Skript-Regeln erkannt.'
+        'In den gewählten Dateien wurden keine .s-Skriptbefehle, Shapes oder Routing-Regeln erkannt.'
       );
       return;
     }
@@ -167,10 +168,15 @@ export const MultiScriptModal: React.FC<MultiScriptModalProps> = ({
     if (nextWs.modules.length > 0) {
       setSelectedModuleNum(nextWs.modules[0].scriptNumber);
     }
+    const kindNotes: string[] = [];
+    if (dotSFilesCount > 0) kindNotes.push(`${dotSFilesCount} .s-Skript`);
+    if (visioFilesCount > 0) kindNotes.push(`${visioFilesCount} grafischer Export`);
+    const failedNote =
+      failedFiles.length > 0 ? ` · ${failedFiles.length} ohne verwertbare Regeln` : '';
     showNotice(
       `${fileArr.length} Datei(en) mit ${parsedCount} Modul(en)${
-        visioFilesCount > 0 ? ` (inkl. ${visioFilesCount} grafischer Export)` : ''
-      } zusammengeführt.`
+        kindNotes.length > 0 ? ` (${kindNotes.join(', ')})` : ''
+      } zusammengeführt${failedNote}.`
     );
   };
 
@@ -262,7 +268,7 @@ export const MultiScriptModal: React.FC<MultiScriptModalProps> = ({
                 ref={fileInputRef}
                 type="file"
                 multiple
-                accept=".vsdx,.vdx,.svg,.txt,.csv,.tsv,.md,.log,.cfg,.xml"
+                accept={CALLFLOW_FILE_ACCEPT}
                 className="hidden"
                 onChange={(e) => {
                   if (e.target.files) {
@@ -273,10 +279,10 @@ export const MultiScriptModal: React.FC<MultiScriptModalProps> = ({
               />
               <FolderUp className="w-5 h-5 text-indigo-400 mx-auto mb-1.5" />
               <div className="text-xs font-medium text-slate-200">
-                Grafische Avaya-Exporte (.vsdx / .vdx / .svg) oder Text-Skripte hier ablegen
+                Avaya `.s`-Skripte, Textdateien oder Visio-Exporte hier ablegen
               </div>
               <div className="text-[11px] text-slate-400 mt-0.5">
-                Format (Text oder grafischer Export) wird automatisch erkannt und verknüpft
+                Mehrere `.s` / `.txt` / `.vsdx` / `.svg`-Dateien werden automatisch dekodiert und verknüpft
               </div>
             </div>
 
@@ -523,11 +529,20 @@ export const MultiScriptModal: React.FC<MultiScriptModalProps> = ({
                         <tbody className="divide-y divide-slate-800/70">
                           {inspectedModule.rules.map((rule) => {
                             const contextDetails = [
-                              rule.queueTarget ? `Queue: ${rule.queueTarget}` : null,
+                              rule.sectionName ? `Abschnitt: ${rule.sectionName}` : null,
+                              rule.eventName ? `Event: ${rule.eventName}` : null,
+                              rule.queueTarget
+                                ? `Queue: ${rule.queueTarget}${
+                                    rule.skillsetPriority !== undefined
+                                      ? ` (Prio ${rule.skillsetPriority})`
+                                      : ''
+                                  }`
+                                : null,
                               rule.schedule ? `Zeitplan: ${rule.schedule}` : null,
                               rule.holiday ? `Feiertag: ${rule.holiday}` : null,
                               rule.condition ? `Bedingung: ${rule.condition}` : null,
                               rule.announcement ? `Ansage: ${rule.announcement}` : null,
+                              rule.waitSeconds !== undefined ? `Wartezeit: ${rule.waitSeconds}s` : null,
                             ]
                               .filter(Boolean)
                               .join(' · ');

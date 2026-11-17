@@ -838,17 +838,23 @@ function extractInlineKeyValuesFromText(
 function isAaccScriptText(text: string): boolean {
   const cleaned = stripScriptCommentsAndNoise(text);
   return (
-    /\bsection\s+[A-Za-z0-9_]+/i.test(cleaned) ||
+    /\bsection\s+["']?[A-Za-z0-9ÄÖÜäöüß_.-]+["']?/i.test(cleaned) ||
     /\bCDN\s*[:=]?\s*\d{3,6}\b/i.test(cleaned) ||
-    (/\bassign\b[\s\S]{1,120}\bto\s+(?:Sys_[A-Za-z0-9_]+|src_route_number)\b/i.test(cleaned)) ||
+    /\bassign\b[\s\S]{1,120}\bto\s+(?:Sys_[A-Za-z0-9_]+|src_route_number)\b/i.test(cleaned) ||
     /\b(?:Sys_Team_Skillset|Sys_Ueberlauf_Skillset|Sys_Retour_Zentrale|Sys_SondStat|Sys_SondZeit|Sys_brand|src_route_number)\b/i.test(
       cleaned
     ) ||
-    /\b(?:queue\s+to|route\s+call|give\s+(?:announcement|ran|ivr|music|cdn|script)|transfer\s+to|execute\s+script)\b/i.test(
+    /\b(?:queue\s+to|route\s+call|give\s+(?:announcement|ran|ivr|music|cdn|script|ringback|treatment|busy|overflow)|transfer\s+to|execute(?:\s+script)?)\b/i.test(
       cleaned
     ) ||
-    /\bVALUE\s+['"]?[0-9xX*]{2,15}['"]?\s*[:=]/i.test(cleaned) ||
-    /\b(?:DNIS_Range[A-Za-z0-9_]*|WHERE\s+(?:DNIS|CDN|CLID|CALLING|CALLED|src_route_number)\b)/i.test(
+    /\b(?:open\s+voice\s+session|end\s+voice\s+session|play\s+prompt|voice\s+segment|collect\s+\d+\s+digits)\b/i.test(
+      cleaned
+    ) ||
+    /\b(?:event\s+(?:handler|call\s+abandon)|out\s+of\s+service|end\s+where|end\s+section|disconnect|drop\s+call)\b/i.test(
+      cleaned
+    ) ||
+    /\bVALUE\s+['"]?[0-9A-Za-z*#_.-]{1,15}['"]?\s*[:=]/i.test(cleaned) ||
+    /\b(?:DNIS_Range[A-Za-z0-9_]*|WHERE\s+(?:DNIS|CDN|CLID|CALLING|CALLED|src_route_number|[A-Za-z0-9_]+)\b)/i.test(
       cleaned
     ) ||
     /\bif\b[\s\S]{1,160}\bthen\b/i.test(cleaned)
@@ -922,22 +928,57 @@ function parseAaccScriptBlocks(
     const trimmedChunk = chunkText.trim();
     if (!trimmedChunk) return;
 
+    const headerCommentSlice = rawText.slice(0, 4000);
+    const headerCommentScriptName = headerCommentSlice
+      .match(
+        /(?:script\s*name|scriptname|application(?:\s*name)?|modul(?:name)?|titel|title)\s*[:=]\s*["']?([^\r\n*/"']{2,80})["']?/i
+      )?.[1]
+      ?.trim();
+    const headerCommentCdn = headerCommentSlice
+      .match(/(?:^|[\s*/;(])(?:CDN|DNIS)\s*[:=]\s*["']?(\d{3,6})["']?/im)?.[1]
+      ?.trim();
+
     const chunkIsMaster = hasAaccMasterRoutingSignals(trimmedChunk);
     const topCdnHeaderMatch = chunkText.match(/^\s*CDN\s*[:=]?\s*(\d{3,6})\b/im);
     const inlineCdnMatch = chunkIsMaster ? null : chunkText.match(/\bCDN\s*[:=]?\s*(\d{3,6})\b/i);
     const cdnMatch = topCdnHeaderMatch || inlineCdnMatch;
 
+    const cleanFileBase = options?.sourceFilename
+      ? options.sourceFilename.replace(/\.[^.]+$/, '').trim()
+      : '';
+    const fileDigitRef = cleanFileBase.match(/(?:^|[\s_-])(\d{3,6})(?:$|[\s_-])/)?.[1];
+    const fileTokenRef =
+      cleanFileBase && isValidScriptRef(cleanFileBase.replace(/\s+/g, '_'))
+        ? normalizeScriptRef(cleanFileBase.replace(/\s+/g, '_'))
+        : undefined;
+
     const fallbackNum =
       options?.defaultScriptNumber?.trim()
         ? normalizeScriptRef(options.defaultScriptNumber)
-        : options?.sourceFilename?.match(/\b(\d{3,6})\b/)?.[1] ||
-          (chunks.length === 1 || chunkIsMaster ? 'Main' : `900${chunkIdx}`);
+        : headerCommentCdn ||
+          fileDigitRef ||
+          (chunkIsMaster
+            ? 'Main'
+            : fileTokenRef ||
+              (headerCommentScriptName && isValidScriptRef(headerCommentScriptName)
+                ? normalizeScriptRef(headerCommentScriptName)
+                : chunks.length === 1
+                ? 'Main'
+                : `900${chunkIdx}`));
+    const hasExplicitMasterHeader =
+      chunkIsMaster &&
+      (/\bVALUE\s+['"]?[0-9xX*]{2,15}['"]?\s*[:=]/i.test(trimmedChunk) ||
+        /\b(?:DNIS_Range[A-Za-z0-9_]*|src_route_number|Sys_brand)\b/i.test(trimmedChunk) ||
+        /\b02131[\s\-/]?(?:290|210|6099)/i.test(trimmedChunk));
     const scriptNumber =
-      chunkIsMaster && (!options?.defaultScriptNumber || /^(?:main|master(?:script)?)$/i.test(options.defaultScriptNumber))
+      (hasExplicitMasterHeader || chunkIsMaster) &&
+      (!options?.defaultScriptNumber ||
+        /^(?:main|master(?:script)?)$/i.test(options.defaultScriptNumber)) &&
+      (!cdnMatch || hasExplicitMasterHeader)
         ? 'Main'
         : cdnMatch?.[1] || fallbackNum;
 
-    // Extract descriptive name: non-key-value line right before `CDN`, or `assign ... to Sys_Team_Skillset`
+    // Extract descriptive name: non-key-value line right before `CDN`, header comments, or `assign ... to Sys_Team_Skillset`
     let detectedName = '';
     const nonEmptyBeforeSection = sliceLines
       .slice(0, 12)
@@ -946,7 +987,7 @@ function parseAaccScriptBlocks(
     for (const line of nonEmptyBeforeSection) {
       if (
         !isMetadataOrChangelogLine(line) &&
-        !/^(?:CDN|Bereich|Abteilung|Team|section|assign|if|else|end(?:\s*(?:if|section))?|give|transfer|route|queue|collect|execute|call|goto|subscript|open|where|select|case|value|default|otherwise|dnis|fax(?:routing)?)\b/i.test(
+        !/^(?:CDN|Bereich|Abteilung|Team|section|event|assign|if|else|end(?:\s*(?:if|section|where|event|voice\s+session))?|give|transfer|route|queue|collect|execute|call|goto|subscript|open|play|wait|disconnect|drop|where|select|case|value|default|otherwise|dnis|fax(?:routing)?)\b/i.test(
           line
         ) &&
         !/^(?:prio|zeitplan|feiertag|bedingung|ansage|taste)\b/i.test(line) &&
@@ -971,12 +1012,15 @@ function parseAaccScriptBlocks(
     }
 
     const teamSkillset = vars.get('Sys_Team_Skillset');
+    const cleanFilenameLabel = cleanFileBase.replace(/[_-]+/g, ' ').trim();
     const scriptName =
       options?.defaultScriptName?.trim() ||
       (chunkIsMaster && scriptNumber === 'Main' ? 'Main (Masterscript)' : '') ||
+      headerCommentScriptName ||
       detectedName ||
       teamSkillset ||
       (teamMatch ? teamMatch[1].trim() : '') ||
+      cleanFilenameLabel ||
       `Skript ${scriptNumber}`;
 
     const rules: ScriptRule[] = [];
@@ -1098,8 +1142,17 @@ function parseAaccScriptBlocks(
       }
     }
 
-    // Procedural body, DNIS_Range IF-ELSE blocks, WHERE/VALUE cases, and Fax-CDN routing
+    // Procedural body, OCL SECTION / EVENT / VOICE SESSION / IF-ELSE / WHERE / VALUE / QUEUE / DISCONNECT blocks
+    const localSectionNames = new Set<string>();
+    for (const sl of sliceLines) {
+      const secDecl = sl.trim().match(/^section\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i);
+      if (secDecl && secDecl[1]) {
+        localSectionNames.add(canonicalScriptMatchKey(secDecl[1]));
+      }
+    }
+
     interface ConditionFrame {
+      kind: 'if' | 'where' | 'event';
       condText: string;
       orga: AaccOrgaContext;
       isFaxCond: boolean;
@@ -1108,12 +1161,22 @@ function parseAaccScriptBlocks(
 
     const conditionStack: ConditionFrame[] = [];
     const orgaRegistry = new Map<string, AaccOrgaContext>();
-    let lastCollectRule: ScriptRule | null = null;
+    const ruleTracking: {
+      lastCollect: ScriptRule | null;
+      lastCreated: ScriptRule | null;
+    } = {
+      lastCollect: null,
+      lastCreated: null,
+    };
+    let currentSection: string | undefined;
+    let currentEvent: string | undefined;
+    let inVoiceSession = false;
     let pendingValueTrigger: {
       valueNumbers: string[];
       rawTrigger: string;
       orga: AaccOrgaContext;
       isFax: boolean;
+      caseLabel?: string;
     } | null = null;
 
     const getStackOrga = (): AaccOrgaContext => {
@@ -1129,6 +1192,23 @@ function parseAaccScriptBlocks(
       if (!key) return;
       const prev = orgaRegistry.get(key);
       orgaRegistry.set(key, mergeOrgaContext(prev, ctx));
+    };
+
+    const formatReadableOclCondition = (rawCond: string): string => {
+      const trimmed = rawCond.trim();
+      const notOos = trimmed.match(/^not\s+out\s+of\s+service\s+["']?(.+?)["']?$/i);
+      if (notOos) return `Skillset aktiv (${notOos[1].trim()})`;
+      const oos = trimmed.match(/^out\s+of\s+service\s+["']?(.+?)["']?$/i);
+      if (oos) return `Skillset Out of Service (${oos[1].trim()})`;
+      return trimmed.replace(/\s+/g, ' ');
+    };
+
+    const getActiveConditionLabel = (): string | undefined => {
+      const nonEventFrames = conditionStack.filter((f) => f.kind !== 'event');
+      if (nonEventFrames.length > 0) {
+        return nonEventFrames.map((f) => f.condText).slice(-2).join(' · ');
+      }
+      return undefined;
     };
 
     const resolveOrgaForRule = (
@@ -1226,12 +1306,14 @@ function parseAaccScriptBlocks(
       actionSegment: string,
       rawLine: string,
       explicitValueNums: string[] = [],
-      explicitIsFax = false
+      explicitIsFax = false,
+      explicitCaseLabel?: string
     ): boolean => {
       const valueNumbers =
         explicitValueNums.length > 0
           ? explicitValueNums
           : pendingValueTrigger?.valueNumbers || [];
+      const caseLabel = explicitCaseLabel || pendingValueTrigger?.caseLabel;
       const stackFax = conditionStack.some((f) => f.isFaxCond);
       const lineHasFaxKeyword = /\bfax(?:routing)?\b/i.test(actionSegment);
       const has4DigitValue = valueNumbers.some((v) => /^\d{4}$/.test(v));
@@ -1240,18 +1322,25 @@ function parseAaccScriptBlocks(
       );
 
       const execCmd = actionSegment.match(
-        /\b(?:execute(?:\s+script)?|call(?:\s+script)?|subscript|give\s+script)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+        /\b(execute(?:\s+script)?|call(?:\s+script)?|subscript|give\s+script|goto)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
       );
       const queueCmd = actionSegment.match(
-        /\bqueue\s+to\s+(?:skillset|cdn)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+        /\bqueue\s+to\s+(?:skillset|cdn)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))(?:\s+with\s+priority\s+(\d{1,3}))?/i
       );
       const routeCmd = actionSegment.match(
-        /\b(?:route\s+call(?:\s+to)?|transfer(?:\s+to)?|give\s+cdn|cdn|goto)\s*[:=]?\s*["']?(\d{3,6})["']?\b/i
+        /\b(?:route\s+call(?:\s+to)?|transfer(?:\s+to)?|give\s+cdn|cdn)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|(\d{3,6}|[A-Za-z0-9ÄÖÜäöüß_.-]+))/i
       );
       const annCmd = actionSegment.match(
-        /\b(?:give\s+(?:announcement|ran|ivr|music)|open\s+voice\s+segment)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+        /\b(?:give\s+(announcement|ran|ivr|music|treatment|overflow)|open\s+voice\s+segment|play\s+prompt(?:\s+voice\s+segment)?)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
       );
-      const collectCmd = actionSegment.match(/\bcollect\s+(\d+)\s+digits?\b/i);
+      const ringbackOrBusyCmd = actionSegment.match(/\bgive\s+(ringback|busy)\b/i);
+      const collectCmd = actionSegment.match(
+        /\bcollect\s+(\d+)\s+digits?(?:\s+into\s+([A-Za-z0-9_]+))?/i
+      );
+      const waitCmd = actionSegment.match(
+        /\bwait\s+(\d+)\s*(?:(min(?:utes?|uten)?)|(sec(?:onds?)?|sek(?:unden)?))?/i
+      );
+      const disconnectCmd = /\b(?:disconnect|drop\s+call)\b/i.test(actionSegment);
 
       const isFaxRoute =
         explicitIsFax ||
@@ -1265,35 +1354,121 @@ function parseAaccScriptBlocks(
         valueNumbers.push(faxCdnMatch[1]);
       }
 
+      const rawExecToken = execCmd ? (execCmd[2] || execCmd[3] || execCmd[4] || '').trim() : '';
+      const execKeyword = execCmd ? execCmd[1] : '';
+      const isLocalSectionCall =
+        Boolean(rawExecToken) &&
+        !/\bscript\b/i.test(execKeyword) &&
+        localSectionNames.has(canonicalScriptMatchKey(rawExecToken));
+
       const execTarget =
-        execCmd && isValidScriptRef(execCmd[1]) ? normalizeScriptRef(execCmd[1]) : undefined;
+        rawExecToken && !isLocalSectionCall && isValidScriptRef(rawExecToken)
+          ? normalizeScriptRef(rawExecToken)
+          : undefined;
+
+      const rawRouteToken = routeCmd
+        ? (routeCmd[1] || routeCmd[2] || routeCmd[3] || '').trim()
+        : '';
       const routeTarget =
-        routeCmd && routeCmd[1] && !isFaxRoute ? routeCmd[1] : undefined;
+        rawRouteToken && !isFaxRoute && isValidScriptRef(rawRouteToken)
+          ? normalizeScriptRef(rawRouteToken)
+          : undefined;
       const resolvedTarget = execTarget || routeTarget;
 
-      if (execCmd || queueCmd || routeCmd || annCmd || collectCmd || isFaxRoute) {
+      const queueToken = queueCmd ? (queueCmd[1] || queueCmd[2] || queueCmd[3] || '').trim() : '';
+      const queuePrio = queueCmd && queueCmd[4] ? parseInt(queueCmd[4], 10) : undefined;
+
+      const annKind = annCmd?.[1]?.toLowerCase();
+      const annVal = annCmd ? (annCmd[2] || annCmd[3] || annCmd[4] || '').trim() : '';
+      const formattedAnnouncement = annVal
+        ? annKind === 'music'
+          ? `Musik: ${annVal}`
+          : annKind === 'treatment'
+          ? `Treatment: ${annVal}`
+          : annKind === 'overflow'
+          ? `Overflow: ${annVal}`
+          : annKind === 'ivr'
+          ? `IVR: ${annVal}`
+          : annKind === 'ran'
+          ? `RAN ${annVal}`
+          : annVal
+        : ringbackOrBusyCmd
+        ? ringbackOrBusyCmd[1].toLowerCase() === 'ringback'
+          ? 'Freizeichen (Ringback)'
+          : 'Besetztton (Busy)'
+        : undefined;
+
+      const waitSecondsVal = waitCmd
+        ? parseInt(waitCmd[1], 10) * (waitCmd[2] ? 60 : 1)
+        : undefined;
+
+      if (
+        waitSecondsVal !== undefined &&
+        !execCmd &&
+        !queueCmd &&
+        !routeCmd &&
+        !annCmd &&
+        !ringbackOrBusyCmd &&
+        !collectCmd &&
+        !disconnectCmd &&
+        !isFaxRoute &&
+        !isLocalSectionCall
+      ) {
+        if (ruleTracking.lastCreated && ruleTracking.lastCreated.waitSeconds === undefined) {
+          ruleTracking.lastCreated.waitSeconds = waitSecondsVal;
+          pendingValueTrigger = null;
+          return true;
+        }
+      }
+
+      if (
+        execCmd ||
+        isLocalSectionCall ||
+        queueCmd ||
+        routeCmd ||
+        annCmd ||
+        ringbackOrBusyCmd ||
+        collectCmd ||
+        waitCmd ||
+        disconnectCmd ||
+        isFaxRoute
+      ) {
         const orga = resolveOrgaForRule(
           pendingValueTrigger?.orga || {},
           valueNumbers,
           rawLine,
           resolvedTarget
         );
-        const activeCondition =
-          conditionStack.length > 0
-            ? conditionStack[conditionStack.length - 1].condText
-            : undefined;
+        const stackCond = getActiveConditionLabel();
+        const combinedCondition = [stackCond, caseLabel].filter(Boolean).join(' · ') || undefined;
         const valDisplay = valueNumbers.length > 0 ? valueNumbers.join(', ') : '';
 
-        const stepLabel = isFaxRoute && !execTarget
+        const stepLabel = disconnectCmd
+          ? 'Anruf beenden (Disconnect)'
+          : isLocalSectionCall
+          ? `Abschnitt → ${rawExecToken}`
+          : isFaxRoute && !execTarget
           ? `Fax-Routing (4-stellig)${valDisplay ? `: ${valDisplay}` : ''}`
           : execTarget
           ? `${valDisplay ? `VALUE ${valDisplay} → ` : 'Subskript: '}${execTarget}`
           : queueCmd
-          ? 'Queue-Anweisung'
+          ? `Queue: ${queueToken}`
           : routeCmd
-          ? `Weiterleitung Ziel ${routeCmd[1]}`
+          ? `Weiterleitung Ziel ${routeTarget || rawRouteToken}`
           : collectCmd
-          ? `DTMF-Eingabe (${collectCmd[1]} Ziffern)`
+          ? `${inVoiceSession ? 'Voice-Menü: ' : ''}DTMF-Eingabe (${collectCmd[1]} Ziffern)`
+          : waitSecondsVal !== undefined && !formattedAnnouncement
+          ? `Wartezeit (${waitSecondsVal}s)`
+          : annKind === 'music'
+          ? 'Wartemusik'
+          : annKind === 'treatment'
+          ? 'Treatment'
+          : ringbackOrBusyCmd
+          ? ringbackOrBusyCmd[1].toLowerCase() === 'ringback'
+            ? 'Freizeichen (Ringback)'
+            : 'Besetztton (Busy)'
+          : inVoiceSession
+          ? 'Voice-Prompt'
           : 'Ansage / RAN';
 
         const createdRule: ScriptRule = {
@@ -1302,10 +1477,14 @@ function parseAaccScriptBlocks(
           stepName: stepLabel,
           sourceNumber: scriptNumber,
           targetNumber: resolvedTarget,
-          queueTarget:
-            queueCmd && !isNumericScriptRef(queueCmd[1]) ? queueCmd[1] : undefined,
-          announcement: annCmd ? annCmd[1] : undefined,
-          condition: activeCondition,
+          queueTarget: queueToken || undefined,
+          skillsetPriority: queuePrio,
+          waitSeconds: waitSecondsVal,
+          isDisconnect: disconnectCmd || undefined,
+          sectionName: currentSection,
+          eventName: currentEvent,
+          announcement: formattedAnnouncement,
+          condition: combinedCondition,
           choices: [],
           rawLine,
           organizationName: orga.organizationName,
@@ -1316,7 +1495,12 @@ function parseAaccScriptBlocks(
           isFaxRoute: isFaxRoute || undefined,
         };
         rules.push(createdRule);
-        lastCollectRule = collectCmd ? createdRule : null;
+        ruleTracking.lastCreated = createdRule;
+        if (collectCmd) {
+          ruleTracking.lastCollect = createdRule;
+        } else if (!caseLabel && valueNumbers.length === 0) {
+          ruleTracking.lastCollect = null;
+        }
         pendingValueTrigger = null;
         if (conditionStack.length > 0) {
           conditionStack[conditionStack.length - 1].hadInlineRules = true;
@@ -1329,17 +1513,86 @@ function parseAaccScriptBlocks(
 
     for (const line of sliceLines) {
       const t = line.trim();
-      if (!t || /^(?:end\s+)?section\b/i.test(t)) {
-        if (/^end\s+section\b/i.test(t)) {
-          lastCollectRule = null;
-          pendingValueTrigger = null;
+      if (!t) continue;
+
+      // Track SECTION / END SECTION
+      const sectionStartMatch = t.match(/^section\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i);
+      if (sectionStartMatch) {
+        currentSection = sectionStartMatch[1].trim();
+        ruleTracking.lastCollect = null;
+        ruleTracking.lastCreated = null;
+        pendingValueTrigger = null;
+        continue;
+      }
+      if (/^end\s+section\b/i.test(t)) {
+        currentSection = undefined;
+        ruleTracking.lastCollect = null;
+        ruleTracking.lastCreated = null;
+        pendingValueTrigger = null;
+        continue;
+      }
+
+      // Track EVENT HANDLER / EVENT CALL ABANDON / END EVENT
+      const eventStartMatch = t.match(
+        /^event\s+(?:handler\s*)?([A-Za-z0-9ÄÖÜäöüß_ .-]+?)\s*:?$/i
+      );
+      if (eventStartMatch && !/^event\b.*\bthen\b/i.test(t)) {
+        const evtLabel = eventStartMatch[1].trim() || 'Handler';
+        currentEvent = evtLabel;
+        conditionStack.push({
+          kind: 'event',
+          condText: `Event: ${evtLabel}`,
+          orga: {},
+          isFaxCond: false,
+          hadInlineRules: false,
+        });
+        continue;
+      }
+      if (/^end\s+event\b/i.test(t)) {
+        currentEvent = undefined;
+        for (let idx = conditionStack.length - 1; idx >= 0; idx--) {
+          if (conditionStack[idx].kind === 'event') {
+            conditionStack.splice(idx, 1);
+            break;
+          }
         }
+        ruleTracking.lastCollect = null;
+        continue;
+      }
+
+      // Track OPEN VOICE SESSION / END VOICE SESSION
+      if (/^open\s+voice\s+session\b/i.test(t)) {
+        inVoiceSession = true;
+        continue;
+      }
+      if (/^end\s+voice\s+session\b/i.test(t)) {
+        inVoiceSession = false;
+        ruleTracking.lastCollect = null;
+        continue;
+      }
+
+      // Handle END WHERE / END SELECT
+      if (/^end\s+(?:where|select|case)\b/i.test(t)) {
+        for (let idx = conditionStack.length - 1; idx >= 0; idx--) {
+          if (conditionStack[idx].kind === 'where') {
+            conditionStack.splice(idx, 1);
+            break;
+          }
+        }
+        pendingValueTrigger = null;
+        ruleTracking.lastCollect = null;
         continue;
       }
 
       // Handle END IF / ENDIF (or trailing end if after inline assignments)
       if (/^(?:end\s*if|endif)\b/i.test(t)) {
-        const closed = conditionStack.pop();
+        let closed: ConditionFrame | undefined;
+        for (let idx = conditionStack.length - 1; idx >= 0; idx--) {
+          if (conditionStack[idx].kind === 'if') {
+            closed = conditionStack.splice(idx, 1)[0];
+            break;
+          }
+        }
         if (
           closed &&
           !closed.hadInlineRules &&
@@ -1347,37 +1600,40 @@ function parseAaccScriptBlocks(
         ) {
           registerOrga(closed.orga);
         }
-        lastCollectRule = null;
+        ruleTracking.lastCollect = null;
         continue;
       }
 
       // Handle WHERE <field> EQUALS / SELECT <field> (AACC CASE/WHERE headers)
       const whereMatch = t.match(/^(?:where|select|case)\s+(.+?)(?:\s+(?:equals|is|in)\b(.*))?$/i);
       if (whereMatch && !/\bexecute\b/i.test(t)) {
-        const condBody = `${whereMatch[1]} ${whereMatch[2] || ''}`.trim();
+        const condBody = `${whereMatch[1]} ${whereMatch[2] || ''}`.replace(/\s+/g, ' ').trim();
         const det = detectOrgaFromText(condBody);
-        if (det.organizationName || /\bfax/i.test(condBody)) {
-          // Reset prior sibling WHERE frame if any
-          if (conditionStack.length > 0 && /^where|select|case:/i.test(conditionStack[conditionStack.length - 1].condText)) {
-            conditionStack.pop();
-          }
-          conditionStack.push({
-            condText: `where:${condBody}`,
-            orga: det,
-            isFaxCond: /\bfax/i.test(condBody),
-            hadInlineRules: false,
-          });
+        if (
+          conditionStack.length > 0 &&
+          conditionStack[conditionStack.length - 1].kind === 'where'
+        ) {
+          conditionStack.pop();
         }
+        conditionStack.push({
+          kind: 'where',
+          condText: condBody,
+          orga: det,
+          isFaxCond: /\bfax/i.test(condBody),
+          hadInlineRules: false,
+        });
         continue;
       }
 
-      // Handle ELSE / ELSE IF
+      // Handle ELSE / ELSE IF (with optional inline action on same line)
       if (/^else\b(?:\s+if\b(.*?)\bthen\b)?/i.test(t)) {
-        lastCollectRule = null;
+        ruleTracking.lastCollect = null;
         const elseIfMatch = t.match(/^else\s+if\s+(.+?)\s+then(?:\s+(.*))?$/i);
-        const prevFrame = conditionStack.pop();
+        const topFrame = conditionStack[conditionStack.length - 1];
+        const prevFrame = topFrame && topFrame.kind === 'if' ? conditionStack.pop() : undefined;
+
         if (elseIfMatch) {
-          const condExpr = elseIfMatch[1].trim();
+          const condExpr = formatReadableOclCondition(elseIfMatch[1]);
           const inlineBody = elseIfMatch[2]?.trim() || '';
           const hasEndIf = /\bend\s*if\b|\bendif\b/i.test(inlineBody);
           const cleanInline = inlineBody.replace(/\b(?:end\s*if|endif)\b/gi, '').trim();
@@ -1386,6 +1642,7 @@ function parseAaccScriptBlocks(
             orga = applyAssignmentsToOrga(cleanInline, orga);
           }
           const frame: ConditionFrame = {
+            kind: 'if',
             condText: condExpr,
             orga,
             isFaxCond: /\bfax/i.test(condExpr),
@@ -1405,21 +1662,36 @@ function parseAaccScriptBlocks(
           }
           continue;
         } else {
+          const inlineElseBody = t.replace(/^else\b/i, '').trim();
+          const hasEndIf = /\bend\s*if\b|\bendif\b/i.test(inlineElseBody);
+          const cleanInline = inlineElseBody.replace(/\b(?:end\s*if|endif)\b/gi, '').trim();
           conditionStack.push({
+            kind: 'if',
             condText: prevFrame ? `Sonst (nicht: ${prevFrame.condText})` : 'Sonst (ELSE)',
             orga: {},
             isFaxCond: false,
             hadInlineRules: false,
           });
+          if (cleanInline) {
+            const actionPart = cleanInline
+              .replace(/\bassign\s+.+?\s+to\s+[A-Za-z0-9_]+/gi, '')
+              .trim();
+            if (actionPart) {
+              processActionSegment(actionPart, t);
+            }
+          }
+          if (hasEndIf) {
+            conditionStack.pop();
+          }
           continue;
         }
       }
 
-      // Handle IF ... THEN (including inline `assign x to src_route_number assign NAME to Sys_brand end if`)
+      // Handle IF ... THEN (including IF NOT OUT OF SERVICE and inline assign/actions)
       const ifThenMatch = t.match(/^if\s+(.+?)\s+then(?:\s+(.*))?$/i);
       if (ifThenMatch) {
-        lastCollectRule = null;
-        const condExpr = ifThenMatch[1].trim();
+        ruleTracking.lastCollect = null;
+        const condExpr = formatReadableOclCondition(ifThenMatch[1]);
         const inlineBody = ifThenMatch[2]?.trim() || '';
         const hasEndIf = /\bend\s*if\b|\bendif\b/i.test(inlineBody);
         const cleanInline = inlineBody.replace(/\b(?:end\s*if|endif)\b/gi, '').trim();
@@ -1430,6 +1702,7 @@ function parseAaccScriptBlocks(
         }
 
         const frame: ConditionFrame = {
+          kind: 'if',
           condText: condExpr,
           orga,
           isFaxCond: /\bfax/i.test(condExpr),
@@ -1468,16 +1741,39 @@ function parseAaccScriptBlocks(
         continue;
       }
 
-      // Handle `VALUE <3-or-4-digit Rufnummer> : execute Script <NAME>` (single-line or multi-line)
-      const valueMatch = t.match(/^VALUE\s+(.+?)\s*:\s*(.*)$/i);
+      // Handle `VALUE <val> : <action>` & `DEFAULT:` / `OTHERWISE:` (numeric DNIS, DTMF choices, or WHERE cases)
+      const valueMatch = t.match(/^(?:VALUE\s+(.+?)|(DEFAULT|OTHERWISE))\s*:\s*(.*)$/i);
       if (valueMatch) {
-        const rawVals = valueMatch[1].trim();
-        const afterColon = (valueMatch[2] || '').trim();
-        const valueNums = parseValueTriggerNumbers(rawVals);
+        const rawVals = (valueMatch[1] || valueMatch[2] || '').trim();
+        const afterColon = (valueMatch[3] || '').trim();
+        const valueNums = valueMatch[1] ? parseValueTriggerNumbers(rawVals) : [];
+        const singleDtmfKey =
+          valueMatch[1] && /^['"]?([0-9*#])['"]?$/.test(rawVals)
+            ? rawVals.replace(/['"]/g, '')
+            : undefined;
+
+        // If inside a DTMF collect menu, attach direct target as a choice branch on ruleTracking.lastCollect
+        if (singleDtmfKey && ruleTracking.lastCollect && afterColon) {
+          const dtmfTarget = afterColon.match(
+            /\b(?:execute(?:\s+script)?|call(?:\s+script)?|route\s+call(?:\s+to)?|transfer(?:\s+to)?|goto)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+          )?.[1];
+          if (dtmfTarget && isValidScriptRef(dtmfTarget) && !localSectionNames.has(canonicalScriptMatchKey(dtmfTarget))) {
+            const normTarget = normalizeScriptRef(dtmfTarget);
+            if (!ruleTracking.lastCollect.choices.some((c) => c.choice === singleDtmfKey && c.targetNumber === normTarget)) {
+              ruleTracking.lastCollect.choices.push({
+                choice: singleDtmfKey,
+                targetNumber: normTarget,
+              });
+            }
+          }
+        }
+
         const orgaFromVal = resolveOrgaForRule({}, valueNums, t, afterColon);
         const isFaxVal =
           /\bfax(?:routing)?\b/i.test(t) ||
           valueNums.some((v) => /^\d{4}$/.test(v));
+        const caseLabel =
+          valueNums.length === 0 ? `Wert: ${rawVals.replace(/^['"]|['"]$/g, '')}` : undefined;
 
         if (!afterColon) {
           pendingValueTrigger = {
@@ -1485,18 +1781,18 @@ function parseAaccScriptBlocks(
             rawTrigger: t,
             orga: orgaFromVal,
             isFax: isFaxVal,
+            caseLabel,
           };
           continue;
         }
 
-        if (processActionSegment(afterColon, t, valueNums, isFaxVal)) {
+        if (processActionSegment(afterColon, t, valueNums, isFaxVal, caseLabel)) {
           continue;
         }
       }
 
       const actionSegment = t;
-      const activeCondition =
-        conditionStack.length > 0 ? conditionStack[conditionStack.length - 1].condText : undefined;
+      const activeCondition = getActiveConditionLabel();
 
       // Choice mappings immediately following `COLLECT N DIGITS` (e.g. `1 -> 550`, `Taste 2 -> 123456`)
       if (
@@ -1504,26 +1800,31 @@ function parseAaccScriptBlocks(
       ) {
         const parsedChoices = parseChoicesSegment(actionSegment, scriptNumber);
         if (parsedChoices.length > 0) {
-          if (lastCollectRule) {
+          if (ruleTracking.lastCollect) {
+            const targetCollect = ruleTracking.lastCollect;
             parsedChoices.forEach((c) => {
               if (
-                !lastCollectRule!.choices.some(
+                !targetCollect.choices.some(
                   (ex) => ex.choice === c.choice && ex.targetNumber === c.targetNumber
                 )
               ) {
-                lastCollectRule!.choices.push(c);
+                targetCollect.choices.push(c);
               }
             });
           } else {
-            rules.push({
+            const dtmfRule: ScriptRule = {
               id: `${scriptNumber}-${ruleCounter++}`,
               prio: ruleCounter + 20,
               stepName: 'DTMF-Auswahl',
               sourceNumber: scriptNumber,
+              sectionName: currentSection,
+              eventName: currentEvent,
               condition: activeCondition,
               choices: parsedChoices,
               rawLine: t,
-            });
+            };
+            rules.push(dtmfRule);
+            ruleTracking.lastCreated = dtmfRule;
           }
           continue;
         }
@@ -1533,7 +1834,7 @@ function parseAaccScriptBlocks(
         continue;
       }
 
-      lastCollectRule = null;
+      ruleTracking.lastCollect = null;
 
       // Support hybrid inline rules / schedules / holidays inside AACC blocks (e.g. `Prio 2: VIP -> 999`, `Zeitplan: Mo-Fr 08:00-18:00`)
       const inline = extractInlineKeyValuesFromText(actionSegment, scriptNumber);
@@ -1546,7 +1847,7 @@ function parseAaccScriptBlocks(
           inline.holiday ||
           inline.condition)
       ) {
-        rules.push({
+        const inlineRule: ScriptRule = {
           id: `${scriptNumber}-${ruleCounter++}`,
           prio: inline.prio !== undefined ? inline.prio : ruleCounter + 20,
           stepName:
@@ -1566,8 +1867,12 @@ function parseAaccScriptBlocks(
           holiday: inline.holiday,
           announcement: inline.announcement,
           queueTarget: inline.queueTarget,
+          sectionName: currentSection,
+          eventName: currentEvent,
           rawLine: t,
-        });
+        };
+        rules.push(inlineRule);
+        ruleTracking.lastCreated = inlineRule;
       }
     }
 
@@ -3534,6 +3839,12 @@ export function buildScriptDetailMermaid(
     const metaParts: string[] = [
       `${isStepOpen ? '● OFFEN · ' : ''}Prio ${rule.prio}: ${sanitizeMermaidText(rule.stepName)}`,
     ];
+    if (rule.sectionName) {
+      metaParts.push(`Abschnitt: ${sanitizeMermaidText(rule.sectionName)}`);
+    }
+    if (rule.eventName) {
+      metaParts.push(`Event: ${sanitizeMermaidText(rule.eventName)}`);
+    }
     if (rule.organizationName) {
       const orgTag = rule.orgaCode
         ? `${rule.organizationName} (02131 ${rule.orgaCode})`
@@ -3556,12 +3867,20 @@ export function buildScriptDetailMermaid(
     if (rule.condition) metaParts.push(`Bedingung: ${sanitizeMermaidText(rule.condition)}`);
     if (rule.holiday) metaParts.push(`Feiertag: ${sanitizeMermaidText(rule.holiday)}`);
     if (rule.announcement) metaParts.push(`Ansage: ${sanitizeMermaidText(rule.announcement)}`);
+    if (rule.skillsetPriority !== undefined) {
+      metaParts.push(`Queue-Prio: ${rule.skillsetPriority}`);
+    }
+    if (rule.waitSeconds !== undefined) {
+      metaParts.push(`Wartezeit: ${rule.waitSeconds}s`);
+    }
 
     const stepLabel = metaParts.join('<br/>');
     const stepSuffix = isStepOpen ? ':::openIssue' : '';
 
     if (hasBranching) {
       lines.push(`        ${stepId}{{"${stepLabel}"}}${stepSuffix}`);
+    } else if (rule.isDisconnect) {
+      lines.push(`        ${stepId}(["■ ${stepLabel}"])${stepSuffix}`);
     } else {
       lines.push(`        ${stepId}["${stepLabel}"]${stepSuffix}`);
     }
@@ -3573,12 +3892,16 @@ export function buildScriptDetailMermaid(
     }
     prevStepId = stepId;
 
-    if (rule.queueTarget && !isNumericScriptRef(rule.queueTarget)) {
+    if (rule.queueTarget) {
       const qKey = sanitizeNodeKey(rule.queueTarget);
       const qId = `QUEUE_${qKey}`;
+      const qLabel =
+        rule.skillsetPriority !== undefined
+          ? `Queue: ${sanitizeMermaidText(rule.queueTarget)} (Prio ${rule.skillsetPriority})`
+          : `Queue: ${sanitizeMermaidText(rule.queueTarget)}`;
       queueNodes.set(qId, {
         id: qId,
-        label: `Queue: ${sanitizeMermaidText(rule.queueTarget)}`,
+        label: qLabel,
       });
       lines.push(`        ${stepId} -->|Queue| ${qId}`);
     }

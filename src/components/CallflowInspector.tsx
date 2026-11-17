@@ -52,6 +52,7 @@ import {
   extractWorkspaceResourceRegistry,
   toMermaidNodeSuffix,
 } from '../utils/scriptCallflowParser';
+import { CALLFLOW_CHECKLIST_ACCEPT } from '../utils/callflowFileImporter';
 
 interface CallflowInspectorProps {
   graph: CallflowGraph;
@@ -973,7 +974,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
             </div>
 
             <p className="text-[11px] text-slate-300 leading-relaxed">
-              Fügen Sie hier Ihr <strong className="text-slate-100">Masterscript (Main)</strong> ein (AACC-Skript, Excel-/Tabellenzeilen oder Freitext) oder wählen Sie einen Visio-Export. Alle darin aufgerufenen Folgeskripte und 3–6-stelligen Rufnummern werden automatisch erkannt.
+              Fügen Sie hier Ihr <strong className="text-slate-100">Masterscript (Main)</strong> ein (Avaya `.s`-Export, AACC-Skript oder Tabellenzeilen) oder wählen Sie eine `.s`-/Visio-Datei. Alle aufgerufenen Folgeskripte und 3–6-stelligen Rufnummern werden automatisch erkannt.
             </p>
 
             {onSubmitChecklistDetailScript && (
@@ -1025,7 +1026,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                       <input
                         ref={guidedMainVisioInputRef}
                         type="file"
-                        accept=".vsdx,.vdx,.svg,.xml"
+                        accept={CALLFLOW_CHECKLIST_ACCEPT}
                         className="hidden"
                         onChange={async (e) => {
                           const file = e.target.files?.[0];
@@ -1040,7 +1041,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                             );
                             if (!updatedWs) {
                               setGuidedMainFeedback(
-                                'Keine Formen in dieser Visio-Datei erkannt.'
+                                'In dieser Datei wurden keine Skript-Befehle oder Visio-Formen erkannt.'
                               );
                             } else {
                               setGuidedStep(2);
@@ -1054,10 +1055,11 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                         type="button"
                         disabled={isImportingGuidedMainVisio}
                         onClick={() => guidedMainVisioInputRef.current?.click()}
+                        title="Avaya .s-Datei oder Visio-Export (.vsdx, .vdx, .svg) laden"
                         className="py-2 px-3 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
                       >
                         <Upload className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>{isImportingGuidedMainVisio ? 'Lade...' : 'Visio (.vsdx/.svg)'}</span>
+                        <span>{isImportingGuidedMainVisio ? 'Lade...' : 'Datei (.s / Visio)'}</span>
                       </button>
                     </>
                   )}
@@ -2114,7 +2116,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                                 <input
                                   ref={checklistVisioInputRef}
                                   type="file"
-                                  accept=".vsdx,.vdx,.svg,.xml"
+                                  accept={CALLFLOW_CHECKLIST_ACCEPT}
                                   className="hidden"
                                   onChange={async (e) => {
                                     const file = e.target.files?.[0];
@@ -2129,7 +2131,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                                       );
                                       if (!updatedWs) {
                                         setChecklistFeedback(
-                                          'Keine Formen in dieser Visio-Datei erkannt.'
+                                          'In dieser Datei wurden keine Skript-Befehle oder Visio-Formen erkannt.'
                                         );
                                       } else {
                                         advanceToNextMissingChecklistItem(
@@ -2146,12 +2148,12 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                                   type="button"
                                   disabled={isImportingChecklistVisio}
                                   onClick={() => checklistVisioInputRef.current?.click()}
-                                  title="Visio-Export (.vsdx, .vdx, .svg) direkt diesem Skript zuordnen"
+                                  title="Avaya .s-Datei, Textskript oder Visio-Export (.vsdx, .vdx, .svg) direkt diesem Skript zuordnen"
                                   className="py-1.5 px-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
                                 >
                                   <Upload className="w-3 h-3 text-emerald-400" />
                                   <span>
-                                    {isImportingChecklistVisio ? 'Lade...' : 'Visio-Datei'}
+                                    {isImportingChecklistVisio ? 'Lade...' : 'Datei (.s / Visio)'}
                                   </span>
                                 </button>
                               </>
