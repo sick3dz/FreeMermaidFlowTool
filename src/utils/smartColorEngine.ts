@@ -3,7 +3,7 @@ import {
   LogicAnalysisSummary,
   SmartColorMode,
 } from '../types/mermaidStudio';
-import { isColorDark } from './mermaidEngine';
+import { isColorDark, sanitizeSvgForXmlParser } from './mermaidEngine';
 
 export type SemanticRoleId =
   | 'start-actor'
@@ -361,8 +361,9 @@ export function applySmartLogicColoring(
   preferredLineColor?: string
 ): { svg: string; summary: LogicAnalysisSummary } {
   const parser = new DOMParser();
-  const doc = parser.parseFromString(rawSvg, 'image/svg+xml');
-  const svgEl = doc.querySelector('svg');
+  const safeSvg = sanitizeSvgForXmlParser(rawSvg);
+  const doc = parser.parseFromString(safeSvg, 'image/svg+xml');
+  const svgEl = doc.querySelector('parsererror') ? null : doc.querySelector('svg');
 
   // Count structural characteristics for recommendation engine
   const subgraphCountInCode = (

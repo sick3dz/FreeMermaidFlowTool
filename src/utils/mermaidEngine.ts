@@ -149,6 +149,8 @@ export function configureMermaidEngine(
   const baseConfig: Record<string, unknown> = {
     startOnLoad: false,
     securityLevel: 'strict',
+    maxTextSize: 2000000,
+    maxEdges: 25000,
     look: themeConfig.look,
     layout: isElk ? 'elk' : 'dagre',
     theme: themeConfig.useCustomColors ? 'base' : themeConfig.theme,
@@ -474,11 +476,26 @@ export function injectInitDirectiveIntoCode(code: string, themeConfig: ThemeConf
  * based on the SVG's `viewBox`. This prevents CSS Flexbox from squishing large diagrams
  * into the viewport width and guarantees that 100% zoom equals true 1:1 readable size.
  */
+/**
+ * Ensures HTML void tags (<br>, <hr>) and entities (&nbsp;) emitted inside Mermaid <foreignObject>
+ * labels are valid XML before passing to DOMParser('image/svg+xml'), preventing XML parser truncation.
+ */
+export function sanitizeSvgForXmlParser(svgString: string): string {
+  return svgString
+    .replace(/<br\s*>/gi, '<br/>')
+    .replace(/<hr\s*>/gi, '<hr/>')
+    .replace(/&nbsp;/gi, '&#160;');
+}
+
 export function normalizeSvgIntrinsicDimensions(svgString: string): string {
   const parser = new DOMParser();
-  const doc = parser.parseFromString(svgString, 'image/svg+xml');
+  const safeXml = sanitizeSvgForXmlParser(svgString);
+  const doc = parser.parseFromString(safeXml, 'image/svg+xml');
+  if (doc.querySelector('parsererror')) {
+    return safeXml;
+  }
   const svgEl = doc.querySelector('svg');
-  if (!svgEl) return svgString;
+  if (!svgEl) return safeXml;
 
   let intrinsicWidth = 0;
   let intrinsicHeight = 0;
@@ -522,7 +539,7 @@ export function normalizeSvgIntrinsicDimensions(svgString: string): string {
  */
 export function getSvgDimensions(svgString: string): { width: number; height: number } {
   const parser = new DOMParser();
-  const doc = parser.parseFromString(svgString, 'image/svg+xml');
+  const doc = parser.parseFromString(sanitizeSvgForXmlParser(svgString), 'image/svg+xml');
   const svgEl = doc.querySelector('svg');
   if (!svgEl) {
     return { width: 1200, height: 800 };
@@ -559,7 +576,7 @@ export function prepareStandaloneSvg(
   padding = 32
 ): { serializedSvg: string; width: number; height: number } {
   const parser = new DOMParser();
-  const doc = parser.parseFromString(svgString, 'image/svg+xml');
+  const doc = parser.parseFromString(sanitizeSvgForXmlParser(svgString), 'image/svg+xml');
   const svgEl = doc.querySelector('svg');
 
   if (!svgEl) {

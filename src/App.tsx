@@ -118,6 +118,7 @@ import {
   mergeScriptModules,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
+  rehydrateAndUpgradeWorkspace,
   reopenIssueInWorkspace,
   toMermaidNodeSuffix,
   unignoreChecklistTargetInWorkspace,
@@ -207,14 +208,52 @@ const MemoizedSvgStage = React.memo(
 );
 MemoizedSvgStage.displayName = 'MemoizedSvgStage';
 
+function loadInitialScriptWorkspace(): ScriptWorkspace {
+  try {
+    const raw = readStudioStorage(STORAGE_KEYS.SCRIPT_WORKSPACE);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.modules)) {
+        const validManualQuestions = Array.isArray(parsed.manualQuestions)
+          ? parsed.manualQuestions.filter(
+              (mq: unknown) =>
+                mq &&
+                typeof mq === 'object' &&
+                typeof (mq as CallflowOpenIssue).id === 'string' &&
+                typeof (mq as CallflowOpenIssue).question === 'string'
+            )
+          : [];
+        const baseWs = buildScriptWorkspace(parsed.modules, {
+          ...parsed,
+          manualQuestions: validManualQuestions,
+        });
+        return rehydrateAndUpgradeWorkspace(baseWs);
+      }
+    }
+  } catch {
+    // ignore corrupted local storage
+  }
+  return buildScriptWorkspace([]);
+}
+
 export default function App() {
   // Initial state starts empty (or restores user's own workspace from localStorage / offline seed)
   const [diagramTitle, setDiagramTitle] = useState<string>(() => {
     return readStudioStorage(STORAGE_KEYS.ACTIVE_TITLE) || 'Neuer Callflow';
   });
 
+  // Two-Level Multi-Script Callflow Workspace (loaded first so initial code is always in sync)
+  const [scriptWorkspace, setScriptWorkspace] = useState<ScriptWorkspace>(() =>
+    loadInitialScriptWorkspace()
+  );
+
   const [code, setCode] = useState<string>(() => {
-    return readStudioStorage(STORAGE_KEYS.ACTIVE_CODE) ?? '';
+    const savedCode = readStudioStorage(STORAGE_KEYS.ACTIVE_CODE) ?? '';
+    if (scriptWorkspace.modules.length > 0) {
+      const dir = getDiagramDirection(savedCode) || 'LR';
+      return buildMasterOverviewMermaid(scriptWorkspace, dir);
+    }
+    return savedCode;
   });
 
   const [themeConfig, setThemeConfig] = useState<ThemeConfiguration>(() => {
@@ -263,34 +302,6 @@ export default function App() {
     useState<CallflowDirectionFilter>('both');
   const [callflowHopDepth, setCallflowHopDepth] = useState<CallflowHopDepth>('all');
   const [isolateSubgraphMode, setIsolateSubgraphMode] = useState<boolean>(false);
-
-  // Two-Level Multi-Script Callflow Workspace
-  const [scriptWorkspace, setScriptWorkspace] = useState<ScriptWorkspace>(() => {
-    try {
-      const raw = readStudioStorage(STORAGE_KEYS.SCRIPT_WORKSPACE);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && Array.isArray(parsed.modules)) {
-          const validManualQuestions = Array.isArray(parsed.manualQuestions)
-            ? parsed.manualQuestions.filter(
-                (mq: unknown) =>
-                  mq &&
-                  typeof mq === 'object' &&
-                  typeof (mq as CallflowOpenIssue).id === 'string' &&
-                  typeof (mq as CallflowOpenIssue).question === 'string'
-              )
-            : [];
-          return buildScriptWorkspace(parsed.modules, {
-            ...parsed,
-            manualQuestions: validManualQuestions,
-          });
-        }
-      }
-    } catch {
-      // ignore corrupted local storage
-    }
-    return buildScriptWorkspace([]);
-  });
   const [callflowViewLevel, setCallflowViewLevel] = useState<CallflowViewLevel>({
     level: 'master',
   });

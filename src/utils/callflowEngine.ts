@@ -10,6 +10,7 @@ import {
   NodePositionOffset,
 } from '../types/mermaidStudio';
 import { toMermaidNodeSuffix } from './scriptCallflowParser';
+import { sanitizeSvgForXmlParser } from './mermaidEngine';
 
 const RESERVED_KEYWORDS = new Set([
   'flowchart',
@@ -714,9 +715,10 @@ export function applyCallflowSpotlightToSvg(
   if (!trace) return svgString;
 
   const parser = new DOMParser();
-  const doc = parser.parseFromString(svgString, 'image/svg+xml');
-  const svgEl = doc.querySelector('svg');
-  if (!svgEl) return svgString;
+  const safeSvg = sanitizeSvgForXmlParser(svgString);
+  const doc = parser.parseFromString(safeSvg, 'image/svg+xml');
+  const svgEl = doc.querySelector('parsererror') ? null : doc.querySelector('svg');
+  if (!svgEl) return safeSvg;
 
   const isDark = canvasSurface === 'dark';
 
@@ -1140,9 +1142,10 @@ export function applyNodeOffsetsToSvg(
   }
 
   const parser = new DOMParser();
-  const doc = parser.parseFromString(svgString, 'image/svg+xml');
-  const svgEl = doc.querySelector('svg');
-  if (!svgEl) return svgString;
+  const safeSvg = sanitizeSvgForXmlParser(svgString);
+  const doc = parser.parseFromString(safeSvg, 'image/svg+xml');
+  const svgEl = doc.querySelector('parsererror') ? null : doc.querySelector('svg');
+  if (!svgEl) return safeSvg;
 
   const activeOffsets = nodeOffsets || {};
   const nodeGroups = Array.from(

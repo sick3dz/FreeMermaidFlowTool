@@ -185,22 +185,22 @@ export function isAnnouncementOrEndpointTargetName(token: string): boolean {
 
 export function isPureMasterDispatcherModule(
   mod: ScriptModule,
-  totalModulesCount: number
+  _totalModulesCount?: number
 ): boolean {
-  if (totalModulesCount <= 1) return false;
   const key = canonicalScriptMatchKey(mod.scriptNumber);
   const nameKey = canonicalScriptMatchKey(mod.scriptName || '');
   const isExplicitMainName =
     /^(?:main|master(?:script)?|master_routing|0000)$/i.test(key) ||
-    /\bmaster(?:script|\s*callflow)?\b/i.test(nameKey);
-  if (!mod.isMaster && !isExplicitMainName) return false;
+    /^(?:main|master(?:script|\s*callflow)?)$/i.test(nameKey) ||
+    /\(masterscript\)/i.test(mod.scriptName || '');
+  if (isExplicitMainName) return true;
+  if (!mod.isMaster) return false;
   const hasOwnSkillsetQueue = mod.rules.some(
     (r) => Boolean(r.queueTarget && r.queueTarget !== 'Default_Skillset')
   );
-  if (hasOwnSkillsetQueue && !isExplicitMainName) return false;
+  if (hasOwnSkillsetQueue) return false;
   return (
-    isExplicitMainName ||
-    mod.outgoingNumbers.length >= 2 ||
+    hasAaccMasterRoutingSignals(mod.rawText || '') ||
     mod.rules.some((r) => Boolean((r.valueNumbers && r.valueNumbers.length > 0) || r.orgaCode))
   );
 }
@@ -265,12 +265,42 @@ function stripNumericNoiseForFreeText(text: string): string {
     .replace(/\b(?:musik(?:-?id)?|ansage(?:-?id)?|wait|wartezeit)\s*[:=]?\s*\d+\b/gi, ' ');
 }
 
+function extractScriptHeaderFromCommentBlock(commentText: string): string | null {
+  const kvMatch = commentText.match(
+    /\b(?:script\s*name|scriptname|skript(?:\s*name)?|script|application(?:\s*name)?|modul(?:name)?|dateiname|file(?:name)?)\s*[:=]\s*["']?([A-Za-z0-9ÄÖÜäöüß_.-]{2,80})["']?/i
+  );
+  if (kvMatch?.[1]) {
+    const clean = kvMatch[1].trim().replace(/\.s$/i, '').trim();
+    if (clean && isValidScriptRef(clean)) return clean;
+  }
+  const dotSMatch = commentText.match(/(?:^|[\s*=-])([A-Za-z0-9ÄÖÜäöüß_-]{3,60})\.s(?:$|[\s*=-])/i);
+  if (dotSMatch?.[1] && isValidScriptRef(dotSMatch[1])) {
+    return dotSMatch[1].trim();
+  }
+  const singleToken = commentText
+    .replace(/^[\s*=\-#/]+|[\s*=\-#/]+$/g, '')
+    .trim()
+    .replace(/\.s$/i, '')
+    .trim();
+  if (
+    singleToken &&
+    /^[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,60}$/.test(singleToken) &&
+    isValidScriptRef(singleToken) &&
+    !isMetadataOrChangelogLine(singleToken)
+  ) {
+    return singleToken;
+  }
+  return null;
+}
+
 /**
  * Strips /* ... * / comments safely (including multi-line, nested /* /* ... * / * /,
- * and unclosed /* ... EOF alt-last blocks) while preserving line breaks.
+ * and unclosed /* ... EOF alt-last blocks) while preserving line breaks and extracting
+ * embedded script boundary headers (`Script Name: ...` or `<Script>.s`) outside the comment.
  */
 function stripBlockCommentsSafely(input: string): string {
   let result = '';
+  let commentBuffer = '';
   let i = 0;
   let depth = 0;
   const len = input.length;
@@ -278,6 +308,9 @@ function stripBlockCommentsSafely(input: string): string {
   while (i < len) {
     const two = input.slice(i, i + 2);
     if (two === '/*') {
+      if (depth === 0) {
+        commentBuffer = '';
+      }
       depth += 1;
       i += 2;
       continue;
@@ -285,12 +318,19 @@ function stripBlockCommentsSafely(input: string): string {
     if (two === '*/' && depth > 0) {
       depth -= 1;
       if (depth === 0) {
-        result += ' ';
+        const extractedHeader = extractScriptHeaderFromCommentBlock(commentBuffer);
+        if (extractedHeader) {
+          result += `\n=== ${extractedHeader} ===\n`;
+        } else {
+          result += ' ';
+        }
+        commentBuffer = '';
       }
       i += 2;
       continue;
     }
     if (depth > 0) {
+      commentBuffer += input[i];
       if (input[i] === '\n') {
         result += '\n';
       }
@@ -305,14 +345,8 @@ function stripBlockCommentsSafely(input: string): string {
 }
 
 function preserveMultiScriptHeadersInComments(rawText: string): string {
-  const headerMatches = rawText.match(
-    /(?:script\s*name|scriptname|application(?:\s*name)?|dateiname|file(?:name)?)\s*[:=]\s*["']?([A-Za-z0-9ÄÖÜäöüß_.-]{2,80})["']?/gi
-  );
-  if (!headerMatches || headerMatches.length < 2) {
-    return rawText;
-  }
   return rawText.replace(
-    /(?:\/\*[\s*]*)?(?:\/\/\s*|#\s*|--\s*)?\b(?:script\s*name|scriptname|application(?:\s*name)?|dateiname|file(?:name)?)\s*[:=]\s*["']?([A-Za-z0-9ÄÖÜäöüß_.-]{2,80})["']?(?:[\s*]*\*\/)?/gi,
+    /^(?:\/\/\s*|#\s*|--\s*)?\b(?:script\s*name|scriptname|skript(?:\s*name)?|script|application(?:\s*name)?|dateiname|file(?:name)?)\s*[:=]\s*["']?([A-Za-z0-9ÄÖÜäöüß_.-]{2,80})["']?\s*$/gim,
     (_m, rawName: string) => {
       const clean = rawName.trim().replace(/\.s$/i, '').trim();
       return clean ? `\n=== ${clean} ===\n` : _m;
@@ -327,11 +361,27 @@ function preserveMultiScriptHeadersInComments(rawText: string): string {
 function stripScriptCommentsAndNoise(rawText: string): string {
   const withPreservedMultiHeaders = preserveMultiScriptHeadersInComments(rawText);
   const withoutBlockComments = stripBlockCommentsSafely(withPreservedMultiHeaders)
-    .replace(/\(\*[\s\S]*?\*\)/g, (match) => (match.includes('\n') ? '\n' : ' '));
+    .replace(/\(\*[\s\S]*?\*\)/g, (match) => {
+      const hdr = extractScriptHeaderFromCommentBlock(match);
+      if (hdr) return `\n=== ${hdr} ===\n`;
+      return match.includes('\n') ? '\n' : ' ';
+    });
 
   return withoutBlockComments
     .split(/\r?\n/)
     .map((line) => {
+      const inlineHeaderMatch = line.match(
+        /^\s*(?:\/\/|--|#)\s*(?:(?:script\s*name|scriptname|skript(?:\s*name)?|script|application(?:\s*name)?|dateiname|file(?:name)?)\s*[:=]\s*["']?([A-Za-z0-9ÄÖÜäöüß_.-]{2,80})["']?|[=\-*#\s]*([A-Za-z0-9ÄÖÜäöüß_-]{3,60})\.s[=\-*#\s]*)\s*$/i
+      );
+      if (inlineHeaderMatch) {
+        const hdrName = (inlineHeaderMatch[1] || inlineHeaderMatch[2] || '')
+          .trim()
+          .replace(/\.s$/i, '')
+          .trim();
+        if (hdrName && isValidScriptRef(hdrName)) {
+          return `=== ${hdrName} ===`;
+        }
+      }
       const noInline = line
         .replace(/(^|\s)\/\/.*$/, '')
         .replace(/(^|\s)--.*$/, '');
@@ -1101,22 +1151,81 @@ function parseAaccScriptBlocks(
   const withoutComments = stripScriptCommentsAndNoise(rawText);
   const rawLines = withoutComments.split(/\r?\n/);
 
-  // Split into individual script chunks whenever a standalone top-level `CDN <3-6-digit>` header line starts
-  const chunks: Array<{ startIdx: number; endIdx: number }> = [];
-  const cdnIndices: number[] = [];
+  const isOclBodyCodeLine = (line: string): boolean => {
+    const t = line.trim();
+    if (!t) return false;
+    return /^(?:section\b(?!\s+["']?init\b)|event\b|assign\b|if\b|else\b|end\b|give\b|transfer\b|route\b|queue\b|collect\b|execute\b|call\b|goto\b|subscript\b|open\b|play\b|wait\b|disconnect\b|drop\b|where\b|select\b|case\b|value\b|default\b|otherwise\b)/i.test(
+      t
+    );
+  };
+
+  const findHeaderStartBeforeAnchor = (anchorIdx: number, maxLookback: number): number => {
+    let start = anchorIdx;
+    for (let k = anchorIdx - 1; k >= Math.max(0, anchorIdx - maxLookback); k--) {
+      const prev = rawLines[k].trim();
+      if (!prev) {
+        continue;
+      }
+      if (/^[=\-*#]{2,}\s*(.+?)\s*[=\-*#]{2,}$/.test(prev)) {
+        start = k;
+        break;
+      }
+      if (isOclBodyCodeLine(prev)) {
+        break;
+      }
+      start = k;
+    }
+    return start;
+  };
+
+  // Detect all script chunk boundaries across full exports (`=== Header ===`, `section Init`, or standalone `CDN <digits>`)
+  const rawStartSet = new Set<number>();
+
   rawLines.forEach((l, idx) => {
-    if (/^\s*CDN\s*[:=]?\s*\d{3,6}\s*$/i.test(l)) {
-      cdnIndices.push(idx);
+    const t = l.trim();
+    if (!t) return;
+
+    if (/^[=\-*#]{2,}\s*(.+?)\s*[=\-*#]{2,}$/.test(t)) {
+      rawStartSet.add(idx);
+      return;
+    }
+
+    if (/^section\s+["']?init["']?\b/i.test(t)) {
+      rawStartSet.add(findHeaderStartBeforeAnchor(idx, 8));
+      return;
+    }
+
+    if (/^CDN\s*[:=]?\s*\d{3,6}\s*$/i.test(t)) {
+      const hasUpcomingInit = rawLines
+        .slice(idx + 1, Math.min(rawLines.length, idx + 9))
+        .some((nl) => /^\s*section\s+["']?init["']?\b/i.test(nl));
+      if (!hasUpcomingInit) {
+        rawStartSet.add(findHeaderStartBeforeAnchor(idx, 3));
+      }
     }
   });
 
-  if (cdnIndices.length <= 1) {
+  const sortedStarts = Array.from(rawStartSet).sort((a, b) => a - b);
+  const chunks: Array<{ startIdx: number; endIdx: number }> = [];
+
+  if (sortedStarts.length <= 1) {
     chunks.push({ startIdx: 0, endIdx: rawLines.length });
   } else {
-    for (let i = 0; i < cdnIndices.length; i++) {
-      const startIdx = i === 0 ? 0 : Math.max(cdnIndices[i - 1] + 1, cdnIndices[i] - 2);
-      const endIdx = i + 1 < cdnIndices.length ? Math.max(cdnIndices[i] + 1, cdnIndices[i + 1] - 2) : rawLines.length;
-      chunks.push({ startIdx, endIdx });
+    // Ensure any leading script (e.g. `Main` before the first sub-script) from line 0 is preserved as Chunk 0
+    if (sortedStarts[0] > 0) {
+      const preSlice = rawLines.slice(0, sortedStarts[0]).join('\n').trim();
+      if (preSlice.length > 0) {
+        sortedStarts.unshift(0);
+      } else {
+        sortedStarts[0] = 0;
+      }
+    }
+    for (let i = 0; i < sortedStarts.length; i++) {
+      const startIdx = sortedStarts[i];
+      const endIdx = i + 1 < sortedStarts.length ? sortedStarts[i + 1] : rawLines.length;
+      if (endIdx > startIdx) {
+        chunks.push({ startIdx, endIdx });
+      }
     }
   }
 
@@ -1132,17 +1241,62 @@ function parseAaccScriptBlocks(
       chunks.length === 1 && chunkIdx === 0 ? rawText.slice(0, 4000) : chunkText.slice(0, 2000);
     const headerCommentScriptName = headerCommentSlice
       .match(
-        /(?:script\s*name|scriptname|application(?:\s*name)?|modul(?:name)?|titel|title)\s*[:=]\s*["']?([^\r\n*/"']{2,80})["']?/i
+        /(?:script\s*name|scriptname|skript(?:\s*name)?|script|application(?:\s*name)?|modul(?:name)?|titel|title)\s*[:=]\s*["']?([^\r\n*/"']{2,80})["']?/i
       )?.[1]
+      ?.trim()
+      ?.replace(/\.s$/i, '')
       ?.trim();
     const headerCommentCdn = headerCommentSlice
       .match(/(?:^|[\s*/;(])(?:CDN|DNIS)\s*[:=]\s*["']?(\d{3,6})["']?/im)?.[1]
       ?.trim();
 
-    const chunkIsMaster = hasAaccMasterRoutingSignals(trimmedChunk);
+    // Extract descriptive name or framed header right before `CDN` / `section Init` FIRST so multi-script chunks get their real script name
+    let detectedName = '';
+    const nonEmptyBeforeSection: string[] = [];
+    for (const rawLine of sliceLines.slice(0, 12)) {
+      const t = rawLine.trim();
+      if (!t) continue;
+      if (/^(?:section|event|assign|if|where|select|case|value|open|give|queue|execute|call|collect|wait|disconnect|drop)\b/i.test(t)) {
+        break;
+      }
+      nonEmptyBeforeSection.push(t);
+    }
+
+    for (const line of nonEmptyBeforeSection) {
+      const framedMatch = line.match(/^[=\-*#]{2,}\s*(.+?)\s*[=\-*#]{2,}$/);
+      const candidateLine = (framedMatch ? framedMatch[1] : line)
+        .trim()
+        .replace(/\.s$/i, '')
+        .trim();
+      if (
+        candidateLine &&
+        !isMetadataOrChangelogLine(candidateLine) &&
+        !/^(?:CDN|Bereich|Abteilung|Team|section|event|assign|if|else|end(?:\s*(?:if|section|where|event|voice\s+session))?|give|transfer|route|queue|collect|execute|call|goto|subscript|open|play|wait|disconnect|drop|where|select|case|value|default|otherwise|dnis|fax(?:routing)?)\b/i.test(
+          candidateLine
+        ) &&
+        !/^(?:prio|zeitplan|feiertag|bedingung|ansage|taste)\b/i.test(candidateLine) &&
+        !/^(?:02131|290|210|6099)\b/.test(candidateLine) &&
+        !candidateLine.includes('->') &&
+        !candidateLine.includes('=>') &&
+        candidateLine.length >= 3
+      ) {
+        detectedName = candidateLine;
+        break;
+      }
+    }
+
+    const detectedNameToken = detectedName.replace(/\s+/g, '_');
+    const isExplicitMainChunkHeader = /^(?:main|master(?:script)?)$/i.test(detectedNameToken);
+    const chunkIsMaster = isExplicitMainChunkHeader || hasAaccMasterRoutingSignals(trimmedChunk);
     const topCdnHeaderMatch = chunkText.match(/^\s*CDN\s*[:=]?\s*(\d{3,6})\b/im);
     const inlineCdnMatch = chunkIsMaster ? null : chunkText.match(/\bCDN\s*[:=]?\s*(\d{3,6})\b/i);
     const cdnMatch = topCdnHeaderMatch || inlineCdnMatch;
+    const detectedNameRef =
+      detectedNameToken &&
+      isValidScriptRef(detectedNameToken) &&
+      !/^(?:main|start)$/i.test(detectedNameToken)
+        ? normalizeScriptRef(detectedNameToken)
+        : undefined;
 
     const cleanFileBase =
       chunks.length === 1 && options?.sourceFilename
@@ -1170,22 +1324,25 @@ function parseAaccScriptBlocks(
         : undefined;
     const detectedCdn = cdnMatch?.[1] || headerCommentCdn || fileDigitRef;
 
-    const scriptNumber =
-      explicitDefaultNum ||
-      namedFileCandidate ||
-      namedCommentCandidate ||
-      detectedCdn ||
-      (options?.defaultScriptNumber?.trim()
-        ? normalizeScriptRef(options.defaultScriptNumber)
-        : chunkIsMaster
-        ? 'Main'
-        : chunks.length === 1
-        ? 'Start'
-        : `900${chunkIdx}`);
+    const scriptNumber = chunkIsMaster
+      ? 'Main'
+      : explicitDefaultNum ||
+        namedFileCandidate ||
+        detectedNameRef ||
+        namedCommentCandidate ||
+        detectedCdn ||
+        (chunks.length === 1 && options?.defaultScriptNumber?.trim()
+          ? normalizeScriptRef(options.defaultScriptNumber)
+          : chunks.length === 1
+          ? 'Start'
+          : `900${chunkIdx}`);
 
     const cdnAlias =
       detectedCdn && canonicalScriptMatchKey(detectedCdn) !== canonicalScriptMatchKey(scriptNumber)
         ? detectedCdn
+        : detectedNameRef &&
+          canonicalScriptMatchKey(detectedNameRef) !== canonicalScriptMatchKey(scriptNumber)
+        ? detectedNameRef
         : namedFileCandidate &&
           canonicalScriptMatchKey(namedFileCandidate) !== canonicalScriptMatchKey(scriptNumber)
         ? namedFileCandidate
@@ -1193,29 +1350,6 @@ function parseAaccScriptBlocks(
           canonicalScriptMatchKey(namedCommentCandidate) !== canonicalScriptMatchKey(scriptNumber)
         ? namedCommentCandidate
         : undefined;
-
-    // Extract descriptive name: non-key-value line right before `CDN`, header comments, or `assign ... to Sys_Team_Skillset`
-    let detectedName = '';
-    const nonEmptyBeforeSection = sliceLines
-      .slice(0, 12)
-      .map((l) => l.trim())
-      .filter(Boolean);
-    for (const line of nonEmptyBeforeSection) {
-      if (
-        !isMetadataOrChangelogLine(line) &&
-        !/^(?:CDN|Bereich|Abteilung|Team|section|event|assign|if|else|end(?:\s*(?:if|section|where|event|voice\s+session))?|give|transfer|route|queue|collect|execute|call|goto|subscript|open|play|wait|disconnect|drop|where|select|case|value|default|otherwise|dnis|fax(?:routing)?)\b/i.test(
-          line
-        ) &&
-        !/^(?:prio|zeitplan|feiertag|bedingung|ansage|taste)\b/i.test(line) &&
-        !/^(?:02131|290|210|6099)\b/.test(line) &&
-        !line.includes('->') &&
-        !line.includes('=>') &&
-        line.length >= 3
-      ) {
-        detectedName = line;
-        break;
-      }
-    }
 
     const teamMatch = chunkText.match(/\bTeam\s*:\s*([^\n\r]+)/i);
     const bereichMatch = chunkText.match(/\bBereich\s*:\s*([^\n\r]+)/i);
@@ -1229,9 +1363,16 @@ function parseAaccScriptBlocks(
 
     const teamSkillset = vars.get('Sys_Team_Skillset');
     const cleanFilenameLabel = cleanFileBase.replace(/[_-]+/g, ' ').trim();
+    const explicitSingleChunkName =
+      chunks.length === 1 &&
+      options?.defaultScriptName?.trim() &&
+      !/^(?:main|start)$/i.test(options.defaultScriptName.trim())
+        ? options.defaultScriptName.trim()
+        : '';
+
     const scriptName =
-      options?.defaultScriptName?.trim() ||
       (chunkIsMaster && scriptNumber === 'Main' ? 'Main (Masterscript)' : '') ||
+      explicitSingleChunkName ||
       headerCommentScriptName ||
       detectedName ||
       teamSkillset ||
@@ -1345,7 +1486,7 @@ function parseAaccScriptBlocks(
       });
     }
 
-    // Rule 4+: Any additional CDN or named script jumps in classic Sys_* variables
+    // Rule 4+: Only explicit target script jump variables (never generic Orga/Brand/Prompt/Timer variables)
     const seenExtraTargets = new Set<string>();
     if (cleanRetour) seenExtraTargets.add(canonicalScriptMatchKey(cleanRetour));
 
@@ -1355,6 +1496,16 @@ function parseAaccScriptBlocks(
           varName
         )
       ) {
+        continue;
+      }
+      const isExplicitJumpVar =
+        /(?:weiterleitung|ziel(?:[\s_-]*(?:script|skript|cdn))?|next[\s_-]*(?:script|skript)|sub[\s_-]*(?:script|skript)|fallback[\s_-]*(?:script|skript)|overflow[\s_-]*(?:script|skript)|sprung[\s_-]*ziel)/i.test(
+          varName
+        ) &&
+        !/(?:ansage|prompt|voice|ran|musik|music|skillset|queue|zeit|time|wait|prio|stat|status|prozent|absolut|brand|gesellschaft|orga|besetzt)/i.test(
+          varName
+        );
+      if (!isExplicitJumpVar) {
         continue;
       }
       const cleanVal = val.trim().replace(/^['"]|['"]$/g, '');
@@ -1581,9 +1732,11 @@ function parseAaccScriptBlocks(
       const routeCmd = actionSegment.match(
         /\b(?:route\s+call(?:\s+to)?|transfer(?:\s+to)?|give\s+cdn)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|(\d{3,6}|[A-Za-z0-9ÄÖÜäöüß_.-]+))/i
       );
-      const annCmd = actionSegment.match(
-        /\b(?:give\s+(announcement|ran|ivr|music|treatment|overflow)|open\s+voice\s+segment|(?:play\s+)?(?:prompt\s+)?voice\s+segment|play\s+(?:prompt|announcement|tone|ran)|sonderansage|ansage)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
-      );
+      const annCmd = !execCmd
+        ? actionSegment.match(
+            /\b(?:give\s+(announcement|ran|ivr|music|treatment|overflow)|open\s+voice\s+segment|(?:play\s+)?(?:prompt\s+)?voice\s+segment|play\s+(?:prompt|announcement|tone|ran)|(?:sonderansage|ansage)\b)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
+          )
+        : null;
       const ringbackOrBusyCmd = actionSegment.match(/\bgive\s+(ringback|busy)\b/i);
       const collectCmd = actionSegment.match(
         /\bcollect\s+(\d+)\s+digits?(?:\s+into\s+([A-Za-z0-9_]+))?/i
@@ -2167,7 +2320,9 @@ function parseAaccScriptBlocks(
 
     if (
       rules.length === 0 &&
-      (Boolean(options?.sourceFilename || options?.defaultScriptNumber) ||
+      (chunks.length > 1 ||
+        Boolean(options?.sourceFilename || options?.defaultScriptNumber) ||
+        /\bsection\s+["']?init["']?\b/i.test(trimmedChunk) ||
         isAnnouncementOrEndpointTargetName(scriptNumber) ||
         isAnnouncementOrEndpointTargetName(scriptName))
     ) {
@@ -2307,7 +2462,12 @@ export function parseScriptTextBundle(
   const cleanedRawText = stripScriptCommentsAndNoise(rawText);
 
   if (isAaccScriptText(rawText)) {
-    // If the bundle mixes explicit `=== ... ===` / `Skript:` sections (e.g. AACC Main + CSV/table subscripts),
+    const aaccModules = parseAaccScriptBlocks(rawText, options);
+    if (aaccModules.length > 1) {
+      return aaccModules;
+    }
+
+    // If the bundle mixes 2+ explicit `=== ... ===` / `Skript:` sections (e.g. AACC Main + CSV/table subscripts),
     // split by explicit section headers so each block uses its matching parser.
     const rawLinesForSplit = cleanedRawText.split(/\r?\n/);
     const explicitSections: Array<{
@@ -2386,13 +2546,14 @@ export function parseScriptTextBundle(
     if (currentSec) explicitSections.push(currentSec);
 
     const namedHeadersCount = explicitSections.filter((s) => Boolean(s.num)).length;
-    if (namedHeadersCount > 0 && explicitSections.length >= 1) {
+    if (namedHeadersCount >= 2 && explicitSections.length >= 2) {
       const merged = new Map<string, ScriptModule>();
       for (const sec of explicitSections) {
         const secText = sec.lines.join('\n').trim();
         if (!secText) continue;
         const secOpts = {
           ...options,
+          sourceFilename: undefined,
           defaultScriptNumber: sec.num || options?.defaultScriptNumber,
           defaultScriptName: sec.name || options?.defaultScriptName,
         };
@@ -2400,7 +2561,7 @@ export function parseScriptTextBundle(
           ? parseAaccScriptBlocks(secText, secOpts)
           : parseScriptTextBundle(secText, secOpts);
         secMods.forEach((m) => {
-          const mod = sec.isMaster ? { ...m, isMaster: true } : m;
+          const mod = sec.isMaster && secMods.length === 1 ? { ...m, isMaster: true } : m;
           const key = canonicalScriptMatchKey(mod.scriptNumber);
           const prev = merged.get(key);
           if (!prev) {
@@ -2423,7 +2584,6 @@ export function parseScriptTextBundle(
       }
     }
 
-    const aaccModules = parseAaccScriptBlocks(rawText, options);
     if (aaccModules.length > 0) {
       return aaccModules;
     }
@@ -3360,6 +3520,17 @@ export function buildScriptWorkspace(
         knownKeyToDisplay.set(aliasKey, m.scriptNumber);
       }
     }
+    const nameToken = (m.scriptName || '').trim().replace(/\s+/g, '_');
+    if (
+      nameToken &&
+      isValidScriptRef(nameToken) &&
+      !/^(?:main|start|skript_)/i.test(nameToken)
+    ) {
+      const nameKey = canonicalScriptMatchKey(nameToken);
+      if (nameKey && !knownKeyToDisplay.has(nameKey)) {
+        knownKeyToDisplay.set(nameKey, m.scriptNumber);
+      }
+    }
   });
 
   // Inherit DNIS / VALUE numbers and Organization from any Master Dispatcher module (`Main`) onto the called entry scripts
@@ -3822,12 +3993,76 @@ export function buildMasterOverviewMermaid(
     (workspace.ignoredChecklistTargets || []).map(canonicalScriptMatchKey)
   );
 
-  // Exclude pure Master Dispatcher (`Main`) modules when real scripts are present so there is no artificial Main fan
+  // Always exclude pure Master Dispatcher (`Main`) modules from being rendered as a star-hub node
+  const dispatcherModules = workspace.modules.filter((m) =>
+    isPureMasterDispatcherModule(m, workspace.modules.length)
+  );
   const nonDispatcherModules = workspace.modules.filter(
     (m) => !isPureMasterDispatcherModule(m, workspace.modules.length)
   );
-  const candidateModules =
-    nonDispatcherModules.length > 0 ? nonDispatcherModules : workspace.modules;
+
+  // If ONLY `Main` is loaded in workspace.modules so far (before sub-scripts are resolved),
+  // render the entry scripts referenced in `Main` grouped cleanly without drawing a `Main` hub node or 265-line fan!
+  if (nonDispatcherModules.length === 0 && dispatcherModules.length > 0) {
+    const entryByKey = new Map<
+      string,
+      { ref: string; orga: string; dnisList: string[]; isAnn: boolean }
+    >();
+    dispatcherModules.forEach((m) => {
+      m.rules.forEach((r) => {
+        const targets: string[] = [];
+        if (r.targetNumber) targets.push(r.targetNumber);
+        r.choices.forEach((c) => {
+          if (c.targetNumber) targets.push(c.targetNumber);
+        });
+        targets.forEach((rawT) => {
+          const clean = normalizeScriptRef(rawT);
+          const key = canonicalScriptMatchKey(clean);
+          if (!clean || !key || ignoredKeySet.has(key)) return;
+          const existing = entryByKey.get(key) || {
+            ref: clean,
+            orga: r.organizationName || r.brandName || 'Einstiegs-Skripte',
+            dnisList: [],
+            isAnn: isAnnouncementOrEndpointTargetName(clean),
+          };
+          if (r.valueNumbers) {
+            r.valueNumbers.forEach((v) => {
+              if (!existing.dnisList.includes(v)) existing.dnisList.push(v);
+            });
+          }
+          entryByKey.set(key, existing);
+        });
+      });
+    });
+
+    if (entryByKey.size === 0) {
+      return `flowchart ${direction}\n    Empty["Keine Einstiegs-Skripte erkannt"]`;
+    }
+
+    const entries = Array.from(entryByKey.values()).slice(0, 80);
+    entries.forEach((entry) => {
+      const suffix = toMermaidNodeSuffix(entry.ref);
+      const safeRef = sanitizeMermaidText(entry.ref);
+      const dnisTag =
+        entry.dnisList.length > 0
+          ? ` · DNIS ${sanitizeMermaidText(entry.dnisList.slice(0, 3).join(', '))}${
+              entry.dnisList.length > 3 ? ` (+${entry.dnisList.length - 3})` : ''
+            }`
+          : '';
+      const orgaTag =
+        entry.orga && entry.orga !== 'Einstiegs-Skripte'
+          ? ` · ${sanitizeMermaidText(entry.orga)}`
+          : '';
+      if (entry.isAnn) {
+        lines.push(`    S_${suffix}[("■ 🔊 ${safeRef}${orgaTag}${dnisTag}")]`);
+      } else {
+        lines.push(`    S_${suffix}(["▶ ${safeRef}${orgaTag}${dnisTag}"])`);
+      }
+    });
+    return lines.join('\n');
+  }
+
+  const candidateModules = nonDispatcherModules;
 
   const knownKeyToMod = new Map<string, ScriptModule>();
   candidateModules.forEach((m) => {
@@ -3838,9 +4073,16 @@ export function buildMasterOverviewMermaid(
         knownKeyToMod.set(aliasKey, m);
       }
     }
+    const nameToken = (m.scriptName || '').trim().replace(/\s+/g, '_');
+    if (nameToken && isValidScriptRef(nameToken) && !/^(?:main|start)$/i.test(nameToken)) {
+      const nameKey = canonicalScriptMatchKey(nameToken);
+      if (nameKey && !knownKeyToMod.has(nameKey)) {
+        knownKeyToMod.set(nameKey, m);
+      }
+    }
   });
 
-  // Compute incoming script-to-script counts strictly among candidateModules (excluding hidden Main dispatcher)
+  // Compute incoming script-to-script counts strictly among candidateModules (excluding Main dispatcher)
   candidateModules.forEach((m) => incomingCounts.set(canonicalScriptMatchKey(m.scriptNumber), 0));
   candidateModules.forEach((m) => {
     m.outgoingNumbers.forEach((target) => {
@@ -3853,6 +4095,18 @@ export function buildMasterOverviewMermaid(
     });
   });
 
+  // Track which scripts are entry scripts called from Main
+  const calledByDispatcherKeys = new Set<string>();
+  dispatcherModules.forEach((m) => {
+    m.outgoingNumbers.forEach((target) => {
+      const rawKey = canonicalScriptMatchKey(target);
+      const matched = knownKeyToMod.get(rawKey);
+      calledByDispatcherKeys.add(
+        matched ? canonicalScriptMatchKey(matched.scriptNumber) : rawKey
+      );
+    });
+  });
+
   const moduleHasActiveQueue = (mod: ScriptModule): boolean =>
     mod.rules.some(
       (r) =>
@@ -3860,22 +4114,32 @@ export function buildMasterOverviewMermaid(
         !/\(deaktiviert\s*=\s*0\)/i.test(r.stepName)
     );
 
-  // In large multi-script exports (>10 modules), filter out completely isolated standalone modules that have
-  // 0 incoming script edges, 0 outgoing script edges, and 0 skillset queues so only logical chains are drawn
+  // In large multi-script exports (>10 modules), keep all scripts that have incoming/outgoing script calls,
+  // active skillset queues, or are referenced by Main while skipping unreferenced legacy ("Altlast") scripts
   const connectedCandidates = candidateModules.filter((m) => {
     const mKey = canonicalScriptMatchKey(m.scriptNumber);
     const inCount = incomingCounts.get(mKey) || 0;
     const outCount = m.outgoingNumbers.length;
-    return inCount > 0 || outCount > 0 || moduleHasActiveQueue(m);
+    return (
+      inCount > 0 ||
+      outCount > 0 ||
+      moduleHasActiveQueue(m) ||
+      calledByDispatcherKeys.has(mKey) ||
+      Boolean(m.entryDnisNumbers && m.entryDnisNumbers.length > 0)
+    );
   });
   const activeModules =
     candidateModules.length > 10 && connectedCandidates.length > 0
       ? connectedCandidates
       : candidateModules;
 
-  const activeModuleKeySet = new Set(
-    activeModules.map((m) => canonicalScriptMatchKey(m.scriptNumber))
-  );
+  const activeModuleKeySet = new Set<string>();
+  activeModules.forEach((m) => {
+    activeModuleKeySet.add(canonicalScriptMatchKey(m.scriptNumber));
+    if (m.cdnAlias) {
+      activeModuleKeySet.add(canonicalScriptMatchKey(m.cdnAlias));
+    }
+  });
 
   const referencedExternalTargets = new Map<string, string>();
   const referencedMissingTargets = new Map<string, string>();
@@ -3886,13 +4150,18 @@ export function buildMasterOverviewMermaid(
       const rawKey = canonicalScriptMatchKey(target);
       if (ignoredKeySet.has(rawKey)) return;
       const matched = knownKeyToMod.get(rawKey);
-      const tKey = matched ? canonicalScriptMatchKey(matched.scriptNumber) : rawKey;
+      const resolvedRef = matched ? matched.scriptNumber : target;
+      const tKey = canonicalScriptMatchKey(resolvedRef);
       if (ignoredKeySet.has(tKey)) return;
-      if (!knownKeyToMod.has(tKey)) {
-        if (externalKeySet.has(tKey) || isAnnouncementOrEndpointTargetName(target)) {
-          referencedExternalTargets.set(tKey, target);
+      if (!activeModuleKeySet.has(tKey)) {
+        if (
+          externalKeySet.has(tKey) ||
+          workspace.treatUnresolvedAsEndpoint ||
+          isAnnouncementOrEndpointTargetName(resolvedRef)
+        ) {
+          referencedExternalTargets.set(tKey, resolvedRef);
         } else {
-          referencedMissingTargets.set(tKey, target);
+          referencedMissingTargets.set(tKey, resolvedRef);
         }
       }
     });
@@ -3954,7 +4223,7 @@ export function buildMasterOverviewMermaid(
         ? ` (CDN ${sanitizeMermaidText(mod.cdnAlias)})`
         : '';
     const baseLabel = showBothNameAndRef
-      ? `${openTag}[${safeRef}] ${safeName}${aliasHint}`
+      ? `${openTag}${safeRef} · ${safeName}${aliasHint}`
       : `${openTag}${safeRef}${aliasHint}`;
 
     const dnisPreview =
@@ -3996,7 +4265,7 @@ export function buildMasterOverviewMermaid(
     hasOpenIssueNodes = true;
     const suffix = toMermaidNodeSuffix(targetRef);
     const safeRef = sanitizeMermaidText(targetRef);
-    lines.push(`    S_${suffix}["● OFFEN · [${safeRef}] Fehlendes Skript"]:::missingScript`);
+    lines.push(`    S_${suffix}["● OFFEN · ${safeRef} (Fehlendes Skript)"]:::missingScript`);
   });
 
   referencedExternalTargets.forEach((targetRef) => {
@@ -4004,8 +4273,8 @@ export function buildMasterOverviewMermaid(
     const safeRef = sanitizeMermaidText(targetRef);
     const isAnn = isAnnouncementOrEndpointTargetName(targetRef);
     const endLabel = isAnn
-      ? `■ 🔊 [${safeRef}] Sonderansage / Endpunkt`
-      : `■ [${safeRef}] Endpunkt`;
+      ? `■ 🔊 ${safeRef} · Sonderansage / Endpunkt`
+      : `■ ${safeRef} · Endpunkt`;
     lines.push(`    S_${suffix}[("${endLabel}")]`);
   });
 
@@ -4142,7 +4411,23 @@ export function buildSafeFallbackMasterMermaid(
   const nonDispatcher = workspace.modules.filter(
     (m) => !isPureMasterDispatcherModule(m, workspace.modules.length)
   );
-  const activeModules = nonDispatcher.length > 0 ? nonDispatcher : workspace.modules;
+  if (nonDispatcher.length === 0) {
+    const seen = new Set<string>();
+    workspace.modules.forEach((m) => {
+      m.outgoingNumbers.slice(0, 60).forEach((t) => {
+        const id = `S_${toMermaidNodeSuffix(t)}`;
+        if (!seen.has(id)) {
+          seen.add(id);
+          lines.push(`    ${id}(["▶ ${toMermaidNodeSuffix(t)}"])`);
+        }
+      });
+    });
+    if (seen.size === 0) {
+      lines.push(`    Empty["Keine Einstiegs-Skripte erkannt"]`);
+    }
+    return lines.join('\n');
+  }
+  const activeModules = nonDispatcher;
 
   const seenNodes = new Set<string>();
   const seenEdges = new Set<string>();
@@ -4168,6 +4453,56 @@ export function buildSafeFallbackMasterMermaid(
   });
 
   return lines.join('\n');
+}
+
+/**
+ * Re-parses stored text modules using the current AACC / multi-script parser so workspaces
+ * persisted in localStorage before parser upgrades are automatically repaired on load.
+ */
+export function rehydrateAndUpgradeWorkspace(rawWorkspace: ScriptWorkspace): ScriptWorkspace {
+  const upgradedModules: ScriptModule[] = [];
+  for (const mod of rawWorkspace.modules || []) {
+    if (mod.origin === 'visio-new' || !mod.rawText || !mod.rawText.trim()) {
+      upgradedModules.push(mod);
+      continue;
+    }
+    const isGenericMainOrStart = /^(?:main|start)$/i.test(mod.scriptNumber || '');
+    const reparsed = parseCallflowTextWithFallback(mod.rawText, {
+      defaultScriptNumber: isGenericMainOrStart ? undefined : mod.scriptNumber,
+      defaultScriptName:
+        isGenericMainOrStart || mod.scriptName === 'Main (Masterscript)'
+          ? undefined
+          : mod.scriptName,
+      sourceFilename: mod.sourceFilename,
+      origin: mod.origin,
+      isMasterHint: mod.isMaster && isGenericMainOrStart,
+    });
+    if (reparsed.length > 0) {
+      for (const rm of reparsed) {
+        upgradedModules.push({
+          ...rm,
+          cdnAlias: rm.cdnAlias || (reparsed.length === 1 ? mod.cdnAlias : undefined),
+        });
+      }
+    } else {
+      upgradedModules.push(mod);
+    }
+  }
+
+  // Deduplicate upgradedModules by canonical key
+  const deduped = mergeScriptModules([], upgradedModules);
+
+  return buildScriptWorkspace(deduped, {
+    externalEndpoints: rawWorkspace.externalEndpoints,
+    ignoredChecklistTargets: rawWorkspace.ignoredChecklistTargets,
+    resolvedIssues: rawWorkspace.resolvedIssues,
+    manualQuestions: rawWorkspace.manualQuestions,
+    manualLinks: rawWorkspace.manualLinks,
+    masterScriptNumber: rawWorkspace.masterScriptNumber,
+    nodeOffsets: rawWorkspace.nodeOffsets,
+    treatUnresolvedAsEndpoint:
+      rawWorkspace.treatUnresolvedAsEndpoint ?? deduped.length >= 2,
+  });
 }
 
 /**
