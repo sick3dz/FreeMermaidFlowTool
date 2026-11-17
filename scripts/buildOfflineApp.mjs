@@ -47,7 +47,7 @@ export async function generateSingleFileOfflineHtml(outPath) {
         cssCodeSplit: false,
         assetsInlineLimit: 100_000_000,
         chunkSizeWarningLimit: 12_000,
-        minify: 'esbuild',
+        minify: true,
         rollupOptions: {
           output: {
             format: 'iife',
