@@ -591,6 +591,11 @@ export function resolveClickedNodeIdFromSvgElement(
   const nodeGroup = targetEl.closest('g.node, g.actor, g.statediagram-state, g.classGroup');
   if (!nodeGroup) return null;
 
+  const fastNodeId = nodeGroup.getAttribute('data-callflow-node-id');
+  if (fastNodeId && graph.nodes.has(fastNodeId)) {
+    return fastNodeId;
+  }
+
   const domId = nodeGroup.getAttribute('id') || '';
   const dataId = nodeGroup.getAttribute('data-id') || '';
   const textLabel = (nodeGroup.textContent || '').replace(/\s+/g, ' ').trim();
@@ -1130,6 +1135,712 @@ export function applyNodeOffsetsToSvg(
 
   const serializer = new XMLSerializer();
   return serializer.serializeToString(svgEl);
+}
+
+// ============================================================================
+// High-Performance Live SVG DOM Index (zero DOMParser / XMLSerializer on Pan/Select/Drag)
+// ============================================================================
+
+interface ParsedLivePathData {
+  pathEl: SVGPathElement;
+  origD: string;
+  origStrokeAttr: string | null;
+  origStyleStroke: string;
+  origStyleStrokeWidth: string;
+  origStyleDasharray: string;
+  parts: string[];
+  pairs: Array<{
+    xIdx: number;
+    yIdx: number;
+    xPrefix: string;
+    yPrefix: string;
+    origX: number;
+    origY: number;
+    t: number;
+  }>;
+}
+
+export interface LiveSvgNodeHandle {
+  nodeId: string;
+  groupEl: SVGGElement;
+  baseTx: number;
+  baseTy: number;
+  restTransform: string;
+  shapeEls: SVGElement[];
+  origShapeStyles: Array<{
+    fillAttr: string | null;
+    strokeAttr: string | null;
+    styleFill: string;
+    styleStroke: string;
+    styleStrokeWidth: string;
+  }>;
+  textEls: SVGElement[];
+  origTextStyles: Array<{
+    fillAttr: string | null;
+    styleFill: string;
+  }>;
+  htmlEls: HTMLElement[];
+  origHtmlStyles: Array<{
+    color: string;
+    fontWeight: string;
+  }>;
+  portEl: SVGGElement | null;
+}
+
+export interface LiveSvgEdgeHandle {
+  from: string;
+  to: string;
+  edgeEl: SVGElement;
+  origOpacity: string;
+  paths: ParsedLivePathData[];
+  labelEl: SVGElement | null;
+  origLabelOpacity: string;
+  labelBaseTx: number;
+  labelBaseTy: number;
+  labelRestTransform: string;
+}
+
+export interface LiveSvgDomIndex {
+  svgEl: SVGSVGElement;
+  origViewBox: string | null;
+  origVbParts: [number, number, number, number] | null;
+  nodes: Map<string, LiveSvgNodeHandle>;
+  allEdges: LiveSvgEdgeHandle[];
+  edgesByNode: Map<string, LiveSvgEdgeHandle[]>;
+  clusters: SVGElement[];
+}
+
+function parseLivePathTokens(pathEl: SVGPathElement): ParsedLivePathData {
+  const origD = pathEl.getAttribute('d') || '';
+  const origStrokeAttr = pathEl.getAttribute('stroke');
+  const origStyleStroke = pathEl.style.stroke || '';
+  const origStyleStrokeWidth = pathEl.style.strokeWidth || '';
+  const origStyleDasharray = pathEl.style.strokeDasharray || '';
+
+  const tokenRegex = /([A-Za-z])|([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)/gi;
+  const rawTokens: Array<{ type: 'cmd' | 'num'; raw: string; val?: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = tokenRegex.exec(origD)) !== null) {
+    if (m[1]) {
+      rawTokens.push({ type: 'cmd', raw: m[1] });
+    } else if (m[2]) {
+      rawTokens.push({ type: 'num', raw: m[2], val: parseFloat(m[2]) });
+    }
+  }
+
+  const parts: string[] = [];
+  const prefixes: string[] = [];
+  for (let k = 0; k < rawTokens.length; k++) {
+    const tk = rawTokens[k];
+    const prev = k > 0 ? rawTokens[k - 1] : null;
+    const prefix =
+      k === 0
+        ? ''
+        : tk.type === 'cmd'
+        ? ' '
+        : prev && prev.type === 'cmd'
+        ? ''
+        : ',';
+    prefixes.push(prefix);
+    parts.push(prefix + tk.raw);
+  }
+
+  const pairIndices: Array<{ xIdx: number; yIdx: number }> = [];
+  let currentCmd = 'M';
+  let i = 0;
+  while (i < rawTokens.length) {
+    const tk = rawTokens[i];
+    if (tk.type === 'cmd') {
+      currentCmd = tk.raw;
+      i++;
+      continue;
+    }
+    const upper = currentCmd.toUpperCase();
+    const isRelative = currentCmd !== upper;
+    if (upper === 'Z' || upper === 'H' || upper === 'V') {
+      i++;
+      continue;
+    }
+    if (upper === 'A') {
+      if (!isRelative && i + 6 < rawTokens.length) {
+        pairIndices.push({ xIdx: i + 5, yIdx: i + 6 });
+      }
+      i += 7;
+      continue;
+    }
+    if (!isRelative && i + 1 < rawTokens.length && rawTokens[i + 1].type === 'num') {
+      pairIndices.push({ xIdx: i, yIdx: i + 1 });
+      i += 2;
+    } else {
+      i++;
+    }
+  }
+
+  const totalPairs = pairIndices.length;
+  const pairs = pairIndices.map((p, idx) => ({
+    xIdx: p.xIdx,
+    yIdx: p.yIdx,
+    xPrefix: prefixes[p.xIdx],
+    yPrefix: prefixes[p.yIdx],
+    origX: rawTokens[p.xIdx].val ?? 0,
+    origY: rawTokens[p.yIdx].val ?? 0,
+    t: totalPairs <= 1 ? 0 : idx / (totalPairs - 1),
+  }));
+
+  return {
+    pathEl,
+    origD,
+    origStrokeAttr,
+    origStyleStroke,
+    origStyleStrokeWidth,
+    origStyleDasharray,
+    parts,
+    pairs,
+  };
+}
+
+function createPortHandleElement(nodeGroup: SVGGElement, nodeId: string): SVGGElement {
+  const rectEl = nodeGroup.querySelector('rect');
+  const polyEl = !rectEl ? nodeGroup.querySelector('polygon') : null;
+  let portX = 72;
+  let portY = 0;
+  if (rectEl) {
+    const rx = parseFloat(rectEl.getAttribute('x') || '0');
+    const rw = parseFloat(rectEl.getAttribute('width') || '120');
+    const ry = parseFloat(rectEl.getAttribute('y') || '0');
+    const rh = parseFloat(rectEl.getAttribute('height') || '44');
+    if (Number.isFinite(rx) && Number.isFinite(rw)) portX = rx + rw / 2;
+    if (Number.isFinite(ry) && Number.isFinite(rh)) portY = ry + rh / 2;
+  } else if (polyEl) {
+    const ptsAttr = polyEl.getAttribute('points') || '';
+    const nums = ptsAttr
+      .trim()
+      .split(/[\s,]+/)
+      .map((n) => parseFloat(n))
+      .filter((n) => Number.isFinite(n));
+    if (nums.length >= 4) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (let i = 0; i + 1 < nums.length; i += 2) {
+        minX = Math.min(minX, nums[i]);
+        maxX = Math.max(maxX, nums[i]);
+        minY = Math.min(minY, nums[i + 1]);
+        maxY = Math.max(maxY, nums[i + 1]);
+      }
+      if (Number.isFinite(minX) && Number.isFinite(maxX)) {
+        portX = minX < 0 ? maxX : (maxX - minX) / 2;
+        portY = minY < 0 && maxY > 0 ? (minY + maxY) / 2 : 0;
+      }
+    }
+  }
+
+  const svgNs = 'http://www.w3.org/2000/svg';
+  const portGroup = nodeGroup.ownerDocument.createElementNS(svgNs, 'g');
+  portGroup.setAttribute('class', 'callflow-connect-port');
+  portGroup.setAttribute('data-port-node-id', nodeId);
+  portGroup.setAttribute(
+    'transform',
+    `translate(${Number(portX.toFixed(1))}, ${Number(portY.toFixed(1))})`
+  );
+  portGroup.setAttribute('style', 'cursor: crosshair; display: none;');
+
+  const portTitle = nodeGroup.ownerDocument.createElementNS(svgNs, 'title');
+  portTitle.textContent =
+    'Ziehen, um neue Verbindung zu einem Ziel-Knoten zu knüpfen (Doppelklick auf Knoten = Text bearbeiten)';
+  portGroup.appendChild(portTitle);
+
+  const outerCircle = nodeGroup.ownerDocument.createElementNS(svgNs, 'circle');
+  outerCircle.setAttribute('r', '7');
+  outerCircle.setAttribute('fill', '#4f46e5');
+  outerCircle.setAttribute('stroke', '#e0e7ff');
+  outerCircle.setAttribute('stroke-width', '2');
+  outerCircle.setAttribute('data-port-node-id', nodeId);
+  portGroup.appendChild(outerCircle);
+
+  const innerDot = nodeGroup.ownerDocument.createElementNS(svgNs, 'circle');
+  innerDot.setAttribute('r', '2.5');
+  innerDot.setAttribute('fill', '#ffffff');
+  innerDot.setAttribute('data-port-node-id', nodeId);
+  portGroup.appendChild(innerDot);
+
+  nodeGroup.appendChild(portGroup);
+  return portGroup;
+}
+
+/**
+ * Builds a reusable in-memory DOM index ONCE whenever a new base SVG mounts,
+ * eliminating DOMParser/XMLSerializer overhead during Pan, Zoom, Selection, and Dragging.
+ */
+export function buildLiveSvgDomIndex(
+  svgEl: SVGSVGElement,
+  graph: CallflowGraph
+): LiveSvgDomIndex {
+  const origViewBox = svgEl.getAttribute('viewBox');
+  let origVbParts: [number, number, number, number] | null = null;
+  if (origViewBox) {
+    const parts = origViewBox
+      .trim()
+      .split(/[\s,]+/)
+      .map(Number);
+    if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
+      origVbParts = [parts[0], parts[1], parts[2], parts[3]];
+    }
+  }
+
+  const nodes = new Map<string, LiveSvgNodeHandle>();
+  const nodeGroups = Array.from(
+    svgEl.querySelectorAll('g.node, g.actor, g.statediagram-state, g.classGroup')
+  ) as SVGGElement[];
+
+  nodeGroups.forEach((groupEl) => {
+    const matchedId = resolveClickedNodeIdFromSvgElement(groupEl, graph);
+    if (!matchedId) return;
+    groupEl.setAttribute('data-callflow-node-id', matchedId);
+
+    const { x, y, rest } = parseTranslateFromTransform(groupEl.getAttribute('transform'));
+    const rawShapes = groupEl.querySelectorAll(
+      'rect, polygon, circle, ellipse, path.label-container, path.basic, g.label-container > path'
+    );
+    const shapeEls = (
+      rawShapes.length > 0
+        ? Array.from(rawShapes)
+        : Array.from(groupEl.children).filter((el) =>
+            ['rect', 'polygon', 'circle', 'ellipse', 'path'].includes(el.tagName.toLowerCase())
+          )
+    ) as SVGElement[];
+
+    const origShapeStyles = shapeEls.map((s) => ({
+      fillAttr: s.getAttribute('fill'),
+      strokeAttr: s.getAttribute('stroke'),
+      styleFill: s.style.fill || '',
+      styleStroke: s.style.stroke || '',
+      styleStrokeWidth: s.style.strokeWidth || '',
+    }));
+
+    const textEls = Array.from(groupEl.querySelectorAll('text, tspan')) as SVGElement[];
+    const origTextStyles = textEls.map((t) => ({
+      fillAttr: t.getAttribute('fill'),
+      styleFill: t.style.fill || '',
+    }));
+
+    const htmlEls = Array.from(
+      groupEl.querySelectorAll('foreignObject div, foreignObject span, foreignObject p')
+    ) as HTMLElement[];
+    const origHtmlStyles = htmlEls.map((h) => ({
+      color: h.style.color || '',
+      fontWeight: h.style.fontWeight || '',
+    }));
+
+    const existingPort = groupEl.querySelector('.callflow-connect-port') as SVGGElement | null;
+    const portEl = existingPort || createPortHandleElement(groupEl, matchedId);
+
+    nodes.set(matchedId, {
+      nodeId: matchedId,
+      groupEl,
+      baseTx: x,
+      baseTy: y,
+      restTransform: rest,
+      shapeEls,
+      origShapeStyles,
+      textEls,
+      origTextStyles,
+      htmlEls,
+      origHtmlStyles,
+      portEl,
+    });
+  });
+
+  // Pre-compile edge matchers once for O(E) setup instead of repeated regex compilation
+  const compiledEdges = graph.edges.map((edge) => {
+    const fromEsc = edge.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const toEsc = edge.to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return {
+      edge,
+      pattern: new RegExp(
+        `(?:^|[-_L])${fromEsc}[-_]${toEsc}(?:[-_\\s\\d]|$)|L[-_]${fromEsc}[-_]${toEsc}`,
+        'i'
+      ),
+      dashToken: `-${edge.from}-${edge.to}-`,
+      underToken: `_${edge.from}_${edge.to}_`,
+      lUnderToken: `L_${edge.from}_${edge.to}`,
+      lDashToken: `L-${edge.from}-${edge.to}`,
+    };
+  });
+
+  const matchEdgeMeta = (el: Element): CallflowEdge | null => {
+    const meta = `${el.getAttribute('id') || ''} ${el.getAttribute('data-id') || ''} ${
+      el.getAttribute('class') || ''
+    }`;
+    for (const item of compiledEdges) {
+      if (
+        item.pattern.test(meta) ||
+        meta.includes(item.dashToken) ||
+        meta.includes(item.underToken) ||
+        meta.includes(item.lUnderToken) ||
+        meta.includes(item.lDashToken)
+      ) {
+        return item.edge;
+      }
+    }
+    return null;
+  };
+
+  const edgeElements = Array.from(
+    svgEl.querySelectorAll('g.edgePaths > *, g.edgePath, path.flowchart-link')
+  ) as SVGElement[];
+  const edgeLabelElements = Array.from(
+    svgEl.querySelectorAll('g.edgeLabels > *, g.edgeLabel')
+  ) as SVGElement[];
+
+  const allEdges: LiveSvgEdgeHandle[] = [];
+  const edgesByNode = new Map<string, LiveSvgEdgeHandle[]>();
+
+  edgeElements.forEach((edgeEl, idx) => {
+    const matched = matchEdgeMeta(edgeEl);
+    if (!matched) return;
+    const pathNodes = (
+      edgeEl.tagName.toLowerCase() === 'path'
+        ? [edgeEl]
+        : Array.from(edgeEl.querySelectorAll('path'))
+    ) as SVGPathElement[];
+
+    const matchedLabel =
+      edgeLabelElements.find((l) => {
+        const m = matchEdgeMeta(l);
+        return m && m.from === matched.from && m.to === matched.to;
+      }) || (edgeLabelElements.length === edgeElements.length ? edgeLabelElements[idx] : null);
+
+    const labelTransform = matchedLabel
+      ? parseTranslateFromTransform(matchedLabel.getAttribute('transform'))
+      : { x: 0, y: 0, rest: '' };
+
+    const handle: LiveSvgEdgeHandle = {
+      from: matched.from,
+      to: matched.to,
+      edgeEl,
+      origOpacity: edgeEl.style.opacity || '',
+      paths: pathNodes.map((p) => parseLivePathTokens(p)),
+      labelEl: matchedLabel,
+      origLabelOpacity: matchedLabel ? matchedLabel.style.opacity || '' : '',
+      labelBaseTx: labelTransform.x,
+      labelBaseTy: labelTransform.y,
+      labelRestTransform: labelTransform.rest,
+    };
+
+    allEdges.push(handle);
+    const fromArr = edgesByNode.get(matched.from) || [];
+    fromArr.push(handle);
+    edgesByNode.set(matched.from, fromArr);
+    if (matched.to !== matched.from) {
+      const toArr = edgesByNode.get(matched.to) || [];
+      toArr.push(handle);
+      edgesByNode.set(matched.to, toArr);
+    }
+  });
+
+  const clusters = Array.from(svgEl.querySelectorAll('g.cluster')) as SVGElement[];
+
+  return {
+    svgEl,
+    origViewBox,
+    origVbParts,
+    nodes,
+    allEdges,
+    edgesByNode,
+    clusters,
+  };
+}
+
+function updateLiveEdgeGeometry(
+  edge: LiveSvgEdgeHandle,
+  dxFrom: number,
+  dyFrom: number,
+  dxTo: number,
+  dyTo: number
+): void {
+  const hasShift =
+    Math.abs(dxFrom) > 0.5 ||
+    Math.abs(dyFrom) > 0.5 ||
+    Math.abs(dxTo) > 0.5 ||
+    Math.abs(dyTo) > 0.5;
+
+  edge.paths.forEach((p) => {
+    if (!hasShift) {
+      if (p.pathEl.getAttribute('d') !== p.origD) {
+        p.pathEl.setAttribute('d', p.origD);
+      }
+      return;
+    }
+    if (p.pairs.length === 0) return;
+    for (let i = 0; i < p.pairs.length; i++) {
+      const pair = p.pairs[i];
+      const shiftX = dxFrom * (1 - pair.t) + dxTo * pair.t;
+      const shiftY = dyFrom * (1 - pair.t) + dyTo * pair.t;
+      p.parts[pair.xIdx] = `${pair.xPrefix}${Number((pair.origX + shiftX).toFixed(2))}`;
+      p.parts[pair.yIdx] = `${pair.yPrefix}${Number((pair.origY + shiftY).toFixed(2))}`;
+    }
+    p.pathEl.setAttribute('d', p.parts.join(''));
+  });
+
+  if (edge.labelEl) {
+    const midDx = (dxFrom + dxTo) / 2;
+    const midDy = (dyFrom + dyTo) / 2;
+    const nextLx = Number((edge.labelBaseTx + midDx).toFixed(2));
+    const nextLy = Number((edge.labelBaseTy + midDy).toFixed(2));
+    edge.labelEl.setAttribute(
+      'transform',
+      `translate(${nextLx}, ${nextLy})${edge.labelRestTransform ? ` ${edge.labelRestTransform}` : ''}`
+    );
+  }
+}
+
+/**
+ * Updates node transforms, connection port visibility, and edge geometry directly in the live SVG DOM.
+ */
+export function applyLiveNodeOffsetsToDom(
+  index: LiveSvgDomIndex,
+  nodeOffsets: Record<string, NodePositionOffset>,
+  isVisualEditMode: boolean
+): void {
+  let minDeltaX = 0;
+  let maxDeltaX = 0;
+  let minDeltaY = 0;
+  let maxDeltaY = 0;
+
+  index.nodes.forEach((node) => {
+    const off = nodeOffsets[node.nodeId];
+    const dx = off && Math.abs(off.dx) > 0.5 ? off.dx : 0;
+    const dy = off && Math.abs(off.dy) > 0.5 ? off.dy : 0;
+    const nextX = Number((node.baseTx + dx).toFixed(2));
+    const nextY = Number((node.baseTy + dy).toFixed(2));
+    node.groupEl.setAttribute(
+      'transform',
+      `translate(${nextX}, ${nextY})${node.restTransform ? ` ${node.restTransform}` : ''}`
+    );
+    node.groupEl.style.cursor = isVisualEditMode ? 'move' : 'pointer';
+    if (node.portEl) {
+      node.portEl.style.display = isVisualEditMode ? '' : 'none';
+    }
+    if (dx < minDeltaX) minDeltaX = dx;
+    if (dx > maxDeltaX) maxDeltaX = dx;
+    if (dy < minDeltaY) minDeltaY = dy;
+    if (dy > maxDeltaY) maxDeltaY = dy;
+  });
+
+  index.allEdges.forEach((edge) => {
+    const fromOff = nodeOffsets[edge.from] || { dx: 0, dy: 0 };
+    const toOff = nodeOffsets[edge.to] || { dx: 0, dy: 0 };
+    updateLiveEdgeGeometry(edge, fromOff.dx, fromOff.dy, toOff.dx, toOff.dy);
+  });
+
+  if (index.origVbParts) {
+    const [vx, vy, vw, vh] = index.origVbParts;
+    const padLeft = minDeltaX < 0 ? Math.abs(minDeltaX) + 40 : 0;
+    const padTop = minDeltaY < 0 ? Math.abs(minDeltaY) + 40 : 0;
+    const padRight = maxDeltaX > 0 ? maxDeltaX + 40 : 0;
+    const padBottom = maxDeltaY > 0 ? maxDeltaY + 40 : 0;
+    index.svgEl.setAttribute(
+      'viewBox',
+      `${Math.floor(vx - padLeft)} ${Math.floor(vy - padTop)} ${Math.ceil(vw + padLeft + padRight)} ${Math.ceil(vh + padTop + padBottom)}`
+    );
+  }
+}
+
+/**
+ * 60fps Drag Fast-Path: updates ONLY the edges connected to `draggedNodeId` during mousemove.
+ */
+export function shiftLiveConnectedEdgesForDrag(
+  index: LiveSvgDomIndex,
+  draggedNodeId: string,
+  draggedOffset: NodePositionOffset,
+  allOffsets: Record<string, NodePositionOffset>
+): void {
+  const connected = index.edgesByNode.get(draggedNodeId);
+  if (!connected || connected.length === 0) return;
+
+  for (let i = 0; i < connected.length; i++) {
+    const edge = connected[i];
+    const fromOff =
+      edge.from === draggedNodeId
+        ? draggedOffset
+        : allOffsets[edge.from] || { dx: 0, dy: 0 };
+    const toOff =
+      edge.to === draggedNodeId
+        ? draggedOffset
+        : allOffsets[edge.to] || { dx: 0, dy: 0 };
+    updateLiveEdgeGeometry(edge, fromOff.dx, fromOff.dy, toOff.dx, toOff.dy);
+  }
+}
+
+function restoreNodeOriginalStyles(node: LiveSvgNodeHandle): void {
+  node.shapeEls.forEach((s, i) => {
+    const orig = node.origShapeStyles[i];
+    if (!orig) return;
+    s.style.fill = orig.styleFill;
+    s.style.stroke = orig.styleStroke;
+    s.style.strokeWidth = orig.styleStrokeWidth;
+    if (orig.fillAttr !== null) s.setAttribute('fill', orig.fillAttr);
+    else s.removeAttribute('fill');
+    if (orig.strokeAttr !== null) s.setAttribute('stroke', orig.strokeAttr);
+    else s.removeAttribute('stroke');
+  });
+  node.textEls.forEach((t, i) => {
+    const orig = node.origTextStyles[i];
+    if (!orig) return;
+    t.style.fill = orig.styleFill;
+    if (orig.fillAttr !== null) t.setAttribute('fill', orig.fillAttr);
+    else t.removeAttribute('fill');
+  });
+  node.htmlEls.forEach((h, i) => {
+    const orig = node.origHtmlStyles[i];
+    if (!orig) return;
+    h.style.color = orig.color;
+    h.style.fontWeight = orig.fontWeight;
+  });
+}
+
+/**
+ * Applies or cleanly clears Callflow path spotlighting directly on the mounted SVG DOM
+ * in <1-2ms with zero XML parsing or DOM replacement.
+ */
+export function applyLiveSpotlightToDom(
+  index: LiveSvgDomIndex,
+  trace: CallflowTraceResult | null,
+  canvasSurface: 'dark' | 'light',
+  directionFilter: CallflowDirectionFilter = 'both',
+  hopDepth: CallflowHopDepth = 'all'
+): void {
+  if (!trace) {
+    // Restore original Smart Logic colors & full opacity cleanly
+    index.nodes.forEach((node) => {
+      node.groupEl.style.opacity = '';
+      restoreNodeOriginalStyles(node);
+    });
+
+    index.allEdges.forEach((edge) => {
+      edge.edgeEl.style.opacity = edge.origOpacity;
+      if (edge.labelEl) {
+        edge.labelEl.style.opacity = edge.origLabelOpacity;
+      }
+      edge.paths.forEach((p) => {
+        p.pathEl.style.stroke = p.origStyleStroke;
+        p.pathEl.style.strokeWidth = p.origStyleStrokeWidth;
+        p.pathEl.style.strokeDasharray = p.origStyleDasharray;
+        if (p.origStrokeAttr !== null) p.pathEl.setAttribute('stroke', p.origStrokeAttr);
+        else p.pathEl.removeAttribute('stroke');
+      });
+    });
+
+    index.clusters.forEach((cl) => {
+      cl.style.opacity = '';
+    });
+    return;
+  }
+
+  const isDark = canvasSurface === 'dark';
+  const { visibleNodeIds, visibleEdges, cycleEdgeKeys } = getFilteredTraceSubset(
+    trace,
+    directionFilter,
+    hopDepth
+  );
+
+  const visibleEdgeKeySet = new Set(visibleEdges.map((e) => `${e.from}->${e.to}`));
+  const terminalIdSet = new Set(trace.terminalPoints.map((t) => t.id));
+
+  index.nodes.forEach((node) => {
+    const matchedId = node.nodeId;
+    if (!visibleNodeIds.has(matchedId)) {
+      node.groupEl.style.opacity = '0.12';
+      restoreNodeOriginalStyles(node);
+      return;
+    }
+
+    node.groupEl.style.opacity = '1';
+
+    let fill = isDark ? '#1e1b4b' : '#e0e7ff';
+    let border = isDark ? '#818cf8' : '#4f46e5';
+    let text = isDark ? '#ffffff' : '#0f172a';
+    let strokeWidth = '2.5px';
+
+    if (matchedId === trace.selectedNode.id) {
+      fill = isDark ? '#78350f' : '#fef3c7';
+      border = isDark ? '#fbbf24' : '#d97706';
+      text = isDark ? '#fffbeb' : '#78350f';
+      strokeWidth = '3.5px';
+    } else if (trace.upstreamNodeIds.has(matchedId)) {
+      fill = isDark ? '#0c4a6e' : '#e0f2fe';
+      border = isDark ? '#38bdf8' : '#0284c7';
+      text = isDark ? '#f0f9ff' : '#0c4a6e';
+    } else if (terminalIdSet.has(matchedId)) {
+      fill = isDark ? '#881337' : '#ffe4e6';
+      border = isDark ? '#fb7185' : '#e11d48';
+      text = isDark ? '#fff1f2' : '#881337';
+    } else if (trace.downstreamNodeIds.has(matchedId)) {
+      fill = isDark ? '#064e3b' : '#d1fae5';
+      border = isDark ? '#34d399' : '#059669';
+      text = isDark ? '#ecfdf5' : '#064e3b';
+    }
+
+    node.shapeEls.forEach((shape) => {
+      shape.style.fill = fill;
+      shape.style.stroke = border;
+      shape.style.strokeWidth = strokeWidth;
+      shape.setAttribute('fill', fill);
+      shape.setAttribute('stroke', border);
+    });
+    node.textEls.forEach((el) => {
+      el.style.fill = text;
+      el.setAttribute('fill', text);
+    });
+    node.htmlEls.forEach((el) => {
+      el.style.color = text;
+      el.style.fontWeight = '700';
+    });
+  });
+
+  index.allEdges.forEach((edge) => {
+    const edgeKey = `${edge.from}->${edge.to}`;
+    const isEdgeOnActivePath = visibleEdgeKeySet.has(edgeKey);
+    const isCycleEdge = isEdgeOnActivePath && cycleEdgeKeys.has(edgeKey);
+
+    if (isEdgeOnActivePath) {
+      edge.edgeEl.style.opacity = '1';
+      if (edge.labelEl) edge.labelEl.style.opacity = '1';
+      const activeStroke = isCycleEdge
+        ? isDark
+          ? '#fb7185'
+          : '#e11d48'
+        : directionFilter === 'downstream'
+        ? isDark
+          ? '#34d399'
+          : '#059669'
+        : isDark
+        ? '#38bdf8'
+        : '#0284c7';
+      edge.paths.forEach((p) => {
+        p.pathEl.style.stroke = activeStroke;
+        p.pathEl.style.strokeWidth = '3px';
+        p.pathEl.setAttribute('stroke', activeStroke);
+        p.pathEl.style.strokeDasharray = isCycleEdge ? '6 4' : p.origStyleDasharray;
+      });
+    } else {
+      edge.edgeEl.style.opacity = '0.12';
+      if (edge.labelEl) edge.labelEl.style.opacity = '0.12';
+      edge.paths.forEach((p) => {
+        p.pathEl.style.stroke = p.origStyleStroke;
+        p.pathEl.style.strokeWidth = p.origStyleStrokeWidth;
+        p.pathEl.style.strokeDasharray = p.origStyleDasharray;
+        if (p.origStrokeAttr !== null) p.pathEl.setAttribute('stroke', p.origStrokeAttr);
+        else p.pathEl.removeAttribute('stroke');
+      });
+    }
+  });
+
+  index.clusters.forEach((cl) => {
+    cl.style.opacity = '0.35';
+  });
 }
 
 /**

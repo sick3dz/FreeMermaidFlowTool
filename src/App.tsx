@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -75,12 +75,17 @@ import {
 } from './utils/smartColorEngine';
 import {
   applyCallflowSpotlightToSvg,
+  applyLiveNodeOffsetsToDom,
+  applyLiveSpotlightToDom,
   applyNodeOffsetsToSvg,
   buildIsolatedPathMermaidCode,
+  buildLiveSvgDomIndex,
   generateInteractiveCallflowHtml,
   InteractiveCallflowHtmlView,
+  LiveSvgDomIndex,
   parseCallflowGraph,
   resolveClickedNodeIdFromSvgElement,
+  shiftLiveConnectedEdgesForDrag,
   traceCallflowForNode,
 } from './utils/callflowEngine';
 import {
@@ -164,6 +169,21 @@ const CLARITY_MODE_OPTIONS: Array<{
     hint: 'Einheitliche Standard-Farbgebung ohne automatische Logik-Differenzierung',
   },
 ];
+
+const DRAG_THRESHOLD_PX = 7;
+
+const MemoizedSvgStage = React.memo(
+  React.forwardRef<HTMLDivElement, { svgHtml: string }>(({ svgHtml }, ref) => (
+    <div
+      ref={ref}
+      style={{ transformOrigin: 'center center' }}
+      className="mermaid-canvas-stage shrink-0 p-4 sm:p-8"
+      dangerouslySetInnerHTML={{ __html: svgHtml }}
+    />
+  )),
+  (prev, next) => prev.svgHtml === next.svgHtml
+);
+MemoizedSvgStage.displayName = 'MemoizedSvgStage';
 
 export default function App() {
   // Initial state starts empty (or restores user's own workspace from localStorage / offline seed)
@@ -335,7 +355,8 @@ export default function App() {
   );
   const pendingAutoFitRef = useRef<boolean>(scriptWorkspace.modules.length > 0);
   const [visualEditTool, setVisualEditTool] = useState<'move' | 'connect'>('move');
-  const [snapToGrid, setSnapToGrid] = useState<boolean>(true);
+  // Continuous dragging by default (stufenlos), optional 16px raster toggle in toolbar
+  const [snapToGrid, setSnapToGrid] = useState<boolean>(false);
   const [standaloneNodeOffsets, setStandaloneNodeOffsets] = useState<
     Record<string, NodePositionOffset>
   >({});
@@ -405,17 +426,34 @@ export default function App() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
+  const stageElRef = useRef<HTMLDivElement | null>(null);
+  const liveSvgIndexRef = useRef<LiveSvgDomIndex | null>(null);
+  const wireLineRef = useRef<SVGLineElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const cameraRef = useRef<{ zoom: number; panX: number; panY: number }>({
+    zoom: 1,
+    panX: 0,
+    panY: 0,
+  });
+  const cameraRafRef = useRef<number | null>(null);
+  const wheelSyncTimerRef = useRef<number | null>(null);
+  const dragMoveRafRef = useRef<number | null>(null);
+  const isPanningRef = useRef<boolean>(false);
+  const panMouseStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const activeNodeOffsetsRef = useRef<Record<string, NodePositionOffset>>({});
 
-  // Persist active work to localStorage (or memory fallback)
+  // Debounced persistence to localStorage (avoids blocking frame commits during drag/pan/typing)
   useEffect(() => {
-    writeStudioStorage(STORAGE_KEYS.ACTIVE_CODE, code);
-    writeStudioStorage(STORAGE_KEYS.ACTIVE_TITLE, diagramTitle);
-    writeStudioStorage(STORAGE_KEYS.ACTIVE_THEME, JSON.stringify(themeConfig));
-    writeStudioStorage(STORAGE_KEYS.SMART_COLOR_MODE, smartColorMode);
-    writeStudioStorage(STORAGE_KEYS.CANVAS_SURFACE, canvasSurface);
-    writeStudioStorage(STORAGE_KEYS.SCRIPT_WORKSPACE, JSON.stringify(scriptWorkspace));
-    writeStudioStorage(STORAGE_KEYS.WORKSPACE_MODE, workspaceMode);
+    const timer = window.setTimeout(() => {
+      writeStudioStorage(STORAGE_KEYS.ACTIVE_CODE, code);
+      writeStudioStorage(STORAGE_KEYS.ACTIVE_TITLE, diagramTitle);
+      writeStudioStorage(STORAGE_KEYS.ACTIVE_THEME, JSON.stringify(themeConfig));
+      writeStudioStorage(STORAGE_KEYS.SMART_COLOR_MODE, smartColorMode);
+      writeStudioStorage(STORAGE_KEYS.CANVAS_SURFACE, canvasSurface);
+      writeStudioStorage(STORAGE_KEYS.SCRIPT_WORKSPACE, JSON.stringify(scriptWorkspace));
+      writeStudioStorage(STORAGE_KEYS.WORKSPACE_MODE, workspaceMode);
+    }, 350);
+    return () => window.clearTimeout(timer);
   }, [code, diagramTitle, themeConfig, smartColorMode, canvasSurface, scriptWorkspace, workspaceMode]);
 
   const handleChangeWorkspaceMode = useCallback((nextMode: 'guided' | 'free') => {
@@ -576,16 +614,16 @@ export default function App() {
     [activeNodeOffsets]
   );
 
-  // Apply Smart Logic Coloring, Callflow Path Spotlight, AND PC Drag-and-Drop Node Offsets
-  const { coloredSvg, unfilteredColoredSvg, logicSummary } = useMemo<{
-    coloredSvg: string | null;
-    unfilteredColoredSvg: string | null;
+  activeNodeOffsetsRef.current = activeNodeOffsets;
+
+  // Base Smart Logic Coloring (cached independently from Selection, Pan, Zoom & Node Offsets!)
+  const { baseColoredSvg, logicSummary } = useMemo<{
+    baseColoredSvg: string | null;
     logicSummary: LogicAnalysisSummary;
   }>(() => {
     if (!baseRenderedSvg) {
       return {
-        coloredSvg: null,
-        unfilteredColoredSvg: null,
+        baseColoredSvg: null,
         logicSummary: {
           activeMode: smartColorMode,
           recommendedMode: 'semantic',
@@ -607,35 +645,8 @@ export default function App() {
       themeConfig.lineColor
     );
 
-    // If a Callflow node is selected and we are in full diagram view, apply Spotlight dimming/highlighting
-    const spotlightSvg =
-      callflowTrace && !isolateSubgraphMode
-        ? applyCallflowSpotlightToSvg(
-            processed.svg,
-            callflowTrace,
-            canvasSurface,
-            callflowGraph,
-            callflowDirectionFilter,
-            callflowHopDepth
-          )
-        : processed.svg;
-
-    const finalCanvasSvg = applyNodeOffsetsToSvg(
-      spotlightSvg,
-      activeNodeOffsets,
-      callflowGraph,
-      isVisualEditMode
-    );
-    const finalExportSvg = applyNodeOffsetsToSvg(
-      processed.svg,
-      activeNodeOffsets,
-      callflowGraph,
-      false
-    );
-
     return {
-      coloredSvg: finalCanvasSvg,
-      unfilteredColoredSvg: finalExportSvg,
+      baseColoredSvg: processed.svg,
       logicSummary: processed.summary,
     };
   }, [
@@ -644,14 +655,108 @@ export default function App() {
     smartColorMode,
     canvasSurface,
     themeConfig.lineColor,
-    callflowTrace,
-    isolateSubgraphMode,
-    callflowGraph,
-    callflowDirectionFilter,
-    callflowHopDepth,
-    activeNodeOffsets,
-    isVisualEditMode,
   ]);
+
+  // Alias for canvas presence checks & intrinsic dimensions (without re-serializing on drag/select)
+  const coloredSvg = baseColoredSvg;
+
+  // Build full export SVG string only on-demand (Export buttons & Modal), keeping interactive PC frame rate at 60fps
+  const buildExportSvgSnapshot = useCallback(
+    (includeSpotlight: boolean): string | null => {
+      if (!baseColoredSvg) return null;
+      const withSpotlight =
+        includeSpotlight && callflowTrace && !isolateSubgraphMode
+          ? applyCallflowSpotlightToSvg(
+              baseColoredSvg,
+              callflowTrace,
+              canvasSurface,
+              callflowGraph,
+              callflowDirectionFilter,
+              callflowHopDepth
+            )
+          : baseColoredSvg;
+      return applyNodeOffsetsToSvg(withSpotlight, activeNodeOffsets, callflowGraph, false);
+    },
+    [
+      baseColoredSvg,
+      callflowTrace,
+      isolateSubgraphMode,
+      canvasSurface,
+      callflowGraph,
+      callflowDirectionFilter,
+      callflowHopDepth,
+      activeNodeOffsets,
+    ]
+  );
+
+  // Mount-once SVG DOM indexer: enables <2ms in-place Spotlight & 60fps Live Edge Dragging
+  useLayoutEffect(() => {
+    const stageEl = stageElRef.current;
+    if (!baseColoredSvg || !stageEl) {
+      liveSvgIndexRef.current = null;
+      return;
+    }
+    const svgEl = stageEl.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) {
+      liveSvgIndexRef.current = null;
+      return;
+    }
+    const index = buildLiveSvgDomIndex(svgEl, callflowGraph);
+    liveSvgIndexRef.current = index;
+    stageEl.style.transform = `translate3d(${cameraRef.current.panX}px, ${cameraRef.current.panY}px, 0) scale(${cameraRef.current.zoom})`;
+
+    // Apply active spotlight & offsets immediately before paint
+    applyLiveSpotlightToDom(
+      index,
+      callflowTrace && !isolateSubgraphMode ? callflowTrace : null,
+      canvasSurface,
+      callflowDirectionFilter,
+      callflowHopDepth
+    );
+    applyLiveNodeOffsetsToDom(index, activeNodeOffsets, isVisualEditMode);
+  }, [baseColoredSvg, callflowGraph]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fast-path: update Spotlight in-place on selection/filter changes (zero SVG rebuild)
+  useLayoutEffect(() => {
+    const index = liveSvgIndexRef.current;
+    if (!index) return;
+    applyLiveSpotlightToDom(
+      index,
+      callflowTrace && !isolateSubgraphMode ? callflowTrace : null,
+      canvasSurface,
+      callflowDirectionFilter,
+      callflowHopDepth
+    );
+  }, [callflowTrace, isolateSubgraphMode, canvasSurface, callflowDirectionFilter, callflowHopDepth]);
+
+  // Fast-path: update Node Offsets & Connection Ports in-place (zero SVG rebuild)
+  useLayoutEffect(() => {
+    const index = liveSvgIndexRef.current;
+    if (!index) return;
+    applyLiveNodeOffsetsToDom(index, activeNodeOffsets, isVisualEditMode);
+  }, [activeNodeOffsets, isVisualEditMode]);
+
+  // Global Escape handler to reliably deselect node / close active wire / clear isolated filter
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (nodeDragRef.current.active && nodeDragRef.current.mode === 'connect-wire') {
+        nodeDragRef.current.active = false;
+        setActiveWirePreview(null);
+        return;
+      }
+      if (editingNodeSnapshot) {
+        setEditingNodeSnapshot(null);
+        return;
+      }
+      if (selectedCallflowNodeId || isolateSubgraphMode) {
+        setSelectedCallflowNodeId(null);
+        setIsolateSubgraphMode(false);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [editingNodeSnapshot, selectedCallflowNodeId, isolateSubgraphMode]);
 
   // Keep diagram line/theme contrast synced when toggling Dark/Light canvas surface
   const handleChangeCanvasSurface = useCallback((nextSurface: 'dark' | 'light') => {
@@ -775,9 +880,29 @@ export default function App() {
     });
   };
 
+  // Apply GPU transform directly to canvas stage at 60fps without React re-renders
+  const applyCameraToDom = useCallback(
+    (panX: number, panY: number, z: number, activeGesture: boolean) => {
+      cameraRef.current = { zoom: z, panX, panY };
+      const stage = stageElRef.current;
+      if (stage) {
+        stage.style.willChange = activeGesture ? 'transform' : 'auto';
+        stage.style.transform = `translate3d(${panX}px, ${panY}px, 0) scale(${z})`;
+      }
+    },
+    []
+  );
+
+  // Sync React camera state when programmatic zoom/pan buttons or resets run
+  useLayoutEffect(() => {
+    if (isPanningRef.current) return;
+    applyCameraToDom(pan.x, pan.y, zoom, false);
+  }, [pan.x, pan.y, zoom, applyCameraToDom]);
+
   // Fit entire diagram into viewport (overview)
   const handleFitToViewport = useCallback(() => {
     if (!coloredSvg || !canvasViewportRef.current) {
+      applyCameraToDom(0, 0, 1, false);
       setZoom(1);
       setPan({ x: 0, y: 0 });
       return;
@@ -787,10 +912,11 @@ export default function App() {
     const padding = rect.width < 640 ? 32 : 80;
     const scaleX = Math.max(100, rect.width - padding) / Math.max(1, dims.width);
     const scaleY = Math.max(100, rect.height - padding) / Math.max(1, dims.height);
-    const optimalScale = Math.min(2.5, Math.max(0.05, Math.min(scaleX, scaleY)));
-    setZoom(Number(optimalScale.toFixed(2)));
+    const optimalScale = Number(Math.min(2.5, Math.max(0.05, Math.min(scaleX, scaleY))).toFixed(2));
+    applyCameraToDom(0, 0, optimalScale, false);
+    setZoom(optimalScale);
     setPan({ x: 0, y: 0 });
-  }, [coloredSvg]);
+  }, [coloredSvg, applyCameraToDom]);
 
   // Automatically center & fit the Master diagram as soon as its SVG renders after loading/switching
   useEffect(() => {
@@ -812,15 +938,18 @@ export default function App() {
         const vpCenterX = vpRect.left + vpRect.width / 2;
         const vpCenterY = vpRect.top + vpRect.height / 2;
 
-        const candidates = canvasViewportRef.current.querySelectorAll(
-          'g.node, g.actor, g.statediagram-state, g.classGroup'
-        );
-        let targetEl: Element | null = null;
-        for (const el of Array.from(candidates)) {
-          const matched = resolveClickedNodeIdFromSvgElement(el, callflowGraph);
-          if (matched === nodeId) {
-            targetEl = el;
-            break;
+        const liveNodeEl = liveSvgIndexRef.current?.nodes.get(nodeId)?.groupEl || null;
+        let targetEl: Element | null = liveNodeEl;
+        if (!targetEl) {
+          const candidates = canvasViewportRef.current.querySelectorAll(
+            'g.node, g.actor, g.statediagram-state, g.classGroup'
+          );
+          for (const el of Array.from(candidates)) {
+            const matched = resolveClickedNodeIdFromSvgElement(el, callflowGraph);
+            if (matched === nodeId) {
+              targetEl = el;
+              break;
+            }
           }
         }
 
@@ -830,26 +959,26 @@ export default function App() {
         const nodeCenterX = nodeRect.left + nodeRect.width / 2;
         const nodeCenterY = nodeRect.top + nodeRect.height / 2;
 
-        // Calculate unscaled (1:1) offset of the node relative to the stage center
-        const currentStageCenterX = vpCenterX + pan.x;
-        const currentStageCenterY = vpCenterY + pan.y;
-        const unscaledOffsetX = (nodeCenterX - currentStageCenterX) / Math.max(0.05, zoom);
-        const unscaledOffsetY = (nodeCenterY - currentStageCenterY) / Math.max(0.05, zoom);
+        const curCam = cameraRef.current;
+        const currentStageCenterX = vpCenterX + curCam.panX;
+        const currentStageCenterY = vpCenterY + curCam.panY;
+        const unscaledOffsetX = (nodeCenterX - currentStageCenterX) / Math.max(0.05, curCam.zoom);
+        const unscaledOffsetY = (nodeCenterY - currentStageCenterY) / Math.max(0.05, curCam.zoom);
 
         const nextZoom = Number(
-          Math.min(20.0, Math.max(desiredMinZoom, zoom < 0.95 ? 1.25 : zoom)).toFixed(2)
+          Math.min(20.0, Math.max(desiredMinZoom, curCam.zoom < 0.95 ? 1.25 : curCam.zoom)).toFixed(2)
         );
+        const nextPanX = Math.round(-unscaledOffsetX * nextZoom);
+        const nextPanY = Math.round(-unscaledOffsetY * nextZoom);
+        applyCameraToDom(nextPanX, nextPanY, nextZoom, false);
         setZoom(nextZoom);
-        setPan({
-          x: Math.round(-unscaledOffsetX * nextZoom),
-          y: Math.round(-unscaledOffsetY * nextZoom),
-        });
+        setPan({ x: nextPanX, y: nextPanY });
       });
     },
-    [callflowGraph, pan.x, pan.y, zoom]
+    [callflowGraph, applyCameraToDom]
   );
 
-  // Cursor-centered Canvas Wheel Zoom (5% up to 2000%)
+  // Cursor-centered Canvas Wheel Zoom (5% up to 2000%) — 60fps direct transform, debounced UI sync
   const handleCanvasWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     e.preventDefault();
     if (!canvasViewportRef.current) return;
@@ -858,24 +987,48 @@ export default function App() {
     const cursorOffsetX = e.clientX - (rect.left + rect.width / 2);
     const cursorOffsetY = e.clientY - (rect.top + rect.height / 2);
 
+    const curCam = cameraRef.current;
     const factor = e.deltaY < 0 ? 1.16 : 0.86;
-    const nextZoom = Math.min(20.0, Math.max(0.05, Number((zoom * factor).toFixed(2))));
-    const scaleRatio = nextZoom / Math.max(0.05, zoom);
+    const nextZoom = Math.min(20.0, Math.max(0.05, Number((curCam.zoom * factor).toFixed(2))));
+    const scaleRatio = nextZoom / Math.max(0.05, curCam.zoom);
 
-    setPan((prevPan) => ({
-      x: Math.round(cursorOffsetX - (cursorOffsetX - prevPan.x) * scaleRatio),
-      y: Math.round(cursorOffsetY - (cursorOffsetY - prevPan.y) * scaleRatio),
-    }));
-    setZoom(nextZoom);
+    const nextPanX = Math.round(cursorOffsetX - (cursorOffsetX - curCam.panX) * scaleRatio);
+    const nextPanY = Math.round(cursorOffsetY - (cursorOffsetY - curCam.panY) * scaleRatio);
+
+    cameraRef.current = { zoom: nextZoom, panX: nextPanX, panY: nextPanY };
+    if (cameraRafRef.current === null) {
+      cameraRafRef.current = requestAnimationFrame(() => {
+        cameraRafRef.current = null;
+        const cam = cameraRef.current;
+        applyCameraToDom(cam.panX, cam.panY, cam.zoom, true);
+      });
+    }
+
+    if (wheelSyncTimerRef.current !== null) {
+      window.clearTimeout(wheelSyncTimerRef.current);
+    }
+    wheelSyncTimerRef.current = window.setTimeout(() => {
+      wheelSyncTimerRef.current = null;
+      const cam = cameraRef.current;
+      applyCameraToDom(cam.panX, cam.panY, cam.zoom, false);
+      setZoom(cam.zoom);
+      setPan({ x: cam.panX, y: cam.panY });
+    }, 110);
   };
 
   // Adaptive step zoom in/out for toolbar buttons
   const handleStepZoom = (direction: 'in' | 'out') => {
-    setZoom((prev) => {
-      const step = prev < 0.5 ? 0.1 : prev < 2.0 ? 0.25 : prev < 5.0 ? 0.5 : 1.5;
-      const next = direction === 'in' ? prev + step : prev - step;
-      return Math.min(20.0, Math.max(0.05, Number(next.toFixed(2))));
-    });
+    if (wheelSyncTimerRef.current !== null) {
+      window.clearTimeout(wheelSyncTimerRef.current);
+      wheelSyncTimerRef.current = null;
+    }
+    const cur = cameraRef.current;
+    const step = cur.zoom < 0.5 ? 0.1 : cur.zoom < 2.0 ? 0.25 : cur.zoom < 5.0 ? 0.5 : 1.5;
+    const next = direction === 'in' ? cur.zoom + step : cur.zoom - step;
+    const clamped = Math.min(20.0, Math.max(0.05, Number(next.toFixed(2))));
+    applyCameraToDom(cur.panX, cur.panY, clamped, false);
+    setPan({ x: cur.panX, y: cur.panY });
+    setZoom(clamped);
   };
 
   const isCanvasOverlayTarget = (target: EventTarget | null): boolean => {
@@ -949,7 +1102,26 @@ export default function App() {
     [scriptWorkspace, callflowViewLevel, callflowGraph]
   );
 
-  // Canvas Mouse Drag Pan + Visual Node Drag & Wire Connect + Click-to-Trace Node Detection
+  const toggleNodeSelectionClean = useCallback(
+    (nodeId: string) => {
+      setSelectedCallflowNodeId((prev) => {
+        const next = prev === nodeId ? null : nodeId;
+        if (next) {
+          setRightSidebarTab('callflow');
+          setIsRightPanelOpen(true);
+          if (workspaceMode === 'guided' && scriptWorkspace.modules.length > 0 && guidedStep === 1) {
+            setGuidedStep(2);
+          }
+        } else {
+          setIsolateSubgraphMode(false);
+        }
+        return next;
+      });
+    },
+    [workspaceMode, scriptWorkspace.modules.length, guidedStep]
+  );
+
+  // Canvas Mouse Drag Pan + Visual Node Drag with Live Edges + Wire Connect + Click/Deselect
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     // Ignore synthetic mouse events generated by mobile browsers right after touch events
     if (Date.now() - lastTouchTimeRef.current < 700) return;
@@ -964,6 +1136,8 @@ export default function App() {
     const wireSourceNodeId =
       portEl?.getAttribute('data-port-node-id') ||
       (isVisualEditMode && visualEditTool === 'connect' ? clickedNodeId : null);
+
+    let startedInteraction: 'none' | 'connect-wire' | 'move-node' | 'pan' = 'none';
 
     if (wireSourceNodeId && canvasViewportRef.current) {
       e.stopPropagation();
@@ -999,26 +1173,29 @@ export default function App() {
         curY: startY,
         hoverTargetNodeId: null,
       });
-      return;
-    }
-
-    // 2. Check if starting a 60fps Node Move Drag on PC when isVisualEditMode is active
-    if (isVisualEditMode && visualEditTool === 'move' && clickedNodeId) {
-      const domGroup = targetEl.closest(
-        'g.node, g.actor, g.statediagram-state, g.classGroup'
-      ) as SVGGElement | null;
+      startedInteraction = 'connect-wire';
+    } else if (isVisualEditMode && visualEditTool === 'move' && clickedNodeId) {
+      // 2. Prepare 60fps Node Move Drag (actual DOM movement waits until DRAG_THRESHOLD_PX)
+      const liveNode = liveSvgIndexRef.current?.nodes.get(clickedNodeId);
+      const domGroup =
+        liveNode?.groupEl ||
+        (targetEl.closest('g.node, g.actor, g.statediagram-state, g.classGroup') as SVGGElement | null);
       if (domGroup) {
-        const currentOff = activeNodeOffsets[clickedNodeId] || { dx: 0, dy: 0 };
-        const rawTransform = domGroup.getAttribute('transform') || '';
-        const trMatch = rawTransform.match(
-          /translate\(\s*([+-]?\d+(?:\.\d+)?)(?:[\s,]+([+-]?\d+(?:\.\d+)?))?\s*\)/i
-        );
-        const curTx = trMatch ? parseFloat(trMatch[1] || '0') : 0;
-        const curTy = trMatch ? parseFloat(trMatch[2] || '0') : 0;
-        const restTransform = trMatch ? rawTransform.replace(trMatch[0], '').trim() : rawTransform;
-        // Base SVG layout coordinate before offset
-        const baseX = curTx - currentOff.dx;
-        const baseY = curTy - currentOff.dy;
+        const currentOff = activeNodeOffsetsRef.current[clickedNodeId] || { dx: 0, dy: 0 };
+        let baseX = liveNode?.baseTx ?? 0;
+        let baseY = liveNode?.baseTy ?? 0;
+        let restTransform = liveNode?.restTransform ?? '';
+        if (!liveNode) {
+          const rawTransform = domGroup.getAttribute('transform') || '';
+          const trMatch = rawTransform.match(
+            /translate\(\s*([+-]?\d+(?:\.\d+)?)(?:[\s,]+([+-]?\d+(?:\.\d+)?))?\s*\)/i
+          );
+          const curTx = trMatch ? parseFloat(trMatch[1] || '0') : 0;
+          const curTy = trMatch ? parseFloat(trMatch[2] || '0') : 0;
+          restTransform = trMatch ? rawTransform.replace(trMatch[0], '').trim() : rawTransform;
+          baseX = curTx - currentOff.dx;
+          baseY = curTy - currentOff.dy;
+        }
 
         nodeDragRef.current = {
           active: true,
@@ -1038,163 +1215,214 @@ export default function App() {
           wireStartX: 0,
           wireStartY: 0,
         };
-        return;
+        startedInteraction = 'move-node';
       }
     }
 
-    setIsPanning(true);
-    dragDistanceRef.current = 0;
-    panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
-  };
-
-  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (Date.now() - lastTouchTimeRef.current < 700) return;
-
-    if (nodeDragRef.current.active) {
-      const st = nodeDragRef.current;
-      const rawPixelDx = e.clientX - st.startClientX;
-      const rawPixelDy = e.clientY - st.startClientY;
-      st.movedPixels = Math.max(st.movedPixels, Math.hypot(rawPixelDx, rawPixelDy));
-
-      if (st.mode === 'connect-wire' && canvasViewportRef.current) {
-        const vpRect = canvasViewportRef.current.getBoundingClientRect();
-        const curX = e.clientX - vpRect.left;
-        const curY = e.clientY - vpRect.top;
-        const hoveredId = resolveClickedNodeIdFromSvgElement(
-          e.target as Element,
-          callflowGraph
-        );
-        setActiveWirePreview((prev) =>
-          prev
-            ? {
-                ...prev,
-                curX,
-                curY,
-                hoverTargetNodeId:
-                  hoveredId && hoveredId !== st.nodeId ? hoveredId : null,
-              }
-            : null
-        );
-        return;
-      }
-
-      if (st.mode === 'move-node' && st.domNodeGroup) {
-        const unscaledDx = rawPixelDx / Math.max(0.05, zoom);
-        const unscaledDy = rawPixelDy / Math.max(0.05, zoom);
-        let nextDx = st.origDx + unscaledDx;
-        let nextDy = st.origDy + unscaledDy;
-        if (snapToGrid) {
-          nextDx = Math.round(nextDx / 16) * 16;
-          nextDy = Math.round(nextDy / 16) * 16;
-        }
-        st.currentDx = nextDx;
-        st.currentDy = nextDy;
-        const nextTx = Number((st.baseTransformX + nextDx).toFixed(2));
-        const nextTy = Number((st.baseTransformY + nextDy).toFixed(2));
-        st.domNodeGroup.setAttribute(
-          'transform',
-          `translate(${nextTx}, ${nextTy})${
-            st.baseTransformRest ? ` ${st.baseTransformRest}` : ''
-          }`
-        );
-        return;
-      }
+    if (startedInteraction === 'none') {
+      isPanningRef.current = true;
+      setIsPanning(true);
+      dragDistanceRef.current = 0;
+      panMouseStartRef.current = { x: e.clientX, y: e.clientY };
+      panStartRef.current = {
+        x: e.clientX - cameraRef.current.panX,
+        y: e.clientY - cameraRef.current.panY,
+      };
+      startedInteraction = 'pan';
     }
 
-    if (!isPanning) return;
-    const nextX = e.clientX - panStartRef.current.x;
-    const nextY = e.clientY - panStartRef.current.y;
-    dragDistanceRef.current += Math.hypot(nextX - pan.x, nextY - pan.y);
-    setPan({ x: nextX, y: nextY });
-  };
+    // Attach global window listeners so fast cursor movement past viewport bounds never breaks dragging
+    const handleWindowMouseMove = (ev: MouseEvent) => {
+      if (nodeDragRef.current.active) {
+        const st = nodeDragRef.current;
+        const rawPixelDx = ev.clientX - st.startClientX;
+        const rawPixelDy = ev.clientY - st.startClientY;
+        st.movedPixels = Math.max(st.movedPixels, Math.hypot(rawPixelDx, rawPixelDy));
 
-  const handleCanvasMouseUp = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (Date.now() - lastTouchTimeRef.current < 700) {
-      setIsPanning(false);
-      nodeDragRef.current.active = false;
-      setActiveWirePreview(null);
-      return;
-    }
-
-    if (nodeDragRef.current.active) {
-      const st = nodeDragRef.current;
-      nodeDragRef.current.active = false;
-
-      if (st.mode === 'connect-wire') {
-        const targetNodeId = resolveClickedNodeIdFromSvgElement(
-          e.target as Element,
-          callflowGraph
-        );
-        setActiveWirePreview(null);
-        if (targetNodeId && targetNodeId !== st.nodeId) {
-          const fromLabel = callflowGraph.nodes.get(st.nodeId)?.label || st.nodeId;
-          const toLabel = callflowGraph.nodes.get(targetNodeId)?.label || targetNodeId;
-          if (scriptWorkspace.modules.length > 0) {
-            const nextWs = connectNodesInWorkspace(
-              scriptWorkspace,
-              callflowViewLevel,
-              st.nodeId,
-              targetNodeId,
-              ''
-            );
-            setScriptWorkspace(nextWs);
-            refreshDiagramFromWorkspace(nextWs);
-          } else {
-            // Raw Mermaid diagram fallback: append edge line
-            skipAutoConvertRef.current = true;
-            setCode((prev) => `${prev.trimEnd()}\n    ${st.nodeId} --> ${targetNodeId}\n`);
+        if (st.mode === 'connect-wire' && canvasViewportRef.current) {
+          const vpRect = canvasViewportRef.current.getBoundingClientRect();
+          const curX = ev.clientX - vpRect.left;
+          const curY = ev.clientY - vpRect.top;
+          if (wireLineRef.current) {
+            wireLineRef.current.setAttribute('x2', String(curX));
+            wireLineRef.current.setAttribute('y2', String(curY));
           }
-          setRecentConnectionBanner({
-            fromNodeId: st.nodeId,
-            toNodeId: targetNodeId,
-            fromLabel,
-            toLabel,
-            labelDraft: '',
-          });
-        }
-        return;
-      }
-
-      if (st.mode === 'move-node') {
-        if (st.movedPixels >= 4) {
-          commitNodePositionOffset(st.nodeId, {
-            dx: st.currentDx,
-            dy: st.currentDy,
-          });
-          setSelectedCallflowNodeId(st.nodeId);
-        } else {
-          // Treat as a regular click on the node -> spotlight path & show filtered Checklist
-          setSelectedCallflowNodeId((prev) =>
-            prev === st.nodeId ? null : st.nodeId
+          const elAtCursor = document.elementFromPoint(ev.clientX, ev.clientY);
+          const hoveredId = resolveClickedNodeIdFromSvgElement(elAtCursor, callflowGraph);
+          const nextHover = hoveredId && hoveredId !== st.nodeId ? hoveredId : null;
+          setActiveWirePreview((prev) =>
+            prev && prev.hoverTargetNodeId !== nextHover
+              ? { ...prev, curX, curY, hoverTargetNodeId: nextHover }
+              : prev
           );
-          setRightSidebarTab('callflow');
-          setIsRightPanelOpen(true);
-          if (workspaceMode === 'guided' && scriptWorkspace.modules.length > 0 && guidedStep === 1) {
-            setGuidedStep(2);
+          return;
+        }
+
+        if (st.mode === 'move-node' && st.domNodeGroup) {
+          if (st.movedPixels < DRAG_THRESHOLD_PX) return;
+          const curZoom = Math.max(0.05, cameraRef.current.zoom);
+          const unscaledDx = rawPixelDx / curZoom;
+          const unscaledDy = rawPixelDy / curZoom;
+          let nextDx = st.origDx + unscaledDx;
+          let nextDy = st.origDy + unscaledDy;
+          if (snapToGrid) {
+            nextDx = Math.round(nextDx / 16) * 16;
+            nextDy = Math.round(nextDy / 16) * 16;
           }
+          st.currentDx = nextDx;
+          st.currentDy = nextDy;
+
+          if (dragMoveRafRef.current === null) {
+            dragMoveRafRef.current = requestAnimationFrame(() => {
+              dragMoveRafRef.current = null;
+              const activeSt = nodeDragRef.current;
+              if (!activeSt.active || activeSt.mode !== 'move-node' || !activeSt.domNodeGroup) {
+                return;
+              }
+              const nextTx = Number((activeSt.baseTransformX + activeSt.currentDx).toFixed(2));
+              const nextTy = Number((activeSt.baseTransformY + activeSt.currentDy).toFixed(2));
+              activeSt.domNodeGroup.setAttribute(
+                'transform',
+                `translate(${nextTx}, ${nextTy})${
+                  activeSt.baseTransformRest ? ` ${activeSt.baseTransformRest}` : ''
+                }`
+              );
+              if (liveSvgIndexRef.current) {
+                shiftLiveConnectedEdgesForDrag(
+                  liveSvgIndexRef.current,
+                  activeSt.nodeId,
+                  { dx: activeSt.currentDx, dy: activeSt.currentDy },
+                  activeNodeOffsetsRef.current
+                );
+              }
+            });
+          }
+          return;
         }
-        return;
       }
-    }
 
-    const wasClick = isPanning && dragDistanceRef.current < 6;
-    setIsPanning(false);
-    if (isCanvasOverlayTarget(e.target)) return;
-
-    if (wasClick) {
-      const clickedId = resolveClickedNodeIdFromSvgElement(
-        e.target as Element,
-        callflowGraph
+      if (!isPanningRef.current) return;
+      const nextX = Math.round(ev.clientX - panStartRef.current.x);
+      const nextY = Math.round(ev.clientY - panStartRef.current.y);
+      dragDistanceRef.current = Math.max(
+        dragDistanceRef.current,
+        Math.hypot(ev.clientX - panMouseStartRef.current.x, ev.clientY - panMouseStartRef.current.y)
       );
-      if (clickedId) {
-        setSelectedCallflowNodeId((prev) => (prev === clickedId ? null : clickedId));
-        setRightSidebarTab('callflow');
-        setIsRightPanelOpen(true);
-        if (workspaceMode === 'guided' && scriptWorkspace.modules.length > 0 && guidedStep === 1) {
-          setGuidedStep(2);
+      cameraRef.current = { ...cameraRef.current, panX: nextX, panY: nextY };
+      if (cameraRafRef.current === null) {
+        cameraRafRef.current = requestAnimationFrame(() => {
+          cameraRafRef.current = null;
+          const cam = cameraRef.current;
+          applyCameraToDom(cam.panX, cam.panY, cam.zoom, true);
+        });
+      }
+    };
+
+    const cleanupListeners = () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+      window.removeEventListener('blur', handleWindowBlur);
+      if (dragMoveRafRef.current !== null) {
+        cancelAnimationFrame(dragMoveRafRef.current);
+        dragMoveRafRef.current = null;
+      }
+      if (cameraRafRef.current !== null) {
+        cancelAnimationFrame(cameraRafRef.current);
+        cameraRafRef.current = null;
+      }
+    };
+
+    const handleWindowBlur = () => {
+      cleanupListeners();
+      nodeDragRef.current.active = false;
+      isPanningRef.current = false;
+      setIsPanning(false);
+      setActiveWirePreview(null);
+      if (liveSvgIndexRef.current) {
+        applyLiveNodeOffsetsToDom(liveSvgIndexRef.current, activeNodeOffsetsRef.current, isVisualEditMode);
+      }
+    };
+
+    const handleWindowMouseUp = (ev: MouseEvent) => {
+      cleanupListeners();
+
+      if (nodeDragRef.current.active) {
+        const st = nodeDragRef.current;
+        nodeDragRef.current.active = false;
+
+        if (st.mode === 'connect-wire') {
+          const dropEl =
+            document.elementFromPoint(ev.clientX, ev.clientY) || (ev.target as Element);
+          const targetNodeId = resolveClickedNodeIdFromSvgElement(dropEl, callflowGraph);
+          setActiveWirePreview(null);
+          if (targetNodeId && targetNodeId !== st.nodeId) {
+            const fromLabel = callflowGraph.nodes.get(st.nodeId)?.label || st.nodeId;
+            const toLabel = callflowGraph.nodes.get(targetNodeId)?.label || targetNodeId;
+            if (scriptWorkspace.modules.length > 0) {
+              const nextWs = connectNodesInWorkspace(
+                scriptWorkspace,
+                callflowViewLevel,
+                st.nodeId,
+                targetNodeId,
+                ''
+              );
+              setScriptWorkspace(nextWs);
+              refreshDiagramFromWorkspace(nextWs);
+            } else {
+              skipAutoConvertRef.current = true;
+              setCode((prev) => `${prev.trimEnd()}\n    ${st.nodeId} --> ${targetNodeId}\n`);
+            }
+            setRecentConnectionBanner({
+              fromNodeId: st.nodeId,
+              toNodeId: targetNodeId,
+              fromLabel,
+              toLabel,
+              labelDraft: '',
+            });
+          }
+          return;
+        }
+
+        if (st.mode === 'move-node') {
+          if (st.movedPixels >= DRAG_THRESHOLD_PX) {
+            commitNodePositionOffset(st.nodeId, {
+              dx: st.currentDx,
+              dy: st.currentDy,
+            });
+          } else if (ev.detail < 2) {
+            toggleNodeSelectionClean(st.nodeId);
+          }
+          return;
         }
       }
-    }
+
+      const wasClick = isPanningRef.current && dragDistanceRef.current < DRAG_THRESHOLD_PX;
+      isPanningRef.current = false;
+      setIsPanning(false);
+      const cam = cameraRef.current;
+      applyCameraToDom(cam.panX, cam.panY, cam.zoom, false);
+      setPan({ x: cam.panX, y: cam.panY });
+
+      const targetAtUp = ev.target instanceof Element ? ev.target : null;
+      if (targetAtUp && isCanvasOverlayTarget(targetAtUp)) return;
+
+      if (wasClick) {
+        const clickedIdAtUp = resolveClickedNodeIdFromSvgElement(targetAtUp, callflowGraph);
+        if (clickedIdAtUp) {
+          if (ev.detail < 2) {
+            toggleNodeSelectionClean(clickedIdAtUp);
+          }
+        } else {
+          // Clicking empty canvas reliably clears selection & isolated path filter
+          setSelectedCallflowNodeId(null);
+          setIsolateSubgraphMode(false);
+        }
+      }
+    };
+
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+    window.addEventListener('blur', handleWindowBlur);
   };
 
   // Multi-Touch Gestures: 1-Finger Pan & 2-Finger Pinch-to-Zoom (up to 2000%)
@@ -1208,6 +1436,7 @@ export default function App() {
     lastTouchTimeRef.current = Date.now();
     if (isCanvasOverlayTarget(e.target) || !coloredSvg) {
       touchGestureRef.current.mode = 'none';
+      isPanningRef.current = false;
       setIsPanning(false);
       return;
     }
@@ -1215,21 +1444,23 @@ export default function App() {
       dragDistanceRef.current = 0;
       touchGestureRef.current = {
         mode: 'pan',
-        startX: e.touches[0].clientX - pan.x,
-        startY: e.touches[0].clientY - pan.y,
+        startX: e.touches[0].clientX - cameraRef.current.panX,
+        startY: e.touches[0].clientY - cameraRef.current.panY,
         initialPinchDistance: 0,
-        initialZoom: zoom,
+        initialZoom: cameraRef.current.zoom,
       };
+      isPanningRef.current = true;
       setIsPanning(true);
     } else if (e.touches.length === 2) {
       const dist = getTouchDistance(e.touches);
       touchGestureRef.current = {
         mode: 'pinch',
-        startX: pan.x,
-        startY: pan.y,
+        startX: cameraRef.current.panX,
+        startY: cameraRef.current.panY,
         initialPinchDistance: Math.max(1, dist),
-        initialZoom: zoom,
+        initialZoom: cameraRef.current.zoom,
       };
+      isPanningRef.current = false;
       setIsPanning(false);
     }
   };
@@ -1238,10 +1469,13 @@ export default function App() {
     lastTouchTimeRef.current = Date.now();
     if (isCanvasOverlayTarget(e.target) || !coloredSvg) return;
     if (touchGestureRef.current.mode === 'pan' && e.touches.length === 1) {
-      const nextX = e.touches[0].clientX - touchGestureRef.current.startX;
-      const nextY = e.touches[0].clientY - touchGestureRef.current.startY;
-      dragDistanceRef.current += Math.hypot(nextX - pan.x, nextY - pan.y);
-      setPan({ x: nextX, y: nextY });
+      const nextX = Math.round(e.touches[0].clientX - touchGestureRef.current.startX);
+      const nextY = Math.round(e.touches[0].clientY - touchGestureRef.current.startY);
+      dragDistanceRef.current += Math.hypot(
+        nextX - cameraRef.current.panX,
+        nextY - cameraRef.current.panY
+      );
+      applyCameraToDom(nextX, nextY, cameraRef.current.zoom, true);
     } else if (touchGestureRef.current.mode === 'pinch' && e.touches.length === 2) {
       const currentDist = getTouchDistance(e.touches);
       const ratio = currentDist / touchGestureRef.current.initialPinchDistance;
@@ -1249,7 +1483,7 @@ export default function App() {
         20.0,
         Math.max(0.05, Number((touchGestureRef.current.initialZoom * ratio).toFixed(2)))
       );
-      setZoom(nextZoom);
+      applyCameraToDom(cameraRef.current.panX, cameraRef.current.panY, nextZoom, true);
     }
   };
 
@@ -1257,13 +1491,19 @@ export default function App() {
     lastTouchTimeRef.current = Date.now();
     if (isCanvasOverlayTarget(e.target) || !coloredSvg) {
       touchGestureRef.current.mode = 'none';
+      isPanningRef.current = false;
       setIsPanning(false);
       return;
     }
     const wasTap =
       touchGestureRef.current.mode === 'pan' && dragDistanceRef.current < 8;
     touchGestureRef.current.mode = 'none';
+    isPanningRef.current = false;
     setIsPanning(false);
+    const cam = cameraRef.current;
+    applyCameraToDom(cam.panX, cam.panY, cam.zoom, false);
+    setPan({ x: cam.panX, y: cam.panY });
+    setZoom(cam.zoom);
 
     if (wasTap) {
       const tappedId = resolveClickedNodeIdFromSvgElement(
@@ -1271,10 +1511,10 @@ export default function App() {
         callflowGraph
       );
       if (tappedId) {
-        setSelectedCallflowNodeId((prev) => (prev === tappedId ? null : tappedId));
-        if (workspaceMode === 'guided' && scriptWorkspace.modules.length > 0 && guidedStep === 1) {
-          setGuidedStep(2);
-        }
+        toggleNodeSelectionClean(tappedId);
+      } else {
+        setSelectedCallflowNodeId(null);
+        setIsolateSubgraphMode(false);
       }
     }
   };
@@ -1903,10 +2143,11 @@ export default function App() {
     setMobileActivePane('preview');
   };
 
-  // Direct 1-Click SVG, PNG & Interactive HTML downloads
+  // Direct 1-Click SVG, PNG & Interactive HTML downloads (bake offsets/spotlight on demand)
   const handleQuickDownloadSvg = () => {
-    if (!coloredSvg) return;
-    const { serializedSvg } = prepareStandaloneSvg(coloredSvg, canvasSurface, 32);
+    const exportSvg = buildExportSvgSnapshot(true);
+    if (!exportSvg) return;
+    const { serializedSvg } = prepareStandaloneSvg(exportSvg, canvasSurface, 32);
     const blob = new Blob([serializedSvg], { type: 'image/svg+xml;charset=utf-8' });
     const safeName =
       diagramTitle.toLowerCase().replace(/[^a-z0-9äöüß_-]+/gi, '-') || 'mermaid-diagramm';
@@ -1916,10 +2157,11 @@ export default function App() {
   };
 
   const handleQuickDownloadPng = async () => {
-    if (!coloredSvg || isDownloadingPng) return;
+    const exportSvg = buildExportSvgSnapshot(true);
+    if (!exportSvg || isDownloadingPng) return;
     setIsDownloadingPng(true);
     try {
-      const { blob } = await exportSvgToPngBlob(coloredSvg, 2, canvasSurface, {
+      const { blob } = await exportSvgToPngBlob(exportSvg, 2, canvasSurface, {
         code: effectiveMermaidCode,
         themeConfig,
         smartColorMode,
@@ -1939,7 +2181,7 @@ export default function App() {
 
   const buildInteractiveHtmlForSurface = useCallback(
     async (targetSurface: 'dark' | 'light'): Promise<string | null> => {
-      const currentExportSvg = unfilteredColoredSvg || coloredSvg;
+      const currentExportSvg = buildExportSvgSnapshot(false);
       if (!currentExportSvg) return null;
 
       const exportThemeConfig: ThemeConfiguration =
@@ -2049,8 +2291,7 @@ export default function App() {
       );
     },
     [
-      unfilteredColoredSvg,
-      coloredSvg,
+      buildExportSvgSnapshot,
       themeConfig,
       scriptWorkspace,
       canvasSurface,
@@ -2064,7 +2305,7 @@ export default function App() {
   );
 
   const handleQuickDownloadInteractiveHtml = async () => {
-    const exportSvg = unfilteredColoredSvg || coloredSvg;
+    const exportSvg = buildExportSvgSnapshot(false);
     if (!exportSvg || isDownloadingHtml) return;
     setIsDownloadingHtml(true);
     try {
@@ -3163,17 +3404,13 @@ export default function App() {
             ref={canvasViewportRef}
             onWheel={handleCanvasWheel}
             onMouseDown={handleCanvasMouseDown}
-            onMouseMove={handleCanvasMouseMove}
-            onMouseUp={handleCanvasMouseUp}
-            onMouseLeave={() => {
-              setIsPanning(false);
-              nodeDragRef.current.active = false;
-              setActiveWirePreview(null);
-            }}
             onTouchStart={handleCanvasTouchStart}
             onTouchMove={handleCanvasTouchMove}
             onTouchEnd={handleCanvasTouchEnd}
-            onTouchCancel={() => setIsPanning(false)}
+            onTouchCancel={() => {
+              isPanningRef.current = false;
+              setIsPanning(false);
+            }}
             onDragOver={(e) => {
               if (e.dataTransfer.types.includes('application/x-callflow-block')) {
                 e.preventDefault();
@@ -3455,6 +3692,7 @@ export default function App() {
                   </marker>
                 </defs>
                 <line
+                  ref={wireLineRef}
                   x1={activeWirePreview.startX}
                   y1={activeWirePreview.startY}
                   x2={activeWirePreview.curX}
@@ -3474,14 +3712,7 @@ export default function App() {
             )}
 
             {coloredSvg ? (
-              <div
-                style={{
-                  transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
-                  transformOrigin: 'center center',
-                }}
-                className="mermaid-canvas-stage shrink-0 transition-transform duration-75 ease-out p-4 sm:p-8"
-                dangerouslySetInnerHTML={{ __html: coloredSvg }}
-              />
+              <MemoizedSvgStage ref={stageElRef} svgHtml={coloredSvg} />
             ) : scriptWorkspace.modules.length > 0 || code.trim().length > 0 ? (
               <div
                 data-canvas-ui="true"
@@ -4007,8 +4238,8 @@ export default function App() {
       <ExportModal
         isOpen={isExportModalOpen}
         onClose={() => setIsExportModalOpen(false)}
-        svgContent={coloredSvg}
-        unfilteredSvgContent={unfilteredColoredSvg}
+        svgContent={isExportModalOpen ? buildExportSvgSnapshot(true) : coloredSvg}
+        unfilteredSvgContent={isExportModalOpen ? buildExportSvgSnapshot(false) : coloredSvg}
         code={code}
         diagramTitle={diagramTitle}
         defaultBackground={canvasSurface}
