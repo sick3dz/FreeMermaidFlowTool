@@ -1,13 +1,15 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
   FileText,
+  FolderSearch,
   FolderUp,
   ListChecks,
   Plus,
+  Search,
   X,
 } from 'lucide-react';
 import {
@@ -24,7 +26,13 @@ import {
 } from '../utils/scriptCallflowParser';
 import {
   CALLFLOW_CHECKLIST_ACCEPT,
+  FolderAutoResolveSummary,
+  FolderScriptFileEntry,
+  FolderScriptPool,
+  autoResolveConnectedScriptsFromFolder,
+  extractFilesFromDataTransfer,
   importCallflowFile,
+  indexScriptFolderFiles,
 } from '../utils/callflowFileImporter';
 
 export type MasterTargetDecision = 'request' | 'external' | 'ignore' | 'present';
@@ -43,7 +51,12 @@ interface NewCallflowModalProps {
   isOpen: boolean;
   hasExistingWorkspace: boolean;
   onClose: () => void;
-  onStartNewCallflow: (payload: { title: string; workspace: ScriptWorkspace }) => void;
+  onStartNewCallflow: (payload: {
+    title: string;
+    workspace: ScriptWorkspace;
+    folderPool?: FolderScriptPool | null;
+    folderSummary?: FolderAutoResolveSummary | null;
+  }) => void;
 }
 
 export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
@@ -63,7 +76,29 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
   const [draftTargets, setDraftTargets] = useState<DraftConfirmedTarget[]>([]);
   const [manualTargetInput, setManualTargetInput] = useState('');
 
+  // Assigned Folder Pool (.s directory with 600+ files)
+  const [folderPool, setFolderPool] = useState<FolderScriptPool | null>(null);
+  const [folderSearchQuery, setFolderSearchQuery] = useState('');
+  const [folderResolveSummary, setFolderResolveSummary] =
+    useState<FolderAutoResolveSummary | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputStep1Ref = useRef<HTMLInputElement | null>(null);
+  const folderInputStep2Ref = useRef<HTMLInputElement | null>(null);
+
+  const filteredFolderEntries = useMemo(() => {
+    if (!folderPool) return [];
+    const q = folderSearchQuery.trim().toLowerCase();
+    const list = q
+      ? folderPool.entries.filter(
+          (e) =>
+            e.baseName.toLowerCase().includes(q) ||
+            e.filename.toLowerCase().includes(q) ||
+            e.relativePath.toLowerCase().includes(q)
+        )
+      : folderPool.entries;
+    return list.slice(0, 120);
+  }, [folderPool, folderSearchQuery]);
 
   if (!isOpen) return null;
 
@@ -75,17 +110,23 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     setActiveMasterNumber('Main');
     setDraftTargets([]);
     setManualTargetInput('');
+    setFolderPool(null);
+    setFolderSearchQuery('');
+    setFolderResolveSummary(null);
     onClose();
   };
 
-  const prepareStep2FromModules = (modules: ScriptModule[]) => {
+  const prepareStep2FromModules = async (
+    modules: ScriptModule[],
+    activePool?: FolderScriptPool | null
+  ) => {
     const mainIdx = modules.findIndex(
       (m) => canonicalScriptMatchKey(m.scriptNumber) === 'main' || m.isMaster
     );
     const primaryIdx = mainIdx >= 0 ? mainIdx : 0;
     const primaryScriptNumber = modules[primaryIdx]?.scriptNumber || 'Main';
 
-    const normalizedModules = modules.map((m, idx) => {
+    let normalizedModules = modules.map((m, idx) => {
       if (idx !== primaryIdx) return m;
       return {
         ...m,
@@ -95,6 +136,21 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
         ),
       };
     });
+
+    const effectivePool = activePool !== undefined ? activePool : folderPool;
+    let resolveSummary: FolderAutoResolveSummary | null = null;
+
+    if (effectivePool && effectivePool.entries.length > 0) {
+      resolveSummary = await autoResolveConnectedScriptsFromFolder(
+        normalizedModules,
+        effectivePool,
+        {
+          masterScriptNumber: primaryScriptNumber,
+        }
+      );
+      normalizedModules = resolveSummary.modules;
+      setFolderResolveSummary(resolveSummary);
+    }
 
     const previewChecklist = detectMasterScriptChecklist(
       normalizedModules,
@@ -120,29 +176,37 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     setStep(2);
   };
 
-  const handleAnalyzeMasterText = () => {
+  const handleAnalyzeMasterText = async () => {
     const trimmed = rawMasterText.trim();
     if (!trimmed) {
       setErrorMsg(
-        'Bitte zuerst den Skript-Text einfügen oder eine Export-Datei (.s, .txt, .vsdx) wählen.'
+        'Bitte zuerst den Skript-Text einfügen oder eine Export-Datei (.s, .txt, .vsdx) bzw. einen Skript-Ordner wählen.'
       );
       return;
     }
 
-    const modules = parseCallflowTextWithFallback(trimmed, {
-      origin: 'legacy-text',
-      isMasterHint: true,
-    });
+    setIsParsingFile(true);
+    try {
+      const modules = parseCallflowTextWithFallback(trimmed, {
+        origin: 'legacy-text',
+        isMasterHint: true,
+      });
 
-    if (modules.length === 0) {
-      setErrorMsg('Im eingefügten Text konnten keine verwertbaren Zeilen erkannt werden.');
-      return;
+      if (modules.length === 0) {
+        setErrorMsg('Im eingefügten Text konnten keine verwertbaren Zeilen erkannt werden.');
+        return;
+      }
+
+      await prepareStep2FromModules(modules, folderPool);
+    } finally {
+      setIsParsingFile(false);
     }
-
-    prepareStep2FromModules(modules);
   };
 
-  const handleImportVisioOrTextFile = async (file: File) => {
+  const handleImportVisioOrTextFile = async (
+    file: File,
+    overridePool?: FolderScriptPool | null
+  ) => {
     setErrorMsg(null);
     setIsParsingFile(true);
     try {
@@ -160,7 +224,10 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
         );
         return;
       }
-      prepareStep2FromModules(result.modules);
+      await prepareStep2FromModules(
+        result.modules,
+        overridePool !== undefined ? overridePool : folderPool
+      );
     } catch (err) {
       setErrorMsg(
         err instanceof Error
@@ -172,7 +239,59 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     }
   };
 
-  const handleAddManualTarget = () => {
+  const handleAssignFolderInStep1 = async (files: FileList | File[]) => {
+    setErrorMsg(null);
+    const pool = indexScriptFolderFiles(files);
+    if (pool.entries.length === 0) {
+      setErrorMsg(
+        'Im gewählten Ordner wurden keine unterstützten Skriptdateien (.s, .txt, .aacc, .vsdx) gefunden.'
+      );
+      return;
+    }
+    setFolderPool(pool);
+    setFolderResolveSummary(null);
+
+    // If rawMasterText is already filled in, automatically analyze it and resolve all linked .s files from the folder!
+    if (rawMasterText.trim()) {
+      setIsParsingFile(true);
+      try {
+        const modules = parseCallflowTextWithFallback(rawMasterText.trim(), {
+          origin: 'legacy-text',
+          isMasterHint: true,
+        });
+        if (modules.length > 0) {
+          await prepareStep2FromModules(modules, pool);
+        }
+      } finally {
+        setIsParsingFile(false);
+      }
+    }
+  };
+
+  const handleSelectStartEntryFromFolder = async (entry: FolderScriptFileEntry) => {
+    if (!folderPool) return;
+    await handleImportVisioOrTextFile(entry.file, folderPool);
+  };
+
+  const handleAssignFolderAndAutoResolveInStep2 = async (files: FileList | File[]) => {
+    setErrorMsg(null);
+    const pool = indexScriptFolderFiles(files);
+    if (pool.entries.length === 0) {
+      setErrorMsg(
+        'Im gewählten Ordner wurden keine unterstützten Skriptdateien (.s, .txt, .aacc, .vsdx) gefunden.'
+      );
+      return;
+    }
+    setFolderPool(pool);
+    setIsParsingFile(true);
+    try {
+      await prepareStep2FromModules(parsedModules, pool);
+    } finally {
+      setIsParsingFile(false);
+    }
+  };
+
+  const handleAddManualTarget = async () => {
     const clean = normalizeScriptRef(manualTargetInput);
     if (!clean) return;
     const key = canonicalScriptMatchKey(clean);
@@ -236,6 +355,8 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     onStartNewCallflow({
       title: primaryMod?.scriptName || activeMasterNumber || 'Callflow',
       workspace,
+      folderPool,
+      folderSummary: folderResolveSummary,
     });
     resetAllAndClose();
   };
@@ -262,11 +383,11 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
             </h2>
             <div className="flex items-center gap-2 text-xs text-slate-400 mt-0.5 font-mono tabular-nums">
               <span className={step === 1 ? 'text-indigo-400 font-semibold' : 'text-emerald-400'}>
-                01. Start-Skript importieren
+                01. Start-Skript oder Skript-Ordner wählen
               </span>
               <span aria-hidden="true">·</span>
               <span className={step === 2 ? 'text-indigo-400 font-semibold' : 'text-slate-500'}>
-                02. Logische Folge-Ziele bestätigen
+                02. Automatisch abgeglichene Kette bestätigen
               </span>
             </div>
           </div>
@@ -296,18 +417,22 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                 </div>
               )}
 
-              {/* Automatic File / Visio Upload Dropzone */}
+              {/* Automatic File / Folder Upload Dropzone */}
               <div
                 onDragOver={(e) => {
                   e.preventDefault();
                   setIsDraggingFile(true);
                 }}
                 onDragLeave={() => setIsDraggingFile(false)}
-                onDrop={(e) => {
+                onDrop={async (e) => {
                   e.preventDefault();
                   setIsDraggingFile(false);
-                  const file = e.dataTransfer.files?.[0];
-                  if (file) void handleImportVisioOrTextFile(file);
+                  const extracted = await extractFilesFromDataTransfer(e.dataTransfer);
+                  if (extracted.hasDirectory || extracted.files.length > 1) {
+                    await handleAssignFolderInStep1(extracted.files);
+                  } else if (extracted.files.length === 1) {
+                    await handleImportVisioOrTextFile(extracted.files[0]);
+                  }
                 }}
                 className={`p-3.5 rounded-xl border transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
                   isDraggingFile
@@ -315,17 +440,15 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                     : 'bg-slate-950 border-slate-800'
                 }`}
               >
-                <div className="space-y-0.5 min-w-0">
+                <div className="space-y-1 min-w-0">
                   <div className="text-xs font-semibold text-slate-100">
-                    Start- oder Masterscript als Avaya `.s`-Skript oder grafischen Export laden
+                    Start-/Masterscript (`.s` / Visio) laden oder kompletten Skript-Ordner zuweisen
                   </div>
-                  <p className="text-[11px] text-slate-400">
-                    Orchestration-Designer-Exporte (`.s`, `.txt`, `.aacc`) sowie grafische Exporte
-                    (`.vsdx`, `.vdx`, `.svg`) behalten ihre echte CDN / Skriptnummer und verketten
-                    sich automatisch entlang der Telefonschaltung.
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Weisen Sie Ihren Skript-Ordner (z. B. 600+ <code className="font-mono text-slate-300">Scriptname.s</code> Dateien) zu: Das Tool lädt ab Ihrem Start-Skript automatisch <strong className="text-slate-200">nur die tatsächlich aufgerufenen Folgeskripte rekursiv</strong> nach und ignoriert ungenutzte Altlast-Dateien.
                   </p>
                 </div>
-                <div className="shrink-0">
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -337,6 +460,34 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                       if (file) void handleImportVisioOrTextFile(file);
                     }}
                   />
+                  <input
+                    ref={(el) => {
+                      folderInputStep1Ref.current = el;
+                      if (el) {
+                        el.setAttribute('webkitdirectory', '');
+                        el.setAttribute('directory', '');
+                      }
+                    }}
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => {
+                      const files = e.target.files;
+                      if (files && files.length > 0) {
+                        void handleAssignFolderInStep1(Array.from(files));
+                      }
+                      e.target.value = '';
+                    }}
+                  />
+                  <button
+                    type="button"
+                    disabled={isParsingFile}
+                    onClick={() => folderInputStep1Ref.current?.click()}
+                    className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <FolderSearch className="w-3.5 h-3.5" />
+                    <span>Skript-Ordner zuweisen (.s Auto-Suche)</span>
+                  </button>
                   <button
                     type="button"
                     disabled={isParsingFile}
@@ -344,25 +495,90 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                     className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-medium rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <FolderUp className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>{isParsingFile ? 'Lese Datei...' : 'Export / Datei wählen'}</span>
+                    <span>{isParsingFile ? 'Lese...' : 'Einzelne Start-Datei'}</span>
                   </button>
                 </div>
               </div>
 
+              {/* Assigned Folder Pool Start-Script Picker */}
+              {folderPool && (
+                <div className="p-3.5 rounded-xl bg-slate-950 border border-indigo-500/50 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="space-y-0.5">
+                      <div className="text-xs font-semibold text-indigo-200 flex items-center gap-1.5">
+                        <FolderSearch className="w-4 h-4 text-indigo-400 shrink-0" />
+                        <span>
+                          Skript-Ordner „{folderPool.folderName}“ verbunden ({folderPool.totalFilesScanned}{' '}
+                          Skript-Dateien erkannt)
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400">
+                        Klicken Sie unten auf Ihr <strong className="text-slate-200">Start- oder Masterscript</strong> (oder laden Sie oben eine separate Start-Datei). Das Tool sucht anschließend alle verknüpften <code className="font-mono text-slate-300">Scriptname.s</code> Dateien automatisch rekursiv aus diesem Ordner.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFolderPool(null);
+                        setFolderSearchQuery('');
+                      }}
+                      className="px-2 py-1 text-[11px] text-slate-400 hover:text-slate-200 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-md cursor-pointer"
+                    >
+                      Ordner trennen
+                    </button>
+                  </div>
+
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={folderSearchQuery}
+                      onChange={(e) => setFolderSearchQuery(e.target.value)}
+                      placeholder={`Aus ${folderPool.totalFilesScanned} Dateien im Ordner nach Start-/Master-Skript suchen (z. B. Main, 4910, Master)...`}
+                      className="w-full pl-8 pr-3 py-1.5 bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-1.5 max-h-48 overflow-y-auto pr-1">
+                    {filteredFolderEntries.map((entry) => (
+                      <button
+                        key={entry.relativePath}
+                        type="button"
+                        disabled={isParsingFile}
+                        onClick={() => void handleSelectStartEntryFromFolder(entry)}
+                        className="px-2.5 py-2 rounded-lg bg-slate-900 hover:bg-indigo-950/60 border border-slate-800 hover:border-indigo-500/50 text-left transition-colors flex items-center justify-between gap-2 cursor-pointer group"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-mono font-semibold text-slate-100 group-hover:text-indigo-200 truncate">
+                            {entry.baseName}
+                          </div>
+                          <div className="text-[10px] font-mono text-slate-500 truncate">
+                            {entry.filename}
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-semibold text-indigo-400 group-hover:text-indigo-200 whitespace-nowrap shrink-0">
+                          Als Start →
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Raw Text Input */}
               <div className="space-y-2">
                 <span className="text-xs font-medium text-slate-200 block">
-                  Oder Text-Skript direkt einfügen (Nummer / Name wird automatisch aus CDN oder Header erkannt)
+                  Oder Text-Skript direkt einfügen (bei verbundenem Ordner werden die Folgeskripte automatisch nachgeladen)
                 </span>
 
                 <textarea
-                  rows={9}
+                  rows={folderPool ? 5 : 8}
                   value={rawMasterText}
                   onChange={(e) => {
                     setRawMasterText(e.target.value);
                     if (errorMsg) setErrorMsg(null);
                   }}
-                  placeholder={`Text für „Main“ (oder AACC-Masterscript mit VALUE / DNIS_Range) hier einfügen...\nHinweis: /* ... */ Altlast-Kommentare werden automatisch ignoriert.\n\nBeispiel:\nIF DNIS_Range_Rheinland THEN assign 290xxxx to src_route_number assign Rheinland to Sys_brand END IF\nVALUE 101 : execute Script Vertrieb_Service\nVALUE 4501 : execute Script Fax_Eingang`}
+                  placeholder={`Text für Ihr Start-/Masterscript hier einfügen...\nHinweis: /* ... */ Altlast-Kommentare werden automatisch ignoriert.\n\nBeispiel:\nIF DNIS_Range_Rheinland THEN assign 290xxxx to src_route_number assign Rheinland to Sys_brand END IF\nVALUE 101 : execute Script Vertrieb_Service\nVALUE 4501 : execute Script Fax_Eingang`}
                   className="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none resize-y"
                 />
               </div>
@@ -375,49 +591,117 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
             </>
           ) : (
             <>
-              {/* Step 2: Confirm Extracted Targets */}
+              {/* Step 2: Confirm Extracted Targets & Folder Auto-Match Banner */}
               <div className="px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
                   <ListChecks className="w-4 h-4 text-indigo-400 shrink-0" />
                   <div className="min-w-0">
                     <div className="text-xs font-semibold text-slate-100 truncate">
-                      Masterscript: <span className="font-mono">{activeMasterNumber}</span>
+                      Start-/Masterscript: <span className="font-mono">{activeMasterNumber}</span>
                     </div>
                     <div className="text-[11px] text-slate-400 font-mono tabular-nums">
+                      {parsedModules.length} Skripte geladen ·{' '}
                       {parsedModules.reduce((acc, m) => acc + m.rules.length, 0)} Regeln ·{' '}
-                      {requestedCount} angefordert
-                      {presentCount > 0 ? ` · ${presentCount} geladen` : ''} · {externalCount}{' '}
-                      extern · {ignoredCount} ignoriert
+                      {presentCount} automatisch verknüpft · {requestedCount} offen · {externalCount}{' '}
+                      extern
                     </div>
                   </div>
                 </div>
 
-                {hasRequestableTargets && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <input
+                    ref={(el) => {
+                      folderInputStep2Ref.current = el;
+                      if (el) {
+                        el.setAttribute('webkitdirectory', '');
+                        el.setAttribute('directory', '');
+                      }
+                    }}
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => {
+                      const files = e.target.files;
+                      if (files && files.length > 0) {
+                        void handleAssignFolderAndAutoResolveInStep2(Array.from(files));
+                      }
+                      e.target.value = '';
+                    }}
+                  />
                   <button
                     type="button"
-                    onClick={() =>
-                      setDraftTargets((prev) =>
-                        prev.map((t) =>
-                          t.isAlreadyPresent ? t : { ...t, decision: 'request' }
-                        )
-                      )
-                    }
-                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    disabled={isParsingFile}
+                    onClick={() => folderInputStep2Ref.current?.click()}
+                    className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-semibold rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Alle anfordern
+                    <FolderSearch className="w-3.5 h-3.5" />
+                    <span>
+                      {isParsingFile
+                        ? 'Gleiche Ordner ab...'
+                        : folderPool
+                        ? 'Anderen Skript-Ordner abgleichen'
+                        : 'Skript-Ordner zuweisen & .s automatisch nachladen'}
+                    </span>
                   </button>
-                )}
+
+                  {hasRequestableTargets && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDraftTargets((prev) =>
+                          prev.map((t) =>
+                            t.isAlreadyPresent ? t : { ...t, decision: 'request' }
+                          )
+                        )
+                      }
+                      className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Alle anfordern
+                    </button>
+                  )}
+                </div>
               </div>
 
+              {folderResolveSummary && (
+                <div className="px-3.5 py-2.5 rounded-xl bg-emerald-950/25 border border-emerald-500/40 text-xs space-y-1">
+                  <div className="font-semibold text-emerald-300 flex items-center justify-between gap-2">
+                    <span>
+                      ✓ Automatischer Ordner-Abgleich („{folderResolveSummary.folderName}“) abgeschlossen
+                    </span>
+                    <span className="font-mono tabular-nums text-[11px] text-emerald-400">
+                      {folderResolveSummary.totalPoolFiles} Dateien im Ordner geprüft
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-300 font-mono tabular-nums">
+                    <strong className="text-emerald-300">
+                      {folderResolveSummary.loadedScriptNumbers.length} verknüpfte Folgeskripte (.s)
+                    </strong>{' '}
+                    rekursiv entlang der Telefonschaltung geladen ·{' '}
+                    <span className="text-slate-400">
+                      {folderResolveSummary.skippedLegacyFilesCount} nicht aufgerufene Altlast-Dateien
+                      automatisch übersprungen
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {errorMsg && (
+                <div className="px-3 py-2 rounded-lg bg-rose-950/50 border border-rose-800/70 text-xs text-rose-300">
+                  {errorMsg}
+                </div>
+              )}
+
               <p className="text-xs text-slate-400 leading-relaxed">
-                Prüfen und haken Sie einzeln ab, welche erkannten Ziel-Skripte das Tool anschließend
-                Schritt für Schritt von oben nach unten abfragen soll:
+                Prüfen Sie die erkannten Ziel-Skripte entlang der Callflow-Kette (bereits aus dem
+                zugewiesenen Ordner gefundene <code className="font-mono text-slate-300">Scriptname.s</code>{' '}
+                Dateien sind grün als <strong className="text-emerald-300">Bereits geladen ✓</strong>{' '}
+                markiert):
               </p>
 
               {draftTargets.length === 0 ? (
                 <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-400 space-y-2">
                   <p>
-                    Im Masterscript wurden automatisch keine weiteren Ziel-Skripte erkannt. Sie
+                    Im Start-Skript wurden automatisch keine weiteren Ziel-Skripte erkannt. Sie
                     können unten direkt Ziel-Skripte manuell ergänzen oder direkt mit der Karte
                     starten.
                   </p>
@@ -571,7 +855,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
-                      handleAddManualTarget();
+                      void handleAddManualTarget();
                     }
                   }}
                   placeholder="Fehlendes Ziel ergänzen (z. B. Schaltung1 oder 3757)..."
@@ -579,7 +863,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                 />
                 <button
                   type="button"
-                  onClick={handleAddManualTarget}
+                  onClick={() => void handleAddManualTarget()}
                   disabled={!manualTargetInput.trim()}
                   className="px-3 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 border border-slate-700 text-slate-200 text-xs font-medium rounded-lg transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
                 >
@@ -604,12 +888,16 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
               </button>
               <button
                 type="button"
-                onClick={handleAnalyzeMasterText}
+                onClick={() => void handleAnalyzeMasterText()}
                 disabled={!rawMasterText.trim() || isParsingFile}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <FileText className="w-3.5 h-3.5" />
-                <span>Masterscript analysieren</span>
+                <span>
+                  {folderPool
+                    ? 'Start-Skript analysieren & Ordner abgleichen'
+                    : 'Start-Skript analysieren'}
+                </span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </>
@@ -631,7 +919,9 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
               >
                 <CheckCircle2 className="w-3.5 h-3.5" />
                 <span>
-                  {requestedCount > 0
+                  {presentCount > 0
+                    ? `Live-Karte mit ${parsedModules.length} Skripten starten`
+                    : requestedCount > 0
                     ? `Bestätigen (${requestedCount}) & Live-Karte starten`
                     : 'Bestätigen & Live-Karte starten'}
                 </span>
@@ -643,3 +933,4 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     </div>
   );
 };
+

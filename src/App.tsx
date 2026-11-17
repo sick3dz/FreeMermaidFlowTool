@@ -125,7 +125,13 @@ import {
   updateWorkspaceNodeFromEdit,
 } from './utils/scriptCallflowParser';
 import {
+  FolderAutoResolveSummary,
+  FolderScriptFileEntry,
+  FolderScriptPool,
+  autoResolveConnectedScriptsFromFolder,
+  extractFilesFromDataTransfer,
   importCallflowFile,
+  indexScriptFolderFiles,
   isSupportedCallflowImportFilename,
 } from './utils/callflowFileImporter';
 import { ThemeConfigurator } from './components/ThemeConfigurator';
@@ -308,6 +314,11 @@ export default function App() {
     ruleCount: number;
   } | null>(null);
   const skipAutoConvertRef = useRef<boolean>(false);
+  const [assignedFolderPool, setAssignedFolderPool] = useState<FolderScriptPool | null>(null);
+  const [lastFolderResolveSummary, setLastFolderResolveSummary] =
+    useState<FolderAutoResolveSummary | null>(null);
+  const [isAutoResolvingFolder, setIsAutoResolvingFolder] = useState<boolean>(false);
+  const [isConfirmingClearWorkspace, setIsConfirmingClearWorkspace] = useState<boolean>(false);
 
   // Workspace Mode: 'guided' (default, clutter-free 3-step assistant starting with Main) vs 'free' (full Mermaid Studio)
   const [workspaceMode, setWorkspaceMode] = useState<'guided' | 'free'>(() => {
@@ -2006,7 +2017,7 @@ export default function App() {
         (t) => canonicalScriptMatchKey(t) !== targetKey
       );
       const wasEmpty = scriptWorkspace.modules.length === 0;
-      const merged = mergeScriptModules(scriptWorkspace.modules, incoming);
+      let merged = mergeScriptModules(scriptWorkspace.modules, incoming);
       const nextWs = buildScriptWorkspace(merged, {
         ...scriptWorkspace,
         masterScriptNumber:
@@ -2021,9 +2032,34 @@ export default function App() {
       }
       setScriptWorkspace(nextWs);
       refreshDiagramFromWorkspace(nextWs);
+
+      // If a script folder pool is already assigned, automatically resolve connected .s scripts recursively!
+      if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
+        setIsAutoResolvingFolder(true);
+        void autoResolveConnectedScriptsFromFolder(merged, assignedFolderPool, {
+          externalEndpoints: nextWs.externalEndpoints,
+          ignoredChecklistTargets: nextWs.ignoredChecklistTargets,
+          masterScriptNumber: nextWs.masterScriptNumber,
+        })
+          .then((summary) => {
+            setLastFolderResolveSummary(summary);
+            if (summary.loadedScriptNumbers.length > 0) {
+              const autoWs = buildScriptWorkspace(summary.modules, {
+                ...nextWs,
+                masterScriptNumber: nextWs.masterScriptNumber,
+              });
+              setScriptWorkspace(autoWs);
+              refreshDiagramFromWorkspace(autoWs);
+            }
+          })
+          .finally(() => {
+            setIsAutoResolvingFolder(false);
+          });
+      }
+
       return nextWs;
     },
-    [scriptWorkspace, refreshDiagramFromWorkspace]
+    [scriptWorkspace, assignedFolderPool, refreshDiagramFromWorkspace]
   );
 
   const handleSubmitChecklistVisioFile = useCallback(
@@ -2044,13 +2080,34 @@ export default function App() {
         const nextIgnored = (scriptWorkspace.ignoredChecklistTargets || []).filter(
           (t) => canonicalScriptMatchKey(t) !== targetKey
         );
-        const merged = mergeScriptModules(scriptWorkspace.modules, result.modules);
+        let merged = mergeScriptModules(scriptWorkspace.modules, result.modules);
+        const effectiveMaster =
+          wasEmpty && isAutoStart
+            ? result.modules[0].scriptNumber
+            : scriptWorkspace.masterScriptNumber;
+
+        if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
+          setIsAutoResolvingFolder(true);
+          try {
+            const summary = await autoResolveConnectedScriptsFromFolder(
+              merged,
+              assignedFolderPool,
+              {
+                externalEndpoints: scriptWorkspace.externalEndpoints,
+                ignoredChecklistTargets: nextIgnored,
+                masterScriptNumber: effectiveMaster,
+              }
+            );
+            merged = summary.modules;
+            setLastFolderResolveSummary(summary);
+          } finally {
+            setIsAutoResolvingFolder(false);
+          }
+        }
+
         const nextWs = buildScriptWorkspace(merged, {
           ...scriptWorkspace,
-          masterScriptNumber:
-            wasEmpty && isAutoStart
-              ? result.modules[0].scriptNumber
-              : scriptWorkspace.masterScriptNumber,
+          masterScriptNumber: effectiveMaster,
           ignoredChecklistTargets: nextIgnored,
         });
         if (wasEmpty) {
@@ -2064,7 +2121,7 @@ export default function App() {
         return null;
       }
     },
-    [scriptWorkspace, refreshDiagramFromWorkspace]
+    [scriptWorkspace, assignedFolderPool, refreshDiagramFromWorkspace]
   );
 
   const showCanvasDropBanner = useCallback(
@@ -2081,10 +2138,123 @@ export default function App() {
     []
   );
 
-  const handleCanvasFilesDrop = useCallback(
+  const handleAssignFolderAndAutoResolve = useCallback(
     async (files: FileList | File[]) => {
+      const pool = indexScriptFolderFiles(files);
+      if (pool.entries.length === 0) {
+        showCanvasDropBanner(
+          'error',
+          'Im gewählten Ordner wurden keine unterstützten Skriptdateien (.s, .txt, .aacc, .vsdx) gefunden.'
+        );
+        return;
+      }
+      setAssignedFolderPool(pool);
+
+      if (scriptWorkspace.modules.length === 0) {
+        showCanvasDropBanner(
+          'success',
+          `Ordner „${pool.folderName}“ mit ${pool.totalFilesScanned} Skript-Dateien verbunden. Wählen Sie rechts Ihr Start-/Master-Skript aus.`
+        );
+        return;
+      }
+
+      setIsAutoResolvingFolder(true);
+      try {
+        const summary = await autoResolveConnectedScriptsFromFolder(
+          scriptWorkspace.modules,
+          pool,
+          {
+            externalEndpoints: scriptWorkspace.externalEndpoints,
+            ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
+            masterScriptNumber: scriptWorkspace.masterScriptNumber,
+          }
+        );
+        setLastFolderResolveSummary(summary);
+
+        const nextWs = buildScriptWorkspace(summary.modules, {
+          externalEndpoints: scriptWorkspace.externalEndpoints,
+          ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
+          resolvedIssues: scriptWorkspace.resolvedIssues,
+          manualQuestions: scriptWorkspace.manualQuestions,
+          manualLinks: scriptWorkspace.manualLinks,
+          masterScriptNumber: scriptWorkspace.masterScriptNumber,
+          nodeOffsets: scriptWorkspace.nodeOffsets,
+        });
+
+        pendingAutoFitRef.current = true;
+        setScriptWorkspace(nextWs);
+        refreshDiagramFromWorkspace(nextWs);
+
+        showCanvasDropBanner(
+          'success',
+          `Ordner „${pool.folderName}“ abgeglichen: ${summary.loadedScriptNumbers.length} aktive Folgeskripte (.s) automatisch entlang der Kette geladen · ${summary.skippedLegacyFilesCount} Altlast-Dateien übersprungen.`
+        );
+      } finally {
+        setIsAutoResolvingFolder(false);
+      }
+    },
+    [scriptWorkspace, refreshDiagramFromWorkspace, showCanvasDropBanner]
+  );
+
+  const handleSelectStartScriptFromAssignedFolder = useCallback(
+    async (entry: FolderScriptFileEntry) => {
+      if (!assignedFolderPool) return;
+      setIsAutoResolvingFolder(true);
+      try {
+        const startRes = await importCallflowFile(entry.file, {
+          isMasterHint: true,
+        });
+        if (startRes.modules.length === 0) {
+          showCanvasDropBanner(
+            'error',
+            `In „${entry.filename}“ konnten keine Callflow-Regeln erkannt werden.`
+          );
+          return;
+        }
+        const primaryNumber = startRes.modules[0].scriptNumber;
+        const summary = await autoResolveConnectedScriptsFromFolder(
+          startRes.modules,
+          assignedFolderPool,
+          {
+            masterScriptNumber: primaryNumber,
+          }
+        );
+        setLastFolderResolveSummary(summary);
+
+        const nextWs = buildScriptWorkspace(summary.modules, {
+          masterScriptNumber: primaryNumber,
+        });
+        pendingAutoFitRef.current = true;
+        setIsVisualEditMode(true);
+        setScriptWorkspace(nextWs);
+        refreshDiagramFromWorkspace(nextWs);
+        showCanvasDropBanner(
+          'success',
+          `Start-Skript [${primaryNumber}] + ${summary.loadedScriptNumbers.length} verknüpfte .s-Skripte automatisch geladen (${summary.skippedLegacyFilesCount} Altlasten ignoriert).`
+        );
+      } finally {
+        setIsAutoResolvingFolder(false);
+      }
+    },
+    [assignedFolderPool, refreshDiagramFromWorkspace, showCanvasDropBanner]
+  );
+
+  const handleClearAssignedFolder = useCallback(() => {
+    setAssignedFolderPool(null);
+    setLastFolderResolveSummary(null);
+  }, []);
+
+  const handleCanvasFilesDrop = useCallback(
+    async (files: FileList | File[], isDirectoryDrop = false) => {
       const fileArr = Array.from(files);
       if (fileArr.length === 0) return;
+
+      // If the user drops a folder (or a large batch of >12 .s files from a folder),
+      // use intelligent folder matching so 600+ legacy files aren't dumped blindly onto the canvas!
+      if (isDirectoryDrop || fileArr.length > 12) {
+        await handleAssignFolderAndAutoResolve(fileArr);
+        return;
+      }
 
       const supportedFiles = fileArr.filter((f) => isSupportedCallflowImportFilename(f.name));
       const filesToRead = supportedFiles.length > 0 ? supportedFiles : fileArr;
@@ -2121,6 +2291,22 @@ export default function App() {
         return;
       }
 
+      let autoLoadedFromFolderCount = 0;
+      if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
+        const summary = await autoResolveConnectedScriptsFromFolder(
+          currentModules,
+          assignedFolderPool,
+          {
+            externalEndpoints: scriptWorkspace.externalEndpoints,
+            ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
+            masterScriptNumber: scriptWorkspace.masterScriptNumber,
+          }
+        );
+        currentModules = summary.modules;
+        autoLoadedFromFolderCount = summary.loadedScriptNumbers.length;
+        setLastFolderResolveSummary(summary);
+      }
+
       const wasEmpty = scriptWorkspace.modules.length === 0;
       const nextWs = buildScriptWorkspace(currentModules, {
         externalEndpoints: scriptWorkspace.externalEndpoints,
@@ -2147,17 +2333,23 @@ export default function App() {
       if (dotSCount > 0) kindParts.push(`${dotSCount} .s-Skript`);
       if (visioCount > 0) kindParts.push(`${visioCount} Visio`);
       const kindSuffix = kindParts.length > 0 ? ` (${kindParts.join(', ')})` : '';
+      const autoFolderSuffix =
+        autoLoadedFromFolderCount > 0
+          ? ` + ${autoLoadedFromFolderCount} verknüpfte .s automatisch aus Ordner geladen`
+          : '';
       const failedSuffix =
         failedNames.length > 0 ? ` · ${failedNames.length} nicht lesbar` : '';
       showCanvasDropBanner(
         'success',
-        `${filesToRead.length} Datei(en) mit ${importedModuleCount} Modul(en)${kindSuffix} in den Callflow importiert${failedSuffix}.`
+        `${filesToRead.length} Datei(en) mit ${importedModuleCount} Modul(en)${kindSuffix}${autoFolderSuffix} in den Callflow importiert${failedSuffix}.`
       );
     },
     [
       scriptWorkspace,
+      assignedFolderPool,
       workspaceMode,
       guidedStep,
+      handleAssignFolderAndAutoResolve,
       refreshDiagramFromWorkspace,
       showCanvasDropBanner,
     ]
@@ -2396,9 +2588,21 @@ export default function App() {
   );
 
   const handleStartNewCallflow = useCallback(
-    (payload: { title: string; workspace: ScriptWorkspace }) => {
+    (payload: {
+      title: string;
+      workspace: ScriptWorkspace;
+      folderPool?: FolderScriptPool | null;
+      folderSummary?: FolderAutoResolveSummary | null;
+    }) => {
       skipAutoConvertRef.current = false;
       setRawScriptDraft(null);
+      setIsConfirmingClearWorkspace(false);
+      if (payload.folderPool !== undefined) {
+        setAssignedFolderPool(payload.folderPool);
+      }
+      if (payload.folderSummary !== undefined) {
+        setLastFolderResolveSummary(payload.folderSummary);
+      }
       setScriptWorkspace(payload.workspace);
       setGuidedStep(2);
       setIsVisualEditMode(true);
@@ -2728,7 +2932,9 @@ export default function App() {
 
   const handleClearWorkspace = () => {
     skipAutoConvertRef.current = false;
+    setIsConfirmingClearWorkspace(false);
     setRawScriptDraft(null);
+    setLastFolderResolveSummary(null);
     setDiagramTitle('Neuer Callflow');
     setCode('');
     setScriptWorkspace(buildScriptWorkspace([]));
@@ -2879,18 +3085,39 @@ export default function App() {
 
         {/* Zone 3: Primary actions */}
         <div className="flex items-center gap-2 shrink-0">
-          {(code.trim().length > 0 || scriptWorkspace.modules.length > 0) &&
-            workspaceMode === 'guided' && (
+          {(code.trim().length > 0 || scriptWorkspace.modules.length > 0) && (
+            isConfirmingClearWorkspace ? (
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-rose-950/90 border border-rose-500 text-xs shrink-0 shadow-md">
+                <span className="text-rose-200 font-semibold whitespace-nowrap">
+                  Wirklich löschen?
+                </span>
+                <button
+                  type="button"
+                  onClick={handleClearWorkspace}
+                  className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded-md transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  Bestätigen
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsConfirmingClearWorkspace(false)}
+                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded-md transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  Abbrechen
+                </button>
+              </div>
+            ) : (
               <button
                 type="button"
-                onClick={handleClearWorkspace}
-                title="Aktuellen Callflow zurücksetzen und neu starten"
-                className="px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:text-rose-200 bg-slate-900 hover:bg-rose-950/60 border border-slate-800 rounded-lg transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
+                onClick={() => setIsConfirmingClearWorkspace(true)}
+                title="Aktuellen Callflow komplett löschen und von vorne anfangen"
+                className="px-2.5 lg:px-3 py-1.5 lg:py-2 text-xs font-semibold text-rose-100 bg-rose-700/80 hover:bg-rose-600 border border-rose-500/70 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
               >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Neu starten</span>
+                <Trash2 className="w-3.5 h-3.5 text-rose-200 shrink-0" />
+                <span className="hidden sm:inline">Von vorne / Löschen</span>
               </button>
-            )}
+            )
+          )}
           <button
             type="button"
             onClick={() => setIsOfflineModalOpen(true)}
@@ -2981,15 +3208,34 @@ export default function App() {
               )}
 
               {(code.trim().length > 0 || scriptWorkspace.modules.length > 0) && (
-                <button
-                  type="button"
-                  onClick={handleClearWorkspace}
-                  title="Editor & Callflow-Arbeitsbereich leeren"
-                  className="px-2 py-1.5 lg:py-1 bg-slate-800 hover:bg-rose-950/70 hover:text-rose-200 text-slate-300 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  <span>Leeren</span>
-                </button>
+                isConfirmingClearWorkspace ? (
+                  <div className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-rose-950 border border-rose-500 text-[11px] shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleClearWorkspace}
+                      className="px-2 py-0.5 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded transition-colors whitespace-nowrap cursor-pointer"
+                    >
+                      Bestätigen
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsConfirmingClearWorkspace(false)}
+                      className="px-1.5 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded transition-colors whitespace-nowrap cursor-pointer"
+                    >
+                      Abbrechen
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setIsConfirmingClearWorkspace(true)}
+                    title="Editor & Callflow-Arbeitsbereich komplett löschen"
+                    className="px-2 py-1.5 lg:py-1 bg-rose-700/80 hover:bg-rose-600 border border-rose-500/70 text-rose-100 text-xs font-semibold rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-200" />
+                    <span>Löschen</span>
+                  </button>
+                )
               )}
 
               <button
@@ -3885,7 +4131,9 @@ export default function App() {
                 e.preventDefault();
                 canvasFileDragDepthRef.current = 0;
                 setIsDraggingCanvasFile(false);
-                void handleCanvasFilesDrop(e.dataTransfer.files);
+                void extractFilesFromDataTransfer(e.dataTransfer).then((extracted) => {
+                  void handleCanvasFilesDrop(extracted.files, extracted.hasDirectory);
+                });
               }
             }}
             onDoubleClick={(e) => {
@@ -4607,6 +4855,12 @@ export default function App() {
               onOpenNodeEditor={handleOpenNodeEditor}
               onResetAllNodeOffsets={handleResetAllNodeOffsets}
               hasCustomNodeOffsets={hasCustomNodeOffsets}
+              assignedFolderPool={assignedFolderPool}
+              lastFolderResolveSummary={lastFolderResolveSummary}
+              isAutoResolvingFolder={isAutoResolvingFolder}
+              onAssignFolderAndAutoResolve={handleAssignFolderAndAutoResolve}
+              onSelectStartScriptFromAssignedFolder={handleSelectStartScriptFromAssignedFolder}
+              onClearAssignedFolder={handleClearAssignedFolder}
             />
           </div>
         )}
@@ -4706,6 +4960,12 @@ export default function App() {
                   onOpenNodeEditor={handleOpenNodeEditor}
                   onResetAllNodeOffsets={handleResetAllNodeOffsets}
                   hasCustomNodeOffsets={hasCustomNodeOffsets}
+                  assignedFolderPool={assignedFolderPool}
+                  lastFolderResolveSummary={lastFolderResolveSummary}
+                  isAutoResolvingFolder={isAutoResolvingFolder}
+                  onAssignFolderAndAutoResolve={handleAssignFolderAndAutoResolve}
+                  onSelectStartScriptFromAssignedFolder={handleSelectStartScriptFromAssignedFolder}
+                  onClearAssignedFolder={handleClearAssignedFolder}
                 />
               ) : (
                 <ThemeConfigurator

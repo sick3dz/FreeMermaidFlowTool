@@ -14,6 +14,7 @@ import {
   FileText,
   Filter,
   FolderPlus,
+  FolderSearch,
   GitBranch,
   Grid,
   Layers,
@@ -55,7 +56,12 @@ import {
   extractWorkspaceResourceRegistry,
   toMermaidNodeSuffix,
 } from '../utils/scriptCallflowParser';
-import { CALLFLOW_CHECKLIST_ACCEPT } from '../utils/callflowFileImporter';
+import {
+  CALLFLOW_CHECKLIST_ACCEPT,
+  FolderAutoResolveSummary,
+  FolderScriptFileEntry,
+  FolderScriptPool,
+} from '../utils/callflowFileImporter';
 
 interface CallflowInspectorProps {
   graph: CallflowGraph;
@@ -109,6 +115,12 @@ interface CallflowInspectorProps {
   onOpenNodeEditor?: (nodeId: string) => void;
   onResetAllNodeOffsets?: () => void;
   hasCustomNodeOffsets?: boolean;
+  assignedFolderPool?: FolderScriptPool | null;
+  lastFolderResolveSummary?: FolderAutoResolveSummary | null;
+  isAutoResolvingFolder?: boolean;
+  onAssignFolderAndAutoResolve?: (files: FileList | File[]) => Promise<void>;
+  onSelectStartScriptFromAssignedFolder?: (entry: FolderScriptFileEntry) => Promise<void>;
+  onClearAssignedFolder?: () => void;
 }
 
 export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
@@ -151,6 +163,12 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
   onOpenNodeEditor,
   onResetAllNodeOffsets,
   hasCustomNodeOffsets = false,
+  assignedFolderPool = null,
+  lastFolderResolveSummary = null,
+  isAutoResolvingFolder = false,
+  onAssignFolderAndAutoResolve,
+  onSelectStartScriptFromAssignedFolder,
+  onClearAssignedFolder,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [issueFilterTab, setIssueFilterTab] = useState<'open' | 'resolved'>('open');
@@ -173,6 +191,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
   const [guidedMainFeedback, setGuidedMainFeedback] = useState<string | null>(null);
   const [isImportingGuidedMainVisio, setIsImportingGuidedMainVisio] = useState(false);
   const guidedMainVisioInputRef = useRef<HTMLInputElement>(null);
+  const folderAssignInputRef = useRef<HTMLInputElement | null>(null);
+  const [folderStartSearch, setFolderStartSearch] = useState('');
   const prevModulesCountRef = useRef<number>(scriptWorkspace.modules.length);
 
   // Top-Down Masterscript Checklist Wizard & Sync Map state
@@ -937,6 +957,29 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
 
       {/* Scrollable Body */}
       <div className="flex-1 overflow-y-auto overscroll-contain touch-pan-y p-4 space-y-4">
+        {/* Shared hidden directory input for assigning a script folder (.s auto-discovery) */}
+        {onAssignFolderAndAutoResolve && (
+          <input
+            ref={(el) => {
+              folderAssignInputRef.current = el;
+              if (el) {
+                el.setAttribute('webkitdirectory', '');
+                el.setAttribute('directory', '');
+              }
+            }}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const files = e.target.files;
+              if (files && files.length > 0) {
+                void onAssignFolderAndAutoResolve(Array.from(files));
+              }
+              e.target.value = '';
+            }}
+          />
+        )}
+
         {/* Compact View-Level Switcher when modules exist */}
         {scriptWorkspace.modules.length > 0 &&
           (workspaceMode === 'free' || guidedStep === 1) && (
@@ -1143,6 +1186,86 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                     </>
                   )}
                 </div>
+
+                {onAssignFolderAndAutoResolve && (
+                  <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                    <button
+                      type="button"
+                      disabled={isAutoResolvingFolder}
+                      onClick={() => folderAssignInputRef.current?.click()}
+                      className="w-full py-2 px-3 bg-indigo-950/70 hover:bg-indigo-900/70 border border-indigo-500/50 text-indigo-100 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <FolderSearch className="w-3.5 h-3.5 text-indigo-300 shrink-0" />
+                      <span>
+                        {isAutoResolvingFolder
+                          ? 'Gleiche Skript-Ordner ab...'
+                          : assignedFolderPool
+                          ? `Ordner „${assignedFolderPool.folderName}“ (${assignedFolderPool.totalFilesScanned} .s) wechseln`
+                          : 'Skript-Ordner zuweisen (600+ .s automatisch abgleichen)'}
+                      </span>
+                    </button>
+
+                    {assignedFolderPool && scriptWorkspace.modules.length === 0 && (
+                      <div className="p-2.5 rounded-lg bg-slate-900 border border-indigo-500/40 space-y-2">
+                        <div className="flex items-center justify-between gap-2 text-[11px]">
+                          <span className="font-semibold text-indigo-200 truncate">
+                            Start-Skript aus Ordner „{assignedFolderPool.folderName}“ (
+                            {assignedFolderPool.totalFilesScanned} Dateien) wählen:
+                          </span>
+                          {onClearAssignedFolder && (
+                            <button
+                              type="button"
+                              onClick={onClearAssignedFolder}
+                              className="text-[10px] text-slate-400 hover:text-slate-200 underline cursor-pointer shrink-0"
+                            >
+                              Trennen
+                            </button>
+                          )}
+                        </div>
+                        <input
+                          type="text"
+                          value={folderStartSearch}
+                          onChange={(e) => setFolderStartSearch(e.target.value)}
+                          placeholder="Start-/Masterscript im Ordner suchen (z. B. 4910, Main)..."
+                          className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded text-[11px] font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none"
+                        />
+                        <div className="max-h-36 overflow-y-auto space-y-1 pr-0.5">
+                          {assignedFolderPool.entries
+                            .filter((e) => {
+                              const q = folderStartSearch.trim().toLowerCase();
+                              if (!q) return true;
+                              return (
+                                e.baseName.toLowerCase().includes(q) ||
+                                e.filename.toLowerCase().includes(q)
+                              );
+                            })
+                            .slice(0, 60)
+                            .map((entry) => (
+                              <button
+                                key={entry.relativePath}
+                                type="button"
+                                disabled={isAutoResolvingFolder}
+                                onClick={async () => {
+                                  if (onSelectStartScriptFromAssignedFolder) {
+                                    await onSelectStartScriptFromAssignedFolder(entry);
+                                    setGuidedStep(2);
+                                  }
+                                }}
+                                className="w-full px-2 py-1.5 rounded bg-slate-950 hover:bg-indigo-950/60 border border-slate-800 hover:border-indigo-500/50 text-left flex items-center justify-between gap-2 text-[11px] transition-colors cursor-pointer"
+                              >
+                                <span className="font-mono font-semibold text-slate-100 truncate">
+                                  {entry.filename}
+                                </span>
+                                <span className="text-[10px] text-indigo-300 font-semibold shrink-0">
+                                  Start + Kette laden →
+                                </span>
+                              </button>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -2140,6 +2263,58 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
               </span>
             )}
           </div>
+
+          {/* 1-Click Folder Assignment & Automatic Recursive .s Script Discovery */}
+          {onAssignFolderAndAutoResolve && (
+            <div className="p-2.5 rounded-lg bg-slate-900/90 border border-indigo-500/40 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-semibold text-indigo-200 flex items-center gap-1.5">
+                    <FolderSearch className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span className="truncate">
+                      {assignedFolderPool
+                        ? `Ordner „${assignedFolderPool.folderName}“ (${assignedFolderPool.totalFilesScanned} Dateien)`
+                        : 'Automatische Ordnersuche (Scriptname.s)'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-slate-400 leading-snug mt-0.5">
+                    Gleicht den Ordner automatisch mit allen im Masterscript &amp; Folgeskripten
+                    aufgerufenen Zielen ab und lädt nur aktive <code className="font-mono text-slate-300">.s</code>-Dateien rekursiv nach (Altlasten werden ignoriert).
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  disabled={isAutoResolvingFolder}
+                  onClick={() => folderAssignInputRef.current?.click()}
+                  className="flex-1 py-1.5 px-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-[11px] font-semibold rounded-md transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <FolderSearch className="w-3.5 h-3.5 shrink-0" />
+                  <span>
+                    {isAutoResolvingFolder
+                      ? 'Suche & lade verknüpfte .s-Skripte...'
+                      : assignedFolderPool
+                      ? 'Anderen Skript-Ordner wählen & abgleichen'
+                      : 'Skript-Ordner zuweisen & .s automatisch laden'}
+                  </span>
+                </button>
+              </div>
+
+              {lastFolderResolveSummary && (
+                <div className="px-2.5 py-1.5 rounded bg-emerald-950/35 border border-emerald-500/35 text-[10px] font-mono tabular-nums text-emerald-200 space-y-0.5">
+                  <div>
+                    ✓ <strong>{lastFolderResolveSummary.loadedScriptNumbers.length}</strong> aktive Folgeskripte (.s) automatisch entlang der Kette geladen
+                  </div>
+                  <div className="text-slate-400">
+                    {lastFolderResolveSummary.skippedLegacyFilesCount} von{' '}
+                    {lastFolderResolveSummary.totalPoolFiles} Dateien im Ordner als ungenutzte Altlast übersprungen
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {scriptWorkspace.modules.length === 0 ? (
             <div className="text-[11px] text-slate-400 leading-relaxed space-y-2.5">

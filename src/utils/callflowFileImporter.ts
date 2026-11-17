@@ -1,7 +1,9 @@
 import { ScriptModule } from '../types/mermaidStudio';
 import {
   canonicalScriptMatchKey,
+  detectMasterScriptChecklist,
   isValidScriptRef,
+  mergeScriptModules,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
 } from './scriptCallflowParser';
@@ -166,3 +168,408 @@ export async function importCallflowFile(
     decodedText,
   };
 }
+
+export interface FolderScriptFileEntry {
+  file: File;
+  filename: string;
+  baseName: string;
+  canonicalKey: string;
+  relativePath: string;
+  isDotS: boolean;
+}
+
+export interface FolderScriptPool {
+  folderName: string;
+  totalFilesScanned: number;
+  entries: FolderScriptFileEntry[];
+  byCanonicalKey: Map<string, FolderScriptFileEntry>;
+  byNormalizedAlias: Map<string, FolderScriptFileEntry>;
+}
+
+export interface FolderAutoResolveSummary {
+  modules: ScriptModule[];
+  loadedScriptNumbers: string[];
+  loadedFilenames: string[];
+  unmatchedTargetRefs: string[];
+  totalPoolFiles: number;
+  skippedLegacyFilesCount: number;
+  folderName: string;
+}
+
+function buildNormalizedFolderAliases(baseName: string): string[] {
+  const aliases = new Set<string>();
+  const trimmed = baseName.trim();
+  if (!trimmed) return [];
+
+  const canonical = canonicalScriptMatchKey(trimmed);
+  if (canonical) aliases.add(canonical);
+
+  const normRef = canonicalScriptMatchKey(normalizeScriptRef(trimmed));
+  if (normRef) aliases.add(normRef);
+
+  // Strip common prefix/suffix patterns like "script_4910", "skript-4910", "cdn_4910", "4910_script"
+  const stripped = trimmed
+    .replace(/^(?:avaya[\s_-]*)?(?:script|skript|cdn|flow|sub|modul)[\s_-]+/i, '')
+    .replace(/[\s_-]+(?:script|skript|flow|neu|alt|prod|v\d+)$/i, '')
+    .trim();
+  if (stripped) {
+    aliases.add(canonicalScriptMatchKey(stripped));
+  }
+
+  // If the basename contains a standalone 3-6 digit script number, register it as a fallback alias
+  const numMatch = trimmed.match(/(?:^|[\s_-])0*(\d{3,6})(?:$|[\s_-])/);
+  if (numMatch?.[1]) {
+    aliases.add(numMatch[1]);
+  }
+
+  return Array.from(aliases).filter(Boolean);
+}
+
+/**
+ * Indexes all supported script files (.s, .txt, .aacc, .vsdx) from an assigned folder
+ * without eagerly parsing all 600+ files. Prioritizes .s files when basenames collide.
+ */
+export function indexScriptFolderFiles(files: FileList | File[]): FolderScriptPool {
+  const rawArr = Array.from(files);
+  let detectedFolderName = '';
+
+  const supportedFiles = rawArr.filter((file) => {
+    const rel = (file as File & { webkitRelativePath?: string }).webkitRelativePath || '';
+    if (!detectedFolderName && rel.includes('/')) {
+      detectedFolderName = rel.split('/')[0].trim();
+    }
+    return isSupportedCallflowImportFilename(file.name);
+  });
+
+  // Sort so .s files come first and shorter/exact basenames take precedence
+  const sorted = [...supportedFiles].sort((a, b) => {
+    const aDotS = isAvayaDotSFilename(a.name) ? 0 : 1;
+    const bDotS = isAvayaDotSFilename(b.name) ? 0 : 1;
+    if (aDotS !== bDotS) return aDotS - bDotS;
+    return a.name.length - b.name.length;
+  });
+
+  const entries: FolderScriptFileEntry[] = [];
+  const byCanonicalKey = new Map<string, FolderScriptFileEntry>();
+  const byNormalizedAlias = new Map<string, FolderScriptFileEntry>();
+
+  for (const file of sorted) {
+    const filename = file.name.trim();
+    const baseName = filename.replace(/\.[^.]+$/, '').trim();
+    if (!baseName) continue;
+    const canonicalKey = canonicalScriptMatchKey(baseName);
+    if (!canonicalKey) continue;
+
+    const rel = (file as File & { webkitRelativePath?: string }).webkitRelativePath || filename;
+    const entry: FolderScriptFileEntry = {
+      file,
+      filename,
+      baseName,
+      canonicalKey,
+      relativePath: rel,
+      isDotS: isAvayaDotSFilename(filename),
+    };
+
+    entries.push(entry);
+
+    if (!byCanonicalKey.has(canonicalKey)) {
+      byCanonicalKey.set(canonicalKey, entry);
+    }
+
+    const aliases = buildNormalizedFolderAliases(baseName);
+    for (const alias of aliases) {
+      if (!byNormalizedAlias.has(alias)) {
+        byNormalizedAlias.set(alias, entry);
+      }
+    }
+  }
+
+  return {
+    folderName: detectedFolderName || 'Skript-Ordner',
+    totalFilesScanned: entries.length,
+    entries,
+    byCanonicalKey,
+    byNormalizedAlias,
+  };
+}
+
+/**
+ * Looks up `<Scriptname>.s` (or a normalized match) in the assigned FolderScriptPool.
+ */
+export function findMatchingFileInFolderPool(
+  pool: FolderScriptPool,
+  targetRef: string
+): FolderScriptFileEntry | null {
+  const cleanRef = targetRef.trim().replace(/\.[^.]+$/, '').trim();
+  if (!cleanRef) return null;
+
+  const exactKey = canonicalScriptMatchKey(cleanRef);
+  if (exactKey && pool.byCanonicalKey.has(exactKey)) {
+    return pool.byCanonicalKey.get(exactKey)!;
+  }
+
+  const normalizedKey = canonicalScriptMatchKey(normalizeScriptRef(cleanRef));
+  if (normalizedKey && pool.byCanonicalKey.has(normalizedKey)) {
+    return pool.byCanonicalKey.get(normalizedKey)!;
+  }
+
+  const candidateAliases = buildNormalizedFolderAliases(cleanRef);
+  for (const alias of candidateAliases) {
+    if (pool.byCanonicalKey.has(alias)) {
+      return pool.byCanonicalKey.get(alias)!;
+    }
+  }
+
+  for (const alias of candidateAliases) {
+    if (pool.byNormalizedAlias.has(alias)) {
+      return pool.byNormalizedAlias.get(alias)!;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Recursively resolves and loads only those `<Scriptname>.s` files from the assigned
+ * folder that are actually referenced along the callflow chain starting from `initialModules`.
+ * Unreferenced legacy ("Altlast") files in the 600+ file folder are skipped automatically.
+ */
+export async function autoResolveConnectedScriptsFromFolder(
+  initialModules: ScriptModule[],
+  pool: FolderScriptPool,
+  options?: {
+    externalEndpoints?: string[];
+    ignoredChecklistTargets?: string[];
+    masterScriptNumber?: string;
+  }
+): Promise<FolderAutoResolveSummary> {
+  let currentModules = [...initialModules];
+  const externalSet = new Set(
+    (options?.externalEndpoints || []).map((t) => canonicalScriptMatchKey(t))
+  );
+  const ignoredSet = new Set(
+    (options?.ignoredChecklistTargets || []).map((t) => canonicalScriptMatchKey(t))
+  );
+
+  const attemptedRefKeys = new Set<string>();
+  const loadedFilesSet = new Set<string>();
+  const loadedScriptNumbers: string[] = [];
+  const loadedFilenames: string[] = [];
+  const unmatchedTargetRefsMap = new Map<string, string>();
+
+  // Mark already-loaded modules so we don't re-parse their own files unless needed
+  for (const mod of currentModules) {
+    if (mod.sourceFilename) {
+      loadedFilesSet.add(mod.sourceFilename.toLowerCase());
+    }
+  }
+
+  let safetyRounds = 0;
+  const MAX_ROUNDS = 450;
+
+  while (safetyRounds < MAX_ROUNDS) {
+    safetyRounds++;
+
+    const presentKeys = new Set(
+      currentModules.map((m) => canonicalScriptMatchKey(m.scriptNumber))
+    );
+
+    const checklistState = detectMasterScriptChecklist(
+      currentModules,
+      options?.externalEndpoints || [],
+      [],
+      options?.masterScriptNumber,
+      options?.ignoredChecklistTargets || []
+    );
+
+    const pendingTargets: string[] = [];
+    const seenInRound = new Set<string>();
+
+    const enqueueCandidate = (rawRef?: string) => {
+      if (!rawRef) return;
+      const clean = normalizeScriptRef(rawRef);
+      if (!clean) return;
+      const key = canonicalScriptMatchKey(clean);
+      if (!key) return;
+      if (presentKeys.has(key) || externalSet.has(key) || ignoredSet.has(key)) return;
+      if (attemptedRefKeys.has(key) || seenInRound.has(key)) return;
+      seenInRound.add(key);
+      pendingTargets.push(clean);
+    };
+
+    // 1. All missing items from the recursive Masterscript checklist
+    for (const item of checklistState.masterChecklist) {
+      if (item.status === 'missing') {
+        enqueueCandidate(item.refKey);
+      }
+    }
+
+    // 2. Any outgoing script references on loaded modules
+    for (const mod of currentModules) {
+      for (const outRef of mod.outgoingNumbers) {
+        enqueueCandidate(outRef);
+      }
+      for (const rule of mod.rules) {
+        if (rule.targetNumber) {
+          enqueueCandidate(rule.targetNumber);
+        }
+      }
+    }
+
+    if (pendingTargets.length === 0) {
+      break;
+    }
+
+    let loadedAnyInThisRound = false;
+
+    for (const targetRef of pendingTargets) {
+      const targetKey = canonicalScriptMatchKey(targetRef);
+      attemptedRefKeys.add(targetKey);
+
+      const matchedEntry = findMatchingFileInFolderPool(pool, targetRef);
+      if (!matchedEntry) {
+        unmatchedTargetRefsMap.set(targetKey, targetRef);
+        continue;
+      }
+
+      try {
+        const imported = await importCallflowFile(matchedEntry.file, {
+          overridePrimaryScriptNumber: targetRef,
+          overridePrimaryScriptName: matchedEntry.baseName || targetRef,
+          isMasterHint: false,
+        });
+
+        if (imported.modules.length > 0) {
+          currentModules = mergeScriptModules(currentModules, imported.modules);
+          loadedAnyInThisRound = true;
+          unmatchedTargetRefsMap.delete(targetKey);
+
+          for (const m of imported.modules) {
+            if (!loadedScriptNumbers.includes(m.scriptNumber)) {
+              loadedScriptNumbers.push(m.scriptNumber);
+            }
+          }
+          const lowerFile = matchedEntry.filename.toLowerCase();
+          if (!loadedFilesSet.has(lowerFile)) {
+            loadedFilesSet.add(lowerFile);
+            loadedFilenames.push(matchedEntry.filename);
+          }
+        } else {
+          unmatchedTargetRefsMap.set(targetKey, targetRef);
+        }
+      } catch {
+        unmatchedTargetRefsMap.set(targetKey, targetRef);
+      }
+    }
+
+    if (!loadedAnyInThisRound) {
+      break;
+    }
+  }
+
+  const finalPresentKeys = new Set(
+    currentModules.map((m) => canonicalScriptMatchKey(m.scriptNumber))
+  );
+  const unmatchedTargetRefs = Array.from(unmatchedTargetRefsMap.entries())
+    .filter(([k]) => !finalPresentKeys.has(k))
+    .map(([, ref]) => ref);
+
+  const activeTotalFilesUsed = Math.min(
+    pool.totalFilesScanned,
+    Math.max(loadedFilesSet.size, currentModules.length)
+  );
+  const skippedLegacyFilesCount = Math.max(0, pool.totalFilesScanned - activeTotalFilesUsed);
+
+  return {
+    modules: currentModules,
+    loadedScriptNumbers,
+    loadedFilenames,
+    unmatchedTargetRefs,
+    totalPoolFiles: pool.totalFilesScanned,
+    skippedLegacyFilesCount,
+    folderName: pool.folderName,
+  };
+}
+
+/**
+ * Extracts all files from a DragEvent DataTransfer, recursively traversing dropped folders
+ * (via webkitGetAsEntry) when the user drags an entire script directory onto the app.
+ */
+export async function extractFilesFromDataTransfer(
+  dataTransfer: DataTransfer
+): Promise<{ files: File[]; hasDirectory: boolean }> {
+  const items = dataTransfer.items ? Array.from(dataTransfer.items) : [];
+  const webkitEntries = items
+    .map((item) =>
+      typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null
+    )
+    .filter((entry): entry is FileSystemEntry => Boolean(entry));
+
+  const hasDirectory = webkitEntries.some((entry) => entry.isDirectory);
+  if (!hasDirectory || webkitEntries.length === 0) {
+    return {
+      files: Array.from(dataTransfer.files || []),
+      hasDirectory: false,
+    };
+  }
+
+  const collected: File[] = [];
+
+  const traverseEntry = async (entry: FileSystemEntry, pathPrefix = ''): Promise<void> => {
+    if (entry.isFile) {
+      const fileEntry = entry as FileSystemFileEntry;
+      const file = await new Promise<File | null>((resolve) => {
+        fileEntry.file(
+          (f) => {
+            try {
+              if (pathPrefix && !f.webkitRelativePath) {
+                Object.defineProperty(f, 'webkitRelativePath', {
+                  value: `${pathPrefix}${f.name}`,
+                  configurable: true,
+                });
+              }
+            } catch {
+              // ignore readonly property
+            }
+            resolve(f);
+          },
+          () => resolve(null)
+        );
+      });
+      if (file) collected.push(file);
+      return;
+    }
+
+    if (entry.isDirectory) {
+      const dirEntry = entry as FileSystemDirectoryEntry;
+      const reader = dirEntry.createReader();
+      const childEntries: FileSystemEntry[] = [];
+
+      while (true) {
+        const batch = await new Promise<FileSystemEntry[]>((resolve) => {
+          reader.readEntries(
+            (entriesBatch) => resolve(entriesBatch || []),
+            () => resolve([])
+          );
+        });
+        if (batch.length === 0) break;
+        childEntries.push(...batch);
+      }
+
+      const nextPrefix = `${pathPrefix}${dirEntry.name}/`;
+      for (const child of childEntries) {
+        await traverseEntry(child, nextPrefix);
+      }
+    }
+  };
+
+  for (const entry of webkitEntries) {
+    await traverseEntry(entry, '');
+  }
+
+  return {
+    files: collected.length > 0 ? collected : Array.from(dataTransfer.files || []),
+    hasDirectory: true,
+  };
+}
+
