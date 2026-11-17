@@ -982,8 +982,9 @@ export function applyNodeOffsetsToSvg(
 
     if (isVisualEditMode) {
       (nodeGroup as SVGElement).style.cursor = 'move';
-      // Determine approximate right-hand side for the connection port handle
+      // Determine approximate right-hand side for the connection port handle across rect/polygon/path nodes
       const rectEl = nodeGroup.querySelector('rect');
+      const polyEl = !rectEl ? nodeGroup.querySelector('polygon') : null;
       let portX = 72;
       let portY = 0;
       if (rectEl) {
@@ -996,6 +997,29 @@ export function applyNodeOffsetsToSvg(
         }
         if (Number.isFinite(ry) && Number.isFinite(rh)) {
           portY = ry + rh / 2;
+        }
+      } else if (polyEl) {
+        const ptsAttr = polyEl.getAttribute('points') || '';
+        const nums = ptsAttr
+          .trim()
+          .split(/[\s,]+/)
+          .map((n) => parseFloat(n))
+          .filter((n) => Number.isFinite(n));
+        if (nums.length >= 4) {
+          let minX = Infinity;
+          let maxX = -Infinity;
+          let minY = Infinity;
+          let maxY = -Infinity;
+          for (let i = 0; i + 1 < nums.length; i += 2) {
+            minX = Math.min(minX, nums[i]);
+            maxX = Math.max(maxX, nums[i]);
+            minY = Math.min(minY, nums[i + 1]);
+            maxY = Math.max(maxY, nums[i + 1]);
+          }
+          if (Number.isFinite(minX) && Number.isFinite(maxX)) {
+            portX = minX < 0 ? maxX : (maxX - minX) / 2;
+            portY = minY < 0 && maxY > 0 ? (minY + maxY) / 2 : 0;
+          }
         }
       }
       if (!nodeGroup.querySelector('.callflow-connect-port')) {

@@ -174,7 +174,27 @@ export function isValidScriptRef(token: string): boolean {
 }
 
 function sanitizeMermaidText(text: string): string {
-  return text.replace(/"/g, "'").replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return text
+    .replace(/\\/g, '/')
+    .replace(/"/g, "'")
+    .replace(/#/g, 'Nr.')
+    .replace(/[;<>|]/g, ' ')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sanitizeMermaidEdgeLabel(text: string): string {
+  const cleaned = text
+    .replace(/\\/g, '/')
+    .replace(/"/g, "'")
+    .replace(/\|/g, '/')
+    .replace(/#/g, 'Nr.')
+    .replace(/[;<>\[\]{}]/g, ' ')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned ? `|"${cleaned}"|` : '';
 }
 
 function sanitizeNodeKey(text: string): string {
@@ -3320,7 +3340,7 @@ export function buildMasterOverviewMermaid(
     const joined = edge.tags.slice(0, maxShow).join(isNumberList ? ', ' : ' · ');
     const suffixExtra = edge.tags.length > maxShow ? ` (+${edge.tags.length - maxShow})` : '';
     const label = joined ? `${isNumberList ? 'VALUE ' : ''}${joined}${suffixExtra}` : '';
-    const labelPart = label ? `|${label.replace(/\|/g, '/')}|` : '';
+    const labelPart = label ? sanitizeMermaidEdgeLabel(label) : '';
     lines.push(`    ${edge.fromNodeId} ${arrow}${labelPart} ${edge.toNodeId}`);
   }
 
@@ -3334,6 +3354,43 @@ export function buildMasterOverviewMermaid(
     }
   }
 
+  return lines.join('\n');
+}
+
+/**
+ * Ultra-safe fallback Master overview graph guaranteed to parse cleanly in Mermaid v11/v12
+ * if any unusual production script text ever causes a layout/syntax issue.
+ */
+export function buildSafeFallbackMasterMermaid(
+  workspace: ScriptWorkspace,
+  direction: DiagramDirection = 'LR'
+): string {
+  if (workspace.modules.length === 0) {
+    return `flowchart ${direction}\n    Empty["Keine Skripte im Callflow geladen"]`;
+  }
+  const lines: string[] = [`flowchart ${direction}`];
+  const masterMod =
+    workspace.modules.find((m) => m.isMaster) || workspace.modules[0];
+  const masterId = `S_${toMermaidNodeSuffix(masterMod.scriptNumber)}`;
+  lines.push(`    ${masterId}(["▶ ${toMermaidNodeSuffix(masterMod.scriptNumber)}"])`);
+
+  const seenTargets = new Set<string>();
+  workspace.modules.forEach((mod) => {
+    const modId = `S_${toMermaidNodeSuffix(mod.scriptNumber)}`;
+    if (modId !== masterId && !seenTargets.has(modId)) {
+      seenTargets.add(modId);
+      lines.push(`    ${modId}["${toMermaidNodeSuffix(mod.scriptNumber)}"]`);
+      lines.push(`    ${masterId} --> ${modId}`);
+    }
+  });
+  workspace.missingTargets.slice(0, 60).forEach((target) => {
+    const tid = `S_${toMermaidNodeSuffix(target)}`;
+    if (!seenTargets.has(tid) && tid !== masterId) {
+      seenTargets.add(tid);
+      lines.push(`    ${tid}["OFFEN: ${toMermaidNodeSuffix(target)}"]`);
+      lines.push(`    ${masterId} --> ${tid}`);
+    }
+  });
   return lines.join('\n');
 }
 
@@ -3429,7 +3486,7 @@ export function buildScriptDetailMermaid(
     });
     lines.push('    end');
     incomingCallers.forEach((caller) => {
-      lines.push(`    INC_${caller.fromSuffix} -->|${caller.tag}| ${entryId}`);
+      lines.push(`    INC_${caller.fromSuffix} -->${sanitizeMermaidEdgeLabel(caller.tag)} ${entryId}`);
     });
   }
 
@@ -3528,10 +3585,10 @@ export function buildScriptDetailMermaid(
 
     if (rule.targetNumber) {
       if (canonicalScriptMatchKey(rule.targetNumber) === modKey) {
-        lines.push(`        ${stepId} -.->|↻ Schleife ${safeModRef}| ${entryId}`);
+        lines.push(`        ${stepId} -.->${sanitizeMermaidEdgeLabel(`↻ Schleife ${safeModRef}`)} ${entryId}`);
       } else {
         const jumpId = registerExternalJump(rule.targetNumber);
-        lines.push(`        ${stepId} -->|Wohin: ${sanitizeMermaidText(rule.targetNumber)}| ${jumpId}`);
+        lines.push(`        ${stepId} -->${sanitizeMermaidEdgeLabel(`Wohin: ${rule.targetNumber}`)} ${jumpId}`);
       }
     }
 
@@ -3539,14 +3596,14 @@ export function buildScriptDetailMermaid(
       const isNamed = /^(?:Feiertag|Zeitplan|Bedingung|Sprung)$/i.test(ch.choice);
       const baseChoiceText = isNamed ? ch.choice : `Taste ${ch.choice}`;
       const choiceLabel = ch.label
-        ? `${baseChoiceText}: ${sanitizeMermaidText(ch.label)}`
+        ? `${baseChoiceText}: ${ch.label}`
         : baseChoiceText;
 
       if (canonicalScriptMatchKey(ch.targetNumber) === modKey) {
-        lines.push(`        ${stepId} -.->|↻ ${choiceLabel}| ${entryId}`);
+        lines.push(`        ${stepId} -.->${sanitizeMermaidEdgeLabel(`↻ ${choiceLabel}`)} ${entryId}`);
       } else {
         const jumpId = registerExternalJump(ch.targetNumber);
-        lines.push(`        ${stepId} -.->|${choiceLabel}| ${jumpId}`);
+        lines.push(`        ${stepId} -.->${sanitizeMermaidEdgeLabel(choiceLabel)} ${jumpId}`);
       }
     });
   });

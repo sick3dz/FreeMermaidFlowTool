@@ -417,9 +417,70 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
     scriptWorkspace.externalEndpoints,
   ]);
 
+  const diagramNodeChecklistScope = useMemo(() => {
+    if (!selectedNodeId || viewLevel.level !== 'master') return null;
+
+    const mainNodeSuffix = mainModule ? `S_${toMermaidNodeSuffix(mainModule.scriptNumber)}` : 'S_Main';
+    if (
+      canonicalScriptMatchKey(selectedNodeId) === canonicalScriptMatchKey(mainNodeSuffix) ||
+      canonicalScriptMatchKey(selectedNodeId) === 's_main'
+    ) {
+      return null;
+    }
+
+    const nodeLabel =
+      traceResult?.selectedNode.label || graph.nodes.get(selectedNodeId)?.label || selectedNodeId;
+    const isFax = selectedNodeId === 'FAX_BUNDLE';
+    const isOrga = selectedNodeId.startsWith('ORG_');
+
+    // Collect downstream script node IDs reachable from this node in the diagram
+    const downstreamIds = new Set<string>();
+    if (traceResult) {
+      traceResult.downstreamNodeIds.forEach((id) => downstreamIds.add(id));
+      downstreamIds.add(traceResult.selectedNode.id);
+    }
+
+    const matchesItem = (item: (typeof masterChecklist)[number]): boolean => {
+      const expectedNodeId = `S_${toMermaidNodeSuffix(item.refKey)}`;
+      if (isFax) {
+        return Boolean(item.isFaxRoute) || downstreamIds.has(expectedNodeId);
+      }
+      if (isOrga) {
+        if (downstreamIds.has(expectedNodeId)) return true;
+        const orgSlug = canonicalScriptMatchKey(selectedNodeId.replace(/^ORG_/, ''));
+        return Boolean(
+          item.organizationNames?.some(
+            (org) =>
+              canonicalScriptMatchKey(org) === orgSlug ||
+              canonicalScriptMatchKey(nodeLabel).includes(canonicalScriptMatchKey(org))
+          )
+        );
+      }
+      if (selectedNodeId.startsWith('S_')) {
+        if (expectedNodeId === selectedNodeId) return true;
+        return downstreamIds.has(expectedNodeId);
+      }
+      return true;
+    };
+
+    return {
+      nodeId: selectedNodeId,
+      label: nodeLabel.replace(/\s+/g, ' ').trim(),
+      isFax,
+      isOrga,
+      matchesItem,
+    };
+  }, [selectedNodeId, viewLevel.level, mainModule, traceResult, graph.nodes]);
+
+  const diagramScopedChecklist = useMemo(() => {
+    if (!diagramNodeChecklistScope) return masterChecklist;
+    const matched = masterChecklist.filter(diagramNodeChecklistScope.matchesItem);
+    return matched.length > 0 ? matched : masterChecklist;
+  }, [masterChecklist, diagramNodeChecklistScope]);
+
   const filteredChecklistItems = useMemo(() => {
     if (checklistFilter === 'todo') {
-      return masterChecklist
+      return diagramScopedChecklist
         .filter((item) => item.status === 'missing')
         .sort((a, b) => {
           const depthDiff = (a.depth || 1) - (b.depth || 1);
@@ -427,21 +488,25 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
         });
     }
     if (checklistFilter === 'synced') {
-      return masterChecklist.filter((item) => item.status !== 'missing');
+      return diagramScopedChecklist.filter((item) => item.status !== 'missing');
     }
-    return masterChecklist;
-  }, [masterChecklist, checklistFilter]);
+    return diagramScopedChecklist;
+  }, [diagramScopedChecklist, checklistFilter]);
 
   const activeChecklistItem = useMemo(() => {
     if (masterChecklist.length === 0) return null;
     if (activeChecklistRef) {
-      const explicit = masterChecklist.find(
+      const explicit = diagramScopedChecklist.find(
         (item) => canonicalScriptMatchKey(item.refKey) === canonicalScriptMatchKey(activeChecklistRef)
       );
       if (explicit) return explicit;
     }
-    return masterChecklist.find((item) => item.status === 'missing') || masterChecklist[0];
-  }, [masterChecklist, activeChecklistRef]);
+    return (
+      diagramScopedChecklist.find((item) => item.status === 'missing') ||
+      diagramScopedChecklist[0] ||
+      masterChecklist[0]
+    );
+  }, [masterChecklist, diagramScopedChecklist, activeChecklistRef]);
 
   const advanceToNextMissingChecklistItem = (currentRef: string, afterList = masterChecklist) => {
     const idx = afterList.findIndex(
@@ -2165,6 +2230,28 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                           </div>
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {/* Aktiver Diagramm-Filter-Hinweis beim Klick auf Orga, Fax oder Ziel-Script */}
+                  {diagramNodeChecklistScope && (
+                    <div className="px-2.5 py-2 rounded-lg bg-indigo-950/50 border border-indigo-500/45 flex items-center justify-between gap-2 text-[11px]">
+                      <div className="min-w-0">
+                        <div className="text-[10px] uppercase tracking-wider text-indigo-300 font-semibold">
+                          Diagramm-Filter aktiv
+                        </div>
+                        <div className="text-slate-100 font-medium truncate">
+                          {diagramNodeChecklistScope.label} ({diagramScopedChecklist.length} /{' '}
+                          {masterChecklist.length})
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onSelectNodeId(null)}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Alle zeigen
+                      </button>
                     </div>
                   )}
 

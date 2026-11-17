@@ -87,6 +87,7 @@ import {
   addBuildingBlockToWorkspace,
   applyIssueResolutionToWorkspace,
   buildMasterOverviewMermaid,
+  buildSafeFallbackMasterMermaid,
   buildScriptDetailMermaid,
   buildScriptWorkspace,
   canonicalScriptMatchKey,
@@ -279,6 +280,7 @@ export default function App() {
 
   // Rendering & Validation states
   const [baseRenderedSvg, setBaseRenderedSvg] = useState<string | null>(null);
+  const [masterRenderError, setMasterRenderError] = useState<string | null>(null);
   const [validation, setValidation] = useState<ValidationState>({
     isValid: true,
     diagramType: 'Flowchart / Callflow v11',
@@ -327,8 +329,11 @@ export default function App() {
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
   const [isOfflineModalOpen, setIsOfflineModalOpen] = useState<boolean>(false);
 
-  // PC Visual Drag-and-Drop Callflow Editor State
-  const [isVisualEditMode, setIsVisualEditMode] = useState<boolean>(false);
+  // PC Visual Drag-and-Drop Callflow Editor State (enabled automatically when a Callflow workspace is loaded)
+  const [isVisualEditMode, setIsVisualEditMode] = useState<boolean>(
+    () => scriptWorkspace.modules.length > 0
+  );
+  const pendingAutoFitRef = useRef<boolean>(scriptWorkspace.modules.length > 0);
   const [visualEditTool, setVisualEditTool] = useState<'move' | 'connect'>('move');
   const [snapToGrid, setSnapToGrid] = useState<boolean>(true);
   const [standaloneNodeOffsets, setStandaloneNodeOffsets] = useState<
@@ -488,25 +493,60 @@ export default function App() {
     callflowHopDepth,
   ]);
 
-  // Debounced Local Mermaid v11 Parsing & Base SVG Rendering
+  // Debounced Local Mermaid v11 Parsing & Base SVG Rendering (0ms when initializing empty canvas)
   useEffect(() => {
     let isCancelled = false;
+    const delayMs = baseRenderedSvg === null && effectiveMermaidCode.trim().length > 0 ? 0 : 120;
     const timer = window.setTimeout(async () => {
       const result = await renderLocalMermaidDiagram(effectiveMermaidCode, themeConfig);
       if (isCancelled) return;
       setValidation(result.validation);
       if (result.svg !== null) {
+        setMasterRenderError(null);
         setBaseRenderedSvg(result.svg);
       } else if (!effectiveMermaidCode.trim()) {
+        setMasterRenderError(null);
         setBaseRenderedSvg(null);
+      } else if (
+        scriptWorkspace.modules.length > 0 &&
+        callflowViewLevel.level === 'master' &&
+        !isolateSubgraphMode
+      ) {
+        // Fallback to guaranteed-valid simplified Master overview if production script syntax edge case occurs
+        const fallbackCode = buildSafeFallbackMasterMermaid(
+          scriptWorkspace,
+          currentDirection || 'LR'
+        );
+        const fallbackResult = await renderLocalMermaidDiagram(fallbackCode, themeConfig);
+        if (isCancelled) return;
+        if (fallbackResult.svg !== null) {
+          setMasterRenderError(null);
+          setBaseRenderedSvg(fallbackResult.svg);
+        } else {
+          setMasterRenderError(
+            result.validation.errorMessage || 'Das Master-Diagramm konnte nicht gerendert werden.'
+          );
+        }
+      } else {
+        setMasterRenderError(
+          result.validation.errorMessage || 'Das Diagramm konnte nicht gerendert werden.'
+        );
       }
-    }, 120);
+    }, delayMs);
 
     return () => {
       isCancelled = true;
       window.clearTimeout(timer);
     };
-  }, [effectiveMermaidCode, themeConfig]);
+  }, [
+    effectiveMermaidCode,
+    themeConfig,
+    baseRenderedSvg,
+    scriptWorkspace,
+    callflowViewLevel.level,
+    isolateSubgraphMode,
+    currentDirection,
+  ]);
 
   const activeNodeOffsets = useMemo<Record<string, NodePositionOffset>>(
     () =>
@@ -739,6 +779,16 @@ export default function App() {
     setZoom(Number(optimalScale.toFixed(2)));
     setPan({ x: 0, y: 0 });
   }, [coloredSvg]);
+
+  // Automatically center & fit the Master diagram as soon as its SVG renders after loading/switching
+  useEffect(() => {
+    if (!coloredSvg || !pendingAutoFitRef.current) return;
+    const frameId = requestAnimationFrame(() => {
+      handleFitToViewport();
+      pendingAutoFitRef.current = false;
+    });
+    return () => cancelAnimationFrame(frameId);
+  }, [coloredSvg, handleFitToViewport]);
 
   // Center and zoom camera directly onto a specific Callflow node in readable 1:1+ scale
   const handleFocusNodeOnCanvas = useCallback(
@@ -1101,12 +1151,15 @@ export default function App() {
           });
           setSelectedCallflowNodeId(st.nodeId);
         } else {
-          // Treat as a regular click on the node
+          // Treat as a regular click on the node -> spotlight path & show filtered Checklist
           setSelectedCallflowNodeId((prev) =>
             prev === st.nodeId ? null : st.nodeId
           );
           setRightSidebarTab('callflow');
           setIsRightPanelOpen(true);
+          if (workspaceMode === 'guided' && scriptWorkspace.modules.length > 0 && guidedStep === 1) {
+            setGuidedStep(2);
+          }
         }
         return;
       }
@@ -1125,6 +1178,9 @@ export default function App() {
         setSelectedCallflowNodeId((prev) => (prev === clickedId ? null : clickedId));
         setRightSidebarTab('callflow');
         setIsRightPanelOpen(true);
+        if (workspaceMode === 'guided' && scriptWorkspace.modules.length > 0 && guidedStep === 1) {
+          setGuidedStep(2);
+        }
       }
     }
   };
@@ -1204,6 +1260,9 @@ export default function App() {
       );
       if (tappedId) {
         setSelectedCallflowNodeId((prev) => (prev === tappedId ? null : tappedId));
+        if (workspaceMode === 'guided' && scriptWorkspace.modules.length > 0 && guidedStep === 1) {
+          setGuidedStep(2);
+        }
       }
     }
   };
@@ -1283,6 +1342,8 @@ export default function App() {
       }
       setSelectedCallflowNodeId(null);
       setIsolateSubgraphMode(false);
+      setIsVisualEditMode(true);
+      pendingAutoFitRef.current = true;
       setZoom(1);
       setPan({ x: 0, y: 0 });
       if (switchToMobilePreview) {
@@ -1433,11 +1494,16 @@ export default function App() {
       const nextIgnored = (scriptWorkspace.ignoredChecklistTargets || []).filter(
         (t) => canonicalScriptMatchKey(t) !== targetKey
       );
+      const wasEmpty = scriptWorkspace.modules.length === 0;
       const merged = mergeScriptModules(scriptWorkspace.modules, incoming);
       const nextWs = buildScriptWorkspace(merged, {
         ...scriptWorkspace,
         ignoredChecklistTargets: nextIgnored,
       });
+      if (wasEmpty) {
+        pendingAutoFitRef.current = true;
+        setIsVisualEditMode(true);
+      }
       setScriptWorkspace(nextWs);
       refreshDiagramFromWorkspace(nextWs);
       return nextWs;
@@ -1454,6 +1520,7 @@ export default function App() {
           overridePrimaryScriptNumber: normalizedTarget,
         });
         if (mods.length === 0) return null;
+        const wasEmpty = scriptWorkspace.modules.length === 0;
         const targetKey = canonicalScriptMatchKey(normalizedTarget);
         const nextIgnored = (scriptWorkspace.ignoredChecklistTargets || []).filter(
           (t) => canonicalScriptMatchKey(t) !== targetKey
@@ -1463,6 +1530,10 @@ export default function App() {
           ...scriptWorkspace,
           ignoredChecklistTargets: nextIgnored,
         });
+        if (wasEmpty) {
+          pendingAutoFitRef.current = true;
+          setIsVisualEditMode(true);
+        }
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
         return nextWs;
@@ -1674,13 +1745,14 @@ export default function App() {
       setRawScriptDraft(null);
       setScriptWorkspace(payload.workspace);
       setGuidedStep(2);
-      handleSwitchCallflowViewLevel({ level: 'master' }, payload.workspace, false);
+      setIsVisualEditMode(true);
+      pendingAutoFitRef.current = true;
+      handleSwitchCallflowViewLevel({ level: 'master' }, payload.workspace, true);
       if (payload.title) {
         setDiagramTitle(payload.title);
       }
       setRightSidebarTab('callflow');
       setIsRightPanelOpen(true);
-      setMobileActivePane('callflow');
     },
     [handleSwitchCallflowViewLevel]
   );
@@ -1710,6 +1782,8 @@ export default function App() {
         ruleCount: nextWs.modules.reduce((sum, m) => sum + m.rules.length, 0),
       });
       setScriptWorkspace(nextWs);
+      setIsVisualEditMode(true);
+      pendingAutoFitRef.current = true;
       handleSwitchCallflowViewLevel({ level: 'master' }, nextWs);
       return true;
     },
@@ -2002,6 +2076,9 @@ export default function App() {
     setCode('');
     setScriptWorkspace(buildScriptWorkspace([]));
     setGuidedStep(1);
+    setIsVisualEditMode(false);
+    setMasterRenderError(null);
+    pendingAutoFitRef.current = false;
     setCallflowViewLevel({ level: 'master' });
     setSelectedCallflowNodeId(null);
     setIsolateSubgraphMode(false);
@@ -3138,7 +3215,7 @@ export default function App() {
             }`}
           >
             {/* Canvas Overlay Stack: Active Trace Banner + Non-destructive Syntax Warning */}
-            {(callflowTrace || (!validation.isValid && coloredSvg)) && (
+            {(callflowTrace || !validation.isValid) && (
               <div
                 data-canvas-ui="true"
                 onMouseDown={(e) => e.stopPropagation()}
@@ -3265,7 +3342,7 @@ export default function App() {
                   </div>
                 )}
 
-                {!validation.isValid && coloredSvg && (
+                {!validation.isValid && (
                   <button
                     type="button"
                     onClick={() => {
@@ -3393,6 +3470,69 @@ export default function App() {
                 className="mermaid-canvas-stage shrink-0 transition-transform duration-75 ease-out p-4 sm:p-8"
                 dangerouslySetInnerHTML={{ __html: coloredSvg }}
               />
+            ) : scriptWorkspace.modules.length > 0 || code.trim().length > 0 ? (
+              <div
+                data-canvas-ui="true"
+                onMouseDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
+                className="max-w-lg w-full mx-auto my-auto p-6 rounded-2xl bg-slate-900/95 border border-slate-800 text-slate-200 space-y-4 shadow-2xl text-center"
+              >
+                {validation.isValid && !masterRenderError ? (
+                  <>
+                    <div className="w-8 h-8 mx-auto rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-slate-100">
+                        Master-Diagramm wird aufgebaut …
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        {scriptWorkspace.modules.length > 0
+                          ? `${scriptWorkspace.modules.length} Skript-Modul(e) werden lokal gerendert und eingepasst.`
+                          : 'Mermaid-Grafik wird lokal gerendert.'}
+                      </p>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <AlertTriangle className="w-8 h-8 mx-auto text-rose-400" />
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-rose-200">
+                        Diagramm konnte nicht direkt gerendert werden
+                      </p>
+                      <p className="text-xs text-slate-400 break-words">
+                        {masterRenderError ||
+                          validation.errorMessage ||
+                          'Syntaxfehler im generierten Mermaid-Code.'}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                      {scriptWorkspace.modules.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const fallback = buildSafeFallbackMasterMermaid(
+                              scriptWorkspace,
+                              currentDirection || 'LR'
+                            );
+                            pendingAutoFitRef.current = true;
+                            setMasterRenderError(null);
+                            setCode(fallback);
+                          }}
+                          className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                        >
+                          Übersicht neu aufbauen
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleChangeWorkspaceMode('free')}
+                        className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium rounded-lg transition-colors cursor-pointer"
+                      >
+                        Zum Freien Modus (Editor)
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
             ) : workspaceMode === 'guided' ? (
               <div
                 data-canvas-ui="true"
