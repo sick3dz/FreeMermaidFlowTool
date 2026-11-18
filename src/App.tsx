@@ -3638,13 +3638,15 @@ export default function App() {
         };
       }
 
+      const registry = extractWorkspaceResourceRegistry(scriptWorkspace);
       const analysisPayload: InteractiveCallflowHtmlAnalysisPayload = {
         openIssues: scriptWorkspace.issues || [],
         healthFindings: analyzeWorkspaceLogicHealth(scriptWorkspace),
         scheduleRows: buildWorkspaceScheduleOverview(scriptWorkspace),
-        registry: extractWorkspaceResourceRegistry(scriptWorkspace),
+        registry,
         routingMatrixRows: buildWorkspaceRoutingMatrix(scriptWorkspace),
         masterScriptNumber: scriptWorkspace.masterScriptNumber,
+        parametersByScript: registry.parametersByScript,
       };
 
       const abortController = new AbortController();

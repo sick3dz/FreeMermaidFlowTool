@@ -11,6 +11,7 @@ import {
   CallflowResourceRegistry,
   CallflowRoutingMatrixRow,
   CallflowScheduleSummaryRow,
+  CallflowScriptParameterItem,
   CallflowTraceResult,
   NodePositionOffset,
   PathColorMode,
@@ -3056,6 +3057,7 @@ export interface InteractiveCallflowHtmlAnalysisPayload {
   registry: CallflowResourceRegistry;
   routingMatrixRows: CallflowRoutingMatrixRow[];
   masterScriptNumber?: string;
+  parametersByScript?: Record<string, CallflowScriptParameterItem[]>;
 }
 
 function escapeHtmlText(str: string): string {
@@ -4965,6 +4967,51 @@ export function generateInteractiveCallflowHtml(
       const fromN = nodeMap.get(activeEdge.from);
       const toN = nodeMap.get(activeEdge.to);
       card.style.display = 'block';
+
+      // Find relevant Sonderparameter for this transition
+      const dt = PAYLOAD.drillTargetsByNodeId ? PAYLOAD.drillTargetsByNodeId[activeEdge.from] : null;
+      const activeView = viewsByKey.get(activeViewKey);
+      const scriptNum = dt
+        ? dt.scriptRef
+        : (activeView && activeView.scriptNumber
+          ? activeView.scriptNumber
+          : activeEdge.from.replace(/^(?:S|JUMP|INC|SELF|STEP)_/, '').split('_')[0]);
+
+      const an = PAYLOAD.analysis;
+      const paramsMap = an ? (an.parametersByScript || (an.registry ? an.registry.parametersByScript : null)) : null;
+      const fromParams = paramsMap ? (paramsMap[scriptNum] || paramsMap[String(scriptNum).toLowerCase()] || []) : [];
+
+      const edgeRelevantParams = [];
+      const toClean = (toN ? toN.label : activeEdge.to).toLowerCase();
+      const lblClean = (activeEdge.label || '').toLowerCase();
+
+      fromParams.forEach(p => {
+        const valClean = (p.rawValue || p.value).toLowerCase();
+        if (p.category === 'overflow' && (lblClean.includes('überlauf') || lblClean.includes('overflow') || toClean.includes(valClean))) {
+          edgeRelevantParams.push(p);
+        } else if (p.key === 'Sys_Retour_Zentrale' && (lblClean.includes('retour') || lblClean.includes('zentrale') || toClean.includes(valClean))) {
+          edgeRelevantParams.push(p);
+        } else if ((p.key === 'Sys_SondStat' || p.key === 'Sys_SondZeit' || p.key === 'Sys_SondRouting') && (lblClean.includes('🕒') || lblClean.includes('📅') || lblClean.includes('zeit') || lblClean.includes('feiertag') || lblClean.includes('sond'))) {
+          edgeRelevantParams.push(p);
+        } else if (lblClean.includes(p.key.toLowerCase())) {
+          edgeRelevantParams.push(p);
+        }
+      });
+
+      const paramsBlock = edgeRelevantParams.length > 0
+        ? '<div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);">' +
+            '<div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-muted);margin-bottom:4px;">Gekoppelte Sonderparameter</div>' +
+            '<div style="display:flex;flex-direction:column;gap:3px;">' +
+            edgeRelevantParams.map(p =>
+              '<div style="display:flex;justify-content:space-between;padding:3px 6px;border-radius:4px;background:var(--chip-bg);font-size:11px;">' +
+                '<span><strong style="color:var(--text);">' + esc(p.label) + '</strong> <span style="font-size:10px;color:var(--text-muted);font-family:monospace;">(' + esc(p.key) + ')</span></span>' +
+                '<span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;color:var(--accent,#38bdf8);">' + esc(p.value) + '</span>' +
+              '</div>'
+            ).join('') +
+            '</div>' +
+          '</div>'
+        : '';
+
       body.innerHTML =
         '<div class="edge-endpoint-row">' +
           '<button class="node-chip" id="btn-edge-from"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Von: ' + esc(fromN ? fromN.label : activeEdge.from) + '</span><span class="badge">Fokus →</span></button>' +
@@ -4973,9 +5020,74 @@ export function generateInteractiveCallflowHtml(
         '<div class="edge-cond-box">' +
           '<div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;margin-bottom:3px;">Bedingung / Übergangslabel</div>' +
           esc(activeEdge.label || 'Standardübergang (ohne Bedingung)') +
-        '</div>';
+        '</div>' +
+        paramsBlock;
       document.getElementById('btn-edge-from').onclick = () => selectNode(activeEdge.from, true);
       document.getElementById('btn-edge-to').onclick = () => selectNode(activeEdge.to, true);
+    }
+
+    function renderNodeSpecialParameters(targetNodeId) {
+      const drillSlot = document.getElementById('drilldown-slot');
+      if (!drillSlot) return;
+      const nObj = nodeMap.get(targetNodeId);
+      if (!nObj) { drillSlot.innerHTML = ''; return; }
+
+      // Resolve script number for targetNodeId
+      const dt = PAYLOAD.drillTargetsByNodeId ? PAYLOAD.drillTargetsByNodeId[targetNodeId] : null;
+      const activeView = viewsByKey.get(activeViewKey);
+      const scriptNum = dt
+        ? dt.scriptRef
+        : (activeView && activeView.scriptNumber
+          ? activeView.scriptNumber
+          : targetNodeId.replace(/^(?:S|JUMP|INC|SELF|STEP)_/, '').split('_')[0]);
+
+      const an = PAYLOAD.analysis;
+      const paramsMap = an ? (an.parametersByScript || (an.registry ? an.registry.parametersByScript : null)) : null;
+      const paramsList = paramsMap ? (paramsMap[scriptNum] || paramsMap[String(scriptNum).toLowerCase()] || []) : [];
+
+      if (!paramsList || paramsList.length === 0) {
+        drillSlot.innerHTML = '';
+        return;
+      }
+
+      const categories = [
+        { key: 'overflow', title: 'Überlauf & Schwellenwerte', icon: '⏱️' },
+        { key: 'routing', title: 'Routing & Zentralen', icon: '📞' },
+        { key: 'schedule', title: 'Öffnungszeiten & Status', icon: '🕒' },
+        { key: 'media', title: 'Audio, Musik & Gründe', icon: '🎵' },
+        { key: 'custom', title: 'Skript-Variablen', icon: '⚙️' },
+      ];
+
+      let html = '<div class="card param-card" style="margin-top:10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg);">';
+      html += '<div class="row-between" style="margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border);">';
+      html += '<div style="font-size:12px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px;">';
+      html += '<span>⚙️ Sonderparameter</span>';
+      html += '<span style="font-size:11px;font-weight:400;color:var(--text-muted);font-family:monospace;">[' + esc(scriptNum) + ']</span>';
+      html += '</div>';
+      html += '<span style="font-size:10px;color:var(--text-muted);">' + paramsList.length + ' Parameter</span>';
+      html += '</div>';
+
+      categories.forEach(cat => {
+        const inCat = paramsList.filter(p => p.category === cat.key);
+        if (!inCat.length) return;
+        html += '<div style="margin-top:7px;margin-bottom:3px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-muted);">' + cat.icon + ' ' + esc(cat.title) + '</div>';
+        html += '<div style="display:flex;flex-direction:column;gap:4px;">';
+        inCat.forEach(p => {
+          html += '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:4px 6px;border-radius:4px;background:var(--chip-bg);font-size:11px;gap:8px;">';
+          html += '<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;">';
+          html += '<span style="font-weight:500;color:var(--text);">' + esc(p.label) + '</span>';
+          html += ' <span style="font-size:10px;color:var(--text-muted);font-family:monospace;">(' + esc(p.key) + ')</span>';
+          html += '</div>';
+          html += '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;color:var(--accent,#38bdf8);white-space:nowrap;text-align:right;">';
+          html += esc(p.value);
+          html += '</div>';
+          html += '</div>';
+        });
+        html += '</div>';
+      });
+
+      html += '</div>';
+      drillSlot.innerHTML = html;
     }
 
     function updateClusterVisibility(visibleSvgNodes) {
@@ -5428,6 +5540,8 @@ export function generateInteractiveCallflowHtml(
         cycleCard.style.display = 'none';
       }
 
+      renderNodeSpecialParameters(activeNodeId);
+
       if (shouldFocusCamera && autoFocusEl.checked) {
         focusNodeCamera(activeNodeId);
       }
@@ -5667,7 +5781,8 @@ export function generateInteractiveCallflowHtml(
             ? '<div class="filter-chips" id="an-inv-chips">' +
                 '<button class="chip' + (anInvCategory === 'skillsets' ? ' active' : '') + '" data-c="skillsets">Skillsets (' + reg.skillsets.length + ')</button>' +
                 '<button class="chip' + (anInvCategory === 'announcements' ? ' active' : '') + '" data-c="announcements">Ansagen (' + reg.announcements.length + ')</button>' +
-                '<button class="chip' + (anInvCategory === 'variables' ? ' active' : '') + '" data-c="variables">Variablen (' + reg.variables.length + ')</button>' +
+                '<button class="chip' + (anInvCategory === 'special' ? ' active' : '') + '" data-c="special">Sonderparameter (' + ((reg.specialParameters && reg.specialParameters.length) || 0) + ')</button>' +
+                '<button class="chip' + (anInvCategory === 'variables' ? ' active' : '') + '" data-c="variables">Alle Variablen (' + reg.variables.length + ')</button>' +
                 '<button class="chip' + (anInvCategory === 'crossRefs' ? ' active' : '') + '" data-c="crossRefs">Kreuzref. (' + reg.crossRefs.length + ')</button>' +
               '</div>'
             : '<div class="muted-note">Knoten-Inventar im aktuellen Diagramm (' + GRAPH.nodes.length + ' Knoten)</div>');
@@ -5717,6 +5832,24 @@ export function generateInteractiveCallflowHtml(
             });
             body.appendChild(el);
           });
+        } else if (anInvCategory === 'special') {
+          const specParams = reg.specialParameters || [];
+          const items = specParams.filter(p => !q || (p.label + ' ' + p.key + ' ' + p.value + ' ' + (p.note || '')).toLowerCase().includes(q));
+          if (!items.length) {
+            const empty = document.createElement('div');
+            empty.className = 'card muted-note';
+            empty.textContent = 'Keine Sonderparameter für die aktuelle Suche gefunden.';
+            body.appendChild(empty);
+          } else {
+            items.slice(0, 100).forEach(p => {
+              const el = document.createElement('div');
+              el.className = 'an-item';
+              el.innerHTML =
+                '<div class="row-between"><span class="an-item-title">' + esc(p.label) + ' <small style="font-family:monospace;font-weight:normal;opacity:0.8;">(' + esc(p.key) + ')</small></span><span class="an-tag" style="font-family:monospace;font-weight:600;color:var(--accent,#38bdf8);">' + esc(p.value) + '</span></div>' +
+                (p.note ? '<div class="an-item-desc">' + esc(p.note) + '</div>' : '');
+              body.appendChild(el);
+            });
+          }
         } else if (anInvCategory === 'variables') {
           const items = reg.variables.filter(v => !q || v.variableName.toLowerCase().includes(q) || v.valuesByScript.some(vs => (vs.scriptNumber + ' ' + vs.value).toLowerCase().includes(q)));
           items.slice(0, 100).forEach(v => {

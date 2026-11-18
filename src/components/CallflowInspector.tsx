@@ -53,6 +53,7 @@ import {
   exportOpeningHoursCsv,
   exportRoutingMatrixCsv,
   extractScriptNumberFromNodeId,
+  extractScriptSpecialParameters,
   extractWorkspaceResourceRegistry,
   formatScriptDisplayLabel,
   toMermaidNodeSuffix,
@@ -208,7 +209,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
   const [scheduleSearch, setScheduleSearch] = useState('');
   const [healthFilter, setHealthFilter] = useState<'all' | 'error' | 'warning'>('all');
   const [registrySubTab, setRegistrySubTab] = useState<
-    'skillsets' | 'announcements' | 'variables' | 'crossrefs'
+    'skillsets' | 'announcements' | 'special' | 'variables' | 'crossrefs'
   >('skillsets');
   const [registrySearch, setRegistrySearch] = useState('');
   const [matrixSearch, setMatrixSearch] = useState('');
@@ -1718,6 +1719,17 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                   </button>
                   <button
                     type="button"
+                    onClick={() => setRegistrySubTab('special')}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
+                      registrySubTab === 'special'
+                        ? 'bg-sky-600/20 border-sky-500/40 text-sky-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Sonderparameter ({(resourceRegistry.specialParameters || []).length})
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setRegistrySubTab('variables')}
                     className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
                       registrySubTab === 'variables'
@@ -1847,7 +1859,50 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                   </div>
                 )}
 
-                {/* Sub-Tab 3c: System Variables */}
+                {/* Sub-Tab 3c: Sonderparameter (Sys_*) */}
+                {registrySubTab === 'special' && (
+                  <div className="space-y-2 max-h-[480px] overflow-y-auto pr-0.5">
+                    {(resourceRegistry.specialParameters || [])
+                      .filter(
+                        (p) =>
+                          !registrySearch.trim() ||
+                          p.label.toLowerCase().includes(registrySearch.toLowerCase()) ||
+                          p.key.toLowerCase().includes(registrySearch.toLowerCase()) ||
+                          p.value.toLowerCase().includes(registrySearch.toLowerCase()) ||
+                          (p.note && p.note.toLowerCase().includes(registrySearch.toLowerCase()))
+                      )
+                      .map((p) => (
+                        <div
+                          key={p.key}
+                          className="p-3 bg-slate-900/60 rounded-xl border border-slate-800/80 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold text-slate-200">
+                              {p.label}{' '}
+                              <span className="font-mono text-[10px] text-slate-400 font-normal">
+                                ({p.key})
+                              </span>
+                            </span>
+                            <span className="font-mono text-xs font-semibold text-sky-300 tabular-nums">
+                              {p.value}
+                            </span>
+                          </div>
+                          {p.note && (
+                            <p className="text-[11px] text-slate-400 leading-relaxed">
+                              {p.note}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    {(!resourceRegistry.specialParameters || resourceRegistry.specialParameters.length === 0) && (
+                      <div className="text-xs text-slate-500 py-2">
+                        Keine konfigurierten Sonderparameter erkannt.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Sub-Tab 3d: System Variables */}
                 {registrySubTab === 'variables' && (
                   <div className="space-y-2 max-h-[480px] overflow-y-auto pr-0.5">
                     {resourceRegistry.variables
@@ -3770,6 +3825,52 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                   <RotateCcw className="w-3.5 h-3.5" />
                 </button>
               </div>
+
+              {/* Sonderparameter des aktiven Knotens */}
+              {(() => {
+                const targetScriptNum =
+                  selectedNodeScriptTarget?.scriptNumber ||
+                  extractScriptNumberFromNodeId(traceResult.selectedNode.id, scriptWorkspace.modules) ||
+                  (viewLevel.level === 'detail' ? viewLevel.scriptNumber : undefined);
+                if (!targetScriptNum) return null;
+                const targetMod = scriptWorkspace.modules.find(
+                  (m) =>
+                    canonicalScriptMatchKey(m.scriptNumber) ===
+                    canonicalScriptMatchKey(targetScriptNum)
+                );
+                if (!targetMod) return null;
+                const params = extractScriptSpecialParameters(targetMod, scriptWorkspace);
+                if (!params.length) return null;
+
+                return (
+                  <div className="pt-2.5 border-t border-amber-500/30 space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-semibold text-amber-300">⚙️ Sonderparameter</span>
+                      <span className="text-[10px] text-slate-400 font-mono tabular-nums">
+                        {params.length} aktiv
+                      </span>
+                    </div>
+                    <div className="space-y-1 max-h-[190px] overflow-y-auto pr-0.5">
+                      {params.map((p) => (
+                        <div
+                          key={p.key}
+                          className="flex items-center justify-between gap-2 p-1.5 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px]"
+                        >
+                          <div className="min-w-0 flex-1 truncate">
+                            <span className="font-medium text-slate-200">{p.label}</span>
+                            <span className="text-[10px] text-slate-400 font-mono ml-1">
+                              ({p.key})
+                            </span>
+                          </div>
+                          <span className="font-mono font-semibold text-sky-300 shrink-0 tabular-nums">
+                            {p.value}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             {directionFilter !== 'downstream' && (

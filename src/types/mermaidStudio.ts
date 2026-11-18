@@ -361,6 +361,24 @@ export interface CallflowVariableRegistryItem {
   }>;
 }
 
+export type CallflowParameterCategory =
+  | 'overflow'
+  | 'routing'
+  | 'media'
+  | 'schedule'
+  | 'custom';
+
+export interface CallflowScriptParameterItem {
+  key: string;
+  label: string;
+  category: CallflowParameterCategory;
+  value: string;
+  rawValue: string;
+  unit?: string;
+  isDefaultOrDisabled?: boolean;
+  note?: string;
+}
+
 export interface CallflowCrossRefRegistryItem {
   refKey: string;
   displayName: string;
@@ -375,6 +393,8 @@ export interface CallflowResourceRegistry {
   announcements: CallflowAnnouncementRegistryItem[];
   variables: CallflowVariableRegistryItem[];
   crossRefs: CallflowCrossRefRegistryItem[];
+  specialParameters?: CallflowScriptParameterItem[];
+  parametersByScript?: Record<string, CallflowScriptParameterItem[]>;
 }
 
 export interface CallflowRoutingMatrixRow {

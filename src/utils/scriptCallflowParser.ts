@@ -2,13 +2,16 @@ import {
   CallflowAnnouncementRegistryItem,
   CallflowBuildingBlockType,
   CallflowCrossRefRegistryItem,
+  CallflowEdge,
   CallflowGraph,
   CallflowHealthFinding,
   CallflowIssueResolution,
   CallflowOpenIssue,
+  CallflowParameterCategory,
   CallflowResourceRegistry,
   CallflowRoutingMatrixRow,
   CallflowScheduleSummaryRow,
+  CallflowScriptParameterItem,
   CallflowSkillsetRegistryItem,
   CallflowVariableRegistryItem,
   CallflowViewLevel,
@@ -5866,6 +5869,392 @@ export function analyzeWorkspaceLogicHealth(
 }
 
 /**
+ * Extrahiert alle relevanten Avaya-/Callflow-Sonderparameter eines Skripts
+ * (Überlauf-Zeiten, Schwellenwerte, Rücksprung-Zentralen, Gesellschaften, Musik-IDs,
+ * Besetztgründe, aufgelöste Öffnungszeiten sowie kundenspezifische Variablen)
+ * und strukturiert sie mit verständlichen deutschen Bezeichnungen und Einheiten.
+ */
+export function extractScriptSpecialParameters(
+  mod: ScriptModule,
+  workspace?: ScriptWorkspace
+): CallflowScriptParameterItem[] {
+  const items: CallflowScriptParameterItem[] = [];
+  const seenKeys = new Set<string>();
+
+  const addParam = (item: CallflowScriptParameterItem) => {
+    const k = item.key.toLowerCase();
+    if (seenKeys.has(k)) return;
+    seenKeys.add(k);
+    items.push(item);
+  };
+
+  // 1. Collect all ASSIGN statements from rawText
+  const varMap = new Map<string, string>();
+  if (mod.rawText) {
+    const cleaned = stripScriptCommentsAndNoise(mod.rawText);
+    const assignToRegex = /\bassign\s+([\s\S]{1,120}?)\s+to\s+([A-Za-z0-9_]+)\b/gi;
+    let m: RegExpExecArray | null;
+    while ((m = assignToRegex.exec(cleaned)) !== null) {
+      const val = m[1].replace(/\s+/g, ' ').trim().replace(/^['"]|['"]$/g, '');
+      const varName = m[2].trim();
+      varMap.set(varName, val);
+    }
+    const assignEqRegex = /\bassign\s+([A-Za-z0-9_]+)\s*=\s*([^\r\n;]+)/gi;
+    let meq: RegExpExecArray | null;
+    while ((meq = assignEqRegex.exec(cleaned)) !== null) {
+      const varName = meq[1].trim();
+      const val = meq[2].trim().replace(/^['"]|['"]$/g, '');
+      if (!/\bto\s+[A-Za-z0-9_]+$/i.test(val) && !varMap.has(varName)) {
+        varMap.set(varName, val);
+      }
+    }
+  }
+
+  // A. Überlauf & Schwellenwerte (Category 'overflow')
+  const ueberlaufZeit = varMap.get('Sys_Ueberlauf_Zeit');
+  if (ueberlaufZeit !== undefined && ueberlaufZeit !== '' && ueberlaufZeit !== '-1') {
+    addParam({
+      key: 'Sys_Ueberlauf_Zeit',
+      label: 'Überlauf-Verzögerung',
+      category: 'overflow',
+      value: `${ueberlaufZeit}s`,
+      rawValue: ueberlaufZeit,
+      unit: 's',
+      note: 'Wartezeit vor Weiterleitung in Sekunden',
+    });
+  }
+
+  const ueberlaufSkill =
+    varMap.get('Sys_Ueberlauf_Skillset') ||
+    mod.rules.find((r) => /[uü]berlauf/i.test(r.stepName) && r.queueTarget)?.queueTarget;
+  if (ueberlaufSkill && ueberlaufSkill !== 'Default_Skillset' && ueberlaufSkill !== '-1') {
+    addParam({
+      key: 'Sys_Ueberlauf_Skillset',
+      label: 'Überlauf-Warteschlange',
+      category: 'overflow',
+      value: ueberlaufSkill,
+      rawValue: ueberlaufSkill,
+      note: 'Ziel-Skillset bei Überlauf / Nicht-Erreichbarkeit',
+    });
+  }
+
+  const ueberlaufPrio = varMap.get('Sys_Ueberlauf_Prio');
+  if (ueberlaufPrio !== undefined && ueberlaufPrio !== '' && ueberlaufPrio !== '-1') {
+    addParam({
+      key: 'Sys_Ueberlauf_Prio',
+      label: 'Überlauf-Priorität',
+      category: 'overflow',
+      value: `Prio ${ueberlaufPrio}`,
+      rawValue: ueberlaufPrio,
+      note: 'Prioritätsstufe in der Überlauf-Warteschlange',
+    });
+  }
+
+  const ueberlaufRouting = varMap.get('Sys_UeberlaufRouting');
+  if (ueberlaufRouting !== undefined && ueberlaufRouting !== '') {
+    const isActive = ueberlaufRouting === '1' || ueberlaufRouting.toLowerCase() === 'true';
+    addParam({
+      key: 'Sys_UeberlaufRouting',
+      label: 'Überlauf-Routing Status',
+      category: 'overflow',
+      value: isActive ? 'Aktiviert (1)' : 'Deaktiviert (0)',
+      rawValue: ueberlaufRouting,
+      isDefaultOrDisabled: !isActive,
+      note: isActive ? 'Überlauf-Weiterleitung ist scharf geschaltet' : 'Überlauf temporär ausgesetzt',
+    });
+  }
+
+  const wsProzent = varMap.get('Sys_WS_Prozent');
+  if (wsProzent !== undefined && wsProzent !== '' && wsProzent !== '-1') {
+    addParam({
+      key: 'Sys_WS_Prozent',
+      label: 'Warteschlangen-Schwelle (%)',
+      category: 'overflow',
+      value: `${wsProzent}%`,
+      rawValue: wsProzent,
+      unit: '%',
+      note: 'Maximaler prozentualer Füllgrad der Warteschlange',
+    });
+  }
+
+  const wsAbsolut = varMap.get('Sys_WS_Absolut');
+  if (wsAbsolut !== undefined && wsAbsolut !== '' && wsAbsolut !== '-1') {
+    addParam({
+      key: 'Sys_WS_Absolut',
+      label: 'Warteschlangen-Schwelle (Anrufer)',
+      category: 'overflow',
+      value: `${wsAbsolut} Anrufer`,
+      rawValue: wsAbsolut,
+      unit: 'Anrufer',
+      note: 'Maximale absolute Anzahl wartender Anrufer',
+    });
+  }
+
+  // B. Routing & Zentralen (Category 'routing')
+  const retourZentrale = varMap.get('Sys_Retour_Zentrale');
+  if (retourZentrale !== undefined && retourZentrale !== '' && retourZentrale !== '-1' && retourZentrale !== '0') {
+    addParam({
+      key: 'Sys_Retour_Zentrale',
+      label: 'Rücksprung-Zentrale',
+      category: 'routing',
+      value: retourZentrale,
+      rawValue: retourZentrale,
+      note: 'Rückfall- und Abwurfelement zur Telefonzentrale',
+    });
+  }
+
+  const gesellschaft = varMap.get('Sys_Gesellschaft');
+  if (gesellschaft) {
+    addParam({
+      key: 'Sys_Gesellschaft',
+      label: 'Gesellschaft / Mandant',
+      category: 'routing',
+      value: gesellschaft,
+      rawValue: gesellschaft,
+      note: 'Unternehmens- oder Mandantenzuordnung',
+    });
+  }
+
+  const sysBrand =
+    varMap.get('Sys_brand') ||
+    mod.rules.find((r) => Boolean(r.brandName))?.brandName ||
+    mod.entryOrganizationName;
+  if (sysBrand && sysBrand !== gesellschaft) {
+    addParam({
+      key: 'Sys_brand',
+      label: 'Marke / Brand',
+      category: 'routing',
+      value: sysBrand,
+      rawValue: sysBrand,
+      note: 'Markenprofil für Begrüßung und Routing',
+    });
+  }
+
+  const srcRoute =
+    varMap.get('src_route_number') ||
+    mod.rules.find((r) => Boolean(r.srcRouteNumber))?.srcRouteNumber;
+  if (srcRoute) {
+    addParam({
+      key: 'src_route_number',
+      label: 'Inbound Routing-Nummer',
+      category: 'routing',
+      value: srcRoute,
+      rawValue: srcRoute,
+      note: 'Eingehende Avaya Route / CDN-Zuweisung',
+    });
+  }
+
+  if (mod.entryDnisNumbers && mod.entryDnisNumbers.length > 0) {
+    addParam({
+      key: 'DNIS_Range',
+      label: 'Eingehende DNIS-Rufnummern',
+      category: 'routing',
+      value: mod.entryDnisNumbers.join(', '),
+      rawValue: mod.entryDnisNumbers.join(','),
+      note: 'Direktwahlnummern für diesen Einstiegspunkt',
+    });
+  }
+
+  const teamSkillset =
+    varMap.get('Sys_Team_Skillset') ||
+    mod.rules.find((r) => r.queueTarget && !/[uü]berlauf/i.test(r.stepName))?.queueTarget;
+  if (teamSkillset && teamSkillset !== 'Default_Skillset' && teamSkillset !== '-1') {
+    addParam({
+      key: 'Sys_Team_Skillset',
+      label: 'Haupt-Warteschlange (Team)',
+      category: 'routing',
+      value: teamSkillset,
+      rawValue: teamSkillset,
+      note: 'Primäres Ziel-Skillset der Anrufverteilung',
+    });
+  }
+
+  const teamPrio = varMap.get('Sys_Team_Prio');
+  if (teamPrio !== undefined && teamPrio !== '' && teamPrio !== '-1') {
+    addParam({
+      key: 'Sys_Team_Prio',
+      label: 'Team-Priorität',
+      category: 'routing',
+      value: `Prio ${teamPrio}`,
+      rawValue: teamPrio,
+      note: 'Standard-Priorität für das Primär-Skillset',
+    });
+  }
+
+  // C. Öffnungszeiten & Sonderstatus (Category 'schedule')
+  const rawSondZeit = varMap.get('Sys_SondZeit') || mod.rules.find((r) => Boolean(r.schedule))?.schedule;
+  if (rawSondZeit) {
+    const resolved = resolveScheduleWithSondZeit(rawSondZeit, mod, workspace);
+    addParam({
+      key: 'Sys_SondZeit',
+      label: 'Öffnungszeiten (SondZeit)',
+      category: 'schedule',
+      value: resolved.displayText,
+      rawValue: rawSondZeit,
+      note: resolved.hasConcreteTimes ? 'Aufgelöste Arbeitszeiten mit Referenz' : 'Referenziertes Zeit-Skript',
+    });
+  }
+
+  const sondStat = varMap.get('Sys_SondStat') || mod.rules.find((r) => Boolean(r.holiday))?.holiday;
+  if (sondStat) {
+    addParam({
+      key: 'Sys_SondStat',
+      label: 'Sonderstatus / Feiertag',
+      category: 'schedule',
+      value: sondStat,
+      rawValue: sondStat,
+      note: 'Prüfstatus für Notfall, Feiertag oder Sonderansage',
+    });
+  }
+
+  const sondRouting = varMap.get('Sys_SondRouting');
+  if (sondRouting !== undefined && sondRouting !== '') {
+    const isSondActive = sondRouting === '1' || sondRouting.toLowerCase() === 'true';
+    addParam({
+      key: 'Sys_SondRouting',
+      label: 'Sonderrouting-Schalter',
+      category: 'schedule',
+      value: isSondActive ? 'Aktiv (1)' : sondRouting === '0' ? 'Inaktiv (0)' : sondRouting,
+      rawValue: sondRouting,
+      note: isSondActive ? 'Sonderrouting bei Feiertag/Notfall aktiv' : 'Normales Routing',
+    });
+  }
+
+  // D. Medien & Audio (Category 'media')
+  const sysMusik = varMap.get('Sys_Musik');
+  if (sysMusik !== undefined && sysMusik !== '' && sysMusik !== '-1') {
+    addParam({
+      key: 'Sys_Musik',
+      label: 'Wartemusik (Audio-ID)',
+      category: 'media',
+      value: `Musik-ID ${sysMusik}`,
+      rawValue: sysMusik,
+      note: 'Zugewiesene Wartemusik / Audio-Beleg',
+    });
+  }
+
+  const besetztgrund = varMap.get('Sys_Besetztgrund');
+  if (besetztgrund) {
+    addParam({
+      key: 'Sys_Besetztgrund',
+      label: 'Besetzt-Ursache / Code',
+      category: 'media',
+      value: besetztgrund,
+      rawValue: besetztgrund,
+      note: 'Ursachencode bei Abwurf oder Überlastung',
+    });
+  }
+
+  const firstAnn = mod.rules.find((r) => Boolean(r.announcement))?.announcement;
+  if (firstAnn && !firstAnn.startsWith('Musik-ID')) {
+    addParam({
+      key: 'Ansage_RAN',
+      label: 'Hauptansage / RAN',
+      category: 'media',
+      value: firstAnn,
+      rawValue: firstAnn,
+      note: 'Begrüßungs- oder Informationsansage',
+    });
+  }
+
+  // E. Individuelle Skript-Variablen (Category 'custom')
+  const standardSysKeys = new Set([
+    'sys_ueberlauf_zeit', 'sys_ueberlauf_skillset', 'sys_ueberlauf_prio', 'sys_ueberlaufrouting',
+    'sys_ws_prozent', 'sys_ws_absolut', 'sys_retour_zentrale', 'sys_gesellschaft', 'sys_brand',
+    'src_route_number', 'sys_team_skillset', 'sys_team_prio', 'sys_sondzeit', 'sys_sondstat',
+    'sys_sondrouting', 'sys_musik', 'sys_besetztgrund', 'dnis_range', 'ansage_ran'
+  ]);
+
+  for (const [vName, vVal] of varMap.entries()) {
+    const vKey = vName.toLowerCase();
+    if (standardSysKeys.has(vKey)) continue;
+    if (/^(?:temp|dummy|loop_?cnt|counter|i|j|idx)$/i.test(vName)) continue;
+    addParam({
+      key: vName,
+      label: vName.replace(/^[Ss]ys_/, '').replace(/_/g, ' '),
+      category: 'custom',
+      value: vVal,
+      rawValue: vVal,
+      note: 'Skriptinterne Zuweisung',
+    });
+  }
+
+  return items;
+}
+
+/**
+ * Erstellt eine Map aller Sonderparameter indexiert nach Skriptnummer und kanonischem Suchschlüssel.
+ */
+export function buildWorkspaceSpecialParametersMap(
+  workspace: ScriptWorkspace
+): Record<string, CallflowScriptParameterItem[]> {
+  const map: Record<string, CallflowScriptParameterItem[]> = {};
+  for (const mod of workspace.modules || []) {
+    const params = extractScriptSpecialParameters(mod, workspace);
+    map[mod.scriptNumber] = params;
+    const cleanRef = canonicalScriptMatchKey(mod.scriptNumber);
+    if (cleanRef) {
+      map[cleanRef] = params;
+    }
+  }
+  return map;
+}
+
+/**
+ * Extrahiert die für einen konkreten Kanten-Übergang steuernden Sonderparameter
+ * (z. B. Überlaufzeit, Rücksprungnummer zur Zentrale, Feiertags- oder Zeitstatus).
+ */
+export function extractEdgeSpecialParameters(
+  edge: Pick<CallflowEdge, 'from' | 'to' | 'label'>,
+  workspace: ScriptWorkspace
+): CallflowScriptParameterItem[] {
+  const fromNum =
+    extractScriptNumberFromNodeId(edge.from, workspace.modules) || edge.from.replace(/^S_/, '');
+  const toNum =
+    extractScriptNumberFromNodeId(edge.to, workspace.modules) || edge.to.replace(/^S_/, '');
+  const fromMod = workspace.modules.find(
+    (m) => canonicalScriptMatchKey(m.scriptNumber) === canonicalScriptMatchKey(fromNum)
+  );
+  if (!fromMod) return [];
+
+  const allParams = extractScriptSpecialParameters(fromMod, workspace);
+  const relevant: CallflowScriptParameterItem[] = [];
+  const edgeLbl = (edge.label || '').toLowerCase();
+  const toClean = canonicalScriptMatchKey(toNum);
+
+  for (const p of allParams) {
+    const pValClean = canonicalScriptMatchKey(p.rawValue);
+    // 1. Überlauf-Sprung
+    if (p.category === 'overflow' && (/überlauf|overflow/i.test(edgeLbl) || pValClean === toClean)) {
+      relevant.push(p);
+      continue;
+    }
+    // 2. Rücksprung zur Zentrale
+    if (p.key === 'Sys_Retour_Zentrale' && (/retour|zentrale/i.test(edgeLbl) || pValClean === toClean)) {
+      relevant.push(p);
+      continue;
+    }
+    // 3. Zeit- oder Sonderstatus-Bedingung
+    if (
+      (p.key === 'Sys_SondStat' || p.key === 'Sys_SondZeit' || p.key === 'Sys_SondRouting') &&
+      (edgeLbl.includes('🕒') || edgeLbl.includes('📅') || /feiertag|zeit|sond/i.test(edgeLbl))
+    ) {
+      relevant.push(p);
+      continue;
+    }
+    // 4. Direkte Erwähnung des Variablennamens im Label
+    if (edgeLbl.includes(p.key.toLowerCase())) {
+      relevant.push(p);
+      continue;
+    }
+  }
+
+  return relevant.length > 0
+    ? relevant
+    : allParams.filter((p) => p.category === 'routing' || p.category === 'overflow').slice(0, 3);
+}
+
+/**
  * Baustein B: Zentrales Ressourcen- & Variablen-Register
  * Extrahiert alle Skillsets/Warteschlangen, Ansagen/RAN-IDs, Systemvariablen (ASSIGN)
  * und Skript-/Rufnummern-Kreuzreferenzen über den gesamten Arbeitsbereich.
@@ -6110,6 +6499,16 @@ export function extractWorkspaceResourceRegistry(
     };
   });
 
+  const parametersByScript = buildWorkspaceSpecialParametersMap(workspace);
+  const allParamsMap = new Map<string, CallflowScriptParameterItem>();
+  Object.values(parametersByScript).forEach((list) => {
+    list.forEach((p) => {
+      if (!allParamsMap.has(p.key.toLowerCase())) {
+        allParamsMap.set(p.key.toLowerCase(), p);
+      }
+    });
+  });
+
   return {
     skillsets: Array.from(skillsetMap.values()).sort((a, b) =>
       a.name.localeCompare(b.name, 'de')
@@ -6121,6 +6520,8 @@ export function extractWorkspaceResourceRegistry(
       a.variableName.localeCompare(b.variableName, 'de')
     ),
     crossRefs,
+    specialParameters: Array.from(allParamsMap.values()),
+    parametersByScript,
   };
 }
 
