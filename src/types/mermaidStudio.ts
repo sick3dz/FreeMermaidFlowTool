@@ -110,6 +110,12 @@ export interface ScriptRule {
   srcRouteNumber?: string;
   valueNumbers?: string[];
   isFaxRoute?: boolean;
+  queueKind?: 'skillset' | 'network-skillset' | 'agent' | 'cdn';
+  isExternalRouteCall?: boolean;
+  intrinsicMetrics?: string[];
+  hdxAction?: string;
+  treatmentInfo?: string;
+  loopSectionTarget?: string;
 }
 
 export interface ScriptModule {

@@ -210,7 +210,12 @@ function sanitizeMermaidText(text: string): string {
     .replace(/\\/g, '/')
     .replace(/"/g, "'")
     .replace(/#/g, 'Nr.')
-    .replace(/[;<>|]/g, ' ')
+    .replace(/>=/g, '≥')
+    .replace(/<=/g, '≤')
+    .replace(/<>/g, '≠')
+    .replace(/>/g, '›')
+    .replace(/</g, '‹')
+    .replace(/[;|]/g, ' ')
     .replace(/[\r\n]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -222,7 +227,12 @@ function sanitizeMermaidEdgeLabel(text: string): string {
     .replace(/"/g, "'")
     .replace(/\|/g, '/')
     .replace(/#/g, 'Nr.')
-    .replace(/[;<>\[\]{}]/g, ' ')
+    .replace(/>=/g, '≥')
+    .replace(/<=/g, '≤')
+    .replace(/<>/g, '≠')
+    .replace(/>/g, '›')
+    .replace(/</g, '‹')
+    .replace(/[;\[\]{}]/g, ' ')
     .replace(/[\r\n]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -939,17 +949,22 @@ function isAaccScriptText(text: string): boolean {
   return (
     /\bsection\s+["']?[A-Za-z0-9ÄÖÜäöüß_.-]+["']?/i.test(cleaned) ||
     /\bCDN\s*[:=]?\s*\d{3,6}\b/i.test(cleaned) ||
-    /\bassign\b[\s\S]{1,120}\bto\s+(?:Sys_[A-Za-z0-9_]+|src_route_number)\b/i.test(cleaned) ||
+    /\bassign\b[\s\S]{1,120}\bto\s+(?:Sys_[A-Za-z0-9_]+|src_route_number|[A-Za-z_][A-Za-z0-9_]*)\b/i.test(
+      cleaned
+    ) ||
     /\b(?:Sys_Team_Skillset|Sys_Ueberlauf_Skillset|Sys_Retour_Zentrale|Sys_SondStat|Sys_SondZeit|Sys_brand|src_route_number)\b/i.test(
       cleaned
     ) ||
-    /\b(?:queue\s+to|route\s+call|give\s+(?:announcement|ran|ivr|music|cdn|script|ringback|treatment|busy|overflow)|transfer\s+to|execute(?:\s+script)?)\b/i.test(
+    /\b(?:queue\s+to|route\s+(?:call|target|end)|give\s+(?:announcement|ran|ivr|music|cdn|script|ringback|treatment|overflow|busy|controlled\s+broadcast|aura\s+recording|silence)|transfer\s+to|execute(?:\s+script)?)\b/i.test(
+      cleaned
+    ) ||
+    /\b(?:readvar|send\s+info|logged\s+in\s+agents|idle\s+agents|expected\s+wait\s+time|calls\s+waiting|queue\s+length|oldest\s+call|not\s+queued|out\s+of\s+service)\b/i.test(
       cleaned
     ) ||
     /\b(?:open\s+voice\s+session|end\s+voice\s+session|play\s+prompt|voice\s+segment|collect\s+\d+\s+digits)\b/i.test(
       cleaned
     ) ||
-    /\b(?:event\s+(?:handler|call\s+abandon)|out\s+of\s+service|end\s+where|end\s+section|disconnect|drop\s+call)\b/i.test(
+    /\b(?:event\s+(?:handler|call\s+abandon)|end\s+where|end\s+section|disconnect|drop\s+call)\b/i.test(
       cleaned
     ) ||
     /\bVALUE\s+['"]?[0-9A-Za-z*#_.-]{1,15}['"]?\s*[:=]/i.test(cleaned) ||
@@ -1154,7 +1169,7 @@ function parseAaccScriptBlocks(
   const isOclBodyCodeLine = (line: string): boolean => {
     const t = line.trim();
     if (!t) return false;
-    return /^(?:section\b(?!\s+["']?init\b)|event\b|assign\b|if\b|else\b|end\b|give\b|transfer\b|route\b|queue\b|collect\b|execute\b|call\b|goto\b|subscript\b|open\b|play\b|wait\b|disconnect\b|drop\b|where\b|select\b|case\b|value\b|default\b|otherwise\b)/i.test(
+    return /^(?:section\b(?!\s+["']?init\b)|const\b|var\b|event\b|assign\b|readvar\b|send\b|if\b|else\b|end\b|give\b|transfer\b|route\b|queue\b|collect\b|execute\b|call\b|goto\b|subscript\b|open\b|play\b|wait\b|disconnect\b|drop\b|where\b|select\b|case\b|value\b|default\b|otherwise\b)/i.test(
       t
     );
   };
@@ -1256,7 +1271,7 @@ function parseAaccScriptBlocks(
     for (const rawLine of sliceLines.slice(0, 12)) {
       const t = rawLine.trim();
       if (!t) continue;
-      if (/^(?:section|event|assign|if|where|select|case|value|open|give|queue|execute|call|collect|wait|disconnect|drop)\b/i.test(t)) {
+      if (/^(?:section|const|var|event|assign|readvar|send|if|where|select|case|value|open|give|queue|route|execute|call|collect|wait|disconnect|drop)\b/i.test(t)) {
         break;
       }
       nonEmptyBeforeSection.push(t);
@@ -1549,6 +1564,7 @@ function parseAaccScriptBlocks(
       orga: AaccOrgaContext;
       isFaxCond: boolean;
       hadInlineRules: boolean;
+      intrinsics: string[];
     }
 
     const conditionStack: ConditionFrame[] = [];
@@ -1563,6 +1579,7 @@ function parseAaccScriptBlocks(
     let currentSection: string | undefined;
     let currentEvent: string | undefined;
     let inVoiceSession = false;
+    let inDeclBlock = false;
     let pendingValueTrigger: {
       valueNumbers: string[];
       rawTrigger: string;
@@ -1586,12 +1603,99 @@ function parseAaccScriptBlocks(
       orgaRegistry.set(key, mergeOrgaContext(prev, ctx));
     };
 
+    const extractCcmaIntrinsicsFromText = (rawTextLine: string): string[] => {
+      const text = rawTextLine.replace(/\s+/g, ' ').trim();
+      const found: string[] = [];
+      const pushUnique = (val: string) => {
+        if (val && !found.includes(val)) found.push(val);
+      };
+
+      const loggedInMatch = text.match(
+        /\blogged\s+in\s+agents(?:\s+(?:of|in|for))?\s+([A-Za-z0-9_.-]+)?(?:\s*(=|<>|!=|<=|>=|<|>)\s*([A-Za-z0-9_.-]+))?/i
+      );
+      if (loggedInMatch) {
+        const cmp = loggedInMatch[2] && loggedInMatch[3] ? ` ${loggedInMatch[2]} ${loggedInMatch[3]}` : '';
+        pushUnique(`Agents logged in${loggedInMatch[1] ? ` (${loggedInMatch[1]})` : ''}${cmp}`);
+      }
+
+      const countAgentsMatch = text.match(
+        /\bcount\s+agents\s+in\s+skillset\s+([A-Za-z0-9_.-]+)\s*\(([^)]+)\)(?:\s*(=|<>|!=|<=|>=|<|>)\s*([A-Za-z0-9_.-]+))?/i
+      );
+      if (countAgentsMatch) {
+        const cmp = countAgentsMatch[3] && countAgentsMatch[4] ? ` ${countAgentsMatch[3]} ${countAgentsMatch[4]}` : '';
+        pushUnique(`${countAgentsMatch[2].trim()} Agents (${countAgentsMatch[1]})${cmp}`);
+      }
+
+      const idleMatch = text.match(
+        /\b(?:idle|available)\s+agents(?:\s+(?:of|in|for))?\s*([A-Za-z0-9_.-]+)?(?:\s*(=|<>|!=|<=|>=|<|>)\s*([A-Za-z0-9_.-]+))?/i
+      );
+      if (idleMatch) {
+        const sk = idleMatch[1] && !/^(?:of|in|for|then|and|or)$/i.test(idleMatch[1]) ? ` (${idleMatch[1]})` : '';
+        const cmp = idleMatch[2] && idleMatch[3] ? ` ${idleMatch[2]} ${idleMatch[3]}` : '';
+        pushUnique(`Idle Agents${sk}${cmp}`);
+      }
+
+      const ewtMatch = text.match(
+        /\b(?:expected\s+wait\s+time|cewt|ewt)(?:\s+(?:of|in|for))?\s*([A-Za-z0-9_.-]+)?(?:\s*(=|<>|!=|<=|>=|<|>)\s*([A-Za-z0-9_.-]+))?/i
+      );
+      if (ewtMatch) {
+        const sk = ewtMatch[1] && !/^(?:then|and|or|>|<|=)$/i.test(ewtMatch[1]) ? ` (${ewtMatch[1]})` : '';
+        const cmp = ewtMatch[2] && ewtMatch[3] ? ` ${ewtMatch[2]} ${ewtMatch[3]}` : '';
+        pushUnique(`EWT${sk}${cmp}`);
+      }
+
+      const callsWaitMatch = text.match(
+        /\b(?:calls\s+waiting|queue\s+length)(?:\s+(?:of|in|for))?\s*([A-Za-z0-9_.-]+)?(?:\s*(=|<>|!=|<=|>=|<|>)\s*([A-Za-z0-9_.-]+))?/i
+      );
+      if (callsWaitMatch) {
+        const sk = callsWaitMatch[1] && !/^(?:then|and|or|>|<|=)$/i.test(callsWaitMatch[1]) ? ` (${callsWaitMatch[1]})` : '';
+        const cmp = callsWaitMatch[2] && callsWaitMatch[3] ? ` ${callsWaitMatch[2]} ${callsWaitMatch[3]}` : '';
+        pushUnique(`Queue Length${sk}${cmp}`);
+      }
+
+      const waitTimeCondMatch = !ewtMatch
+        ? text.match(/\bwait\s+time(?:\s*(=|<>|!=|<=|>=|<|>)\s*([A-Za-z0-9_.-]+))?/i)
+        : null;
+      if (waitTimeCondMatch) {
+        const cmp = waitTimeCondMatch[1] && waitTimeCondMatch[2] ? ` ${waitTimeCondMatch[1]} ${waitTimeCondMatch[2]}` : '';
+        pushUnique(`Wait Time${cmp}`);
+      }
+
+      if (/\boldest\s+call(?:\s+waiting)?\b/i.test(text)) {
+        pushUnique('Oldest Call');
+      }
+      if (/\banswered\s+within\b/i.test(text)) {
+        pushUnique('Service-Level (Answered Within)');
+      }
+      if (/\bnot\s+queued\b/i.test(text)) {
+        pushUnique('Not Queued');
+      } else if (/\bqueued\b/i.test(text)) {
+        pushUnique('Queued');
+      }
+      if (/\bpriority\s+in\s+network\s+queue\b/i.test(text)) {
+        pushUnique('Network Queue Prio');
+      }
+      const notOos = text.match(/\bnot\s+out\s+of\s+service\s+["']?([A-Za-z0-9_.-]+)["']?/i);
+      if (notOos) {
+        pushUnique(`Skillset aktiv (${notOos[1]})`);
+      } else {
+        const oos = text.match(/\bout\s+of\s+service\s+["']?([A-Za-z0-9_.-]+)["']?/i);
+        if (oos) pushUnique(`Out of Service (${oos[1]})`);
+      }
+
+      return found;
+    };
+
     const formatReadableOclCondition = (rawCond: string): string => {
       const trimmed = rawCond.trim();
       const notOos = trimmed.match(/^not\s+out\s+of\s+service\s+["']?(.+?)["']?$/i);
       if (notOos) return `Skillset aktiv (${notOos[1].trim()})`;
       const oos = trimmed.match(/^out\s+of\s+service\s+["']?(.+?)["']?$/i);
       if (oos) return `Skillset Out of Service (${oos[1].trim()})`;
+      const intrinsics = extractCcmaIntrinsicsFromText(trimmed);
+      if (intrinsics.length > 0 && !/\b(?:day\s+of\s+week|time\s+of\s+day|holiday)\b/i.test(trimmed)) {
+        return intrinsics.join(' · ');
+      }
       const extractedTime = extractReadableScheduleAndHolidayFromText(trimmed);
       if (extractedTime.schedule && extractedTime.holiday) {
         return `Öffnungszeiten ${extractedTime.schedule} · ${extractedTime.holiday}`;
@@ -1611,6 +1715,16 @@ function parseAaccScriptBlocks(
         return nonEventFrames.map((f) => f.condText).slice(-2).join(' · ');
       }
       return undefined;
+    };
+
+    const getActiveIntrinsics = (): string[] => {
+      const set = new Set<string>();
+      for (const frame of conditionStack) {
+        for (const item of frame.intrinsics) {
+          set.add(item);
+        }
+      }
+      return Array.from(set);
     };
 
     const resolveOrgaForRule = (
@@ -1727,24 +1841,38 @@ function parseAaccScriptBlocks(
         /\b(execute(?:\s+script)?|call(?:\s+script)?|subscript|give\s+script|goto)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
       );
       const queueCmd = actionSegment.match(
-        /\bqueue\s+to\s+(?:skillset|cdn)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))(?:\s+with\s+priority\s+(\d{1,3}))?/i
+        /\bqueue\s+to\s+(?:(network\s+skillset|skillset|agent|cdn)\s+)?(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))(?:\s+with\s+priority\s+(\d{1,3}))?/i
       );
-      const routeCmd = actionSegment.match(
-        /\b(?:route\s+call(?:\s+to)?|transfer(?:\s+to)?|give\s+cdn)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|(\d{3,6}|[A-Za-z0-9ÄÖÜäöüß_.-]+))/i
-      );
-      const annCmd = !execCmd
+      const routeEndCmd = /\broute\s+end\b/i.test(actionSegment);
+      const routeCmd = !routeEndCmd
         ? actionSegment.match(
-            /\b(?:give\s+(announcement|ran|ivr|music|treatment|overflow)|open\s+voice\s+segment|(?:play\s+)?(?:prompt\s+)?voice\s+segment|play\s+(?:prompt|announcement|tone|ran)|(?:sonderansage|ansage)\b)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
+            /\b(route\s+(?:call(?:\s+to)?|target)|transfer(?:\s+to)?|give\s+cdn)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_+.-]+))/i
           )
         : null;
-      const ringbackOrBusyCmd = actionSegment.match(/\bgive\s+(ringback|busy)\b/i);
+      const readVarCmd = actionSegment.match(
+        /\breadvar\s+([A-Za-z0-9ÄÖÜäöüß_.-]+)(?:\s+from\s+([A-Za-z0-9ÄÖÜäöüß_.-]+))?/i
+      );
+      const sendInfoCmd = actionSegment.match(
+        /\bsend\s+info\b(?:\s+(.+))?$/i
+      );
+      const ivrTreatmentCmd = !execCmd
+        ? actionSegment.match(
+            /\bgive\s+ivr\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))(?:\s+with\s+treatment\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+)))?/i
+          )
+        : null;
+      const annCmd = !execCmd && !ivrTreatmentCmd
+        ? actionSegment.match(
+            /\b(?:give\s+(controlled\s+broadcast(?:\s+announcement)?|aura\s+recording|announcement|ran|music|treatment|overflow)|open\s+voice\s+segment|(?:play\s+)?(?:prompt\s+)?voice\s+segment|play\s+(?:prompt|announcement|tone|ran)|(?:sonderansage|ansage)\b)(?:\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+)))?/i
+          )
+        : null;
+      const ringbackOrBusyCmd = actionSegment.match(/\bgive\s+(ringback|busy|silence)\b/i);
       const collectCmd = actionSegment.match(
         /\bcollect\s+(\d+)\s+digits?(?:\s+into\s+([A-Za-z0-9_]+))?/i
       );
       const waitCmd = actionSegment.match(
         /\bwait\s+(\d+)\s*(?:(min(?:utes?|uten)?)|(sec(?:onds?)?|sek(?:unden)?))?/i
       );
-      const disconnectCmd = /\b(?:disconnect|drop\s+call)\b/i.test(actionSegment);
+      const disconnectCmd = routeEndCmd || /\b(?:disconnect|drop\s+call)\b/i.test(actionSegment);
 
       const isFaxRoute =
         explicitIsFax ||
@@ -1770,36 +1898,89 @@ function parseAaccScriptBlocks(
           ? normalizeScriptRef(rawExecToken)
           : undefined;
 
+      const routeKeyword = routeCmd?.[1]?.toLowerCase() || '';
       const rawRouteToken = routeCmd
-        ? (routeCmd[1] || routeCmd[2] || routeCmd[3] || '').trim()
+        ? (routeCmd[2] || routeCmd[3] || routeCmd[4] || '').trim()
         : '';
+      const isPhoneOrExtTarget =
+        Boolean(rawRouteToken) &&
+        /^route\s+(?:call|target)/.test(routeKeyword) &&
+        /^\+?\d{2,16}$/.test(rawRouteToken);
       const routeTarget =
-        rawRouteToken && !isFaxRoute && isValidScriptRef(rawRouteToken)
+        rawRouteToken && !isFaxRoute && (isValidScriptRef(rawRouteToken) || isPhoneOrExtTarget)
           ? normalizeScriptRef(rawRouteToken)
           : undefined;
+      const isExternalRouteCall = Boolean(
+        routeTarget && /^route\s+(?:call|target)/.test(routeKeyword)
+      );
       const resolvedTarget = execTarget || routeTarget;
 
-      const queueToken = queueCmd ? (queueCmd[1] || queueCmd[2] || queueCmd[3] || '').trim() : '';
-      const queuePrio = queueCmd && queueCmd[4] ? parseInt(queueCmd[4], 10) : undefined;
+      const rawQueueKind = queueCmd?.[1]?.toLowerCase().replace(/\s+/g, ' ');
+      const queueKind: ScriptRule['queueKind'] = queueCmd
+        ? rawQueueKind === 'network skillset'
+          ? 'network-skillset'
+          : rawQueueKind === 'agent'
+          ? 'agent'
+          : rawQueueKind === 'cdn'
+          ? 'cdn'
+          : 'skillset'
+        : undefined;
+      const queueToken = queueCmd ? (queueCmd[2] || queueCmd[3] || queueCmd[4] || '').trim() : '';
+      const queuePrio = queueCmd && queueCmd[5] ? parseInt(queueCmd[5], 10) : undefined;
 
-      const annKind = annCmd?.[1]?.toLowerCase();
+      const annKind = annCmd?.[1]?.toLowerCase().replace(/\s+/g, ' ');
       const annVal = annCmd ? (annCmd[2] || annCmd[3] || annCmd[4] || '').trim() : '';
-      const formattedAnnouncement = annVal
+      const ivrPort = ivrTreatmentCmd
+        ? (ivrTreatmentCmd[1] || ivrTreatmentCmd[2] || ivrTreatmentCmd[3] || '').trim()
+        : '';
+      const ivrTreat = ivrTreatmentCmd
+        ? (ivrTreatmentCmd[4] || ivrTreatmentCmd[5] || ivrTreatmentCmd[6] || '').trim()
+        : '';
+
+      const treatmentInfo = ivrTreatmentCmd
+        ? ivrTreat
+          ? `IVR ${ivrPort} (Treatment ${ivrTreat})`
+          : `IVR ${ivrPort}`
+        : annKind && annKind.includes('controlled broadcast')
+        ? `Broadcast${annVal ? `: ${annVal}` : ''}`
+        : annKind === 'aura recording'
+        ? `Aura Recording${annVal ? `: ${annVal}` : ''}`
+        : annKind === 'treatment'
+        ? `Treatment${annVal ? `: ${annVal}` : ''}`
+        : annKind === 'overflow'
+        ? `Overflow${annVal ? `: ${annVal}` : ''}`
+        : undefined;
+
+      const formattedAnnouncement = ivrTreatmentCmd
+        ? treatmentInfo
+        : annKind
         ? annKind === 'music'
-          ? `Musik: ${annVal}`
+          ? annVal
+            ? `Musik: ${annVal}`
+            : 'Wartemusik (Music)'
           : annKind === 'treatment'
-          ? `Treatment: ${annVal}`
+          ? `Treatment${annVal ? `: ${annVal}` : ''}`
           : annKind === 'overflow'
-          ? `Overflow: ${annVal}`
-          : annKind === 'ivr'
-          ? `IVR: ${annVal}`
+          ? `Overflow${annVal ? `: ${annVal}` : ''}`
+          : annKind.includes('controlled broadcast')
+          ? `Broadcast${annVal ? `: ${annVal}` : ''}`
+          : annKind === 'aura recording'
+          ? `RAN ${annVal || 'Aura'}`
           : annKind === 'ran'
           ? `RAN ${annVal}`
-          : annVal
+          : annVal || 'Ansage / RAN'
         : ringbackOrBusyCmd
         ? ringbackOrBusyCmd[1].toLowerCase() === 'ringback'
           ? 'Freizeichen (Ringback)'
+          : ringbackOrBusyCmd[1].toLowerCase() === 'silence'
+          ? 'Stille (Silence)'
           : 'Besetztton (Busy)'
+        : undefined;
+
+      const hdxAction = readVarCmd
+        ? `READVAR ${readVarCmd[1]}${readVarCmd[2] ? ` ⇐ ${readVarCmd[2]}` : ''}`
+        : sendInfoCmd
+        ? `SEND INFO${sendInfoCmd[1] ? `: ${sendInfoCmd[1].trim()}` : ''}`
         : undefined;
 
       const waitSecondsVal = waitCmd
@@ -1811,10 +1992,13 @@ function parseAaccScriptBlocks(
         !execCmd &&
         !queueCmd &&
         !routeCmd &&
+        !ivrTreatmentCmd &&
         !annCmd &&
         !ringbackOrBusyCmd &&
         !collectCmd &&
         !disconnectCmd &&
+        !readVarCmd &&
+        !sendInfoCmd &&
         !isFaxRoute &&
         !isLocalSectionCall
       ) {
@@ -1830,11 +2014,14 @@ function parseAaccScriptBlocks(
         isLocalSectionCall ||
         queueCmd ||
         routeCmd ||
+        ivrTreatmentCmd ||
         annCmd ||
         ringbackOrBusyCmd ||
         collectCmd ||
         waitCmd ||
         disconnectCmd ||
+        readVarCmd ||
+        sendInfoCmd ||
         isFaxRoute
       ) {
         const orga = resolveOrgaForRule(
@@ -1845,31 +2032,48 @@ function parseAaccScriptBlocks(
         );
         const stackCond = getActiveConditionLabel();
         const combinedCondition = [stackCond, caseLabel].filter(Boolean).join(' · ') || undefined;
+        const activeIntrinsics = getActiveIntrinsics();
         const valDisplay = valueNumbers.length > 0 ? valueNumbers.join(', ') : '';
 
-        const stepLabel = disconnectCmd
+        const stepLabel = routeEndCmd
+          ? 'Anruf-Ende (Route End)'
+          : disconnectCmd
           ? 'Anruf beenden (Disconnect)'
           : isLocalSectionCall
-          ? `Abschnitt → ${rawExecToken}`
+          ? `Zyklus / Abschnitt → ${rawExecToken}`
           : isFaxRoute && !execTarget
           ? `Fax-Routing (4-stellig)${valDisplay ? `: ${valDisplay}` : ''}`
           : execTarget
           ? `${valDisplay ? `VALUE ${valDisplay} → ` : 'Subskript: '}${execTarget}`
           : queueCmd
-          ? `Queue: ${queueToken}`
+          ? queueKind === 'network-skillset'
+            ? `Network-Skillset: ${queueToken}`
+            : queueKind === 'agent'
+            ? `Agent-Queue: ${queueToken}`
+            : `Queue: ${queueToken}`
           : routeCmd
-          ? `Weiterleitung Ziel ${routeTarget || rawRouteToken}`
+          ? `Route Call → ${routeTarget || rawRouteToken}`
+          : hdxAction
+          ? hdxAction
+          : ivrTreatmentCmd
+          ? treatmentInfo || 'IVR / Treatment'
           : collectCmd
           ? `${inVoiceSession ? 'Voice-Menü: ' : ''}DTMF-Eingabe (${collectCmd[1]} Ziffern)`
           : waitSecondsVal !== undefined && !formattedAnnouncement
           ? `Wartezeit (${waitSecondsVal}s)`
           : annKind === 'music'
           ? 'Wartemusik'
+          : annKind && annKind.includes('controlled broadcast')
+          ? `Controlled Broadcast${annVal ? `: ${annVal}` : ''}`
+          : annKind === 'aura recording'
+          ? `Aura Recording${annVal ? `: ${annVal}` : ''}`
           : annKind === 'treatment'
-          ? 'Treatment'
+          ? `Treatment${annVal ? `: ${annVal}` : ''}`
           : ringbackOrBusyCmd
           ? ringbackOrBusyCmd[1].toLowerCase() === 'ringback'
             ? 'Freizeichen (Ringback)'
+            : ringbackOrBusyCmd[1].toLowerCase() === 'silence'
+            ? 'Stille (Silence)'
             : 'Besetztton (Busy)'
           : inVoiceSession
           ? 'Voice-Prompt'
@@ -1886,12 +2090,18 @@ function parseAaccScriptBlocks(
           sourceNumber: scriptNumber,
           targetNumber: resolvedTarget,
           queueTarget: queueToken || undefined,
+          queueKind,
+          isExternalRouteCall: isExternalRouteCall || undefined,
           skillsetPriority: queuePrio,
           waitSeconds: waitSecondsVal,
           isDisconnect: disconnectCmd || undefined,
           sectionName: currentSection,
           eventName: currentEvent,
           announcement: formattedAnnouncement,
+          treatmentInfo,
+          hdxAction,
+          loopSectionTarget: isLocalSectionCall ? rawExecToken : undefined,
+          intrinsicMetrics: activeIntrinsics.length > 0 ? activeIntrinsics : undefined,
           schedule: detectedTime.schedule,
           holiday: detectedTime.holiday,
           condition: combinedCondition,
@@ -1925,6 +2135,19 @@ function parseAaccScriptBlocks(
       const t = line.trim();
       if (!t) continue;
 
+      // Skip CONST / VAR declaration blocks cleanly without creating bogus rules
+      if (/^(?:const|var)\b/i.test(t) && !/\bexecute\b|\bqueue\b|\broute\b/i.test(t)) {
+        inDeclBlock = !/\bend\s+(?:const|var)\b/i.test(t);
+        continue;
+      }
+      if (/^end\s+(?:const|var)\b/i.test(t)) {
+        inDeclBlock = false;
+        continue;
+      }
+      if (inDeclBlock) {
+        continue;
+      }
+
       // Track SECTION / END SECTION
       const sectionStartMatch = t.match(/^section\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i);
       if (sectionStartMatch) {
@@ -1955,6 +2178,7 @@ function parseAaccScriptBlocks(
           orga: {},
           isFaxCond: false,
           hadInlineRules: false,
+          intrinsics: [],
         });
         continue;
       }
@@ -2031,6 +2255,7 @@ function parseAaccScriptBlocks(
           orga: det,
           isFaxCond: /\bfax/i.test(condBody),
           hadInlineRules: false,
+          intrinsics: extractCcmaIntrinsicsFromText(condBody),
         });
         continue;
       }
@@ -2057,6 +2282,7 @@ function parseAaccScriptBlocks(
             orga,
             isFaxCond: /\bfax/i.test(condExpr),
             hadInlineRules: false,
+            intrinsics: extractCcmaIntrinsicsFromText(elseIfMatch[1]),
           };
           conditionStack.push(frame);
           if (cleanInline) {
@@ -2081,6 +2307,7 @@ function parseAaccScriptBlocks(
             orga: {},
             isFaxCond: false,
             hadInlineRules: false,
+            intrinsics: [],
           });
           if (cleanInline) {
             const actionPart = cleanInline
@@ -2117,6 +2344,7 @@ function parseAaccScriptBlocks(
           orga,
           isFaxCond: /\bfax/i.test(condExpr),
           hadInlineRules: false,
+          intrinsics: extractCcmaIntrinsicsFromText(ifThenMatch[1]),
         };
         conditionStack.push(frame);
 
@@ -3594,7 +3822,7 @@ export function buildScriptWorkspace(
           })),
         }));
 
-      const recordTarget = (rawTarget: string) => {
+      const recordTarget = (rawTarget: string, isExternalRoute = false) => {
         const clean = normalizeScriptRef(rawTarget);
         const rawKey = canonicalScriptMatchKey(clean);
         if (!clean || ignoredKeySet.has(rawKey)) return;
@@ -3607,8 +3835,10 @@ export function buildScriptWorkspace(
         }
 
         if (!knownKeyToDisplay.has(tKey) && !externalKeySet.has(tKey)) {
-          // Automatically classify Sonderansagen / announcement endpoints or unresolvable targets in a multi-script export as endpoints rather than missing-script errors
+          // Automatically classify Sonderansagen / announcement endpoints, ROUTE CALL external targets,
+          // or unresolvable targets in a multi-script export as endpoints rather than missing-script errors
           if (
+            isExternalRoute ||
             isAnnouncementOrEndpointTargetName(canonicalDisplay) ||
             treatUnresolvedAsEndpoint
           ) {
@@ -3621,7 +3851,7 @@ export function buildScriptWorkspace(
       };
 
       sortedRules.forEach((r) => {
-        if (r.targetNumber) recordTarget(r.targetNumber);
+        if (r.targetNumber) recordTarget(r.targetNumber, Boolean(r.isExternalRouteCall));
         r.choices.forEach((c) => {
           if (c.targetNumber) recordTarget(c.targetNumber);
         });
@@ -4143,9 +4373,21 @@ export function buildMasterOverviewMermaid(
 
   const referencedExternalTargets = new Map<string, string>();
   const referencedMissingTargets = new Map<string, string>();
-  const skillsetsMap = new Map<string, { nodeId: string; name: string }>();
+  const externalRouteTargetKeys = new Set<string>();
+  const skillsetsMap = new Map<
+    string,
+    { nodeId: string; name: string; kind: 'skillset' | 'network-skillset' | 'agent' | 'cdn' }
+  >();
 
   activeModules.forEach((m) => {
+    m.rules.forEach((r) => {
+      if (r.isExternalRouteCall && r.targetNumber) {
+        const matched = knownKeyToMod.get(canonicalScriptMatchKey(r.targetNumber));
+        const resolvedRef = matched ? matched.scriptNumber : r.targetNumber;
+        externalRouteTargetKeys.add(canonicalScriptMatchKey(resolvedRef));
+      }
+    });
+
     m.outgoingNumbers.forEach((target) => {
       const rawKey = canonicalScriptMatchKey(target);
       if (ignoredKeySet.has(rawKey)) return;
@@ -4156,6 +4398,7 @@ export function buildMasterOverviewMermaid(
       if (!activeModuleKeySet.has(tKey)) {
         if (
           externalKeySet.has(tKey) ||
+          externalRouteTargetKeys.has(tKey) ||
           workspace.treatUnresolvedAsEndpoint ||
           isAnnouncementOrEndpointTargetName(resolvedRef)
         ) {
@@ -4172,11 +4415,15 @@ export function buildMasterOverviewMermaid(
         rule.queueTarget !== 'Default_Skillset' &&
         !/\(deaktiviert\s*=\s*0\)/i.test(rule.stepName)
       ) {
-        const qKey = canonicalScriptMatchKey(rule.queueTarget);
-        if (qKey && !skillsetsMap.has(qKey)) {
+        const kind = rule.queueKind || 'skillset';
+        const qKey = `${kind}:${canonicalScriptMatchKey(rule.queueTarget)}`;
+        if (!skillsetsMap.has(qKey)) {
+          const prefix =
+            kind === 'network-skillset' ? 'NQ' : kind === 'agent' ? 'AG' : 'Q';
           skillsetsMap.set(qKey, {
-            nodeId: `Q_${toMermaidNodeSuffix(rule.queueTarget)}`,
+            nodeId: `${prefix}_${toMermaidNodeSuffix(rule.queueTarget)}`,
             name: rule.queueTarget,
+            kind,
           });
         }
       }
@@ -4241,7 +4488,61 @@ export function buildMasterOverviewMermaid(
     const hoursBadge = hoursSummary.combinedBadge
       ? `<br/>🕒 ${sanitizeMermaidText(hoursSummary.combinedBadge)}`
       : '';
-    const label = `${baseLabel}${dnisBadge}${hoursBadge}`;
+
+    // Collect CCMA Intrinsics, Wait Cycles / Loop Sections, Broadcasts/Treatments, and HDX/CTI actions directly for Master display
+    const intrinsicList: string[] = [];
+    const loopTargets: string[] = [];
+    const waitList: number[] = [];
+    const mediaList: string[] = [];
+    const hdxList: string[] = [];
+
+    mod.rules.forEach((r) => {
+      (r.intrinsicMetrics || []).forEach((metric) => {
+        if (!intrinsicList.includes(metric)) intrinsicList.push(metric);
+      });
+      if (r.loopSectionTarget && !loopTargets.includes(r.loopSectionTarget)) {
+        loopTargets.push(r.loopSectionTarget);
+      }
+      if (r.waitSeconds !== undefined && !waitList.includes(r.waitSeconds)) {
+        waitList.push(r.waitSeconds);
+      }
+      if (r.treatmentInfo && !mediaList.includes(r.treatmentInfo)) {
+        mediaList.push(r.treatmentInfo);
+      } else if (r.announcement && !mediaList.includes(r.announcement)) {
+        mediaList.push(r.announcement);
+      }
+      if (r.hdxAction && !hdxList.includes(r.hdxAction)) {
+        hdxList.push(r.hdxAction);
+      }
+    });
+
+    const ccmaIntrinsicsBadge =
+      intrinsicList.length > 0
+        ? `<br/>📊 ${sanitizeMermaidText(intrinsicList.slice(0, 3).join(' · '))}${
+            intrinsicList.length > 3 ? ` (+${intrinsicList.length - 3})` : ''
+          }`
+        : '';
+
+    const cycleParts: string[] = [];
+    if (loopTargets.length > 0) {
+      cycleParts.push(`🔄 Zyklus (${loopTargets.slice(0, 2).join(', ')})`);
+    }
+    if (waitList.length > 0) {
+      cycleParts.push(`⏳ Wait ${waitList.slice(0, 2).map((s) => `${s}s`).join('/')}`);
+    }
+    if (mediaList.length > 0) {
+      const hasBroadcastOrTreat = mediaList.some((m) => /broadcast|treatment|ivr/i.test(m));
+      cycleParts.push(
+        `${hasBroadcastOrTreat ? '📢' : '🎵'} ${mediaList.slice(0, 2).join(' · ')}`
+      );
+    }
+    if (hdxList.length > 0) {
+      cycleParts.push(`🗄️ ${hdxList.slice(0, 2).join(' · ')}`);
+    }
+    const ccmaCycleBadge =
+      cycleParts.length > 0 ? `<br/>${sanitizeMermaidText(cycleParts.join(' · '))}` : '';
+
+    const label = `${baseLabel}${dnisBadge}${hoursBadge}${ccmaIntrinsicsBadge}${ccmaCycleBadge}`;
 
     const isAnnEndpoint =
       Boolean(mod.isAnnouncementEndpoint) ||
@@ -4251,7 +4552,7 @@ export function buildMasterOverviewMermaid(
       lines.push(`    ${id}[("■ 🔊 ${label}")]${openClassSuffix}`);
     } else if (inCount === 0 && (outCount > 0 || hasQueue)) {
       lines.push(`    ${id}(["▶ ${label}"])${openClassSuffix}`);
-    } else if (hasChoices || outCount >= 2) {
+    } else if (hasChoices || outCount >= 2 || intrinsicList.length > 0) {
       lines.push(`    ${id}{{"◆ ${label}"}}${openClassSuffix}`);
     } else if (outCount === 0 && !hasQueue) {
       lines.push(`    ${id}[("■ ${label}")]${openClassSuffix}`);
@@ -4269,18 +4570,28 @@ export function buildMasterOverviewMermaid(
   });
 
   referencedExternalTargets.forEach((targetRef) => {
+    const tKey = canonicalScriptMatchKey(targetRef);
     const suffix = toMermaidNodeSuffix(targetRef);
     const safeRef = sanitizeMermaidText(targetRef);
     const isAnn = isAnnouncementOrEndpointTargetName(targetRef);
+    const isRouteCall = externalRouteTargetKeys.has(tKey);
     const endLabel = isAnn
       ? `■ 🔊 ${safeRef} · Sonderansage / Endpunkt`
+      : isRouteCall
+      ? `↗ Route Call: ${safeRef} (Extern)`
       : `■ ${safeRef} · Endpunkt`;
     lines.push(`    S_${suffix}[("${endLabel}")]`);
   });
 
   skillsetsMap.forEach((sk) => {
     const safeSkill = sanitizeMermaidText(sk.name);
-    lines.push(`    ${sk.nodeId}[("🎧 Skillset: ${safeSkill}")]`);
+    if (sk.kind === 'network-skillset') {
+      lines.push(`    ${sk.nodeId}[("🌐 Network-Skillset: ${safeSkill}")]`);
+    } else if (sk.kind === 'agent') {
+      lines.push(`    ${sk.nodeId}(["👤 Agent-Queue: ${safeSkill}"])`);
+    } else {
+      lines.push(`    ${sk.nodeId}[("🎧 Skillset: ${safeSkill}")]`);
+    }
   });
 
   lines.push('');
@@ -4326,16 +4637,32 @@ export function buildMasterOverviewMermaid(
   activeModules.forEach((mod) => {
     const fromNodeId = `S_${toMermaidNodeSuffix(mod.scriptNumber)}`;
     mod.rules.forEach((rule) => {
+      const condBit =
+        rule.intrinsicMetrics && rule.intrinsicMetrics.length > 0
+          ? rule.intrinsicMetrics.slice(0, 2).join(', ')
+          : rule.condition && !/^(?:Skillset aktiv|Sonst)/i.test(rule.condition)
+          ? rule.condition
+          : '';
+      const waitBit = rule.waitSeconds !== undefined ? `WAIT ${rule.waitSeconds}s` : '';
+
       if (rule.targetNumber) {
-        const tag =
+        const baseTag =
           rule.valueNumbers && rule.valueNumbers.length > 0
             ? `VALUE ${rule.valueNumbers.join(', ')}`
             : rule.schedule
             ? `🕒 ${rule.schedule}`
             : rule.holiday
             ? `📅 ${rule.holiday}`
+            : rule.isExternalRouteCall
+            ? `Route Call (P${rule.prio})`
             : `P${rule.prio}`;
-        addAggregatedEdge(mod.scriptNumber, rule.targetNumber, tag, false);
+        const tag = [baseTag, condBit, waitBit].filter(Boolean).join(' · ');
+        addAggregatedEdge(
+          mod.scriptNumber,
+          rule.targetNumber,
+          tag,
+          Boolean(rule.isExternalRouteCall && !knownKeyToMod.has(canonicalScriptMatchKey(rule.targetNumber)))
+        );
       }
       rule.choices.forEach((ch) => {
         const isNamed = /^(?:Feiertag|Zeitplan|Bedingung|Sprung|Retour)$/i.test(ch.choice);
@@ -4347,11 +4674,20 @@ export function buildMasterOverviewMermaid(
         rule.queueTarget !== 'Default_Skillset' &&
         !/\(deaktiviert\s*=\s*0\)/i.test(rule.stepName)
       ) {
-        const sk = skillsetsMap.get(canonicalScriptMatchKey(rule.queueTarget));
+        const kind = rule.queueKind || 'skillset';
+        const sk = skillsetsMap.get(`${kind}:${canonicalScriptMatchKey(rule.queueTarget)}`);
         if (sk) {
           const isOverflow = /überlauf|overflow/i.test(rule.stepName);
-          const qTag = isOverflow ? `Überlauf (P${rule.prio})` : `Queue (P${rule.prio})`;
-          addAggregatedRawEdge(fromNodeId, sk.nodeId, qTag, isOverflow);
+          const qBase =
+            kind === 'network-skillset'
+              ? `Network-Queue (P${rule.prio})`
+              : kind === 'agent'
+              ? `Agent (P${rule.prio})`
+              : isOverflow
+              ? `Überlauf (P${rule.prio})`
+              : `Queue (P${rule.prio})`;
+          const qTag = [qBase, condBit, waitBit].filter(Boolean).join(' · ');
+          addAggregatedRawEdge(fromNodeId, sk.nodeId, qTag, isOverflow || kind === 'network-skillset');
         }
       }
     });
@@ -4657,9 +4993,21 @@ export function buildScriptDetailMermaid(
     return jumpId;
   };
 
+  const firstStepBySection = new Map<string, string>();
+  sortedRules.forEach((rule, idx) => {
+    if (rule.sectionName) {
+      const secKey = canonicalScriptMatchKey(rule.sectionName);
+      if (secKey && !firstStepBySection.has(secKey)) {
+        firstStepBySection.set(secKey, `STEP_${modSuffix}_${idx + 1}`);
+      }
+    }
+  });
+
   sortedRules.forEach((rule, idx) => {
     const stepId = `STEP_${modSuffix}_${idx + 1}`;
-    const hasBranching = rule.choices.length > 0 || Boolean(rule.condition || rule.schedule);
+    const hasBranching =
+      rule.choices.length > 0 ||
+      Boolean(rule.condition || rule.schedule || (rule.intrinsicMetrics && rule.intrinsicMetrics.length > 0));
     const isStepOpen = openRuleIds.has(rule.id);
     if (isStepOpen) hasOpenStep = true;
 
@@ -4696,8 +5044,18 @@ export function buildScriptDetailMermaid(
     if (rule.holiday) {
       metaParts.push(`📅 Feiertag: ${sanitizeMermaidText(rule.holiday)}`);
     }
+    if (rule.intrinsicMetrics && rule.intrinsicMetrics.length > 0) {
+      metaParts.push(`📊 CCMA: ${sanitizeMermaidText(rule.intrinsicMetrics.join(' · '))}`);
+    }
     if (rule.condition) metaParts.push(`Bedingung: ${sanitizeMermaidText(rule.condition)}`);
-    if (rule.announcement) metaParts.push(`Ansage: ${sanitizeMermaidText(rule.announcement)}`);
+    if (rule.treatmentInfo) {
+      metaParts.push(`📢 Treatment: ${sanitizeMermaidText(rule.treatmentInfo)}`);
+    } else if (rule.announcement) {
+      metaParts.push(`Ansage: ${sanitizeMermaidText(rule.announcement)}`);
+    }
+    if (rule.hdxAction) {
+      metaParts.push(`🗄️ CTI/HDX: ${sanitizeMermaidText(rule.hdxAction)}`);
+    }
     if (rule.skillsetPriority !== undefined) {
       metaParts.push(`Queue-Prio: ${rule.skillsetPriority}`);
     }
@@ -4723,18 +5081,41 @@ export function buildScriptDetailMermaid(
     }
     prevStepId = stepId;
 
+    if (rule.loopSectionTarget) {
+      const targetStepId = firstStepBySection.get(canonicalScriptMatchKey(rule.loopSectionTarget));
+      if (targetStepId && targetStepId !== stepId) {
+        lines.push(
+          `        ${stepId} -.->${sanitizeMermaidEdgeLabel(`↻ Zyklus: ${rule.loopSectionTarget}`)} ${targetStepId}`
+        );
+      }
+    }
+
     if (rule.queueTarget) {
       const qKey = sanitizeNodeKey(rule.queueTarget);
-      const qId = `QUEUE_${qKey}`;
+      const qPrefix =
+        rule.queueKind === 'network-skillset'
+          ? 'NQ'
+          : rule.queueKind === 'agent'
+          ? 'AG'
+          : 'QUEUE';
+      const qId = `${qPrefix}_${qKey}`;
+      const qKindLabel =
+        rule.queueKind === 'network-skillset'
+          ? '🌐 Network-Skillset'
+          : rule.queueKind === 'agent'
+          ? '👤 Agent-Queue'
+          : '🎧 Queue';
       const qLabel =
         rule.skillsetPriority !== undefined
-          ? `Queue: ${sanitizeMermaidText(rule.queueTarget)} (Prio ${rule.skillsetPriority})`
-          : `Queue: ${sanitizeMermaidText(rule.queueTarget)}`;
+          ? `${qKindLabel}: ${sanitizeMermaidText(rule.queueTarget)} (Prio ${rule.skillsetPriority})`
+          : `${qKindLabel}: ${sanitizeMermaidText(rule.queueTarget)}`;
       queueNodes.set(qId, {
         id: qId,
         label: qLabel,
       });
-      lines.push(`        ${stepId} -->|Queue| ${qId}`);
+      lines.push(
+        `        ${stepId} -->${sanitizeMermaidEdgeLabel(rule.queueKind === 'network-skillset' ? 'Network-Queue' : 'Queue')} ${qId}`
+      );
     }
 
     if (rule.targetNumber) {
@@ -4742,7 +5123,10 @@ export function buildScriptDetailMermaid(
         lines.push(`        ${stepId} -.->${sanitizeMermaidEdgeLabel(`↻ Schleife ${safeModRef}`)} ${entryId}`);
       } else {
         const jumpId = registerExternalJump(rule.targetNumber);
-        lines.push(`        ${stepId} -->${sanitizeMermaidEdgeLabel(`Wohin: ${rule.targetNumber}`)} ${jumpId}`);
+        const edgeText = rule.isExternalRouteCall
+          ? `Route Call: ${rule.targetNumber}`
+          : `Wohin: ${rule.targetNumber}`;
+        lines.push(`        ${stepId} -->${sanitizeMermaidEdgeLabel(edgeText)} ${jumpId}`);
       }
     }
 

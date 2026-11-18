@@ -111,42 +111,43 @@ export function classifySemanticRole(
 
   // 1. Error / Alert / Rejection keywords
   if (
-    /\b(error|fehler|fail|failed|abbruch|exception|ungültig|invalid|401|403|404|422|500|timeout|alert|warnung|ablehnung|denied|reject|kritisch)\b/i.test(
+    /\b(error|fehler|fail|failed|abbruch|exception|ungültig|invalid|401|403|404|422|500|timeout|alert|warnung|ablehnung|denied|reject|kritisch|out\s+of\s+service|missingscript|fehlendes)\b/i.test(
       lower
     )
   ) {
     return 'error-alert';
   }
 
-  // 2. Storage / Database / Persistence
+  // 2. Async / Queue / Skillset / Network-Skillset (check before cylinder shapeHint so Skillsets are colored as Queues)
+  if (
+    shapeHint === 'subroutine' ||
+    /\b(kafka|queue|skillset|network-skillset|agent-queue|event|events|bus|stream|streaming|topic|worker|webhook|async|message|broker|rabbitmq|pubsub)\b/i.test(
+      lower
+    ) ||
+    /^(?:q|nq|ag|queue)_/i.test(lower)
+  ) {
+    return 'async-queue';
+  }
+
+  // 3. Storage / Database / Persistence / HDX READVAR / Recorded Prompts
   if (
     shapeHint === 'cylinder' ||
-    /\b(db|database|datenbank|postgres|postgresql|mysql|sql|redis|cache|storage|speicher|archiv|archive|s3|disk|bucket|mongo|repository|table|persistenz)\b/i.test(
+    /\b(db|database|datenbank|postgres|postgresql|mysql|sql|redis|cache|storage|speicher|archiv|archive|s3|disk|bucket|mongo|repository|table|persistenz|readvar|hdx|sonderansage|endpunkt|route\s*call)\b/i.test(
       lower
     )
   ) {
     return 'storage-db';
   }
 
-  // 3. Decision / Gateway / Security / Firewall
+  // 4. Decision / Gateway / Security / Firewall / CCMA Intrinsics
   if (
     shapeHint === 'diamond' ||
     lower.includes('?') ||
-    /\b(if|prüfung|pruefung|check|valid|validation|auth|oauth|oidc|idp|waf|firewall|gateway|apigw|entscheidung|bedingung|gate|filter|load\s*balancer|ingress)\b/i.test(
+    /\b(if|prüfung|pruefung|check|valid|validation|auth|oauth|oidc|idp|waf|firewall|gateway|apigw|entscheidung|bedingung|gate|filter|load\s*balancer|ingress|ewt|logged\s*in\s*agents|idle\s*agents|calls\s*waiting)\b/i.test(
       lower
     )
   ) {
     return 'decision-gate';
-  }
-
-  // 4. Async / Event / Queue / Stream
-  if (
-    shapeHint === 'subroutine' ||
-    /\b(kafka|queue|event|events|bus|stream|streaming|topic|worker|webhook|async|message|broker|rabbitmq|pubsub)\b/i.test(
-      lower
-    )
-  ) {
-    return 'async-queue';
   }
 
   // 5. Start / End / Client / User / Actor
@@ -165,7 +166,7 @@ export function classifySemanticRole(
 
 /**
  * Parses the raw Mermaid code to pre-classify node IDs based on bracket syntax:
- * - [(...)] -> storage-db
+ * - [(...)] -> storage-db (or async-queue when Skillset / Queue)
  * - {...} or {{...}} -> decision-gate
  * - [[...]] -> async-queue
  * - ([...]) or ((...)) -> start-actor
@@ -180,7 +181,14 @@ export function buildCodeSyntaxRoleMap(code: string): Map<string, SemanticRoleId
 
     // Cylinder [(...)] or @{ shape: cyl }
     const cylMatches = trimmed.matchAll(/\b([A-Za-z0-9_-]+)\s*\[\(/g);
-    for (const m of cylMatches) map.set(m[1], 'storage-db');
+    for (const m of cylMatches) {
+      const id = m[1];
+      if (/^(?:Q|NQ|AG|QUEUE)_/i.test(id) || /\b(?:skillset|queue)\b/i.test(trimmed)) {
+        map.set(id, 'async-queue');
+      } else {
+        map.set(id, 'storage-db');
+      }
+    }
     if (/shape\s*:\s*(cyl|db|database|disk)/i.test(trimmed)) {
       const idMatch = trimmed.match(/^([A-Za-z0-9_-]+)@/);
       if (idMatch) map.set(idMatch[1], 'storage-db');
@@ -200,7 +208,14 @@ export function buildCodeSyntaxRoleMap(code: string): Map<string, SemanticRoleId
 
     // Stadium ([...]) or Circle ((...))
     const stadMatches = trimmed.matchAll(/\b([A-Za-z0-9_-]+)\s*\([[(]/g);
-    for (const m of stadMatches) map.set(m[1], 'start-actor');
+    for (const m of stadMatches) {
+      const id = m[1];
+      if (/^(?:Q|NQ|AG|QUEUE)_/i.test(id) || /\b(?:agent-queue|skillset|queue)\b/i.test(trimmed)) {
+        map.set(id, 'async-queue');
+      } else {
+        map.set(id, 'start-actor');
+      }
+    }
   }
 
   return map;
