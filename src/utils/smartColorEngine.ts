@@ -2,6 +2,7 @@ import {
   LegendItem,
   LogicAnalysisSummary,
   SmartColorMode,
+  SmartColorNodeType,
 } from '../types/mermaidStudio';
 import { isColorDark, sanitizeSvgForXmlParser } from './mermaidEngine';
 
@@ -12,6 +13,58 @@ export type SemanticRoleId =
   | 'async-queue'
   | 'error-alert'
   | 'core-service';
+
+export interface SmartColorNodeTypeOption {
+  id: SmartColorNodeType;
+  label: string;
+  description: string;
+  swatchColor: string;
+}
+
+export const SMART_COLOR_NODE_TYPE_OPTIONS: SmartColorNodeTypeOption[] = [
+  {
+    id: 'announcement',
+    label: 'Ansagen & Audio',
+    description: 'Sonderansagen, Broadcast, Treatment, Wartemusik, RAN',
+    swatchColor: '#14b8a6',
+  },
+  {
+    id: 'queue',
+    label: 'Skillsets & Queues',
+    description: 'Skillsets, Network-Skillsets, Agent-Queues, Event-Bus',
+    swatchColor: '#a78bfa',
+  },
+  {
+    id: 'decision',
+    label: 'Entscheidungen & Gates',
+    description: 'Verzweigungen, CCMA-Intrinsics, Gateways, Auth',
+    swatchColor: '#fbbf24',
+  },
+  {
+    id: 'storage',
+    label: 'Datenbank & CTI / Endpunkte',
+    description: 'DB, READVAR / HDX, Route Call, externe Endpunkte',
+    swatchColor: '#34d399',
+  },
+  {
+    id: 'start-actor',
+    label: 'Einstieg & Akteure',
+    description: 'Einstiegs-Skripte, Client, Akteur, Ziel',
+    swatchColor: '#38bdf8',
+  },
+  {
+    id: 'core-service',
+    label: 'Skripte & Services',
+    description: 'Reguläre Skripte, Prozesse, Services',
+    swatchColor: '#818cf8',
+  },
+  {
+    id: 'error-alert',
+    label: 'Offene Punkte & Fehler',
+    description: 'Fehlende Skripte, Out of Service, Abbruch, Fehler',
+    swatchColor: '#fb7185',
+  },
+];
 
 interface RolePalette {
   id: SemanticRoleId;
@@ -221,6 +274,175 @@ export function buildCodeSyntaxRoleMap(code: string): Map<string, SemanticRoleId
   return map;
 }
 
+function getPrimaryNodeTitle(rawLabel: string): string {
+  const beforeDetailBadges = rawLabel
+    .split(/📊|🔄|⏳|🗄️|🕒|📅|Abschnitt:|Bedingung:/)[0]
+    .trim();
+  return beforeDetailBadges || rawLabel.trim();
+}
+
+export function isAnnouncementNodeText(idAndAttr: string, textContent: string): boolean {
+  const idLower = idAndAttr.toLowerCase();
+  const fullText = textContent.replace(/\s+/g, ' ').trim();
+  const primaryTitle = getPrimaryNodeTitle(fullText);
+
+  if (fullText.includes('🔊') || /sonderansage\s*\/\s*endpunkt/i.test(fullText)) {
+    return true;
+  }
+
+  // Detail-view step nodes playing announcements, broadcasts, treatments, or audio
+  if (
+    /^(?:step_|flowchart-step_)/i.test(idLower) ||
+    /^prio\s+\d+\s*:/i.test(primaryTitle)
+  ) {
+    if (
+      /^prio\s+\d+\s*:\s*(?:controlled\s+broadcast|aura\s+recording|treatment|wartemusik|musik|freizeichen|besetztton|stille|ringback|busy|silence|sonderansage|ansage|voice\s+segment|play\b|ran\b|ivr\s+\S+\s*\(treatment)/i.test(
+        primaryTitle
+      ) ||
+      /\b(?:ansage|wartemusik)\s*:/i.test(primaryTitle) ||
+      /📢\s*treatment\s*:/i.test(fullText)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  // Master script summary nodes (▶ or ◆) are only announcement nodes if their own name/ID is an announcement
+  const cleanTitleForMatch = primaryTitle.replace(/^[▶◆★■●\s]+/, '').trim();
+  if (
+    /\b(announcement|announcements|sonderansage|ansage|ansagen|voice[\s_-]*segment|controlled[\s_-]*broadcast|aura[\s_-]*recording|wartemusik|ringback|audio[\s_-]*prompt|ran)\b/i.test(
+      `${idAndAttr} ${cleanTitleForMatch}`
+    ) ||
+    /\.(?:wav|mp3|ogg|ulaw|alaw|vox|au)\b/i.test(`${idAndAttr} ${cleanTitleForMatch}`)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export function classifySmartFilterNodeType(
+  idAndAttr: string,
+  textContent: string,
+  shapeHint: 'diamond' | 'cylinder' | 'stadium' | 'subroutine' | 'circle' | 'rect',
+  codeContextMap: Map<string, SemanticRoleId>,
+  element?: Element
+): { filterType: SmartColorNodeType; semanticRole: SemanticRoleId } {
+  const combined = `${idAndAttr} ${textContent}`;
+  const semanticRole = classifySemanticRole(combined, shapeHint, codeContextMap);
+
+  const isOpenIssue =
+    Boolean(element?.classList.contains('missingScript')) ||
+    Boolean(element?.classList.contains('openIssue')) ||
+    textContent.includes('●');
+
+  if (isOpenIssue || semanticRole === 'error-alert') {
+    return { filterType: 'error-alert', semanticRole };
+  }
+
+  if (isAnnouncementNodeText(idAndAttr, textContent)) {
+    return { filterType: 'announcement', semanticRole };
+  }
+
+  switch (semanticRole) {
+    case 'async-queue':
+      return { filterType: 'queue', semanticRole };
+    case 'decision-gate':
+      return { filterType: 'decision', semanticRole };
+    case 'storage-db':
+      return { filterType: 'storage', semanticRole };
+    case 'start-actor':
+      return { filterType: 'start-actor', semanticRole };
+    case 'core-service':
+    default:
+      return { filterType: 'core-service', semanticRole };
+  }
+}
+
+function collectDeclaredCodeNodeIds(code: string): {
+  allIds: string[];
+  subgraphNodeIds: Map<string, Set<string>>;
+} {
+  const idSet = new Set<string>();
+  const subgraphNodeIds = new Map<string, Set<string>>();
+  const lines = code.split('\n');
+  const subgraphStack: string[] = [];
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('%%')) continue;
+
+    const sgMatch = trimmed.match(/^subgraph\s+([A-Za-z0-9_.-]+)/i);
+    if (sgMatch) {
+      const sgId = sgMatch[1];
+      subgraphStack.push(sgId);
+      if (!subgraphNodeIds.has(sgId)) {
+        subgraphNodeIds.set(sgId, new Set<string>());
+      }
+      continue;
+    }
+    if (/^end\b/i.test(trimmed)) {
+      subgraphStack.pop();
+      continue;
+    }
+
+    const tokenMatches = trimmed.matchAll(
+      /\b([A-Za-z0-9_]+)\s*(?:\[\[|\[\(|\(\[|\(\(|\{\{|[\[\(\{])/g
+    );
+    for (const m of tokenMatches) {
+      const id = m[1];
+      if (
+        ['subgraph', 'end', 'direction', 'classDef', 'class', 'style', 'click', 'linkStyle'].includes(
+          id
+        )
+      ) {
+        continue;
+      }
+      idSet.add(id);
+      for (const sgId of subgraphStack) {
+        subgraphNodeIds.get(sgId)?.add(id);
+      }
+    }
+  }
+
+  return {
+    allIds: Array.from(idSet).sort((a, b) => b.length - a.length),
+    subgraphNodeIds,
+  };
+}
+
+function extractNodeIdFromSvgElement(nodeEl: Element, sortedKnownIds: string[]): string | null {
+  const fastId = nodeEl.getAttribute('data-callflow-node-id');
+  if (fastId) return fastId;
+  const dataId = nodeEl.getAttribute('data-id');
+  if (dataId) return dataId;
+
+  const domId = nodeEl.getAttribute('id') || '';
+  for (const knownId of sortedKnownIds) {
+    const escaped = knownId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`(?:^|[-_])${escaped}(?:[-_]\\d+|$)`, 'i').test(domId)) {
+      return knownId;
+    }
+  }
+
+  const mermaidPrefixMatch = domId.match(/^(?:flowchart|state)-(.+?)-\d+$/i);
+  if (mermaidPrefixMatch) return mermaidPrefixMatch[1];
+  return domId || null;
+}
+
+function edgeElementConnectsHiddenNode(
+  edgeEl: Element,
+  hiddenNodeIdPatterns: RegExp[]
+): boolean {
+  if (hiddenNodeIdPatterns.length === 0) return false;
+  const nestedDataId =
+    edgeEl.getAttribute('data-id') ||
+    edgeEl.querySelector('[data-id]')?.getAttribute('data-id') ||
+    '';
+  const meta = `${edgeEl.getAttribute('id') || ''} ${nestedDataId} ${edgeEl.getAttribute('class') || ''}`;
+  return hiddenNodeIdPatterns.some((re) => re.test(meta));
+}
+
 /**
  * Applies text color to both SVG `<text>`/`<tspan>` and HTML `<foreignObject>` inside a group.
  */
@@ -373,7 +595,8 @@ export function applySmartLogicColoring(
   code: string,
   mode: SmartColorMode,
   canvasSurface: 'dark' | 'light',
-  preferredLineColor?: string
+  preferredLineColor?: string,
+  hiddenNodeTypes: SmartColorNodeType[] = []
 ): { svg: string; summary: LogicAnalysisSummary } {
   const parser = new DOMParser();
   const safeSvg = sanitizeSvgForXmlParser(rawSvg);
@@ -386,6 +609,7 @@ export function applySmartLogicColoring(
   ).length;
   const asyncEdgeCountInCode = (code.match(/-\.-?>|-->>|\.\.>/g) || []).length;
   const syntaxRoleMap = buildCodeSyntaxRoleMap(code);
+  const hiddenTypeSet = new Set<SmartColorNodeType>(hiddenNodeTypes || []);
 
   if (!svgEl) {
     return {
@@ -396,13 +620,15 @@ export function applySmartLogicColoring(
         recommendationReason: 'Semantische Rollen-Erkennung hebt Knotenfunktionen hervor.',
         legend: [],
         nodeCount: 0,
+        hiddenNodeCount: 0,
+        detectedTypeCounts: {},
         clusterCount: subgraphCountInCode,
         asyncEdgeCount: asyncEdgeCountInCode,
       },
     };
   }
 
-  const nodeGroups = Array.from(
+  const allNodeGroups = Array.from(
     svgEl.querySelectorAll(
       'g.node, g.actor, g.er.entityBox, g.mindmap-node, g.statediagram-state, g.classGroup, g.kanban-item, g.architecture-service'
     )
@@ -414,7 +640,116 @@ export function applySmartLogicColoring(
     svgEl.querySelectorAll('g.edgePath, g.edgePaths > g, path.er.relationshipLine, path.transition')
   );
 
-  // Determine the best recommended mode based on diagram structure
+  const { allIds: sortedKnownIds, subgraphNodeIds } = collectDeclaredCodeNodeIds(code);
+  const detectedTypeCounts: Partial<Record<SmartColorNodeType, number>> = {};
+  const nodeClassificationMap = new Map<
+    Element,
+    {
+      filterType: SmartColorNodeType;
+      semanticRole: SemanticRoleId;
+      shapeHint: 'diamond' | 'cylinder' | 'stadium' | 'subroutine' | 'circle' | 'rect';
+    }
+  >();
+
+  const hiddenNodeElements = new Set<Element>();
+  const hiddenSvgNodeIds = new Set<string>();
+
+  allNodeGroups.forEach((node) => {
+    const idAttr = node.getAttribute('id') || '';
+    const textContent = (node.textContent || '').trim();
+
+    let shapeHint: 'diamond' | 'cylinder' | 'stadium' | 'subroutine' | 'circle' | 'rect' =
+      'rect';
+    if (node.querySelector('polygon')) {
+      shapeHint = 'diamond';
+    } else if (node.querySelector('circle, ellipse')) {
+      shapeHint = 'circle';
+    } else {
+      const pathEl = node.querySelector('path');
+      const dAttr = pathEl?.getAttribute('d') || '';
+      if (dAttr.includes('a') || dAttr.includes('A')) {
+        shapeHint = 'cylinder';
+      }
+    }
+
+    const classified = classifySmartFilterNodeType(
+      idAttr,
+      textContent,
+      shapeHint,
+      syntaxRoleMap,
+      node
+    );
+    nodeClassificationMap.set(node, { ...classified, shapeHint });
+    detectedTypeCounts[classified.filterType] =
+      (detectedTypeCounts[classified.filterType] || 0) + 1;
+
+    if (hiddenTypeSet.has(classified.filterType)) {
+      hiddenNodeElements.add(node);
+      (node as SVGElement).style.display = 'none';
+      node.setAttribute('data-smart-hidden', 'true');
+      const resolvedId = extractNodeIdFromSvgElement(node, sortedKnownIds);
+      if (resolvedId) {
+        hiddenSvgNodeIds.add(resolvedId);
+      }
+    }
+  });
+
+  // Hide edges and edge labels attached to any filtered-out node without changing source code
+  if (hiddenSvgNodeIds.size > 0) {
+    const hiddenPatterns = Array.from(hiddenSvgNodeIds).map((hid) => {
+      const esc = hid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`(?:^|[-\\s_])(?:LS_|LE_|L_)?${esc}(?:[-_\\s\\d]|$)`, 'i');
+    });
+
+    const svgEdges = Array.from(
+      svgEl.querySelectorAll('g.edgePaths > *, g.edgePath, path.flowchart-link, path.transition, path.relationshipLine')
+    );
+    const svgEdgeLabels = Array.from(
+      svgEl.querySelectorAll('g.edgeLabels > *, g.edgeLabel')
+    );
+    const hiddenEdgeIndices = new Set<number>();
+
+    svgEdges.forEach((edgeEl, idx) => {
+      if (edgeElementConnectsHiddenNode(edgeEl, hiddenPatterns)) {
+        hiddenEdgeIndices.add(idx);
+        (edgeEl as SVGElement).style.display = 'none';
+        edgeEl.setAttribute('data-smart-hidden', 'true');
+      }
+    });
+
+    svgEdgeLabels.forEach((labelEl, idx) => {
+      const matchedByMeta = edgeElementConnectsHiddenNode(labelEl, hiddenPatterns);
+      const matchedByIndex =
+        svgEdgeLabels.length === svgEdges.length && hiddenEdgeIndices.has(idx);
+      if (matchedByMeta || matchedByIndex) {
+        (labelEl as SVGElement).style.display = 'none';
+        labelEl.setAttribute('data-smart-hidden', 'true');
+      }
+    });
+
+    // Hide empty clusters whose nodes are all hidden
+    if (subgraphNodeIds.size > 0 && clusterGroups.length > 0) {
+      clusterGroups.forEach((clusterEl) => {
+        const cid = clusterEl.getAttribute('id') || '';
+        for (const [sgId, memberIds] of subgraphNodeIds.entries()) {
+          if (memberIds.size === 0) continue;
+          const escSg = sgId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          if (new RegExp(`(?:^|[-_])${escSg}(?:[-_\\d]|$)`, 'i').test(cid)) {
+            const allHidden = Array.from(memberIds).every((mId) => hiddenSvgNodeIds.has(mId));
+            if (allHidden) {
+              (clusterEl as SVGElement).style.display = 'none';
+              clusterEl.setAttribute('data-smart-hidden', 'true');
+            }
+            break;
+          }
+        }
+      });
+    }
+  }
+
+  const nodeGroups = allNodeGroups.filter((n) => !hiddenNodeElements.has(n));
+
+  // Determine the best recommended mode based on visible diagram structure
   let recommendedMode: SmartColorMode = 'semantic';
   let recommendationReason = 'Erkennt Knoten-Rollen (Services, DBs, Entscheidungen, Clients)';
 
@@ -434,29 +769,21 @@ export function applySmartLogicColoring(
   if (mode === 'standard') {
     if (canvasSurface === 'dark') {
       ensureDarkModeEdgeVisibility(svgEl, darkLineColor, darkLineColor, false);
-      const serializer = new XMLSerializer();
-      return {
-        svg: serializer.serializeToString(svgEl),
-        summary: {
-          activeMode: mode,
-          recommendedMode,
-          recommendationReason,
-          legend: [],
-          nodeCount: nodeGroups.length,
-          clusterCount: Math.max(clusterGroups.length, subgraphCountInCode),
-          asyncEdgeCount: asyncEdgeCountInCode,
-        },
-      };
     }
-
+    const serializer = new XMLSerializer();
     return {
-      svg: rawSvg,
+      svg:
+        canvasSurface === 'dark' || hiddenNodeElements.size > 0
+          ? serializer.serializeToString(svgEl)
+          : rawSvg,
       summary: {
         activeMode: mode,
         recommendedMode,
         recommendationReason,
         legend: [],
         nodeCount: nodeGroups.length,
+        hiddenNodeCount: hiddenNodeElements.size,
+        detectedTypeCounts,
         clusterCount: Math.max(clusterGroups.length, subgraphCountInCode),
         asyncEdgeCount: asyncEdgeCountInCode,
       },
@@ -468,25 +795,12 @@ export function applySmartLogicColoring(
   // MODE 1: SEMANTIC ROLES (Knoten-Rollen + Datenfluss-Akzente)
   if (mode === 'semantic') {
     nodeGroups.forEach((node) => {
+      const classified = nodeClassificationMap.get(node);
       const idAttr = node.getAttribute('id') || '';
       const textContent = (node.textContent || '').trim();
-      const combined = `${idAttr} ${textContent}`;
-
-      let shapeHint: 'diamond' | 'cylinder' | 'stadium' | 'subroutine' | 'circle' | 'rect' =
-        'rect';
-      if (node.querySelector('polygon')) {
-        shapeHint = 'diamond';
-      } else if (node.querySelector('circle, ellipse')) {
-        shapeHint = 'circle';
-      } else {
-        const pathEl = node.querySelector('path');
-        const dAttr = pathEl?.getAttribute('d') || '';
-        if (dAttr.includes('a') || dAttr.includes('A')) {
-          shapeHint = 'cylinder';
-        }
-      }
-
-      const role = classifySemanticRole(combined, shapeHint, syntaxRoleMap);
+      const role =
+        classified?.semanticRole ||
+        classifySemanticRole(`${idAttr} ${textContent}`, 'rect', syntaxRoleMap);
       const palette = SEMANTIC_PALETTES[role];
       const colors = canvasSurface === 'dark' ? palette.dark : palette.light;
 
@@ -728,12 +1042,12 @@ export function applySmartLogicColoring(
     );
   }
 
-  // Decorate any node flagged as `openIssue` or `missingScript` with a crisp SVG red sphere ("rote Kugel")
+  // Decorate any visible node flagged as `openIssue` or `missingScript` with a crisp SVG red sphere ("rote Kugel")
   let openIssueSvgCount = 0;
   const svgNs = 'http://www.w3.org/2000/svg';
   const allNodesForOpen = Array.from(
     svgEl.querySelectorAll('g.node, g.statediagram-state')
-  );
+  ).filter((n) => !hiddenNodeElements.has(n));
 
   for (const node of allNodesForOpen) {
     const labelTxt = (node.textContent || '').trim();
@@ -841,6 +1155,8 @@ export function applySmartLogicColoring(
       recommendationReason,
       legend: Array.from(legendMap.values()),
       nodeCount: nodeGroups.length,
+      hiddenNodeCount: hiddenNodeElements.size,
+      detectedTypeCounts,
       clusterCount: Math.max(clusterGroups.length, subgraphCountInCode),
       asyncEdgeCount: Math.max(asyncEdgeCountInCode, edgeGroups.length),
     },
@@ -853,7 +1169,8 @@ export function applySmartLogicColoring(
  */
 export function injectSmartColorsIntoCode(
   code: string,
-  canvasSurface: 'dark' | 'light'
+  canvasSurface: 'dark' | 'light',
+  hiddenNodeTypes: SmartColorNodeType[] = []
 ): string {
   const isFlowchart = /^\s*(flowchart|graph)\b/m.test(code);
   if (!isFlowchart) {
@@ -866,7 +1183,9 @@ export function injectSmartColorsIntoCode(
     '\n'
   );
 
+  const hiddenSet = new Set<SmartColorNodeType>(hiddenNodeTypes || []);
   const roleMap = buildCodeSyntaxRoleMap(cleaned);
+  const filteredRoleMap = new Map<string, SemanticRoleId>();
   // Also scan all node declarations `ID["Label"]`
   const nodeMatches = cleaned.matchAll(
     /\b([A-Za-z0-9_]+)\s*(?:\["([^"]+)"\]|\["?([^"\]]+)"?\]|\(\("?([^"\)]+)"?\)\)|\(\["?([^"\]]+)"?\]\)|\{\{"?([^"\}]+)"?\}\}|\{"?([^"\}]+)"?\}|\[\("?([^"\)]+)"?\)\]|\[\["?([^"\]]+)"?\]\])/g
@@ -889,14 +1208,17 @@ export function injectSmartColorsIntoCode(
         : existingHint === 'start-actor'
         ? 'stadium'
         : 'rect';
-    const role = classifySemanticRole(`${id} ${label}`, shapeHint, roleMap);
-    roleMap.set(id, role);
+    const classified = classifySmartFilterNodeType(id, label, shapeHint, roleMap);
+    if (hiddenSet.has(classified.filterType)) {
+      continue;
+    }
+    filteredRoleMap.set(id, classified.semanticRole);
   }
 
-  if (roleMap.size === 0) return code;
+  if (filteredRoleMap.size === 0) return code;
 
   const grouped = new Map<SemanticRoleId, string[]>();
-  for (const [nodeId, role] of roleMap.entries()) {
+  for (const [nodeId, role] of filteredRoleMap.entries()) {
     const list = grouped.get(role) || [];
     if (!list.includes(nodeId)) list.push(nodeId);
     grouped.set(role, list);

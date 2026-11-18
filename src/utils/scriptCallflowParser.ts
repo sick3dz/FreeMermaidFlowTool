@@ -183,6 +183,70 @@ export function isAnnouncementOrEndpointTargetName(token: string): boolean {
   );
 }
 
+export function formatScriptDisplayLabel(
+  mod: Pick<ScriptModule, 'scriptNumber' | 'scriptName' | 'isMaster' | 'cdnAlias'>
+): string {
+  const numKey = canonicalScriptMatchKey(mod.scriptNumber || '');
+  if (numKey === 'main' || (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(numKey))) {
+    return 'Main';
+  }
+  const cleanName = (mod.scriptName || '').trim();
+  const hasDistinctName =
+    cleanName &&
+    canonicalScriptMatchKey(cleanName) !== numKey &&
+    cleanName !== `Skript ${mod.scriptNumber}` &&
+    cleanName !== 'Main (Masterscript)';
+  return hasDistinctName ? `[${mod.scriptNumber}] ${cleanName}` : `[${mod.scriptNumber}]`;
+}
+
+export function promoteEntryModuleToMain(
+  modules: ScriptModule[],
+  preferredEntryNumber?: string
+): ScriptModule[] {
+  if (modules.length === 0) return modules;
+  const prefKey = preferredEntryNumber ? canonicalScriptMatchKey(preferredEntryNumber) : '';
+  let entryIdx = prefKey
+    ? modules.findIndex(
+        (m) =>
+          canonicalScriptMatchKey(m.scriptNumber) === prefKey ||
+          (m.cdnAlias && canonicalScriptMatchKey(m.cdnAlias) === prefKey)
+      )
+    : -1;
+  if (entryIdx < 0) {
+    entryIdx = modules.findIndex(
+      (m) => canonicalScriptMatchKey(m.scriptNumber) === 'main' || m.isMaster
+    );
+  }
+  if (entryIdx < 0) entryIdx = 0;
+
+  return modules.map((m, idx) => {
+    if (idx !== entryIdx) return m;
+    const origKey = canonicalScriptMatchKey(m.scriptNumber);
+    const preserveAsAlias =
+      m.cdnAlias ||
+      (origKey && !/^(?:main|start|master(?:script)?)$/i.test(origKey)
+        ? m.scriptNumber
+        : undefined);
+    const updatedRules = m.rules.map((r) => ({
+      ...r,
+      sourceNumber: 'Main',
+    }));
+    const filteredOutgoing = m.outgoingNumbers.filter((t) => {
+      const tk = canonicalScriptMatchKey(t);
+      return tk !== 'main' && (!preserveAsAlias || tk !== canonicalScriptMatchKey(preserveAsAlias));
+    });
+    return {
+      ...m,
+      scriptNumber: 'Main',
+      scriptName: 'Main',
+      cdnAlias: preserveAsAlias,
+      isMaster: true,
+      rules: updatedRules,
+      outgoingNumbers: filteredOutgoing,
+    };
+  });
+}
+
 export function isPureMasterDispatcherModule(
   mod: ScriptModule,
   _totalModulesCount?: number
@@ -193,16 +257,18 @@ export function isPureMasterDispatcherModule(
     /^(?:main|master(?:script)?|master_routing|0000)$/i.test(key) ||
     /^(?:main|master(?:script|\s*callflow)?)$/i.test(nameKey) ||
     /\(masterscript\)/i.test(mod.scriptName || '');
-  if (isExplicitMainName) return true;
-  if (!mod.isMaster) return false;
+  if (!mod.isMaster && !isExplicitMainName) return false;
   const hasOwnSkillsetQueue = mod.rules.some(
     (r) => Boolean(r.queueTarget && r.queueTarget !== 'Default_Skillset')
   );
   if (hasOwnSkillsetQueue) return false;
-  return (
-    hasAaccMasterRoutingSignals(mod.rawText || '') ||
-    mod.rules.some((r) => Boolean((r.valueNumbers && r.valueNumbers.length > 0) || r.orgaCode))
-  );
+  if (hasAaccMasterRoutingSignals(mod.rawText || '')) {
+    return true;
+  }
+  const dispatchValueRulesCount = mod.rules.filter((r) =>
+    Boolean((r.valueNumbers && r.valueNumbers.length > 0) || r.orgaCode)
+  ).length;
+  return dispatchValueRulesCount >= 4;
 }
 
 function sanitizeMermaidText(text: string): string {
@@ -1161,6 +1227,7 @@ function parseAaccScriptBlocks(
     defaultScriptName?: string;
     sourceFilename?: string;
     origin?: ScriptOrigin;
+    isMasterHint?: boolean;
   }
 ): ScriptModule[] {
   const withoutComments = stripScriptCommentsAndNoise(rawText);
@@ -1302,7 +1369,11 @@ function parseAaccScriptBlocks(
 
     const detectedNameToken = detectedName.replace(/\s+/g, '_');
     const isExplicitMainChunkHeader = /^(?:main|master(?:script)?)$/i.test(detectedNameToken);
-    const chunkIsMaster = isExplicitMainChunkHeader || hasAaccMasterRoutingSignals(trimmedChunk);
+    const isPrimarySingleMaster = Boolean(chunks.length === 1 && options?.isMasterHint);
+    const chunkIsMaster =
+      isExplicitMainChunkHeader ||
+      hasAaccMasterRoutingSignals(trimmedChunk) ||
+      isPrimarySingleMaster;
     const topCdnHeaderMatch = chunkText.match(/^\s*CDN\s*[:=]?\s*(\d{3,6})\b/im);
     const inlineCdnMatch = chunkIsMaster ? null : chunkText.match(/\bCDN\s*[:=]?\s*(\d{3,6})\b/i);
     const cdnMatch = topCdnHeaderMatch || inlineCdnMatch;
@@ -1339,32 +1410,38 @@ function parseAaccScriptBlocks(
         : undefined;
     const detectedCdn = cdnMatch?.[1] || headerCommentCdn || fileDigitRef;
 
+    const originalNonMainRef =
+      explicitDefaultNum ||
+      namedFileCandidate ||
+      detectedNameRef ||
+      namedCommentCandidate ||
+      detectedCdn;
+
     const scriptNumber = chunkIsMaster
       ? 'Main'
-      : explicitDefaultNum ||
-        namedFileCandidate ||
-        detectedNameRef ||
-        namedCommentCandidate ||
-        detectedCdn ||
+      : originalNonMainRef ||
         (chunks.length === 1 && options?.defaultScriptNumber?.trim()
           ? normalizeScriptRef(options.defaultScriptNumber)
           : chunks.length === 1
           ? 'Start'
           : `900${chunkIdx}`);
 
-    const cdnAlias =
-      detectedCdn && canonicalScriptMatchKey(detectedCdn) !== canonicalScriptMatchKey(scriptNumber)
-        ? detectedCdn
-        : detectedNameRef &&
-          canonicalScriptMatchKey(detectedNameRef) !== canonicalScriptMatchKey(scriptNumber)
-        ? detectedNameRef
-        : namedFileCandidate &&
-          canonicalScriptMatchKey(namedFileCandidate) !== canonicalScriptMatchKey(scriptNumber)
-        ? namedFileCandidate
-        : namedCommentCandidate &&
-          canonicalScriptMatchKey(namedCommentCandidate) !== canonicalScriptMatchKey(scriptNumber)
-        ? namedCommentCandidate
-        : undefined;
+    const cdnAlias = chunkIsMaster
+      ? originalNonMainRef && canonicalScriptMatchKey(originalNonMainRef) !== 'main'
+        ? originalNonMainRef
+        : undefined
+      : detectedCdn && canonicalScriptMatchKey(detectedCdn) !== canonicalScriptMatchKey(scriptNumber)
+      ? detectedCdn
+      : detectedNameRef &&
+        canonicalScriptMatchKey(detectedNameRef) !== canonicalScriptMatchKey(scriptNumber)
+      ? detectedNameRef
+      : namedFileCandidate &&
+        canonicalScriptMatchKey(namedFileCandidate) !== canonicalScriptMatchKey(scriptNumber)
+      ? namedFileCandidate
+      : namedCommentCandidate &&
+        canonicalScriptMatchKey(namedCommentCandidate) !== canonicalScriptMatchKey(scriptNumber)
+      ? namedCommentCandidate
+      : undefined;
 
     const teamMatch = chunkText.match(/\bTeam\s*:\s*([^\n\r]+)/i);
     const bereichMatch = chunkText.match(/\bBereich\s*:\s*([^\n\r]+)/i);
@@ -1386,7 +1463,7 @@ function parseAaccScriptBlocks(
         : '';
 
     const scriptName =
-      (chunkIsMaster && scriptNumber === 'Main' ? 'Main (Masterscript)' : '') ||
+      (chunkIsMaster || scriptNumber === 'Main' ? 'Main' : '') ||
       explicitSingleChunkName ||
       headerCommentScriptName ||
       detectedName ||
@@ -1537,9 +1614,13 @@ function parseAaccScriptBlocks(
         !seenExtraTargets.has(canonicalScriptMatchKey(candidateRef))
       ) {
         seenExtraTargets.add(canonicalScriptMatchKey(candidateRef));
+        const nextPrio = Math.max(
+          rules.reduce((mx, r) => Math.max(mx, r.prio || 0), 19) + 1,
+          ruleCounter + 20
+        );
         rules.push({
           id: `${scriptNumber}-${ruleCounter++}`,
-          prio: ruleCounter + 10,
+          prio: nextPrio,
           stepName: varName.replace(/^Sys_/, ''),
           sourceNumber: scriptNumber,
           targetNumber: candidateRef,
@@ -2083,9 +2164,13 @@ function parseAaccScriptBlocks(
           `${stackCond || ''} ${caseLabel || ''} ${rawLine}`
         );
 
+        const nextPrio = Math.max(
+          rules.reduce((mx, r) => Math.max(mx, r.prio || 0), 19) + 1,
+          ruleCounter + 20
+        );
         const createdRule: ScriptRule = {
           id: `${scriptNumber}-${ruleCounter++}`,
-          prio: ruleCounter + 20,
+          prio: nextPrio,
           stepName: stepLabel,
           sourceNumber: scriptNumber,
           targetNumber: resolvedTarget,
@@ -2450,9 +2535,13 @@ function parseAaccScriptBlocks(
               }
             });
           } else {
+            const nextPrio = Math.max(
+              rules.reduce((mx, r) => Math.max(mx, r.prio || 0), 19) + 1,
+              ruleCounter + 20
+            );
             const dtmfRule: ScriptRule = {
               id: `${scriptNumber}-${ruleCounter++}`,
-              prio: ruleCounter + 20,
+              prio: nextPrio,
               stepName: 'DTMF-Auswahl',
               sourceNumber: scriptNumber,
               sectionName: currentSection,
@@ -2485,9 +2574,13 @@ function parseAaccScriptBlocks(
           inline.holiday ||
           inline.condition)
       ) {
+        const nextAutoPrio = Math.max(
+          rules.reduce((mx, r) => Math.max(mx, r.prio || 0), 19) + 1,
+          ruleCounter + 20
+        );
         const inlineRule: ScriptRule = {
           id: `${scriptNumber}-${ruleCounter++}`,
-          prio: inline.prio !== undefined ? inline.prio : ruleCounter + 20,
+          prio: inline.prio !== undefined ? inline.prio : nextAutoPrio,
           stepName:
             inline.stepName ||
             (inline.schedule
@@ -2530,9 +2623,13 @@ function parseAaccScriptBlocks(
             orgaCtx.organizationName || orgaCtx.brandName || 'Orga-Bereich',
             orgaCtx.srcRouteNumber || (orgaCtx.orgaCode ? `02131 ${orgaCtx.orgaCode}xxxx` : ''),
           ].filter(Boolean);
+          const nextOrgaPrio = Math.max(
+            rules.reduce((mx, r) => Math.max(mx, r.prio || 0), 19) + 1,
+            ruleCounter + 20
+          );
           rules.push({
             id: `${scriptNumber}-${ruleCounter++}`,
-            prio: ruleCounter + 5,
+            prio: nextOrgaPrio,
             stepName: `DNIS-Range: ${labelBits.join(' · ')}`,
             sourceNumber: scriptNumber,
             choices: [],
@@ -2685,6 +2782,7 @@ export function parseScriptTextBundle(
     defaultScriptName?: string;
     sourceFilename?: string;
     origin?: ScriptOrigin;
+    isMasterHint?: boolean;
   }
 ): ScriptModule[] {
   const cleanedRawText = stripScriptCommentsAndNoise(rawText);
@@ -3192,26 +3290,42 @@ export function parseCallflowTextWithFallback(
   const structured = parseScriptTextBundle(trimmed, options);
   const hasRules = structured.some((m) => m.rules.length > 0);
   if (structured.length > 0 && hasRules) {
-    return structured;
+    if (options?.isMasterHint && !structured.some((m) => canonicalScriptMatchKey(m.scriptNumber) === 'main')) {
+      return promoteEntryModuleToMain(structured);
+    }
+    return structured.map((m) =>
+      canonicalScriptMatchKey(m.scriptNumber) === 'main' || m.scriptName === 'Main (Masterscript)'
+        ? { ...m, scriptName: 'Main', isMaster: true }
+        : m
+    );
   }
 
   const fileBaseCandidate = options?.sourceFilename
     ? options.sourceFilename.replace(/\.[^.]+$/, '').replace(/\s+/g, '_').trim()
     : '';
-  const defaultRef =
+  const rawCandidateRef =
     normalizeScriptRef(
       options?.defaultScriptNumber ||
         (fileBaseCandidate && isValidScriptRef(fileBaseCandidate) ? fileBaseCandidate : 'Main')
     ) || 'Main';
-  const defaultKey = canonicalScriptMatchKey(defaultRef);
-  const defaultName =
-    options?.defaultScriptName?.trim() ||
-    (options?.sourceFilename ? options.sourceFilename.replace(/\.[^.]+$/, '').trim() : '') ||
-    defaultRef;
-  const origin: ScriptOrigin = options?.origin || 'legacy-text';
+  const rawCandidateKey = canonicalScriptMatchKey(rawCandidateRef);
   const isMaster =
     options?.isMasterHint ??
-    (/^(?:main|master(?:script)?)$/i.test(defaultKey) || defaultKey === '0000');
+    (/^(?:main|master(?:script)?)$/i.test(rawCandidateKey) || rawCandidateKey === '0000');
+  const defaultRef = isMaster ? 'Main' : rawCandidateRef;
+  const cdnAlias =
+    isMaster &&
+    rawCandidateKey &&
+    !/^(?:main|start|master(?:script)?)$/i.test(rawCandidateKey)
+      ? rawCandidateRef
+      : undefined;
+  const defaultKey = canonicalScriptMatchKey(defaultRef);
+  const defaultName = isMaster
+    ? 'Main'
+    : options?.defaultScriptName?.trim() ||
+      (options?.sourceFilename ? options.sourceFilename.replace(/\.[^.]+$/, '').trim() : '') ||
+      defaultRef;
+  const origin: ScriptOrigin = options?.origin || 'legacy-text';
 
   const cleanedText = stripScriptCommentsAndNoise(trimmed);
   const cleanedLines = cleanedText
@@ -3254,7 +3368,9 @@ export function parseCallflowTextWithFallback(
 
     const normalizedTarget = rawTargetRef ? normalizeScriptRef(rawTargetRef) : undefined;
     const effectiveTarget =
-      normalizedTarget && canonicalScriptMatchKey(normalizedTarget) !== defaultKey
+      normalizedTarget &&
+      canonicalScriptMatchKey(normalizedTarget) !== defaultKey &&
+      canonicalScriptMatchKey(normalizedTarget) !== rawCandidateKey
         ? normalizedTarget
         : undefined;
 
@@ -3277,6 +3393,7 @@ export function parseCallflowTextWithFallback(
     {
       scriptNumber: defaultRef,
       scriptName: defaultName,
+      cdnAlias,
       isMaster,
       origin,
       sourceFilename: options?.sourceFilename,
@@ -4462,14 +4579,23 @@ export function buildMasterOverviewMermaid(
     const openClassSuffix = openCount > 0 ? ':::openIssue' : '';
     if (openCount > 0) hasOpenIssueNodes = true;
 
+    const isMainModule =
+      mKey === 'main' ||
+      (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(mKey));
     const showBothNameAndRef =
-      canonicalScriptMatchKey(mod.scriptName) !== canonicalScriptMatchKey(mod.scriptNumber) &&
-      mod.scriptName !== `Skript ${mod.scriptNumber}`;
+      !isMainModule &&
+      canonicalScriptMatchKey(mod.scriptName) !== mKey &&
+      mod.scriptName !== `Skript ${mod.scriptNumber}` &&
+      mod.scriptName !== 'Main (Masterscript)';
     const aliasHint =
       mod.cdnAlias && canonicalScriptMatchKey(mod.cdnAlias) !== mKey
-        ? ` (CDN ${sanitizeMermaidText(mod.cdnAlias)})`
+        ? isMainModule
+          ? ` (Start-Ref ${sanitizeMermaidText(mod.cdnAlias)})`
+          : ` (CDN ${sanitizeMermaidText(mod.cdnAlias)})`
         : '';
-    const baseLabel = showBothNameAndRef
+    const baseLabel = isMainModule
+      ? `${openTag}Main${aliasHint}`
+      : showBothNameAndRef
       ? `${openTag}${safeRef} · ${safeName}${aliasHint}`
       : `${openTag}${safeRef}${aliasHint}`;
 
@@ -4799,10 +4925,15 @@ export function rehydrateAndUpgradeWorkspace(rawWorkspace: ScriptWorkspace): Scr
   const upgradedModules: ScriptModule[] = [];
   for (const mod of rawWorkspace.modules || []) {
     if (mod.origin === 'visio-new' || !mod.rawText || !mod.rawText.trim()) {
-      upgradedModules.push(mod);
+      const cleaned =
+        canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
+        mod.scriptName === 'Main (Masterscript)'
+          ? { ...mod, scriptNumber: 'Main', scriptName: 'Main', isMaster: true }
+          : mod;
+      upgradedModules.push(cleaned);
       continue;
     }
-    const isGenericMainOrStart = /^(?:main|start)$/i.test(mod.scriptNumber || '');
+    const isGenericMainOrStart = /^(?:main|start|master(?:script)?)$/i.test(mod.scriptNumber || '');
     const reparsed = parseCallflowTextWithFallback(mod.rawText, {
       defaultScriptNumber: isGenericMainOrStart ? undefined : mod.scriptNumber,
       defaultScriptName:
@@ -4826,7 +4957,13 @@ export function rehydrateAndUpgradeWorkspace(rawWorkspace: ScriptWorkspace): Scr
   }
 
   // Deduplicate upgradedModules by canonical key
-  const deduped = mergeScriptModules([], upgradedModules);
+  let deduped = mergeScriptModules([], upgradedModules);
+  if (deduped.length > 0 && deduped.some((m) => m.isMaster)) {
+    const primaryMaster = deduped.find((m) => m.isMaster);
+    if (primaryMaster && canonicalScriptMatchKey(primaryMaster.scriptNumber) === 'main') {
+      deduped = promoteEntryModuleToMain(deduped, primaryMaster.scriptNumber);
+    }
+  }
 
   return buildScriptWorkspace(deduped, {
     externalEndpoints: rawWorkspace.externalEndpoints,
@@ -4891,15 +5028,22 @@ export function buildScriptDetailMermaid(
   const safeModRef = sanitizeMermaidText(mod.scriptNumber);
 
   const entryId = `SELF_${modSuffix}`;
+  const isMainDetailModule =
+    modKey === 'main' ||
+    (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(modKey));
   const selfPrefix = selfOpenCount > 0 ? `● ${selfOpenCount} Offen · ` : '';
   const showDetailBoth =
-    canonicalScriptMatchKey(mod.scriptName) !== canonicalScriptMatchKey(mod.scriptNumber) &&
-    mod.scriptName !== `Skript ${mod.scriptNumber}`;
+    !isMainDetailModule &&
+    canonicalScriptMatchKey(mod.scriptName) !== modKey &&
+    mod.scriptName !== `Skript ${mod.scriptNumber}` &&
+    mod.scriptName !== 'Main (Masterscript)';
   const dnisInfo =
     mod.entryDnisNumbers && mod.entryDnisNumbers.length > 0
       ? `<br/>📞 DNIS: ${sanitizeMermaidText(mod.entryDnisNumbers.slice(0, 5).join(', '))}`
       : '';
-  const entryLabel = showDetailBoth
+  const entryLabel = isMainDetailModule
+    ? `${selfPrefix}Main (Einstiegsskript)${dnisInfo}`
+    : showDetailBoth
     ? `${selfPrefix}[${safeModRef}] ${safeModName}${dnisInfo}`
     : `${selfPrefix}${safeModRef}${dnisInfo}`;
   lines.push(
@@ -4943,8 +5087,15 @@ export function buildScriptDetailMermaid(
   if (incomingCallers.length > 0) {
     lines.push(`    subgraph Aufrufer["Eingehende Aufrufer (Woher)"]`);
     incomingCallers.forEach((caller) => {
+      const callerDisplay =
+        canonicalScriptMatchKey(caller.fromNum) === 'main'
+          ? 'Main (Einstiegsskript)'
+          : caller.fromName &&
+            canonicalScriptMatchKey(caller.fromName) !== canonicalScriptMatchKey(caller.fromNum)
+          ? `[${caller.fromNum}] ${caller.fromName}`
+          : caller.fromNum;
       lines.push(
-        `        INC_${caller.fromSuffix}(["← [${sanitizeMermaidText(caller.fromNum)}] ${sanitizeMermaidText(caller.fromName)}"])`
+        `        INC_${caller.fromSuffix}(["← ${sanitizeMermaidText(callerDisplay)}"])`
       );
     });
     lines.push('    end');
@@ -4954,7 +5105,9 @@ export function buildScriptDetailMermaid(
   }
 
   lines.push(
-    showDetailBoth
+    isMainDetailModule
+      ? `    subgraph ScriptBody["Main (Einstiegsskript)"]`
+      : showDetailBoth
       ? `    subgraph ScriptBody["Skript [${safeModRef}] ${safeModName}"]`
       : `    subgraph ScriptBody["Skript ${safeModRef}"]`
   );
@@ -5304,121 +5457,84 @@ export function analyzeWorkspaceLogicHealth(
     }
   }
 
-  // 2. Reachability from Master -> Orphan modules (Dead Code)
-  const reachableFromMaster = new Set<string>();
-  const queue: string[] = [masterKey];
-  while (queue.length > 0) {
-    const curr = queue.shift()!;
-    if (reachableFromMaster.has(curr)) continue;
-    reachableFromMaster.add(curr);
-    const nexts = adjacency.get(curr) || new Set<string>();
-    for (const n of nexts) {
-      if (!reachableFromMaster.has(n)) queue.push(n);
-    }
-  }
+  // 2. Per-module & per-rule checks (focused strictly on genuine structural errors)
+  const isRuleActionable = (rule: ScriptRule): boolean =>
+    Boolean(rule.targetNumber) ||
+    rule.choices.length > 0 ||
+    Boolean(rule.queueTarget) ||
+    Boolean(rule.announcement) ||
+    Boolean(rule.treatmentInfo) ||
+    Boolean(rule.hdxAction) ||
+    Boolean(rule.isDisconnect) ||
+    Boolean(rule.loopSectionTarget) ||
+    rule.waitSeconds !== undefined ||
+    Boolean(rule.schedule) ||
+    Boolean(rule.holiday) ||
+    Boolean(rule.orgaCode || rule.organizationName || rule.brandName || rule.srcRouteNumber) ||
+    /^(?:Init|DNIS-Range|Assign)/i.test(rule.stepName);
 
-  // 3. Per-module checks
   for (const mod of modules) {
     const modKey = canonicalScriptMatchKey(mod.scriptNumber);
-    const isMasterMod = modKey === masterKey || mod.isMaster;
 
-    // 3a. Orphan check (when more than 1 module is loaded)
-    if (
-      modules.length > 1 &&
-      !isMasterMod &&
-      !reachableFromMaster.has(modKey) &&
-      (callersByTarget.get(modKey)?.size || 0) === 0
-    ) {
-      findings.push({
-        id: `health:orphan:${modKey}`,
-        severity: 'warning',
-        category: 'orphan-module',
-        scriptNumber: mod.scriptNumber,
-        scriptName: mod.scriptName,
-        title: `Verwaistes Skript [${mod.scriptNumber}] (Dead Code)`,
-        description: `Das Skript "${mod.scriptName}" (${mod.scriptNumber}) wird weder vom Hauptskript noch von einem anderen geladenen Teil-Skript aufgerufen.`,
-        recommendation:
-          'Prüfen Sie, ob ein Sprungbefehl aus Main fehlt oder ob das Skript bei der Migration stillgelegt werden kann.',
-      });
-    }
-
-    // 3b. Dead-end module check (no outgoing scripts, no queueTarget, no choices)
-    const hasAnyQueue = mod.rules.some((r) => Boolean(r.queueTarget));
-    const hasAnyOutgoing =
+    // 2a. Genuine dead-end module check:
+    // Announcement endpoints, Disconnect/Route-End scripts, Broadcast/Treatment/IVR endpoints,
+    // CTI/Wait steps, Queues, and outgoing targets are all valid Callflow terminations.
+    const hasAnyActionableStep =
+      Boolean(mod.isAnnouncementEndpoint) ||
       mod.outgoingNumbers.length > 0 ||
+      mod.rules.some(isRuleActionable) ||
       (workspace.manualLinks || []).some(
         (l) => canonicalScriptMatchKey(l.fromScriptNumber) === modKey
       );
-    if (!hasAnyQueue && !hasAnyOutgoing) {
+
+    if (!hasAnyActionableStep) {
       findings.push({
         id: `health:dead-end-mod:${modKey}`,
         severity: 'error',
         category: 'dead-end-module',
         scriptNumber: mod.scriptNumber,
         scriptName: mod.scriptName,
-        title: `Skript [${mod.scriptNumber}] ohne Weiterleitung oder Queue`,
-        description: `In [${mod.scriptNumber}] wurde weder ein Ziel-Skript noch eine Warteschlange/Skillset erkannt – Anrufe enden hier in einer Sackgasse.`,
+        title: `Skript [${mod.scriptNumber}] ohne gültige Aktion oder Ziel`,
+        description: `In [${mod.scriptNumber}] wurde weder ein Ziel-Skript, eine Warteschlange/Skillset, eine Ansage/Treatment noch ein gültiger Abschluss (Disconnect/Route End) erkannt.`,
         recommendation:
-          'Ergänzen Sie ein Ziel-Skript (Wohin/Sprung), eine DTMF-Auswahl oder ein Ziel-Skillset (Queue).',
+          'Ergänzen Sie ein Ziel-Skript, eine Ansage, ein Ziel-Skillset oder einen expliziten Abschluss.',
       });
     }
 
-    // 3c. Duplicate priorities & dead-end rules & inactive overflows
+    // 2b. Check individual rules only for truly empty/actionless steps and non-OCL duplicate priorities
     const prioMap = new Map<number, ScriptRule[]>();
     for (const rule of mod.rules) {
       const list = prioMap.get(rule.prio) || [];
       list.push(rule);
       prioMap.set(rule.prio, list);
 
-      const hasAction =
-        Boolean(rule.targetNumber) ||
-        rule.choices.length > 0 ||
-        Boolean(rule.queueTarget) ||
-        Boolean(rule.announcement) ||
-        Boolean(rule.schedule) ||
-        Boolean(rule.holiday) ||
-        /^Init\b/i.test(rule.stepName);
-
-      if (!hasAction) {
+      if (!isRuleActionable(rule)) {
         findings.push({
           id: `health:dead-end-rule:${modKey}:${rule.id}`,
-          severity: 'warning',
+          severity: 'error',
           category: 'dead-end-rule',
           scriptNumber: mod.scriptNumber,
           scriptName: mod.scriptName,
           ruleId: rule.id,
           prio: rule.prio,
-          title: `Unvollständige Regel (Prio ${rule.prio}: ${rule.stepName})`,
-          description: `Schritt "${rule.stepName}" in [${mod.scriptNumber}] besitzt weder Zielnummer, DTMF-Auswahl, Ansage noch Warteschlange.`,
+          title: `Leere Regel ohne Aktion (Prio ${rule.prio}: ${rule.stepName})`,
+          description: `Schritt "${rule.stepName}" in [${mod.scriptNumber}] besitzt weder Ziel, DTMF-Auswahl, Ansage/Treatment, CTI-Aktion, Abschluss noch Warteschlange.`,
           recommendation:
-            'Definieren Sie ein Sprungziel oder entfernen Sie den leeren Regelschritt.',
-        });
-      }
-
-      if (
-        /deaktiviert\s*=\s*0/i.test(rule.stepName) ||
-        /Default_Skillset/i.test(rule.condition || '') ||
-        /Default_Skillset/i.test(rule.rawLine || '')
-      ) {
-        findings.push({
-          id: `health:inactive-overflow:${modKey}:${rule.id}`,
-          severity: 'info',
-          category: 'inactive-overflow',
-          scriptNumber: mod.scriptNumber,
-          scriptName: mod.scriptName,
-          ruleId: rule.id,
-          prio: rule.prio,
-          title: `Deaktivierter Überlauf / Platzhalter-Skillset in [${mod.scriptNumber}]`,
-          description: `In Schritt "${rule.stepName}" ist das Überlauf-Routing deaktiviert (Sys_UeberlaufRouting = 0) oder auf Default_Skillset gesetzt.`,
-          recommendation:
-            'Klären Sie für das Zielsystem, ob bei Wartezeit-Überschreitung ein echter Überlauf oder Rücksprung aktiv sein soll.',
+            'Definieren Sie eine Aktion oder entfernen Sie die leere Zeile.',
         });
       }
     }
 
     for (const [prio, rulesWithPrio] of prioMap.entries()) {
       if (rulesWithPrio.length > 1) {
-        // Ignore if rules have distinct conditions (e.g. IF / ELSE branches)
+        // Sequential steps in OCL/WHERE/VALUE blocks execute deterministically in line order — never warn on those.
+        const allFromOclOrSameBranch = rulesWithPrio.every((r) =>
+          /\b(?:execute|queue|give|route|wait|disconnect|readvar|send|assign|section|where|if|when|value)\b/i.test(
+            r.rawLine || ''
+          )
+        );
+        if (allFromOclOrSameBranch) continue;
+
         const distinctConditions = new Set(
           rulesWithPrio.map((r) => (r.condition || '').trim()).filter(Boolean)
         );
@@ -5431,38 +5547,13 @@ export function analyzeWorkspaceLogicHealth(
             scriptName: mod.scriptName,
             prio,
             title: `Doppelte Priorität ${prio} in [${mod.scriptNumber}]`,
-            description: `${rulesWithPrio.length} Regeln in [${mod.scriptNumber}] verwenden dieselbe Prioritätsstufe ${prio} (${rulesWithPrio
+            description: `${rulesWithPrio.length} Regeln in [${mod.scriptNumber}] verwenden dieselbe explizite Prioritätsstufe ${prio} (${rulesWithPrio
               .map((r) => r.stepName)
               .join(', ')}).`,
             recommendation:
               'Vergeben Sie eindeutige Prioritäten, damit die Auswertungsreihenfolge deterministisch bleibt.',
           });
         }
-      }
-    }
-
-    // 3d. Master schedule/holiday check
-    if (isMasterMod && mod.rules.length > 0) {
-      const hasScheduleOrHolidayInMaster = mod.rules.some(
-        (r) =>
-          Boolean(r.schedule) ||
-          Boolean(r.holiday) ||
-          /zeitplan|feiertag|[oö]ffnungszeit|sondzeit|nacht/i.test(
-            `${r.stepName} ${r.condition || ''} ${r.rawLine}`
-          )
-      );
-      if (!hasScheduleOrHolidayInMaster) {
-        findings.push({
-          id: `health:no-schedule:${modKey}`,
-          severity: 'info',
-          category: 'missing-schedule-guard',
-          scriptNumber: mod.scriptNumber,
-          scriptName: mod.scriptName,
-          title: `Keine explizite Zeitplan-/Feiertagsprüfung in [${mod.scriptNumber}]`,
-          description: `Im Hauptskript [${mod.scriptNumber}] wurde keine direkte Öffnungszeiten-, Feiertags- oder Sonderzeit-Regel erkannt.`,
-          recommendation:
-            'Prüfen Sie, ob Öffnungszeiten und Feiertage in einem nachgelagerten Teil-Skript oder zentral vor dem Callflow geprüft werden.',
-        });
       }
     }
   }

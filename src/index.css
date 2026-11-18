@@ -22,9 +22,13 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Prevent flex containers or preflight rules from shrinking large Mermaid SVGs */
+/* Prevent flex containers or preflight rules from shrinking large Mermaid SVGs
+   and maintain a permanent GPU composite layer to avoid re-rasterization stutter */
 .mermaid-canvas-stage {
   flex-shrink: 0;
+  contain: layout style;
+  will-change: transform;
+  backface-visibility: hidden;
 }
 
 .mermaid-canvas-stage > svg {
@@ -32,6 +36,17 @@
   max-height: none !important;
   flex-shrink: 0;
   display: block;
+}
+
+/* Zero-re-render cursor & gesture isolation during canvas pan/wheel/pinch */
+[data-panning="true"] {
+  cursor: grabbing !important;
+}
+
+[data-transforming="true"] .mermaid-canvas-stage svg,
+[data-transforming="true"] .mermaid-canvas-stage svg * {
+  pointer-events: none !important;
+  transition: none !important;
 }
 
 /* Subtle studio scrollbars */

@@ -54,6 +54,7 @@ import {
   exportRoutingMatrixCsv,
   extractScriptNumberFromNodeId,
   extractWorkspaceResourceRegistry,
+  formatScriptDisplayLabel,
   toMermaidNodeSuffix,
 } from '../utils/scriptCallflowParser';
 import {
@@ -103,6 +104,7 @@ interface CallflowInspectorProps {
   focusChecklistTrigger?: { refKey: string; nonce: number } | null;
   onSwitchViewLevel: (next: CallflowViewLevel) => void;
   onExportInteractiveHtml: () => void;
+  isExportingHtml?: boolean;
   onClose: () => void;
   isMobileView?: boolean;
   workspaceMode?: 'guided' | 'free';
@@ -123,7 +125,7 @@ interface CallflowInspectorProps {
   onClearAssignedFolder?: () => void;
 }
 
-export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
+const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
   graph,
   selectedNodeId,
   onSelectNodeId,
@@ -151,6 +153,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
   focusChecklistTrigger,
   onSwitchViewLevel,
   onExportInteractiveHtml,
+  isExportingHtml = false,
   onClose,
   isMobileView = false,
   workspaceMode = 'guided',
@@ -245,9 +248,85 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
     setChecklistFilter('all');
   }, [scriptWorkspace.masterScriptNumber]);
 
+  // Decouple heavy workspace analyzers from nodeOffsets & updatedAt so node dragging never re-runs scans
+  const moduleOnlyWorkspace = useMemo<ScriptWorkspace>(
+    () => ({
+      ...scriptWorkspace,
+      nodeOffsets: undefined,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      scriptWorkspace.modules,
+      scriptWorkspace.masterScriptNumber,
+      scriptWorkspace.externalEndpoints,
+      scriptWorkspace.manualLinks,
+      scriptWorkspace.treatUnresolvedAsEndpoint,
+    ]
+  );
+
+  // Lazy tab warmup: active tab evaluates immediately; background Free-Mode tabs warm up sequentially when idle
+  const [idleWarmPhase, setIdleWarmPhase] = useState<number>(0);
+
+  useEffect(() => {
+    setIdleWarmPhase(0);
+    if (scriptWorkspace.modules.length === 0) return;
+
+    let cancelled = false;
+    let phase = 0;
+    const maxPhase = workspaceMode === 'free' ? 4 : 1;
+    let handleId: number | null = null;
+    let usedIdleCallback = false;
+
+    const scheduleNext = () => {
+      if (cancelled || phase >= maxPhase) return;
+      const runStep = () => {
+        if (cancelled) return;
+        phase += 1;
+        setIdleWarmPhase(phase);
+        scheduleNext();
+      };
+      const win = window as Window & {
+        requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+        cancelIdleCallback?: (id: number) => void;
+      };
+      if (typeof win.requestIdleCallback === 'function') {
+        usedIdleCallback = true;
+        handleId = win.requestIdleCallback(runStep, { timeout: 140 });
+      } else {
+        usedIdleCallback = false;
+        handleId = window.setTimeout(runStep, 45);
+      }
+    };
+
+    scheduleNext();
+
+    return () => {
+      cancelled = true;
+      if (handleId !== null) {
+        const win = window as Window & { cancelIdleCallback?: (id: number) => void };
+        if (usedIdleCallback && typeof win.cancelIdleCallback === 'function') {
+          win.cancelIdleCallback(handleId);
+        } else {
+          window.clearTimeout(handleId);
+        }
+      }
+    };
+  }, [moduleOnlyWorkspace, workspaceMode, scriptWorkspace.modules.length]);
+
+  const shouldComputeHealth =
+    (workspaceMode === 'guided' && (guidedStep === 3 || idleWarmPhase >= 1)) ||
+    (workspaceMode === 'free' && (inspectorTab === 'health' || idleWarmPhase >= 1));
+
+  const shouldComputeSchedules =
+    workspaceMode === 'free' && (inspectorTab === 'schedules' || idleWarmPhase >= 2);
+  const shouldComputeRegistry =
+    workspaceMode === 'free' && (inspectorTab === 'registry' || idleWarmPhase >= 3);
+  const shouldComputeMatrix =
+    workspaceMode === 'free' && (inspectorTab === 'matrix' || idleWarmPhase >= 4);
+
   const healthFindings = useMemo(
-    () => analyzeWorkspaceLogicHealth(scriptWorkspace),
-    [scriptWorkspace]
+    () => (shouldComputeHealth ? analyzeWorkspaceLogicHealth(moduleOnlyWorkspace) : []),
+    [shouldComputeHealth, moduleOnlyWorkspace]
   );
   const healthErrorCount = useMemo(
     () => healthFindings.filter((f) => f.severity === 'error').length,
@@ -268,8 +347,11 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
   }, [healthFindings, healthFilter]);
 
   const resourceRegistry = useMemo(
-    () => extractWorkspaceResourceRegistry(scriptWorkspace),
-    [scriptWorkspace]
+    () =>
+      shouldComputeRegistry
+        ? extractWorkspaceResourceRegistry(moduleOnlyWorkspace)
+        : { skillsets: [], announcements: [], variables: [], crossRefs: [] },
+    [shouldComputeRegistry, moduleOnlyWorkspace]
   );
   const totalRegistryCount =
     resourceRegistry.skillsets.length +
@@ -277,8 +359,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
     resourceRegistry.variables.length;
 
   const routingMatrixRows = useMemo(
-    () => buildWorkspaceRoutingMatrix(scriptWorkspace),
-    [scriptWorkspace]
+    () => (shouldComputeMatrix ? buildWorkspaceRoutingMatrix(moduleOnlyWorkspace) : []),
+    [shouldComputeMatrix, moduleOnlyWorkspace]
   );
   const filteredMatrixRows = useMemo(() => {
     const q = matrixSearch.trim().toLowerCase();
@@ -321,8 +403,8 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
   };
 
   const scheduleOverviewRows = useMemo(
-    () => buildWorkspaceScheduleOverview(scriptWorkspace),
-    [scriptWorkspace]
+    () => (shouldComputeSchedules ? buildWorkspaceScheduleOverview(moduleOnlyWorkspace) : []),
+    [shouldComputeSchedules, moduleOnlyWorkspace]
   );
   const scheduleWithHoursCount = useMemo(
     () => scheduleOverviewRows.filter((r) => r.hasSchedule).length,
@@ -418,7 +500,13 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
       scriptWorkspace.modules[0]
     );
   }, [scriptWorkspace.modules, scriptWorkspace.masterScriptNumber]);
-  const mainScriptLabel = mainModule?.scriptNumber || 'Main';
+  const mainScriptLabel =
+    mainModule &&
+    (canonicalScriptMatchKey(mainModule.scriptNumber) === 'main' || mainModule.isMaster)
+      ? 'Main'
+      : mainModule
+      ? formatScriptDisplayLabel(mainModule)
+      : 'Main';
 
   const {
     checklistMissingCount,
@@ -885,7 +973,9 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   : 'text-slate-400'
               }`}
             >
-              {scheduleWithHoursCount + scheduleHolidayCount > 0
+              {!shouldComputeSchedules
+                ? '…'
+                : scheduleWithHoursCount + scheduleHolidayCount > 0
                 ? `${scheduleWithHoursCount + scheduleHolidayCount} aktiv`
                 : `${scheduleOverviewRows.length} Skripte`}
             </span>
@@ -913,7 +1003,11 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   : 'text-emerald-400'
               }`}
             >
-              {healthFindings.length > 0 ? `${healthFindings.length} Befunde` : '0 Fehler'}
+              {!shouldComputeHealth
+                ? '…'
+                : healthFindings.length > 0
+                ? `${healthFindings.length} Befunde`
+                : '0 Fehler'}
             </span>
           </button>
 
@@ -931,7 +1025,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
               <span className="truncate">Register</span>
             </div>
             <span className="text-[10px] font-mono tabular-nums text-slate-400">
-              {totalRegistryCount} Einträge
+              {!shouldComputeRegistry ? '…' : `${totalRegistryCount} Einträge`}
             </span>
           </button>
 
@@ -949,7 +1043,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
               <span className="truncate">Matrix</span>
             </div>
             <span className="text-[10px] font-mono tabular-nums text-slate-400">
-              {routingMatrixRows.length} Regeln
+              {!shouldComputeMatrix ? '…' : `${routingMatrixRows.length} Regeln`}
             </span>
           </button>
         </div>
@@ -1027,13 +1121,19 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                 className="w-full px-2.5 py-1.5 text-xs bg-slate-900 border border-slate-700 rounded-lg text-slate-100 font-mono focus:outline-none focus:border-indigo-500 cursor-pointer"
               >
                 <option value="master">
-                  Ebene 1: Master-Übersicht ({scriptWorkspace.modules.length} Skripte)
+                  Ebene 1: Master-Gesamtkarte ({scriptWorkspace.modules.length} Skripte)
                 </option>
-                {scriptWorkspace.modules.map((mod) => (
-                  <option key={mod.scriptNumber} value={`detail:${mod.scriptNumber}`}>
-                    Ebene 2: [{mod.scriptNumber}] {mod.scriptName} ({mod.rules.length} Regeln)
-                  </option>
-                ))}
+                {scriptWorkspace.modules.map((mod) => {
+                  const isMainMod =
+                    canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
+                    (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(mod.scriptNumber));
+                  return (
+                    <option key={mod.scriptNumber} value={`detail:${mod.scriptNumber}`}>
+                      Ebene 2: {isMainMod ? 'Main (Einstiegsskript)' : formatScriptDisplayLabel(mod)}{' '}
+                      ({mod.rules.length} Regeln)
+                    </option>
+                  );
+                })}
               </select>
 
               {viewLevel.level === 'detail' && (
@@ -1043,7 +1143,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   className="w-full py-1.5 px-3 bg-indigo-950/60 hover:bg-indigo-900/60 border border-indigo-500/50 text-indigo-200 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>Zurück zur Master-Übersicht (Ebene 1)</span>
+                  <span>Zurück zur Master-Gesamtkarte (Ebene 1)</span>
                 </button>
               )}
             </div>
@@ -1086,7 +1186,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   1
                 </span>
                 <span className="text-xs font-semibold text-slate-100 truncate">
-                  Masterscript (Main) laden
+                  Main (Einstiegsskript) laden
                 </span>
               </div>
               {scriptWorkspace.modules.length > 0 && (
@@ -1097,7 +1197,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
             </div>
 
             <p className="text-[11px] text-slate-300 leading-relaxed">
-              Fügen Sie hier Ihr <strong className="text-slate-100">Masterscript (Main)</strong> ein (Avaya `.s`-Export, AACC-Skript oder Tabellenzeilen) oder wählen Sie eine `.s`-/Visio-Datei. Alle aufgerufenen Folgeskripte und 3–6-stelligen Rufnummern werden automatisch erkannt.
+              Laden Sie hier Ihr <strong className="text-slate-100">erstes Startskript</strong> (Avaya `.s`-Export, AACC-Skript oder Tabellenzeilen). Es wird unabhängig vom Dateinamen fest als <strong className="text-slate-100">Main</strong> geführt; Ebene 1 zeigt danach die <strong className="text-slate-100">Master-Gesamtkarte</strong> aller verknüpften Skripte.
             </p>
 
             {onSubmitChecklistDetailScript && (
@@ -1109,7 +1209,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                     setGuidedMainDraft(e.target.value);
                     if (guidedMainFeedback) setGuidedMainFeedback(null);
                   }}
-                  placeholder={`Masterscript (Main) hier einfügen...\nBeispiel:\nSECTION Init\n  GIVE RAN 301\n  EXECUTE "Schaltung1"\n  TRANSFER TO 48210`}
+                  placeholder={`Main (Einstiegsskript) hier einfügen...\nBeispiel:\nSECTION Init\n  GIVE RAN 301\n  EXECUTE "Schaltung1"\n  TRANSFER TO 48210`}
                   className="w-full px-2.5 py-2 bg-slate-900 border border-slate-800 rounded-lg text-[11px] font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 resize-y"
                 />
 
@@ -1226,7 +1326,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                           type="text"
                           value={folderStartSearch}
                           onChange={(e) => setFolderStartSearch(e.target.value)}
-                          placeholder="Start-/Masterscript im Ordner suchen (z. B. 4910, Main)..."
+                          placeholder="Einstiegsskript im Ordner suchen (z. B. Main, 4910)..."
                           className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded text-[11px] font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none"
                         />
                         <div className="max-h-36 overflow-y-auto space-y-1 pr-0.5">
@@ -1432,7 +1532,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => setHealthFilter('all')}
-                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium transition-colors cursor-pointer ${
+                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium tabular-nums transition-colors cursor-pointer ${
                       healthFilter === 'all'
                         ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-200'
                         : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
@@ -1443,7 +1543,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => setHealthFilter('error')}
-                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium transition-colors cursor-pointer ${
+                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium tabular-nums transition-colors cursor-pointer ${
                       healthFilter === 'error'
                         ? 'bg-rose-950/40 border-rose-500/50 text-rose-200'
                         : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
@@ -1454,7 +1554,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => setHealthFilter('warning')}
-                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium transition-colors cursor-pointer ${
+                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium tabular-nums transition-colors cursor-pointer ${
                       healthFilter === 'warning'
                         ? 'bg-amber-950/40 border-amber-500/50 text-amber-200'
                         : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
@@ -1468,7 +1568,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   <div className="p-3 rounded-lg bg-emerald-950/20 border border-emerald-500/30 flex items-center gap-2 text-xs text-emerald-300">
                     <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                     <span>
-                      Keine Schleifen, Sackgassen oder verwaisten Skripte in dieser Kategorie gefunden.
+                      Keine Endlosschleifen oder echten Sackgassen erkannt – Callflow-Logik ist konsistent.
                     </span>
                   </div>
                 ) : (
@@ -1819,7 +1919,11 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                               onClick={() => jumpToScriptInInspector(cr.refKey, cr.status !== 'missing')}
                               className="text-left text-xs font-mono font-semibold text-slate-100 hover:text-indigo-300 truncate cursor-pointer"
                             >
-                              [{cr.refKey}] {cr.displayName !== cr.refKey ? cr.displayName : ''}
+                              [{cr.refKey}]{' '}
+                              {canonicalScriptMatchKey(cr.displayName) !==
+                              canonicalScriptMatchKey(cr.refKey)
+                                ? cr.displayName
+                                : ''}
                             </button>
                             <span
                               className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 ${
@@ -1833,7 +1937,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                               }`}
                             >
                               {cr.status === 'master'
-                                ? 'Master'
+                                ? 'Einstieg (Main)'
                                 : cr.status === 'present'
                                 ? 'Geladen'
                                 : cr.status === 'external'
@@ -2244,13 +2348,13 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
         {((workspaceMode === 'free' && inspectorTab === 'overview') ||
           (workspaceMode === 'guided' && guidedStep === 2)) && (
           <>
-        {/* Section 1a: Masterscript Top-Down Checkliste & Echtzeit-Sync-Karte */}
+        {/* Section 1a: Main-Abgleich Top-Down Checkliste & Echtzeit-Sync-Karte */}
         <section className="space-y-3 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 min-w-0">
               <ListChecks className="w-4 h-4 text-indigo-400 shrink-0" />
               <span className="text-xs font-semibold text-slate-100 truncate">
-                Masterscript-Checkliste
+                Main-Abgleich &amp; Checkliste
               </span>
             </div>
             {masterChecklist.length > 0 && (
@@ -2278,7 +2382,7 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                     </span>
                   </div>
                   <p className="text-[10px] text-slate-400 leading-snug mt-0.5">
-                    Gleicht den Ordner automatisch mit allen im Masterscript &amp; Folgeskripten
+                    Gleicht den Ordner automatisch mit allen in Main (Einstiegsskript) &amp; Folgeskripten
                     aufgerufenen Zielen ab und lädt nur aktive <code className="font-mono text-slate-300">.s</code>-Dateien rekursiv nach (Altlasten werden ignoriert).
                   </p>
                 </div>
@@ -2330,9 +2434,9 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
             <>
               {scriptWorkspace.modules.length > 1 && onSelectMasterScript && (
                 <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-slate-400 shrink-0">Master:</span>
+                  <span className="text-[11px] text-slate-400 shrink-0">Einstieg:</span>
                   <select
-                    aria-label="Aktives Masterscript für Checkliste wählen"
+                    aria-label="Aktives Einstiegsskript (Main) für Checkliste wählen"
                     value={scriptWorkspace.masterScriptNumber || ''}
                     onChange={(e) => {
                       setActiveChecklistRef(null);
@@ -2344,7 +2448,9 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   >
                     {scriptWorkspace.modules.map((m) => (
                       <option key={m.scriptNumber} value={m.scriptNumber}>
-                        [{m.scriptNumber}] {m.scriptName}
+                        {canonicalScriptMatchKey(m.scriptNumber) === 'main'
+                          ? 'Main (Einstiegsskript)'
+                          : formatScriptDisplayLabel(m)}
                       </option>
                     ))}
                   </select>
@@ -3055,7 +3161,9 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   >
                     {scriptWorkspace.modules.map((m) => (
                       <option key={m.scriptNumber} value={m.scriptNumber}>
-                        [{m.scriptNumber}] {m.scriptName}
+                        {canonicalScriptMatchKey(m.scriptNumber) === 'main'
+                          ? 'Main'
+                          : formatScriptDisplayLabel(m)}
                       </option>
                     ))}
                   </select>
@@ -3550,7 +3658,9 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
                   className="w-full py-1.5 px-3 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-amber-200 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <span>
-                    In Skript [{selectedNodeScriptTarget.scriptNumber}] hineinzoomen (Ebene 2)
+                    {canonicalScriptMatchKey(selectedNodeScriptTarget.scriptNumber) === 'main'
+                      ? 'In Main (Einstiegsskript) hineinzoomen (Ebene 2)'
+                      : `In Skript [${selectedNodeScriptTarget.scriptNumber}] hineinzoomen (Ebene 2)`}
                   </span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
@@ -3823,16 +3933,24 @@ export const CallflowInspector: React.FC<CallflowInspectorProps> = ({
       <div className="p-3.5 border-t border-slate-800 bg-slate-900/90 lg:bg-slate-950/60 shrink-0">
         <button
           type="button"
+          disabled={isExportingHtml}
           onClick={onExportInteractiveHtml}
-          className="w-full min-h-[40px] lg:min-h-0 py-2 px-3 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
+          className="w-full min-h-[40px] lg:min-h-0 py-2 px-3 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
         >
           <Download className="w-3.5 h-3.5" />
-          <span>Interaktive Callflow-HTML speichern (.html)</span>
+          <span>
+            {isExportingHtml
+              ? 'Interaktive HTML wird erstellt…'
+              : 'Interaktive Callflow-HTML speichern (.html)'}
+          </span>
         </button>
       </div>
     </aside>
   );
 };
+
+export const CallflowInspector = React.memo(CallflowInspectorInner);
+CallflowInspector.displayName = 'CallflowInspector';
 
 interface TraceListBlockProps {
   title: string;

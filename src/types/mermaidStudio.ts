@@ -5,6 +5,15 @@ export type FlowchartCurve = 'basis' | 'bumpX' | 'bumpY' | 'cardinal' | 'catmull
 export type DiagramDirection = 'TB' | 'TD' | 'RL' | 'LR' | 'BT';
 export type SmartColorMode = 'standard' | 'semantic' | 'clusters' | 'high-contrast';
 
+export type SmartColorNodeType =
+  | 'announcement'
+  | 'queue'
+  | 'decision'
+  | 'storage'
+  | 'start-actor'
+  | 'core-service'
+  | 'error-alert';
+
 export interface LegendItem {
   id: string;
   label: string;
@@ -20,6 +29,8 @@ export interface LogicAnalysisSummary {
   recommendationReason: string;
   legend: LegendItem[];
   nodeCount: number;
+  hiddenNodeCount?: number;
+  detectedTypeCounts?: Partial<Record<SmartColorNodeType, number>>;
   clusterCount: number;
   asyncEdgeCount: number;
 }
@@ -399,9 +410,20 @@ export interface OfflineWorkspaceSeed {
   code: string;
   themeConfig: ThemeConfiguration;
   smartColorMode: SmartColorMode;
+  hiddenSmartNodeTypes?: SmartColorNodeType[];
   canvasSurface: 'dark' | 'light';
   workspaceMode: 'guided' | 'free';
   scriptWorkspace: ScriptWorkspace;
   savedDiagrams: SavedDiagram[];
 }
+
+export interface HtmlExportProgress {
+  active: boolean;
+  phase: 'preparing' | 'rendering' | 'packaging';
+  current: number;
+  total: number;
+  currentLabel: string;
+  cacheHits: number;
+}
+
 

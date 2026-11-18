@@ -6,6 +6,7 @@ export const STUDIO_STORAGE_KEYS = {
   ACTIVE_TITLE: 'mermaid_studio_local_active_title_v3',
   ACTIVE_THEME: 'mermaid_studio_local_active_theme_v2',
   SMART_COLOR_MODE: 'mermaid_studio_local_smart_color_mode_v2',
+  HIDDEN_SMART_NODE_TYPES: 'mermaid_studio_local_hidden_smart_node_types_v1',
   CANVAS_SURFACE: 'mermaid_studio_local_canvas_surface_v2',
   SAVED_LIST: 'mermaid_studio_local_saved_diagrams_v1',
   SCRIPT_WORKSPACE: 'mermaid_studio_local_script_workspace_v2',
@@ -59,6 +60,12 @@ export function hydrateOfflineWorkspaceSeed(): void {
   writeStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_CODE, seed.code ?? '');
   writeStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_THEME, JSON.stringify(seed.themeConfig));
   writeStudioStorage(STUDIO_STORAGE_KEYS.SMART_COLOR_MODE, seed.smartColorMode || 'semantic');
+  if (Array.isArray(seed.hiddenSmartNodeTypes)) {
+    writeStudioStorage(
+      STUDIO_STORAGE_KEYS.HIDDEN_SMART_NODE_TYPES,
+      JSON.stringify(seed.hiddenSmartNodeTypes)
+    );
+  }
   writeStudioStorage(STUDIO_STORAGE_KEYS.CANVAS_SURFACE, seed.canvasSurface || 'dark');
   writeStudioStorage(STUDIO_STORAGE_KEYS.WORKSPACE_MODE, seed.workspaceMode || 'guided');
   writeStudioStorage(

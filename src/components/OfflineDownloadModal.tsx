@@ -14,6 +14,7 @@ import {
   SavedDiagram,
   ScriptWorkspace,
   SmartColorMode,
+  SmartColorNodeType,
   ThemeConfiguration,
 } from '../types/mermaidStudio';
 import {
@@ -28,6 +29,7 @@ interface OfflineDownloadModalProps {
   code: string;
   themeConfig: ThemeConfiguration;
   smartColorMode: SmartColorMode;
+  hiddenSmartNodeTypes?: SmartColorNodeType[];
   canvasSurface: 'dark' | 'light';
   workspaceMode: 'guided' | 'free';
   scriptWorkspace: ScriptWorkspace;
@@ -41,6 +43,7 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
   code,
   themeConfig,
   smartColorMode,
+  hiddenSmartNodeTypes = [],
   canvasSurface,
   workspaceMode,
   scriptWorkspace,
@@ -95,6 +98,7 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
                 code,
                 themeConfig,
                 smartColorMode,
+                hiddenSmartNodeTypes,
                 canvasSurface,
                 workspaceMode,
                 scriptWorkspace,
@@ -157,7 +161,7 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
           <div className="rounded-xl bg-slate-950/90 border border-slate-800 p-4 space-y-2.5">
             <div className="flex items-center gap-2 text-xs font-semibold text-emerald-300">
               <ShieldCheck className="w-4 h-4 shrink-0" />
-              <span>Vollständig isolierter Einzeldatei-Betrieb für sensible Masterscripts</span>
+              <span>Vollständig isolierter Einzeldatei-Betrieb für sensible Produktiv-Callflows</span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs text-slate-300 pt-1">
               <div className="flex items-start gap-2">
@@ -205,7 +209,7 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
                 <div className="space-y-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-semibold">
-                      Inkl. aktuellem Callflow &amp; Masterscript
+                      Inkl. aktuellem Callflow &amp; Main-Einstiegsskript
                     </span>
                     {hasWorkspaceContent && (
                       <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-medium text-emerald-300">
@@ -216,7 +220,7 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
                   <p className="text-xs text-slate-400">
                     {hasWorkspaceContent
                       ? `Bettet „${diagramTitle}“ (${scriptWorkspace.modules.length} Module, Checkliste, manuelle Positionen & Speicherstände) lokal in die HTML-Datei ein.`
-                      : 'Aktuell ist noch kein Diagramm oder Masterscript geladen.'}
+                      : 'Aktuell ist noch kein Callflow oder Startskript (Main) geladen.'}
                   </p>
                 </div>
                 <span
@@ -247,7 +251,7 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
                   </div>
                   <p className="text-xs text-slate-400">
                     Lädt die nackte Offline-Anwendung ohne vorbefüllte Daten – ideal als
-                    wiederverwendbares Werkzeug für neue Masterscripts.
+                    wiederverwendbares Werkzeug für neue Callflows.
                   </p>
                 </div>
                 <span

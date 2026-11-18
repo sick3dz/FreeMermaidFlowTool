@@ -6,6 +6,7 @@ import {
   mergeScriptModules,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
+  promoteEntryModuleToMain,
 } from './scriptCallflowParser';
 import { isVisioFilename, parseVisioFileToModules } from './visioParser';
 
@@ -151,9 +152,13 @@ export async function importCallflowFile(
   }
 ): Promise<ImportedCallflowFileResult> {
   if (isVisioFilename(file.name)) {
-    const modules = await parseVisioFileToModules(file, {
+    const rawModules = await parseVisioFileToModules(file, {
       overridePrimaryScriptNumber: options?.overridePrimaryScriptNumber,
     });
+    const modules =
+      options?.isMasterHint && rawModules.length > 0
+        ? promoteEntryModuleToMain(rawModules)
+        : rawModules;
     return {
       modules,
       sourceKind: 'visio',

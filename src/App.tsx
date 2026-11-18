@@ -47,12 +47,14 @@ import {
   CallflowViewLevel,
   DiagramDirection,
   DiagramTemplate,
+  HtmlExportProgress,
   LogicAnalysisSummary,
   NodePositionOffset,
   SavedDiagram,
   ScriptOrigin,
   ScriptWorkspace,
   SmartColorMode,
+  SmartColorNodeType,
   ThemeConfiguration,
   ValidationState,
 } from './types/mermaidStudio';
@@ -113,11 +115,13 @@ import {
   EditableCallflowNodeSnapshot,
   EditableNodeConnectionItem,
   extractScriptNumberFromNodeId,
+  formatScriptDisplayLabel,
   inspectWorkspaceNodeForEdit,
   looksLikeRawCallflowScript,
   mergeScriptModules,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
+  promoteEntryModuleToMain,
   rehydrateAndUpgradeWorkspace,
   reopenIssueInWorkspace,
   toMermaidNodeSuffix,
@@ -281,6 +285,30 @@ export default function App() {
     return 'semantic';
   });
 
+  const [hiddenSmartNodeTypes, setHiddenSmartNodeTypes] = useState<SmartColorNodeType[]>(() => {
+    try {
+      const raw = readStudioStorage(STORAGE_KEYS.HIDDEN_SMART_NODE_TYPES);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          const valid = new Set<SmartColorNodeType>([
+            'announcement',
+            'queue',
+            'decision',
+            'storage',
+            'start-actor',
+            'core-service',
+            'error-alert',
+          ]);
+          return parsed.filter((item): item is SmartColorNodeType => valid.has(item));
+        }
+      }
+    } catch {
+      // ignore invalid storage payload
+    }
+    return [];
+  });
+
   const [canvasSurface, setCanvasSurface] = useState<'dark' | 'light'>(() => {
     const saved = readStudioStorage(STORAGE_KEYS.CANVAS_SURFACE);
     return saved === 'light' ? 'light' : 'dark';
@@ -369,7 +397,6 @@ export default function App() {
   // Pan & Zoom state (Mouse + Multi-Touch)
   const [zoom, setZoom] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [isPanning, setIsPanning] = useState<boolean>(false);
   const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const dragDistanceRef = useRef<number>(0);
   const touchGestureRef = useRef<{
@@ -472,8 +499,11 @@ export default function App() {
   >(null);
   const [isDownloadingPng, setIsDownloadingPng] = useState<boolean>(false);
   const [isDownloadingHtml, setIsDownloadingHtml] = useState<boolean>(false);
+  const [htmlExportProgress, setHtmlExportProgress] = useState<HtmlExportProgress | null>(null);
+  const [htmlExportNotice, setHtmlExportNotice] = useState<string | null>(null);
 
   // Refs
+  const exportAbortControllerRef = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
@@ -489,23 +519,64 @@ export default function App() {
   const cameraRafRef = useRef<number | null>(null);
   const wheelSyncTimerRef = useRef<number | null>(null);
   const dragMoveRafRef = useRef<number | null>(null);
+  const hoverRafRef = useRef<number | null>(null);
+  const hoverPendingTargetRef = useRef<Element | null>(null);
   const isPanningRef = useRef<boolean>(false);
+  const isTransformingRef = useRef<boolean>(false);
   const panMouseStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const activeNodeOffsetsRef = useRef<Record<string, NodePositionOffset>>({});
 
-  // Debounced persistence to localStorage (avoids blocking frame commits during drag/pan/typing)
+  // Debounced persistence for lightweight UI preferences (independent from heavy scriptWorkspace JSON)
   useEffect(() => {
     const timer = window.setTimeout(() => {
       writeStudioStorage(STORAGE_KEYS.ACTIVE_CODE, code);
       writeStudioStorage(STORAGE_KEYS.ACTIVE_TITLE, diagramTitle);
       writeStudioStorage(STORAGE_KEYS.ACTIVE_THEME, JSON.stringify(themeConfig));
       writeStudioStorage(STORAGE_KEYS.SMART_COLOR_MODE, smartColorMode);
+      writeStudioStorage(
+        STORAGE_KEYS.HIDDEN_SMART_NODE_TYPES,
+        JSON.stringify(hiddenSmartNodeTypes)
+      );
       writeStudioStorage(STORAGE_KEYS.CANVAS_SURFACE, canvasSurface);
-      writeStudioStorage(STORAGE_KEYS.SCRIPT_WORKSPACE, JSON.stringify(scriptWorkspace));
       writeStudioStorage(STORAGE_KEYS.WORKSPACE_MODE, workspaceMode);
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [code, diagramTitle, themeConfig, smartColorMode, canvasSurface, scriptWorkspace, workspaceMode]);
+  }, [
+    code,
+    diagramTitle,
+    themeConfig,
+    smartColorMode,
+    hiddenSmartNodeTypes,
+    canvasSurface,
+    workspaceMode,
+  ]);
+
+  // Idle-scheduled persistence for full ScriptWorkspace so node dragging & UI toggles stay 60fps
+  useEffect(() => {
+    let idleHandle: number | null = null;
+    let usedIdleCallback = false;
+    const timer = window.setTimeout(() => {
+      const persist = () => {
+        writeStudioStorage(STORAGE_KEYS.SCRIPT_WORKSPACE, JSON.stringify(scriptWorkspace));
+      };
+      const win = window as Window & {
+        requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      };
+      if (typeof win.requestIdleCallback === 'function') {
+        usedIdleCallback = true;
+        idleHandle = win.requestIdleCallback(persist, { timeout: 600 });
+      } else {
+        persist();
+      }
+    }, 600);
+    return () => {
+      window.clearTimeout(timer);
+      if (idleHandle !== null && usedIdleCallback) {
+        const win = window as Window & { cancelIdleCallback?: (id: number) => void };
+        win.cancelIdleCallback?.(idleHandle);
+      }
+    };
+  }, [scriptWorkspace]);
 
   const handleChangeWorkspaceMode = useCallback((nextMode: 'guided' | 'free') => {
     setWorkspaceMode(nextMode);
@@ -708,7 +779,8 @@ export default function App() {
       effectiveMermaidCode,
       smartColorMode,
       canvasSurface,
-      themeConfig.lineColor
+      themeConfig.lineColor,
+      hiddenSmartNodeTypes
     );
 
     return {
@@ -719,6 +791,7 @@ export default function App() {
     baseRenderedSvg,
     effectiveMermaidCode,
     smartColorMode,
+    hiddenSmartNodeTypes,
     canvasSurface,
     themeConfig.lineColor,
   ]);
@@ -1019,13 +1092,43 @@ export default function App() {
     });
   };
 
-  // Apply GPU transform directly to canvas stage at 60fps without React re-renders
+  // Direct DOM gesture attribute toggling so panning/pinching/hover suppression cause 0 React re-renders
+  const setCanvasGestureAttrs = useCallback((panning: boolean, transforming: boolean) => {
+    isTransformingRef.current = transforming;
+    const vp = canvasViewportRef.current;
+    if (!vp) return;
+    if (panning) vp.setAttribute('data-panning', 'true');
+    else vp.removeAttribute('data-panning');
+    if (transforming) vp.setAttribute('data-transforming', 'true');
+    else vp.removeAttribute('data-transforming');
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (hoverRafRef.current !== null) {
+        cancelAnimationFrame(hoverRafRef.current);
+        hoverRafRef.current = null;
+      }
+      if (cameraRafRef.current !== null) {
+        cancelAnimationFrame(cameraRafRef.current);
+        cameraRafRef.current = null;
+      }
+      if (wheelSyncTimerRef.current !== null) {
+        window.clearTimeout(wheelSyncTimerRef.current);
+        wheelSyncTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // Apply GPU transform directly to canvas stage at 60fps without tearing down GPU composite layer
   const applyCameraToDom = useCallback(
-    (panX: number, panY: number, z: number, activeGesture: boolean) => {
+    (panX: number, panY: number, z: number, _activeGesture: boolean) => {
       cameraRef.current = { zoom: z, panX, panY };
       const stage = stageElRef.current;
       if (stage) {
-        stage.style.willChange = activeGesture ? 'transform' : 'auto';
+        if (stage.style.willChange !== 'transform') {
+          stage.style.willChange = 'transform';
+        }
         stage.style.transform = `translate3d(${panX}px, ${panY}px, 0) scale(${z})`;
       }
     },
@@ -1034,7 +1137,7 @@ export default function App() {
 
   // Sync React camera state when programmatic zoom/pan buttons or resets run
   useLayoutEffect(() => {
-    if (isPanningRef.current) return;
+    if (isPanningRef.current || isTransformingRef.current) return;
     applyCameraToDom(pan.x, pan.y, zoom, false);
   }, [pan.x, pan.y, zoom, applyCameraToDom]);
 
@@ -1135,6 +1238,7 @@ export default function App() {
     const nextPanY = Math.round(cursorOffsetY - (cursorOffsetY - curCam.panY) * scaleRatio);
 
     cameraRef.current = { zoom: nextZoom, panX: nextPanX, panY: nextPanY };
+    setCanvasGestureAttrs(isPanningRef.current, true);
     if (cameraRafRef.current === null) {
       cameraRafRef.current = requestAnimationFrame(() => {
         cameraRafRef.current = null;
@@ -1149,6 +1253,7 @@ export default function App() {
     wheelSyncTimerRef.current = window.setTimeout(() => {
       wheelSyncTimerRef.current = null;
       const cam = cameraRef.current;
+      setCanvasGestureAttrs(isPanningRef.current, false);
       applyCameraToDom(cam.panX, cam.panY, cam.zoom, false);
       setZoom(cam.zoom);
       setPan({ x: cam.panX, y: cam.panY });
@@ -1261,24 +1366,33 @@ export default function App() {
     [workspaceMode, scriptWorkspace.modules.length, guidedStep]
   );
 
-  // Lightweight hover tracker: reveals docked padlock ("Schloss-Symbol") on hovered edge/node in O(1)
+  // rAF-throttled hover tracker: reveals docked padlock ("Schloss-Symbol") without blocking 60fps gestures
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    const index = liveSvgIndexRef.current;
-    if (!index || !isVisualEditMode) return;
-    if (isPanningRef.current || nodeDragRef.current.active) return;
+    if (!isVisualEditMode) return;
+    if (isPanningRef.current || nodeDragRef.current.active || isTransformingRef.current) return;
 
-    const target = e.target instanceof Element ? e.target : null;
-    const lockHit = resolveClickedLockFromSvgElement(target);
-    const hoveredEdge = lockHit || resolveClickedEdgeFromSvgElement(target);
-    const hoveredNodeId = !hoveredEdge
-      ? resolveClickedNodeIdFromSvgElement(target, callflowGraph)
-      : null;
+    hoverPendingTargetRef.current = e.target instanceof Element ? e.target : null;
+    if (hoverRafRef.current !== null) return;
+    hoverRafRef.current = requestAnimationFrame(() => {
+      hoverRafRef.current = null;
+      const index = liveSvgIndexRef.current;
+      if (!index || isPanningRef.current || nodeDragRef.current.active || isTransformingRef.current) {
+        return;
+      }
 
-    const nextKey = `${hoveredEdge?.from || ''}>${hoveredEdge?.to || ''}|${hoveredNodeId || ''}`;
-    if (nextKey !== lastHoverLockKeyRef.current) {
-      lastHoverLockKeyRef.current = nextKey;
-      setHoveredLockTargetsInDom(index, hoveredEdge, hoveredNodeId, selectedCallflowEdge);
-    }
+      const target = hoverPendingTargetRef.current;
+      const lockHit = resolveClickedLockFromSvgElement(target);
+      const hoveredEdge = lockHit || resolveClickedEdgeFromSvgElement(target);
+      const hoveredNodeId = !hoveredEdge
+        ? resolveClickedNodeIdFromSvgElement(target, callflowGraph)
+        : null;
+
+      const nextKey = `${hoveredEdge?.from || ''}>${hoveredEdge?.to || ''}|${hoveredNodeId || ''}`;
+      if (nextKey !== lastHoverLockKeyRef.current) {
+        lastHoverLockKeyRef.current = nextKey;
+        setHoveredLockTargetsInDom(index, hoveredEdge, hoveredNodeId, selectedCallflowEdge);
+      }
+    });
   };
 
   // Canvas Mouse Drag Pan + Visual Node Drag with Live Edges + Wire Connect + Padlock Unlock + Click/Deselect
@@ -1405,7 +1519,7 @@ export default function App() {
 
     if (startedInteraction === 'none') {
       isPanningRef.current = true;
-      setIsPanning(true);
+      setCanvasGestureAttrs(true, true);
       dragDistanceRef.current = 0;
       panMouseStartRef.current = { x: e.clientX, y: e.clientY };
       panStartRef.current = {
@@ -1566,7 +1680,7 @@ export default function App() {
       nodeDragRef.current.active = false;
       snappedPortRef.current = null;
       isPanningRef.current = false;
-      setIsPanning(false);
+      setCanvasGestureAttrs(false, false);
       setActiveWirePreview(null);
       if (liveSvgIndexRef.current) {
         setMagneticSnapTargetInDom(liveSvgIndexRef.current, null, false);
@@ -1643,7 +1757,7 @@ export default function App() {
 
       const wasClick = isPanningRef.current && dragDistanceRef.current < DRAG_THRESHOLD_PX;
       isPanningRef.current = false;
-      setIsPanning(false);
+      setCanvasGestureAttrs(false, false);
       const cam = cameraRef.current;
       applyCameraToDom(cam.panX, cam.panY, cam.zoom, false);
       setPan({ x: cam.panX, y: cam.panY });
@@ -1700,7 +1814,7 @@ export default function App() {
     if (isCanvasOverlayTarget(e.target) || !coloredSvg) {
       touchGestureRef.current.mode = 'none';
       isPanningRef.current = false;
-      setIsPanning(false);
+      setCanvasGestureAttrs(false, false);
       return;
     }
     if (e.touches.length === 1) {
@@ -1713,7 +1827,7 @@ export default function App() {
         initialZoom: cameraRef.current.zoom,
       };
       isPanningRef.current = true;
-      setIsPanning(true);
+      setCanvasGestureAttrs(true, true);
     } else if (e.touches.length === 2) {
       const dist = getTouchDistance(e.touches);
       touchGestureRef.current = {
@@ -1724,7 +1838,7 @@ export default function App() {
         initialZoom: cameraRef.current.zoom,
       };
       isPanningRef.current = false;
-      setIsPanning(false);
+      setCanvasGestureAttrs(false, true);
     }
   };
 
@@ -1755,14 +1869,14 @@ export default function App() {
     if (isCanvasOverlayTarget(e.target) || !coloredSvg) {
       touchGestureRef.current.mode = 'none';
       isPanningRef.current = false;
-      setIsPanning(false);
+      setCanvasGestureAttrs(false, false);
       return;
     }
     const wasTap =
       touchGestureRef.current.mode === 'pan' && dragDistanceRef.current < 8;
     touchGestureRef.current.mode = 'none';
     isPanningRef.current = false;
-    setIsPanning(false);
+    setCanvasGestureAttrs(false, false);
     const cam = cameraRef.current;
     applyCameraToDom(cam.panX, cam.panY, cam.zoom, false);
     setPan({ x: cam.panX, y: cam.panY });
@@ -1830,17 +1944,19 @@ export default function App() {
     });
   };
 
-  const handleChangeDirection = (dir: DiagramDirection) => {
+  const handleChangeDirection = useCallback((dir: DiagramDirection) => {
     setCode((prev) => updateDiagramDirection(prev, dir));
-  };
+  }, []);
 
-  const handleInjectInitDirective = () => {
+  const handleInjectInitDirective = useCallback(() => {
     setCode((prev) => injectInitDirectiveIntoCode(prev, themeConfig));
-  };
+  }, [themeConfig]);
 
-  const handleInjectSmartClassDefs = () => {
-    setCode((prev) => injectSmartColorsIntoCode(prev, canvasSurface));
-  };
+  const handleInjectSmartClassDefs = useCallback(() => {
+    setCode((prev) =>
+      injectSmartColorsIntoCode(prev, canvasSurface, hiddenSmartNodeTypes)
+    );
+  }, [canvasSurface, hiddenSmartNodeTypes]);
 
   const handleSwitchCallflowViewLevel = useCallback(
     (
@@ -1859,15 +1975,23 @@ export default function App() {
       setCallflowViewLevel(nextLevel);
       setCode(nextCode);
       if (nextLevel.level === 'master') {
-        setDiagramTitle(`Master-Callflow (${ws.modules.length} Skripte)`);
+        setDiagramTitle(`Master-Gesamtkarte (${ws.modules.length} Skripte)`);
       } else {
         const mod = ws.modules.find(
           (m) =>
             canonicalScriptMatchKey(m.scriptNumber) ===
             canonicalScriptMatchKey(nextLevel.scriptNumber)
         );
+        const isMainMod =
+          mod &&
+          (canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
+            (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(mod.scriptNumber)));
         setDiagramTitle(
-          mod ? `[${mod.scriptNumber}] ${mod.scriptName}` : `Skript ${nextLevel.scriptNumber}`
+          isMainMod
+            ? 'Main (Einstiegsskript)'
+            : mod
+            ? formatScriptDisplayLabel(mod)
+            : `Skript ${nextLevel.scriptNumber}`
         );
       }
       setSelectedCallflowNodeId(null);
@@ -1907,15 +2031,23 @@ export default function App() {
       }
       setCode(nextCode);
       if (effectiveLevel.level === 'master') {
-        setDiagramTitle(`Master-Callflow (${nextWs.modules.length} Skripte)`);
+        setDiagramTitle(`Master-Gesamtkarte (${nextWs.modules.length} Skripte)`);
       } else {
         const mod = nextWs.modules.find(
           (m) =>
             canonicalScriptMatchKey(m.scriptNumber) ===
             canonicalScriptMatchKey(effectiveLevel.scriptNumber)
         );
+        const isMainMod =
+          mod &&
+          (canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
+            (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(mod.scriptNumber)));
         setDiagramTitle(
-          mod ? `[${mod.scriptNumber}] ${mod.scriptName}` : `Skript ${effectiveLevel.scriptNumber}`
+          isMainMod
+            ? 'Main (Einstiegsskript)'
+            : mod
+            ? formatScriptDisplayLabel(mod)
+            : `Skript ${effectiveLevel.scriptNumber}`
         );
       }
     },
@@ -2010,12 +2142,15 @@ export default function App() {
       if (!trimmed) return null;
       const isAutoStart = !targetRef || targetRef === '__auto__';
       const normalizedTarget = isAutoStart ? '' : normalizeScriptRef(targetRef);
+      const wasEmpty = scriptWorkspace.modules.length === 0;
+      const treatAsEntryMain =
+        wasEmpty || isAutoStart || canonicalScriptMatchKey(normalizedTarget) === 'main';
 
       const incoming = parseCallflowTextWithFallback(trimmed, {
         defaultScriptNumber: normalizedTarget || undefined,
         defaultScriptName: normalizedTarget || undefined,
         origin,
-        isMasterHint: isAutoStart || canonicalScriptMatchKey(normalizedTarget) === 'main',
+        isMasterHint: treatAsEntryMain,
       });
 
       const hasRulesOrAnnouncement = incoming.some(
@@ -2029,14 +2164,13 @@ export default function App() {
       const nextIgnored = (scriptWorkspace.ignoredChecklistTargets || []).filter(
         (t) => canonicalScriptMatchKey(t) !== targetKey
       );
-      const wasEmpty = scriptWorkspace.modules.length === 0;
       let merged = mergeScriptModules(scriptWorkspace.modules, incoming);
+      if (wasEmpty) {
+        merged = promoteEntryModuleToMain(merged, incoming[0].scriptNumber);
+      }
       const nextWs = buildScriptWorkspace(merged, {
         ...scriptWorkspace,
-        masterScriptNumber:
-          wasEmpty && isAutoStart
-            ? incoming[0].scriptNumber
-            : scriptWorkspace.masterScriptNumber,
+        masterScriptNumber: wasEmpty ? 'Main' : scriptWorkspace.masterScriptNumber,
         ignoredChecklistTargets: nextIgnored,
       });
       if (wasEmpty) {
@@ -2082,14 +2216,16 @@ export default function App() {
     async (targetRef: string, file: File): Promise<ScriptWorkspace | null> => {
       const isAutoStart = !targetRef || targetRef === '__auto__';
       const normalizedTarget = isAutoStart ? '' : normalizeScriptRef(targetRef);
+      const wasEmpty = scriptWorkspace.modules.length === 0;
+      const treatAsEntryMain =
+        wasEmpty || isAutoStart || canonicalScriptMatchKey(normalizedTarget) === 'main';
       try {
         const result = await importCallflowFile(file, {
           overridePrimaryScriptNumber: normalizedTarget || undefined,
           overridePrimaryScriptName: normalizedTarget || undefined,
-          isMasterHint: isAutoStart || canonicalScriptMatchKey(normalizedTarget) === 'main',
+          isMasterHint: treatAsEntryMain,
         });
         if (result.modules.length === 0) return null;
-        const wasEmpty = scriptWorkspace.modules.length === 0;
         const targetKey = canonicalScriptMatchKey(
           normalizedTarget || result.modules[0].scriptNumber
         );
@@ -2097,10 +2233,10 @@ export default function App() {
           (t) => canonicalScriptMatchKey(t) !== targetKey
         );
         let merged = mergeScriptModules(scriptWorkspace.modules, result.modules);
-        const effectiveMaster =
-          wasEmpty && isAutoStart
-            ? result.modules[0].scriptNumber
-            : scriptWorkspace.masterScriptNumber;
+        if (wasEmpty) {
+          merged = promoteEntryModuleToMain(merged, result.modules[0].scriptNumber);
+        }
+        const effectiveMaster = wasEmpty ? 'Main' : scriptWorkspace.masterScriptNumber;
 
         let nextExternalEndpoints = [...(scriptWorkspace.externalEndpoints || [])];
         if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
@@ -2177,7 +2313,7 @@ export default function App() {
       if (scriptWorkspace.modules.length === 0) {
         showCanvasDropBanner(
           'success',
-          `Ordner „${pool.folderName}“ mit ${pool.totalFilesScanned} Skript-Dateien verbunden. Wählen Sie rechts Ihr Start-/Master-Skript aus.`
+          `Ordner „${pool.folderName}“ mit ${pool.totalFilesScanned} Skript-Dateien verbunden. Wählen Sie rechts Ihr Einstiegsskript (Main) aus.`
         );
         return;
       }
@@ -2240,9 +2376,13 @@ export default function App() {
           );
           return;
         }
-        const primaryNumber = startRes.modules[0].scriptNumber;
-        const summary = await autoResolveConnectedScriptsFromFolder(
+        const normalizedModules = promoteEntryModuleToMain(
           startRes.modules,
+          startRes.modules[0].scriptNumber
+        );
+        const primaryNumber = 'Main';
+        const summary = await autoResolveConnectedScriptsFromFolder(
+          normalizedModules,
           assignedFolderPool,
           {
             masterScriptNumber: primaryNumber,
@@ -2261,7 +2401,7 @@ export default function App() {
         refreshDiagramFromWorkspace(nextWs);
         showCanvasDropBanner(
           'success',
-          `Start-Skript [${primaryNumber}] + ${summary.loadedScriptNumbers.length} verknüpfte .s-Skripte automatisch geladen (${summary.skippedLegacyFilesCount} Altlasten ignoriert).`
+          `Einstiegsskript Main (aus „${entry.filename}“) + ${summary.loadedScriptNumbers.length} verknüpfte .s-Skripte automatisch geladen (${summary.skippedLegacyFilesCount} Altlasten ignoriert).`
         );
       } finally {
         setIsAutoResolvingFolder(false);
@@ -2290,15 +2430,19 @@ export default function App() {
       const supportedFiles = fileArr.filter((f) => isSupportedCallflowImportFilename(f.name));
       const filesToRead = supportedFiles.length > 0 ? supportedFiles : fileArr;
 
+      const wasEmpty = scriptWorkspace.modules.length === 0;
       let currentModules = [...scriptWorkspace.modules];
       let importedModuleCount = 0;
       let dotSCount = 0;
       let visioCount = 0;
       const failedNames: string[] = [];
 
-      for (const file of filesToRead) {
+      for (let i = 0; i < filesToRead.length; i++) {
+        const file = filesToRead[i];
         try {
-          const result = await importCallflowFile(file);
+          const result = await importCallflowFile(file, {
+            isMasterHint: wasEmpty && currentModules.length === 0 && i === 0,
+          });
           if (result.modules.length > 0) {
             currentModules = mergeScriptModules(currentModules, result.modules);
             importedModuleCount += result.modules.length;
@@ -2322,6 +2466,10 @@ export default function App() {
         return;
       }
 
+      if (wasEmpty && currentModules.length > 0) {
+        currentModules = promoteEntryModuleToMain(currentModules, currentModules[0].scriptNumber);
+      }
+
       let autoLoadedFromFolderCount = 0;
       let nextExternalEndpoints = [...(scriptWorkspace.externalEndpoints || [])];
       if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
@@ -2331,7 +2479,7 @@ export default function App() {
           {
             externalEndpoints: scriptWorkspace.externalEndpoints,
             ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
-            masterScriptNumber: scriptWorkspace.masterScriptNumber,
+            masterScriptNumber: wasEmpty ? 'Main' : scriptWorkspace.masterScriptNumber,
           }
         );
         currentModules = summary.modules;
@@ -2342,14 +2490,13 @@ export default function App() {
         setLastFolderResolveSummary(summary);
       }
 
-      const wasEmpty = scriptWorkspace.modules.length === 0;
       const nextWs = buildScriptWorkspace(currentModules, {
         externalEndpoints: nextExternalEndpoints,
         ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
         resolvedIssues: scriptWorkspace.resolvedIssues,
         manualQuestions: scriptWorkspace.manualQuestions,
         manualLinks: scriptWorkspace.manualLinks,
-        masterScriptNumber: scriptWorkspace.masterScriptNumber,
+        masterScriptNumber: wasEmpty ? 'Main' : scriptWorkspace.masterScriptNumber,
         nodeOffsets: scriptWorkspace.nodeOffsets,
         treatUnresolvedAsEndpoint:
           Boolean(assignedFolderPool && assignedFolderPool.entries.length > 0) ||
@@ -2815,6 +2962,7 @@ export default function App() {
         code: effectiveMermaidCode,
         themeConfig,
         smartColorMode,
+        hiddenNodeTypes: hiddenSmartNodeTypes,
         canvasSurface,
       });
       const safeName =
@@ -2829,10 +2977,26 @@ export default function App() {
     }
   };
 
+  const cancelInteractiveHtmlExport = useCallback(() => {
+    if (exportAbortControllerRef.current) {
+      exportAbortControllerRef.current.abort();
+    }
+    setHtmlExportProgress(null);
+    setIsDownloadingHtml(false);
+    setHtmlExportNotice('Interaktiver HTML-Export abgebrochen.');
+    window.setTimeout(() => {
+      setHtmlExportNotice((prev) =>
+        prev === 'Interaktiver HTML-Export abgebrochen.' ? null : prev
+      );
+    }, 2800);
+  }, []);
+
   const buildInteractiveHtmlForSurface = useCallback(
-    async (targetSurface: 'dark' | 'light'): Promise<string | null> => {
+    async (
+      targetSurface: 'dark' | 'light'
+    ): Promise<{ html: string | null; aborted?: boolean }> => {
       const currentExportSvg = buildExportSvgSnapshot(false);
-      if (!currentExportSvg) return null;
+      if (!currentExportSvg) return { html: null };
 
       const exportThemeConfig: ThemeConfiguration =
         targetSurface === 'dark'
@@ -2857,88 +3021,207 @@ export default function App() {
                 code,
                 smartColorMode,
                 targetSurface,
-                exportThemeConfig.lineColor
+                exportThemeConfig.lineColor,
+                hiddenSmartNodeTypes
               ).svg
             : currentExportSvg;
-        return generateInteractiveCallflowHtml(
-          diagramTitle,
-          adjustedSvg,
-          callflowGraph,
-          targetSurface
-        );
+        return {
+          html: generateInteractiveCallflowHtml(
+            diagramTitle,
+            adjustedSvg,
+            callflowGraph,
+            targetSurface
+          ),
+        };
       }
 
-      const dir = currentDirection || 'LR';
-      const viewSpecs: Array<{
-        key: string;
-        label: string;
-        scriptNumber?: string;
-        mermaidCode: string;
-      }> = [
-        {
-          key: 'master',
-          label: `Ebene 1: Master-Übersicht (${scriptWorkspace.modules.length} Skripte)`,
-          mermaidCode: buildMasterOverviewMermaid(scriptWorkspace, dir),
-        },
-        ...scriptWorkspace.modules.map((mod) => ({
-          key: `script:${mod.scriptNumber}`,
-          label: `Ebene 2: [${mod.scriptNumber}] ${mod.scriptName}`,
-          scriptNumber: mod.scriptNumber,
-          mermaidCode: buildScriptDetailMermaid(scriptWorkspace, mod.scriptNumber, dir),
-        })),
-      ];
+      const abortController = new AbortController();
+      exportAbortControllerRef.current = abortController;
+      const { signal } = abortController;
 
-      const views: InteractiveCallflowHtmlView[] = [];
-      for (const spec of viewSpecs) {
-        const res = await renderLocalMermaidDiagram(spec.mermaidCode, exportThemeConfig);
-        if (!res.svg) continue;
-        const parsedGraph = parseCallflowGraph(spec.mermaidCode);
-        const colored = applySmartLogicColoring(
-          res.svg,
-          spec.mermaidCode,
-          smartColorMode,
-          targetSurface,
-          exportThemeConfig.lineColor
-        ).svg;
-        const withOffsets = applyNodeOffsetsToSvg(
-          colored,
-          scriptWorkspace.nodeOffsets,
-          parsedGraph,
-          false
-        );
-        views.push({
-          key: spec.key,
-          label: spec.label,
-          scriptNumber: spec.scriptNumber,
-          svg: withOffsets,
-          graph: parsedGraph,
+      const yieldFrame = () =>
+        new Promise<void>((resolve) => {
+          if (typeof requestAnimationFrame === 'function') {
+            requestAnimationFrame(() => resolve());
+          } else {
+            window.setTimeout(resolve, 0);
+          }
         });
-      }
+      const yieldMicroTick = () =>
+        new Promise<void>((resolve) => {
+          window.setTimeout(resolve, 0);
+        });
 
-      if (views.length === 0) {
-        return generateInteractiveCallflowHtml(
-          diagramTitle,
-          currentExportSvg,
-          callflowGraph,
-          targetSurface
-        );
-      }
+      try {
+        const dir = currentDirection || 'LR';
+        const viewSpecs: Array<{
+          key: string;
+          label: string;
+          scriptNumber?: string;
+          mermaidCode: string;
+        }> = [
+          {
+            key: 'master',
+            label: `Ebene 1: Master-Gesamtkarte (${scriptWorkspace.modules.length} Skripte)`,
+            mermaidCode: buildMasterOverviewMermaid(scriptWorkspace, dir),
+          },
+          ...scriptWorkspace.modules.map((mod) => {
+            const isMainMod =
+              canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
+              (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(mod.scriptNumber));
+            return {
+              key: `script:${mod.scriptNumber}`,
+              label: `Ebene 2: ${isMainMod ? 'Main (Einstiegsskript)' : formatScriptDisplayLabel(mod)}`,
+              scriptNumber: mod.scriptNumber,
+              mermaidCode: buildScriptDetailMermaid(scriptWorkspace, mod.scriptNumber, dir),
+            };
+          }),
+        ];
 
-      const activeKey =
-        callflowViewLevel.level === 'detail'
-          ? `script:${callflowViewLevel.scriptNumber}`
-          : 'master';
+        const canReuseActiveCanvasSvg =
+          Boolean(baseRenderedSvg) &&
+          !isolateSubgraphMode &&
+          exportThemeConfig.theme === themeConfig.theme &&
+          exportThemeConfig.background === themeConfig.background &&
+          exportThemeConfig.lineColor === themeConfig.lineColor;
 
-      return generateInteractiveCallflowHtml(
-        diagramTitle,
-        views[0].svg,
-        views[0].graph,
-        targetSurface,
-        {
-          views,
-          activeViewKey: activeKey,
+        let cacheHits = 0;
+        setHtmlExportNotice(null);
+        setHtmlExportProgress({
+          active: true,
+          phase: 'preparing',
+          current: 0,
+          total: viewSpecs.length,
+          currentLabel: `${viewSpecs.length} Ansichten werden vorbereitet…`,
+          cacheHits: 0,
+        });
+        await yieldFrame();
+        if (signal.aborted) return { html: null, aborted: true };
+
+        const views: InteractiveCallflowHtmlView[] = [];
+        for (let idx = 0; idx < viewSpecs.length; idx++) {
+          if (signal.aborted) {
+            return { html: null, aborted: true };
+          }
+
+          const spec = viewSpecs[idx];
+          setHtmlExportProgress({
+            active: true,
+            phase: 'rendering',
+            current: idx + 1,
+            total: viewSpecs.length,
+            currentLabel: spec.label,
+            cacheHits,
+          });
+
+          let rawSvg: string | null = null;
+          let wasCacheHit = false;
+
+          if (
+            canReuseActiveCanvasSvg &&
+            baseRenderedSvg &&
+            spec.mermaidCode.trim() === effectiveMermaidCode.trim()
+          ) {
+            rawSvg = baseRenderedSvg;
+            wasCacheHit = true;
+          } else {
+            const res = await renderLocalMermaidDiagram(spec.mermaidCode, exportThemeConfig);
+            rawSvg = res.svg;
+            wasCacheHit = Boolean(res.fromCache);
+          }
+
+          if (signal.aborted) {
+            return { html: null, aborted: true };
+          }
+
+          if (wasCacheHit) {
+            cacheHits += 1;
+          }
+
+          if (rawSvg) {
+            const parsedGraph = parseCallflowGraph(spec.mermaidCode);
+            const colored = applySmartLogicColoring(
+              rawSvg,
+              spec.mermaidCode,
+              smartColorMode,
+              targetSurface,
+              exportThemeConfig.lineColor,
+              hiddenSmartNodeTypes
+            ).svg;
+            const withOffsets = applyNodeOffsetsToSvg(
+              colored,
+              scriptWorkspace.nodeOffsets,
+              parsedGraph,
+              false
+            );
+            views.push({
+              key: spec.key,
+              label: spec.label,
+              scriptNumber: spec.scriptNumber,
+              svg: withOffsets,
+              graph: parsedGraph,
+            });
+          }
+
+          // Yield cleanly so progress bar & Cancel button stay responsive at 60fps
+          if (!wasCacheHit) {
+            await yieldFrame();
+          } else if ((idx + 1) % 8 === 0) {
+            await yieldMicroTick();
+          }
         }
-      );
+
+        if (signal.aborted) {
+          return { html: null, aborted: true };
+        }
+
+        setHtmlExportProgress({
+          active: true,
+          phase: 'packaging',
+          current: viewSpecs.length,
+          total: viewSpecs.length,
+          currentLabel: `${views.length} Ansichten werden in HTML-Datei verpackt…`,
+          cacheHits,
+        });
+        await yieldFrame();
+        if (signal.aborted) {
+          return { html: null, aborted: true };
+        }
+
+        if (views.length === 0) {
+          return {
+            html: generateInteractiveCallflowHtml(
+              diagramTitle,
+              currentExportSvg,
+              callflowGraph,
+              targetSurface
+            ),
+          };
+        }
+
+        const activeKey =
+          callflowViewLevel.level === 'detail'
+            ? `script:${callflowViewLevel.scriptNumber}`
+            : 'master';
+
+        return {
+          html: generateInteractiveCallflowHtml(
+            diagramTitle,
+            views[0].svg,
+            views[0].graph,
+            targetSurface,
+            {
+              views,
+              activeViewKey: activeKey,
+            }
+          ),
+        };
+      } finally {
+        if (exportAbortControllerRef.current === abortController) {
+          exportAbortControllerRef.current = null;
+        }
+        setHtmlExportProgress(null);
+      }
     },
     [
       buildExportSvgSnapshot,
@@ -2947,20 +3230,24 @@ export default function App() {
       canvasSurface,
       code,
       smartColorMode,
+      hiddenSmartNodeTypes,
       diagramTitle,
       callflowGraph,
       currentDirection,
       callflowViewLevel,
+      baseRenderedSvg,
+      effectiveMermaidCode,
+      isolateSubgraphMode,
     ]
   );
 
-  const handleQuickDownloadInteractiveHtml = async () => {
+  const handleQuickDownloadInteractiveHtml = useCallback(async () => {
     const exportSvg = buildExportSvgSnapshot(false);
-    if (!exportSvg || isDownloadingHtml) return;
+    if (!exportSvg || isDownloadingHtml || htmlExportProgress?.active) return;
     setIsDownloadingHtml(true);
     try {
-      const htmlContent = await buildInteractiveHtmlForSurface(canvasSurface);
-      if (!htmlContent) return;
+      const { html: htmlContent, aborted } = await buildInteractiveHtmlForSurface(canvasSurface);
+      if (aborted || !htmlContent) return;
       const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
       const safeName =
         diagramTitle.toLowerCase().replace(/[^a-z0-9äöüß_-]+/gi, '-') || 'mermaid-diagramm';
@@ -2970,7 +3257,14 @@ export default function App() {
     } finally {
       setIsDownloadingHtml(false);
     }
-  };
+  }, [
+    buildExportSvgSnapshot,
+    isDownloadingHtml,
+    htmlExportProgress?.active,
+    buildInteractiveHtmlForSurface,
+    canvasSurface,
+    diagramTitle,
+  ]);
 
   const handleClearWorkspace = () => {
     skipAutoConvertRef.current = false;
@@ -3003,8 +3297,38 @@ export default function App() {
   };
 
   const lineCount = useMemo(() => Math.max(1, code.split('\n').length), [code]);
+  const lineNumberList = useMemo(
+    () => Array.from({ length: lineCount }, (_, idx) => idx + 1),
+    [lineCount]
+  );
   const showDesktopEditor =
     workspaceMode === 'free' && !isFullscreenPreview && !isDesktopEditorCollapsed;
+
+  const handleOpenNewCallflowModalCb = useCallback(() => setIsNewCallflowModalOpen(true), []);
+  const handleExportHtmlFromInspectorCb = useCallback(() => {
+    void handleQuickDownloadInteractiveHtml();
+  }, [handleQuickDownloadInteractiveHtml]);
+  const handleCloseMobileInspectorCb = useCallback(() => setMobileActivePane('preview'), []);
+  const handleCloseDesktopRightPanelCb = useCallback(() => setIsRightPanelOpen(false), []);
+  const handleFocusNodeDesktopCb = useCallback(
+    (id: string) => handleFocusNodeOnCanvas(id, 1.25),
+    [handleFocusNodeOnCanvas]
+  );
+  const handleFocusNodeMobileCb = useCallback(
+    (id: string) => {
+      setMobileActivePane('preview');
+      setTimeout(() => handleFocusNodeOnCanvas(id, 1.25), 60);
+    },
+    [handleFocusNodeOnCanvas]
+  );
+  const handleAddBuildingBlockDefaultCb = useCallback(
+    (type: CallflowBuildingBlockType) => handleAddBuildingBlock(type),
+    [handleAddBuildingBlock]
+  );
+  const handleSwitchViewLevelCb = useCallback(
+    (lvl: CallflowViewLevel) => handleSwitchCallflowViewLevel(lvl),
+    [handleSwitchCallflowViewLevel]
+  );
 
   return (
     <div className="h-dvh w-full flex flex-col bg-slate-950 text-slate-100 overflow-hidden select-none">
@@ -3031,7 +3355,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => handleChangeWorkspaceMode('guided')}
-              title="Aufgeräumter 3-Schritte-Assistent ohne Code-Editor (Start mit Masterscript Main)"
+              title="Aufgeräumter 3-Schritte-Assistent ohne Code-Editor (Start mit Einstiegsskript Main)"
               className={`px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs font-semibold rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer ${
                 workspaceMode === 'guided'
                   ? 'bg-indigo-600 text-white shadow-xs'
@@ -3041,7 +3365,7 @@ export default function App() {
               <span className="sm:hidden">Geführt</span>
               <span className="hidden sm:inline">Geführter Modus</span>
               <span className="hidden md:inline text-[10px] font-normal opacity-90">
-                (Masterscript)
+                (Einstieg: Main)
               </span>
             </button>
             <button
@@ -3120,7 +3444,7 @@ export default function App() {
               Fokus-Ansicht aktiv
             </span>
             <span className="truncate">
-              Mermaid-Editor ausgeblendet · Rechts in 3 Schritten vom Masterscript bis zum Export
+              Mermaid-Editor ausgeblendet · Rechts in 3 Schritten von Main über die Master-Gesamtkarte bis zum Export
             </span>
           </div>
         )}
@@ -3420,8 +3744,7 @@ export default function App() {
               aria-hidden="true"
               className="w-11 sm:w-12 py-3 sm:py-4 bg-slate-950/90 border-r border-slate-800/80 text-right pr-2.5 sm:pr-3 text-slate-600 select-none overflow-hidden tabular-nums shrink-0"
             >
-              {Array.from({ length: lineCount }).map((_, idx) => {
-                const lineNumber = idx + 1;
+              {lineNumberList.map((lineNumber) => {
                 const isErrorLine =
                   !validation.isValid && validation.errorLine === lineNumber;
                 return (
@@ -3858,7 +4181,7 @@ export default function App() {
                   }`}
                 >
                   {callflowViewLevel.level === 'detail' && <ArrowLeft className="w-3.5 h-3.5" />}
-                  <span>Ebene 1: Master-Übersicht</span>
+                  <span>Ebene 1: Master-Gesamtkarte</span>
                 </button>
 
                 {callflowViewLevel.level === 'detail' && (
@@ -3867,10 +4190,23 @@ export default function App() {
                       /
                     </span>
                     <span className="font-mono font-semibold text-amber-300 truncate tabular-nums">
-                      [{callflowViewLevel.scriptNumber}]{' '}
-                      {scriptWorkspace.modules.find(
-                        (m) => m.scriptNumber === callflowViewLevel.scriptNumber
-                      )?.scriptName || ''}
+                      {(() => {
+                        const activeMod = scriptWorkspace.modules.find(
+                          (m) =>
+                            canonicalScriptMatchKey(m.scriptNumber) ===
+                            canonicalScriptMatchKey(callflowViewLevel.scriptNumber)
+                        );
+                        if (
+                          canonicalScriptMatchKey(callflowViewLevel.scriptNumber) === 'main' ||
+                          (activeMod?.isMaster &&
+                            /^(?:main|start|master(?:script)?)$/i.test(activeMod.scriptNumber))
+                        ) {
+                          return 'Main (Einstiegsskript)';
+                        }
+                        return activeMod
+                          ? formatScriptDisplayLabel(activeMod)
+                          : callflowViewLevel.scriptNumber;
+                      })()}
                     </span>
                   </>
                 )}
@@ -3923,14 +4259,19 @@ export default function App() {
                       });
                     }
                   }}
-                  className="bg-slate-900 border border-slate-800 rounded-md px-2 py-1 text-[11px] font-mono text-slate-200 focus:outline-none focus:border-indigo-500 max-w-[210px] cursor-pointer"
+                  className="bg-slate-900 border border-slate-800 rounded-md px-2 py-1 text-[11px] font-mono text-slate-200 focus:outline-none focus:border-indigo-500 max-w-[230px] cursor-pointer"
                 >
-                  <option value="master">Master-Übersicht (Ebene 1)</option>
-                  {scriptWorkspace.modules.map((mod) => (
-                    <option key={mod.scriptNumber} value={`detail:${mod.scriptNumber}`}>
-                      [{mod.scriptNumber}] {mod.scriptName}
-                    </option>
-                  ))}
+                  <option value="master">Ebene 1: Master-Gesamtkarte</option>
+                  {scriptWorkspace.modules.map((mod) => {
+                    const isMainMod =
+                      canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
+                      (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(mod.scriptNumber));
+                    return (
+                      <option key={mod.scriptNumber} value={`detail:${mod.scriptNumber}`}>
+                        {isMainMod ? 'Ebene 2: Main (Einstiegsskript)' : `Ebene 2: ${formatScriptDisplayLabel(mod)}`}
+                      </option>
+                    );
+                  })}
                 </select>
 
                 <button
@@ -4115,7 +4456,7 @@ export default function App() {
             onTouchEnd={handleCanvasTouchEnd}
             onTouchCancel={() => {
               isPanningRef.current = false;
-              setIsPanning(false);
+              setCanvasGestureAttrs(false, false);
             }}
             onDragEnter={(e) => {
               const hasBlockDrag = e.dataTransfer.types.includes('application/x-callflow-block');
@@ -4197,8 +4538,6 @@ export default function App() {
                 ? `overflow-hidden touch-none ${
                     isVisualEditMode && visualEditTool === 'connect'
                       ? 'cursor-crosshair'
-                      : isPanning
-                      ? 'cursor-grabbing'
                       : 'cursor-grab'
                   }`
                 : 'overflow-y-auto overscroll-contain touch-pan-y p-3 sm:p-6'
@@ -4614,7 +4953,7 @@ export default function App() {
                     <div className="w-8 h-8 mx-auto rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
                     <div className="space-y-1">
                       <p className="text-sm font-semibold text-slate-100">
-                        Master-Diagramm wird aufgebaut …
+                        Master-Gesamtkarte wird aufgebaut …
                       </p>
                       <p className="text-xs text-slate-400">
                         {scriptWorkspace.modules.length > 0
@@ -4680,7 +5019,7 @@ export default function App() {
                     Callflow in 3 klaren Schritten aufbauen
                   </h2>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Der Mermaid-Code-Editor ist bewusst ausgeblendet. Sie arbeiten im Schritt-Assistenten direkt mit Ihrem Masterscript:
+                    Der Mermaid-Code-Editor ist bewusst ausgeblendet. Sie starten rechts mit dem Einstiegsskript <strong className="text-slate-200">Main</strong> und erhalten auf Ebene 1 die <strong className="text-slate-200">Master-Gesamtkarte</strong>:
                   </p>
                 </div>
 
@@ -4690,9 +5029,9 @@ export default function App() {
                       1
                     </span>
                     <div>
-                      <div className="font-semibold text-slate-100">Masterscript (Main) laden</div>
+                      <div className="font-semibold text-slate-100">Main (Einstiegsskript) laden</div>
                       <div className="text-[11px] text-slate-400">
-                        Avaya `.s`-Dateien, AACC-Text oder Visio direkt per Drag &amp; Drop auf den Canvas ziehen oder im Schritt 1 einfügen.
+                        Erstes Startskript (Avaya `.s`, AACC-Text oder Visio) auf den Canvas ziehen oder rechts einfügen – wird automatisch als <strong className="text-slate-200">Main</strong> geführt.
                       </div>
                     </div>
                   </div>
@@ -4855,13 +5194,8 @@ export default function App() {
             <CallflowInspector
               graph={callflowGraph}
               selectedNodeId={selectedCallflowNodeId}
-              onSelectNodeId={(id) => {
-                setSelectedCallflowNodeId(id);
-              }}
-              onFocusNodeOnCanvas={(id) => {
-                setMobileActivePane('preview');
-                setTimeout(() => handleFocusNodeOnCanvas(id, 1.25), 60);
-              }}
+              onSelectNodeId={setSelectedCallflowNodeId}
+              onFocusNodeOnCanvas={handleFocusNodeMobileCb}
               traceResult={callflowTrace}
               directionFilter={callflowDirectionFilter}
               onChangeDirectionFilter={setCallflowDirectionFilter}
@@ -4873,9 +5207,9 @@ export default function App() {
               onChangeThemeConfig={setThemeConfig}
               scriptWorkspace={scriptWorkspace}
               viewLevel={callflowViewLevel}
-              onOpenNewCallflowModal={() => setIsNewCallflowModalOpen(true)}
+              onOpenNewCallflowModal={handleOpenNewCallflowModalCb}
               onOpenMultiScriptModal={openMultiScriptModalWithPrefill}
-              onSwitchViewLevel={(lvl) => handleSwitchCallflowViewLevel(lvl)}
+              onSwitchViewLevel={handleSwitchViewLevelCb}
               onResolveIssue={handleResolveCallflowIssue}
               onReopenIssue={handleReopenCallflowIssue}
               onAddManualQuestion={handleAddManualCallflowQuestion}
@@ -4884,8 +5218,9 @@ export default function App() {
               onSubmitChecklistVisioFile={handleSubmitChecklistVisioFile}
               onUnignoreChecklistTarget={handleUnignoreChecklistTarget}
               focusChecklistTrigger={checklistFocusTrigger}
-              onExportInteractiveHtml={() => void handleQuickDownloadInteractiveHtml()}
-              onClose={() => setMobileActivePane('preview')}
+              onExportInteractiveHtml={handleExportHtmlFromInspectorCb}
+              isExportingHtml={isDownloadingHtml || Boolean(htmlExportProgress?.active)}
+              onClose={handleCloseMobileInspectorCb}
               isMobileView={true}
               workspaceMode={workspaceMode}
               onChangeWorkspaceMode={handleChangeWorkspaceMode}
@@ -4893,7 +5228,7 @@ export default function App() {
               onChangeGuidedStep={setGuidedStep}
               isVisualEditMode={isVisualEditMode}
               onToggleVisualEditMode={setIsVisualEditMode}
-              onAddBuildingBlock={(type) => handleAddBuildingBlock(type)}
+              onAddBuildingBlock={handleAddBuildingBlockDefaultCb}
               onOpenNodeEditor={handleOpenNodeEditor}
               onResetAllNodeOffsets={handleResetAllNodeOffsets}
               hasCustomNodeOffsets={hasCustomNodeOffsets}
@@ -4914,6 +5249,8 @@ export default function App() {
               onChangeTheme={setThemeConfig}
               smartColorMode={smartColorMode}
               onChangeSmartColorMode={setSmartColorMode}
+              hiddenNodeTypes={hiddenSmartNodeTypes}
+              onChangeHiddenNodeTypes={setHiddenSmartNodeTypes}
               logicSummary={logicSummary}
               onInjectSmartClassDefs={handleInjectSmartClassDefs}
               currentDirection={currentDirection}
@@ -4921,7 +5258,7 @@ export default function App() {
               onInjectInitDirective={handleInjectInitDirective}
               canvasSurface={canvasSurface}
               onChangeCanvasSurface={handleChangeCanvasSurface}
-              onClose={() => setMobileActivePane('preview')}
+              onClose={handleCloseMobileInspectorCb}
               isMobileView={true}
             />
           </div>
@@ -4966,7 +5303,7 @@ export default function App() {
                   graph={callflowGraph}
                   selectedNodeId={selectedCallflowNodeId}
                   onSelectNodeId={setSelectedCallflowNodeId}
-                  onFocusNodeOnCanvas={(id) => handleFocusNodeOnCanvas(id, 1.25)}
+                  onFocusNodeOnCanvas={handleFocusNodeDesktopCb}
                   traceResult={callflowTrace}
                   directionFilter={callflowDirectionFilter}
                   onChangeDirectionFilter={setCallflowDirectionFilter}
@@ -4978,9 +5315,9 @@ export default function App() {
                   onChangeThemeConfig={setThemeConfig}
                   scriptWorkspace={scriptWorkspace}
                   viewLevel={callflowViewLevel}
-                  onOpenNewCallflowModal={() => setIsNewCallflowModalOpen(true)}
+                  onOpenNewCallflowModal={handleOpenNewCallflowModalCb}
                   onOpenMultiScriptModal={openMultiScriptModalWithPrefill}
-                  onSwitchViewLevel={(lvl) => handleSwitchCallflowViewLevel(lvl)}
+                  onSwitchViewLevel={handleSwitchViewLevelCb}
                   onResolveIssue={handleResolveCallflowIssue}
                   onReopenIssue={handleReopenCallflowIssue}
                   onAddManualQuestion={handleAddManualCallflowQuestion}
@@ -4989,8 +5326,9 @@ export default function App() {
                   onSubmitChecklistVisioFile={handleSubmitChecklistVisioFile}
                   onUnignoreChecklistTarget={handleUnignoreChecklistTarget}
                   focusChecklistTrigger={checklistFocusTrigger}
-                  onExportInteractiveHtml={() => void handleQuickDownloadInteractiveHtml()}
-                  onClose={() => setIsRightPanelOpen(false)}
+                  onExportInteractiveHtml={handleExportHtmlFromInspectorCb}
+                  isExportingHtml={isDownloadingHtml || Boolean(htmlExportProgress?.active)}
+                  onClose={handleCloseDesktopRightPanelCb}
                   isMobileView={false}
                   workspaceMode={workspaceMode}
                   onChangeWorkspaceMode={handleChangeWorkspaceMode}
@@ -4998,7 +5336,7 @@ export default function App() {
                   onChangeGuidedStep={setGuidedStep}
                   isVisualEditMode={isVisualEditMode}
                   onToggleVisualEditMode={setIsVisualEditMode}
-                  onAddBuildingBlock={(type) => handleAddBuildingBlock(type)}
+                  onAddBuildingBlock={handleAddBuildingBlockDefaultCb}
                   onOpenNodeEditor={handleOpenNodeEditor}
                   onResetAllNodeOffsets={handleResetAllNodeOffsets}
                   hasCustomNodeOffsets={hasCustomNodeOffsets}
@@ -5015,6 +5353,8 @@ export default function App() {
                   onChangeTheme={setThemeConfig}
                   smartColorMode={smartColorMode}
                   onChangeSmartColorMode={setSmartColorMode}
+                  hiddenNodeTypes={hiddenSmartNodeTypes}
+                  onChangeHiddenNodeTypes={setHiddenSmartNodeTypes}
                   logicSummary={logicSummary}
                   onInjectSmartClassDefs={handleInjectSmartClassDefs}
                   currentDirection={currentDirection}
@@ -5022,7 +5362,7 @@ export default function App() {
                   onInjectInitDirective={handleInjectInitDirective}
                   canvasSurface={canvasSurface}
                   onChangeCanvasSurface={handleChangeCanvasSurface}
-                  onClose={() => setIsRightPanelOpen(false)}
+                  onClose={handleCloseDesktopRightPanelCb}
                   isMobileView={false}
                 />
               )}
@@ -5146,10 +5486,90 @@ export default function App() {
         defaultBackground={canvasSurface}
         themeConfig={themeConfig}
         smartColorMode={smartColorMode}
+        hiddenNodeTypes={hiddenSmartNodeTypes}
         callflowGraph={callflowGraph}
         scriptCount={scriptWorkspace.modules.length}
         buildInteractiveHtml={buildInteractiveHtmlForSurface}
+        htmlExportProgress={htmlExportProgress}
+        onCancelInteractiveHtml={cancelInteractiveHtmlExport}
       />
+
+      {/* Quick Interactive HTML Export Progress Modal HUD */}
+      {htmlExportProgress?.active && !isExportModalOpen && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-md bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl p-4 shadow-2xl space-y-3"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-slate-100">
+                {htmlExportProgress.phase === 'packaging'
+                  ? 'HTML-Paket wird zusammengestellt'
+                  : htmlExportProgress.phase === 'preparing'
+                  ? 'HTML-Export wird vorbereitet'
+                  : 'Interaktive Callflow-HTML wird erstellt'}
+              </div>
+              <div className="text-xs text-slate-400 truncate mt-0.5">
+                {htmlExportProgress.currentLabel}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={cancelInteractiveHtmlExport}
+              className="px-3 py-1.5 text-xs font-medium text-rose-200 bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Abbrechen
+            </button>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="h-2 w-full rounded-full bg-slate-800 overflow-hidden">
+              <div
+                className="h-full bg-emerald-500 transition-all duration-150 ease-out"
+                style={{
+                  width: `${
+                    htmlExportProgress.total > 0
+                      ? Math.min(
+                          100,
+                          Math.max(
+                            3,
+                            Math.round(
+                              (htmlExportProgress.current / htmlExportProgress.total) * 100
+                            )
+                          )
+                        )
+                      : 100
+                  }%`,
+                }}
+              />
+            </div>
+            <div className="flex items-center justify-between text-[11px] text-slate-400 tabular-nums">
+              <span>
+                {htmlExportProgress.cacheHits > 0
+                  ? `${htmlExportProgress.cacheHits} aus Cache übernommen`
+                  : 'Lokales Browser-Rendering'}
+              </span>
+              <span className="font-mono text-indigo-300 font-semibold">
+                {htmlExportProgress.current} / {htmlExportProgress.total} ·{' '}
+                {htmlExportProgress.total > 0
+                  ? Math.round((htmlExportProgress.current / htmlExportProgress.total) * 100)
+                  : 0}
+                %
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {htmlExportNotice && !htmlExportProgress?.active && !isExportModalOpen && (
+        <div
+          role="status"
+          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl bg-slate-900/95 border border-slate-700 text-xs font-medium text-slate-200 shadow-xl"
+        >
+          {htmlExportNotice}
+        </div>
+      )}
 
       <MultiScriptModal
         isOpen={isMultiScriptModalOpen}
@@ -5180,6 +5600,7 @@ export default function App() {
         code={code}
         themeConfig={themeConfig}
         smartColorMode={smartColorMode}
+        hiddenSmartNodeTypes={hiddenSmartNodeTypes}
         canvasSurface={canvasSurface}
         workspaceMode={workspaceMode}
         scriptWorkspace={scriptWorkspace}

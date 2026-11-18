@@ -152,11 +152,31 @@ function parseNodeToken(rawToken: string): { id: string; label?: string } | null
   return null;
 }
 
+const MAX_GRAPH_CACHE_ENTRIES = 120;
+const parsedCallflowGraphCache = new Map<string, CallflowGraph>();
+
+function computeGraphCacheHash(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(36)}_${input.length}`;
+}
+
 /**
  * Parses Mermaid code locally into a directed CallflowGraph (nodes, edges, degrees, roles).
  * Supports Flowchart (`-->`, `-.->`, `==>`, `<-->`), Sequence (`->>`, `-->>`), State (`-->`), etc.
  */
 export function parseCallflowGraph(code: string): CallflowGraph {
+  const cacheKey = computeGraphCacheHash(code);
+  const cachedGraph = parsedCallflowGraphCache.get(cacheKey);
+  if (cachedGraph) {
+    parsedCallflowGraphCache.delete(cacheKey);
+    parsedCallflowGraphCache.set(cacheKey, cachedGraph);
+    return cachedGraph;
+  }
+
   const labelMap = new Map<string, string>();
   const edges: CallflowEdge[] = [];
   const nodeIds = new Set<string>();
@@ -360,13 +380,23 @@ export function parseCallflowGraph(code: string): CallflowGraph {
     else if (role === 'terminal') terminalNodes.push(nodeObj);
   }
 
-  return {
+  const result: CallflowGraph = {
     nodes,
     edges,
     entryNodes,
     hubNodes,
     terminalNodes,
   };
+
+  parsedCallflowGraphCache.set(cacheKey, result);
+  if (parsedCallflowGraphCache.size > MAX_GRAPH_CACHE_ENTRIES) {
+    const oldestKey = parsedCallflowGraphCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      parsedCallflowGraphCache.delete(oldestKey);
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -604,6 +634,29 @@ export function getFilteredTraceSubset(
   return { visibleNodeIds, visibleEdges, cycleEdgeKeys };
 }
 
+interface CompiledNodeIdMatcher {
+  nodeId: string;
+  regex: RegExp;
+}
+
+const nodeIdMatcherCache = new WeakMap<CallflowGraph, CompiledNodeIdMatcher[]>();
+
+function getCompiledNodeIdMatchers(graph: CallflowGraph): CompiledNodeIdMatcher[] {
+  const cached = nodeIdMatcherCache.get(graph);
+  if (cached) return cached;
+  const compiled = Array.from(graph.nodes.keys())
+    .sort((a, b) => b.length - a.length)
+    .map((nodeId) => {
+      const escaped = nodeId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return {
+        nodeId,
+        regex: new RegExp(`(?:^|[-_])${escaped}(?:[-_]\\d+|$)`, 'i'),
+      };
+    });
+  nodeIdMatcherCache.set(graph, compiled);
+  return compiled;
+}
+
 /**
  * Matches a clicked DOM SVG element (`g.node`, `g.actor`, etc.) back to a CallflowNode ID.
  */
@@ -621,29 +674,29 @@ export function resolveClickedNodeIdFromSvgElement(
     return fastNodeId;
   }
 
-  const domId = nodeGroup.getAttribute('id') || '';
   const dataId = nodeGroup.getAttribute('data-id') || '';
-  const textLabel = (nodeGroup.textContent || '').replace(/\s+/g, ' ').trim();
-
-  // 1. Check `data-id` exact match
   if (dataId && graph.nodes.has(dataId)) {
     return dataId;
   }
 
-  // 2. Check Mermaid's `flowchart-<NodeId>-<index>` DOM id convention (longest ID first to avoid prefix collision)
-  const sortedIds = Array.from(graph.nodes.keys()).sort((a, b) => b.length - a.length);
-  for (const nodeId of sortedIds) {
-    const escaped = nodeId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`(?:^|[-_])${escaped}(?:[-_]\\d+|$)`, 'i');
-    if (regex.test(domId)) {
-      return nodeId;
+  // Check Mermaid's `flowchart-<NodeId>-<index>` DOM id convention using precompiled matchers
+  const domId = nodeGroup.getAttribute('id') || '';
+  if (domId) {
+    const matchers = getCompiledNodeIdMatchers(graph);
+    for (const item of matchers) {
+      if (item.regex.test(domId)) {
+        return item.nodeId;
+      }
     }
   }
 
-  // 3. Fallback: match by exact node label text
-  for (const [nodeId, nodeObj] of graph.nodes.entries()) {
-    if (nodeObj.label === textLabel || nodeId === textLabel) {
-      return nodeId;
+  // Fallback: match by exact node label text
+  const textLabel = (nodeGroup.textContent || '').replace(/\s+/g, ' ').trim();
+  if (textLabel) {
+    for (const [nodeId, nodeObj] of graph.nodes.entries()) {
+      if (nodeObj.label === textLabel || nodeId === textLabel) {
+        return nodeId;
+      }
     }
   }
 
@@ -2976,7 +3029,7 @@ export function generateInteractiveCallflowHtml(
     #svg-stage {
       flex-shrink: 0;
       transform-origin: center center;
-      transition: transform 45ms ease-out;
+      contain: layout style;
       padding: 32px;
     }
     #svg-stage svg {
@@ -3050,8 +3103,8 @@ export function generateInteractiveCallflowHtml(
     <div class="brand">${safeTitle} · Interaktiver Callflow</div>
     <div class="controls">
       <div class="view-bar" id="view-bar">
-        <select id="view-select" title="Zwischen Master-Übersicht (Ebene 1) und Detail-Skripten (Ebene 2) wechseln"></select>
-        <button id="btn-master-back" style="display:none;" title="Zurück zur Master-Übersicht">← Master</button>
+        <select id="view-select" title="Zwischen Ebene 1 (Master-Gesamtkarte) und Ebene 2 (Einzel-Skripte inkl. Main) wechseln"></select>
+        <button id="btn-master-back" style="display:none;" title="Zurück zur Master-Gesamtkarte (Ebene 1)">← Master-Karte</button>
       </div>
       <div class="seg-group" id="dir-group" title="Richtungs-Filter">
         <button class="seg-btn active" data-dir="both">Ganzer Pfad</button>
@@ -3239,8 +3292,30 @@ export function generateInteractiveCallflowHtml(
       selectEl.value = prevVal;
     }
 
-    function updateTransform() {
+    let transformRafId = null;
+    let zoomLabelTimer = null;
+
+    function applyTransformImmediate() {
+      stage.style.willChange = 'transform';
       stage.style.transform = 'translate3d(' + panX + 'px,' + panY + 'px,0) scale(' + zoom + ')';
+    }
+
+    function updateTransform(activeGesture) {
+      if (activeGesture) {
+        if (transformRafId === null) {
+          transformRafId = requestAnimationFrame(() => {
+            transformRafId = null;
+            applyTransformImmediate();
+          });
+        }
+        if (zoomLabelTimer !== null) clearTimeout(zoomLabelTimer);
+        zoomLabelTimer = setTimeout(() => {
+          zoomLabelTimer = null;
+          document.getElementById('btn-100').textContent = '1:1 (' + Math.round(zoom * 100) + '%)';
+        }, 90);
+        return;
+      }
+      applyTransformImmediate();
       document.getElementById('btn-100').textContent = '1:1 (' + Math.round(zoom * 100) + '%)';
     }
 
@@ -3255,7 +3330,7 @@ export function generateInteractiveCallflowHtml(
       zoom = Math.min(2.0, Math.max(0.05, Math.min(scaleX, scaleY)));
       panX = 0;
       panY = 0;
-      updateTransform();
+      updateTransform(false);
     }
 
     function focusNodeCamera(targetId) {
@@ -3275,7 +3350,7 @@ export function generateInteractiveCallflowHtml(
       zoom = nextZoom;
       panX = Math.round(-unscaledX * nextZoom);
       panY = Math.round(-unscaledY * nextZoom);
-      updateTransform();
+      updateTransform(false);
     }
 
     wrap.addEventListener('wheel', e => {
@@ -3289,15 +3364,15 @@ export function generateInteractiveCallflowHtml(
       panX = cursorOffsetX - (cursorOffsetX - panX) * ratio;
       panY = cursorOffsetY - (cursorOffsetY - panY) * ratio;
       zoom = nextZoom;
-      updateTransform();
+      updateTransform(true);
     }, { passive: false });
 
     wrap.addEventListener('mousedown', e => { isDragging = true; startX = e.clientX - panX; startY = e.clientY - panY; });
-    window.addEventListener('mousemove', e => { if (!isDragging) return; panX = e.clientX - startX; panY = e.clientY - startY; updateTransform(); });
-    window.addEventListener('mouseup', () => { isDragging = false; });
+    window.addEventListener('mousemove', e => { if (!isDragging) return; panX = e.clientX - startX; panY = e.clientY - startY; updateTransform(true); });
+    window.addEventListener('mouseup', () => { if (!isDragging) return; isDragging = false; updateTransform(false); });
 
     document.getElementById('btn-fit').addEventListener('click', fitToWindow);
-    document.getElementById('btn-100').addEventListener('click', () => { zoom = 1; panX = 0; panY = 0; updateTransform(); });
+    document.getElementById('btn-100').addEventListener('click', () => { zoom = 1; panX = 0; panY = 0; updateTransform(false); });
 
     function resolveNodeId(el) {
       const g = el.closest('g.node, g.actor, g.statediagram-state');

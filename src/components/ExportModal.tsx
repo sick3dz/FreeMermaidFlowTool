@@ -17,7 +17,9 @@ import {
 } from '../utils/mermaidEngine';
 import {
   CallflowGraph,
+  HtmlExportProgress,
   SmartColorMode,
+  SmartColorNodeType,
   ThemeConfiguration,
 } from '../types/mermaidStudio';
 import { generateInteractiveCallflowHtml } from '../utils/callflowEngine';
@@ -33,9 +35,14 @@ interface ExportModalProps {
   defaultBackground: 'dark' | 'light';
   themeConfig: ThemeConfiguration;
   smartColorMode: SmartColorMode;
+  hiddenNodeTypes?: SmartColorNodeType[];
   callflowGraph: CallflowGraph;
   scriptCount?: number;
-  buildInteractiveHtml?: (targetSurface: 'dark' | 'light') => Promise<string | null>;
+  buildInteractiveHtml?: (
+    targetSurface: 'dark' | 'light'
+  ) => Promise<{ html: string | null; aborted?: boolean }>;
+  htmlExportProgress?: HtmlExportProgress | null;
+  onCancelInteractiveHtml?: () => void;
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({
@@ -48,9 +55,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   defaultBackground,
   themeConfig,
   smartColorMode,
+  hiddenNodeTypes = [],
   callflowGraph,
   scriptCount = 0,
   buildInteractiveHtml,
+  htmlExportProgress = null,
+  onCancelInteractiveHtml,
 }) => {
   const [pngScale, setPngScale] = useState<1 | 2 | 4>(2);
   const [bgMode, setBgMode] = useState<'transparent' | 'dark' | 'light'>(defaultBackground);
@@ -83,7 +93,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         code,
         smartColorMode,
         'dark',
-        themeConfig.lineColor
+        themeConfig.lineColor,
+        hiddenNodeTypes
       ).svg;
     }
     return sourceSvg;
@@ -112,6 +123,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         code,
         themeConfig,
         smartColorMode,
+        hiddenNodeTypes,
         canvasSurface: targetSurface,
       });
       triggerLocalDownload(blob, `${safeFilename}-${pngScale}x-${width}x${height}.png`);
@@ -128,13 +140,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   const handleDownloadInteractiveHtml = async () => {
     const rawHtmlSvg = unfilteredSvgContent || svgContent;
-    if (!rawHtmlSvg || isExportingHtml) return;
+    if (!rawHtmlSvg || isExportingHtml || htmlExportProgress?.active) return;
     setIsExportingHtml(true);
+    setExportStatus(null);
     try {
       const targetSurface = bgMode === 'light' ? 'light' : 'dark';
       let htmlContent: string | null = null;
+      let wasAborted = false;
       if (buildInteractiveHtml) {
-        htmlContent = await buildInteractiveHtml(targetSurface);
+        const res = await buildInteractiveHtml(targetSurface);
+        htmlContent = res.html;
+        wasAborted = Boolean(res.aborted);
+      }
+      if (wasAborted) {
+        setExportStatus('Interaktiver HTML-Export wurde abgebrochen.');
+        setTimeout(() => setExportStatus(null), 3000);
+        return;
       }
       if (!htmlContent) {
         const htmlSvg =
@@ -304,7 +325,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
             <button
               type="button"
-              disabled={!svgContent || isExportingHtml}
+              disabled={!svgContent || isExportingHtml || Boolean(htmlExportProgress?.active)}
               onClick={handleDownloadInteractiveHtml}
               className="p-4 rounded-xl bg-emerald-950/30 border border-emerald-500/50 hover:border-emerald-400 text-left transition-colors flex flex-col justify-between group disabled:opacity-50 cursor-pointer"
             >
@@ -321,7 +342,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               </div>
               <div className="mt-4 flex items-center gap-1.5 text-xs font-semibold text-emerald-300">
                 <Download className="w-3.5 h-3.5" />
-                <span>{isExportingHtml ? 'Rendere HTML...' : '.html laden'}</span>
+                <span>
+                  {isExportingHtml || htmlExportProgress?.active
+                    ? 'Wird gerendert…'
+                    : '.html laden'}
+                </span>
               </div>
             </button>
 
@@ -428,7 +453,69 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </div>
           </div>
 
-          {exportStatus && (
+          {htmlExportProgress?.active && (
+            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-slate-100">
+                    {htmlExportProgress.phase === 'packaging'
+                      ? 'HTML-Paket wird zusammengestellt'
+                      : htmlExportProgress.phase === 'preparing'
+                      ? 'Export wird vorbereitet'
+                      : 'Interaktive Callflow-HTML wird erstellt'}
+                  </div>
+                  <div className="text-xs text-slate-400 truncate mt-0.5">
+                    {htmlExportProgress.currentLabel}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 shrink-0">
+                  <span className="text-xs font-mono text-indigo-300 tabular-nums whitespace-nowrap">
+                    {htmlExportProgress.current} / {htmlExportProgress.total} (
+                    {htmlExportProgress.total > 0
+                      ? Math.round((htmlExportProgress.current / htmlExportProgress.total) * 100)
+                      : 0}
+                    %)
+                  </span>
+                  {onCancelInteractiveHtml && (
+                    <button
+                      type="button"
+                      onClick={onCancelInteractiveHtml}
+                      className="px-3 py-1.5 text-xs font-medium text-rose-200 bg-rose-950/60 hover:bg-rose-900/70 border border-rose-500/40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Abbrechen
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="h-2 w-full rounded-full bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full bg-emerald-500 transition-all duration-150 ease-out"
+                  style={{
+                    width: `${
+                      htmlExportProgress.total > 0
+                        ? Math.min(
+                            100,
+                            Math.max(
+                              3,
+                              Math.round(
+                                (htmlExportProgress.current / htmlExportProgress.total) * 100
+                              )
+                            )
+                          )
+                        : 100
+                    }%`,
+                  }}
+                />
+              </div>
+              {htmlExportProgress.cacheHits > 0 && (
+                <div className="text-[11px] text-slate-400 tabular-nums">
+                  {htmlExportProgress.cacheHits} bereits gecachte Ansicht(en) direkt übernommen
+                </div>
+              )}
+            </div>
+          )}
+
+          {exportStatus && !htmlExportProgress?.active && (
             <div className="px-3.5 py-2.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-indigo-300 flex items-center justify-between">
               <span>{exportStatus}</span>
             </div>

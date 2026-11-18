@@ -2,6 +2,7 @@ import mermaid from 'mermaid';
 import {
   DiagramDirection,
   SmartColorMode,
+  SmartColorNodeType,
   ThemeConfiguration,
   ValidationState,
 } from '../types/mermaidStudio';
@@ -10,6 +11,101 @@ import { applySmartLogicColoring } from './smartColorEngine';
 let renderCounter = 0;
 let elkRegistered = false;
 let elkRegisterPromise: Promise<void> | null = null;
+let lastEngineConfigSignature: string | null = null;
+
+const MAX_SVG_RENDER_CACHE = 160;
+const svgRenderCache = new Map<
+  string,
+  { svg: string; diagramType: string }
+>();
+
+function computeFastCacheHash(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(36)}_${input.length}`;
+}
+
+function buildEngineConfigSignature(
+  themeConfig: ThemeConfiguration,
+  forceNativeSvgLabels: boolean
+): string {
+  const nodeSpacing = Number.isFinite(themeConfig.nodeSpacing) ? themeConfig.nodeSpacing : 55;
+  const rankSpacing = Number.isFinite(themeConfig.rankSpacing) ? themeConfig.rankSpacing : 70;
+  return JSON.stringify([
+    themeConfig.layoutEngine || 'dagre',
+    themeConfig.look,
+    themeConfig.theme,
+    themeConfig.useCustomColors,
+    themeConfig.curve,
+    themeConfig.fontFamily,
+    themeConfig.fontSize,
+    nodeSpacing,
+    rankSpacing,
+    forceNativeSvgLabels,
+    themeConfig.useCustomColors
+      ? [
+          themeConfig.primaryColor,
+          themeConfig.primaryTextColor,
+          themeConfig.primaryBorderColor,
+          themeConfig.lineColor,
+          themeConfig.secondaryColor,
+          themeConfig.tertiaryColor,
+          themeConfig.background,
+          themeConfig.mainBkg,
+          themeConfig.nodeBorder,
+          themeConfig.clusterBkg,
+          themeConfig.clusterBorder,
+          themeConfig.titleColor,
+          themeConfig.edgeLabelBackground,
+        ]
+      : null,
+  ]);
+}
+
+function getCachedSvgRender(key: string): { svg: string; diagramType: string } | undefined {
+  const hit = svgRenderCache.get(key);
+  if (!hit) return undefined;
+  svgRenderCache.delete(key);
+  svgRenderCache.set(key, hit);
+  return hit;
+}
+
+function setCachedSvgRender(
+  key: string,
+  value: { svg: string; diagramType: string }
+): void {
+  if (svgRenderCache.has(key)) {
+    svgRenderCache.delete(key);
+  }
+  svgRenderCache.set(key, value);
+  if (svgRenderCache.size > MAX_SVG_RENDER_CACHE) {
+    const oldestKey = svgRenderCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      svgRenderCache.delete(oldestKey);
+    }
+  }
+}
+
+export function buildMermaidRenderCacheKey(
+  code: string,
+  themeConfig: ThemeConfiguration,
+  forceNativeSvgLabels = false
+): string {
+  const sig = buildEngineConfigSignature(themeConfig, forceNativeSvgLabels);
+  return `${computeFastCacheHash(code.trim())}::${computeFastCacheHash(sig)}`;
+}
+
+export function hasCachedMermaidDiagram(
+  code: string,
+  themeConfig: ThemeConfiguration,
+  forceNativeSvgLabels = false
+): boolean {
+  const key = buildMermaidRenderCacheKey(code, themeConfig, forceNativeSvgLabels);
+  return svgRenderCache.has(key);
+}
 
 async function ensureElkLayoutRegistered(): Promise<void> {
   if (elkRegistered) return;
@@ -131,8 +227,13 @@ function buildCustomThemeVariables(themeConfig: ThemeConfiguration): Record<stri
  */
 export function configureMermaidEngine(
   themeConfig: ThemeConfiguration,
-  forceNativeSvgLabels = false
+  forceNativeSvgLabels = false,
+  forceReset = false
 ): void {
+  const nextSignature = buildEngineConfigSignature(themeConfig, forceNativeSvgLabels);
+  if (!forceReset && lastEngineConfigSignature === nextSignature) {
+    return;
+  }
 
   const nodeSpacing = Number.isFinite(themeConfig.nodeSpacing) ? themeConfig.nodeSpacing : 55;
   const rankSpacing = Number.isFinite(themeConfig.rankSpacing) ? themeConfig.rankSpacing : 70;
@@ -201,6 +302,7 @@ export function configureMermaidEngine(
   }
 
   mermaid.initialize(baseConfig as Parameters<typeof mermaid.initialize>[0]);
+  lastEngineConfigSignature = nextSignature;
 }
 
 /**
@@ -285,6 +387,7 @@ export async function renderLocalMermaidDiagram(
 ): Promise<{
   svg: string | null;
   validation: ValidationState;
+  fromCache?: boolean;
 }> {
   const trimmed = code.trim();
   const diagramType = detectDiagramTypeLabel(trimmed);
@@ -299,6 +402,23 @@ export async function renderLocalMermaidDiagram(
         errorLine: null,
         lastRenderMs: 0,
       },
+      fromCache: false,
+    };
+  }
+
+  const cacheKey = buildMermaidRenderCacheKey(trimmed, themeConfig, forceNativeSvgLabels);
+  const cached = getCachedSvgRender(cacheKey);
+  if (cached) {
+    return {
+      svg: cached.svg,
+      validation: {
+        isValid: true,
+        diagramType: cached.diagramType,
+        errorMessage: null,
+        errorLine: null,
+        lastRenderMs: 1,
+      },
+      fromCache: true,
     };
   }
 
@@ -310,13 +430,10 @@ export async function renderLocalMermaidDiagram(
     }
     configureMermaidEngine(themeConfig, forceNativeSvgLabels);
 
-    // Step 1: Parse and validate user's exact code first for accurate line numbers
-    await mermaid.parse(trimmed, { suppressErrors: false });
-
     // Apply live UI layout/spacing directive on top of code so sliders never get ignored by stale init blocks
     const renderCode = prepareCodeWithRuntimeLayout(trimmed, themeConfig);
 
-    // Step 2: Render clean SVG (with automatic fallback to Dagre if ELK fails on unsupported diagram types)
+    // Single-pass render (mermaid.render validates & layouts in one step; parse() runs only on error for exact line numbers)
     renderCounter += 1;
     const uniqueRenderId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
     let svgResult: string;
@@ -333,12 +450,14 @@ export async function renderLocalMermaidDiagram(
           layoutEngine: 'dagre',
           look: 'classic',
         };
-        configureMermaidEngine(fallbackConfig, forceNativeSvgLabels);
+        configureMermaidEngine(fallbackConfig, forceNativeSvgLabels, true);
         const fallbackRenderCode = prepareCodeWithRuntimeLayout(trimmed, fallbackConfig);
         renderCounter += 1;
         const fallbackId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
         const fallbackRendered = await mermaid.render(fallbackId, fallbackRenderCode);
         svgResult = fallbackRendered.svg;
+        // Restore active engine signature on next call since fallback mutated Mermaid config
+        lastEngineConfigSignature = null;
       } else {
         throw renderErr;
       }
@@ -346,6 +465,7 @@ export async function renderLocalMermaidDiagram(
 
     const elapsed = Math.max(1, Math.round(performance.now() - startTime));
     const normalizedSvg = normalizeSvgIntrinsicDimensions(svgResult);
+    setCachedSvgRender(cacheKey, { svg: normalizedSvg, diagramType });
 
     return {
       svg: normalizedSvg,
@@ -356,15 +476,24 @@ export async function renderLocalMermaidDiagram(
         errorLine: null,
         lastRenderMs: elapsed,
       },
+      fromCache: false,
     };
   } catch (err: unknown) {
     const elapsed = Math.max(1, Math.round(performance.now() - startTime));
+    let exactParseErr: unknown = null;
+    try {
+      await mermaid.parse(trimmed, { suppressErrors: false });
+    } catch (parseErr) {
+      exactParseErr = parseErr;
+    }
+
+    const errorSource = exactParseErr ?? err;
     const rawMsg =
-      err instanceof Error
-        ? err.message
-        : typeof err === 'object' && err !== null && 'str' in err
-        ? String((err as { str: unknown }).str)
-        : String(err);
+      errorSource instanceof Error
+        ? errorSource.message
+        : typeof errorSource === 'object' && errorSource !== null && 'str' in errorSource
+        ? String((errorSource as { str: unknown }).str)
+        : String(errorSource);
 
     if (typeof document !== 'undefined') {
       const strayErrorNodes = document.querySelectorAll('[id^="dmermaid-local-svg-"]');
@@ -380,6 +509,7 @@ export async function renderLocalMermaidDiagram(
         errorLine: extractErrorLine(rawMsg),
         lastRenderMs: elapsed,
       },
+      fromCache: false,
     };
   }
 }
@@ -487,9 +617,52 @@ export function sanitizeSvgForXmlParser(svgString: string): string {
     .replace(/&nbsp;/gi, '&#160;');
 }
 
+function extractSvgViewBoxDimensionsFast(
+  svgString: string
+): { width: number; height: number } | null {
+  const svgTagMatch = svgString.match(/<svg\b([^>]*)>/i);
+  if (!svgTagMatch) return null;
+  const attrs = svgTagMatch[1];
+  const vbMatch = attrs.match(/\bviewBox\s*=\s*["']([^"']+)["']/i);
+  if (vbMatch) {
+    const parts = vbMatch[1].trim().split(/[\s,]+/).map(Number);
+    if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+      return {
+        width: Math.ceil(parts[2]),
+        height: Math.ceil(parts[3]),
+      };
+    }
+  }
+  return null;
+}
+
 export function normalizeSvgIntrinsicDimensions(svgString: string): string {
-  const parser = new DOMParser();
   const safeXml = sanitizeSvgForXmlParser(svgString);
+  const fastDims = extractSvgViewBoxDimensionsFast(safeXml);
+  if (fastDims) {
+    const { width: intrinsicWidth, height: intrinsicHeight } = fastDims;
+    return safeXml.replace(/<svg\b([^>]*)>/i, (_full, rawAttrs: string) => {
+      let attrs = rawAttrs
+        .replace(/\s*\bwidth\s*=\s*["'][^"']*["']/gi, '')
+        .replace(/\s*\bheight\s*=\s*["'][^"']*["']/gi, '');
+      const styleMatch = attrs.match(/\bstyle\s*=\s*["']([^"']*)["']/i);
+      const enforcedStyle = `max-width: none; width: ${intrinsicWidth}px; height: ${intrinsicHeight}px; display: block;`;
+      if (styleMatch) {
+        const cleanedStyle = styleMatch[1]
+          .replace(/(?:max-width|width|height|display)\s*:[^;]+;?/gi, '')
+          .trim();
+        const combined = cleanedStyle
+          ? `${cleanedStyle.replace(/;?$/, ';')} ${enforcedStyle}`
+          : enforcedStyle;
+        attrs = attrs.replace(styleMatch[0], `style="${combined}"`);
+      } else {
+        attrs += ` style="${enforcedStyle}"`;
+      }
+      return `<svg${attrs} width="${intrinsicWidth}px" height="${intrinsicHeight}px">`;
+    });
+  }
+
+  const parser = new DOMParser();
   const doc = parser.parseFromString(safeXml, 'image/svg+xml');
   if (doc.querySelector('parsererror')) {
     return safeXml;
@@ -538,6 +711,24 @@ export function normalizeSvgIntrinsicDimensions(svgString: string): string {
  * Extracts intrinsic SVG dimensions (width & height) from viewBox or width/height attributes.
  */
 export function getSvgDimensions(svgString: string): { width: number; height: number } {
+  const fastDims = extractSvgViewBoxDimensionsFast(svgString);
+  if (fastDims) {
+    return fastDims;
+  }
+
+  const svgTagMatch = svgString.match(/<svg\b([^>]*)>/i);
+  if (svgTagMatch) {
+    const wMatch = svgTagMatch[1].match(/\bwidth\s*=\s*["']([\d.]+)(?:px)?["']/i);
+    const hMatch = svgTagMatch[1].match(/\bheight\s*=\s*["']([\d.]+)(?:px)?["']/i);
+    if (wMatch && hMatch) {
+      const w = parseFloat(wMatch[1]);
+      const h = parseFloat(hMatch[1]);
+      if (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0) {
+        return { width: Math.ceil(w), height: Math.ceil(h) };
+      }
+    }
+  }
+
   const parser = new DOMParser();
   const doc = parser.parseFromString(sanitizeSvgForXmlParser(svgString), 'image/svg+xml');
   const svgEl = doc.querySelector('svg');
@@ -723,6 +914,7 @@ export async function exportSvgToPngBlob(
     code: string;
     themeConfig: ThemeConfiguration;
     smartColorMode: SmartColorMode;
+    hiddenNodeTypes?: SmartColorNodeType[];
     canvasSurface: 'dark' | 'light';
   }
 ): Promise<{ blob: Blob; width: number; height: number }> {
@@ -741,7 +933,8 @@ export async function exportSvgToPngBlob(
           fallbackOptions.code,
           fallbackOptions.smartColorMode,
           fallbackOptions.canvasSurface,
-          fallbackOptions.themeConfig.lineColor
+          fallbackOptions.themeConfig.lineColor,
+          fallbackOptions.hiddenNodeTypes
         );
         return await rasterizeSvgStringToPng(colored.svg, scale, backgroundMode);
       }

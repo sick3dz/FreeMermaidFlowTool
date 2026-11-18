@@ -397,8 +397,8 @@ export const MultiScriptModal: React.FC<MultiScriptModalProps> = ({
                   Laden Sie links Ihre einzelnen Text-Skripte oder grafischen Exporte (oder das
                   Beispiel mit <span className="font-mono text-slate-200">Main</span> +
                   Folgeskripten). Die App verknüpft alle freien Skriptnamen und Zielnummern
-                  automatisch in eine übersichtliche <strong>Ebene 1 (Master)</strong> und{' '}
-                  <strong>Ebene 2 (Skript-Detail)</strong>.
+                  automatisch in eine übersichtliche <strong>Ebene 1 (Master-Gesamtkarte)</strong> und{' '}
+                  <strong>Ebene 2 (Einzel-Skript inkl. Main)</strong>.
                 </p>
               </div>
             ) : (
@@ -431,10 +431,10 @@ export const MultiScriptModal: React.FC<MultiScriptModalProps> = ({
                                 />
                               )}
                               <span className="font-mono text-xs font-bold text-indigo-300 tabular-nums">
-                                [{mod.scriptNumber}]
+                                {mod.scriptNumber === 'Main' ? 'Main' : `[${mod.scriptNumber}]`}
                               </span>
                               <span className="text-xs font-semibold text-slate-100 truncate">
-                                {mod.scriptName}
+                                {mod.scriptNumber === 'Main' ? 'Einstiegsskript' : mod.scriptName}
                               </span>
                             </div>
                             <div className="text-[11px] text-slate-400 mt-0.5 font-mono tabular-nums flex flex-wrap items-center gap-1.5">
@@ -587,7 +587,7 @@ export const MultiScriptModal: React.FC<MultiScriptModalProps> = ({
         {/* Footer */}
         <div className="px-4 sm:px-6 py-3 border-t border-slate-800 bg-slate-950/90 flex flex-wrap items-center justify-between gap-3 shrink-0">
           <span className="text-xs text-slate-400">
-            Ebene 1 zeigt nur Skript-Verknüpfungen · Klick auf ein Skript öffnet Ebene 2 mit allen Prio- &amp; Auswahl-Regeln
+            Ebene 1: Master-Gesamtkarte zeigt alle Skript-Verknüpfungen · Klick auf ein Skript (inkl. Main) öffnet Ebene 2 mit allen Regeln
           </span>
           <div className="flex items-center gap-2">
             <button
@@ -607,7 +607,7 @@ export const MultiScriptModal: React.FC<MultiScriptModalProps> = ({
               className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
             >
               <Layers className="w-3.5 h-3.5" />
-              <span>Master-Callflow (Ebene 1) übernehmen</span>
+              <span>Master-Gesamtkarte (Ebene 1) übernehmen</span>
             </button>
           </div>
         </div>

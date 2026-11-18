@@ -1,8 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Check,
+  ChevronDown,
   Code2,
   Compass,
+  EyeOff,
+  Filter,
   Layers,
   Palette,
   RotateCcw,
@@ -17,15 +20,19 @@ import {
   MermaidBaseTheme,
   MermaidLook,
   SmartColorMode,
+  SmartColorNodeType,
   ThemeConfiguration,
 } from '../types/mermaidStudio';
 import { DEFAULT_THEME_CONFIG, THEME_PRESETS } from '../data/mermaidTemplates';
+import { SMART_COLOR_NODE_TYPE_OPTIONS } from '../utils/smartColorEngine';
 
 interface ThemeConfiguratorProps {
   themeConfig: ThemeConfiguration;
   onChangeTheme: (next: ThemeConfiguration) => void;
   smartColorMode: SmartColorMode;
   onChangeSmartColorMode: (mode: SmartColorMode) => void;
+  hiddenNodeTypes: SmartColorNodeType[];
+  onChangeHiddenNodeTypes: (next: SmartColorNodeType[]) => void;
   logicSummary: LogicAnalysisSummary;
   onInjectSmartClassDefs: () => void;
   currentDirection: DiagramDirection | null;
@@ -88,11 +95,13 @@ const DIRECTION_OPTIONS: Array<{ value: DiagramDirection; label: string; hint: s
   { value: 'BT', label: 'BT', hint: 'Unten nach Oben' },
 ];
 
-export const ThemeConfigurator: React.FC<ThemeConfiguratorProps> = ({
+const ThemeConfiguratorInner: React.FC<ThemeConfiguratorProps> = ({
   themeConfig,
   onChangeTheme,
   smartColorMode,
   onChangeSmartColorMode,
+  hiddenNodeTypes,
+  onChangeHiddenNodeTypes,
   logicSummary,
   onInjectSmartClassDefs,
   currentDirection,
@@ -105,6 +114,36 @@ export const ThemeConfigurator: React.FC<ThemeConfiguratorProps> = ({
 }) => {
   const [directiveInjected, setDirectiveInjected] = useState(false);
   const [classDefInjected, setClassDefInjected] = useState(false);
+  const [isNodeFilterOpen, setIsNodeFilterOpen] = useState(false);
+  const nodeFilterRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isNodeFilterOpen) return;
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (nodeFilterRef.current && !nodeFilterRef.current.contains(event.target as Node)) {
+        setIsNodeFilterOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsNodeFilterOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isNodeFilterOpen]);
+
+  const handleToggleNodeType = (typeId: SmartColorNodeType) => {
+    if (hiddenNodeTypes.includes(typeId)) {
+      onChangeHiddenNodeTypes(hiddenNodeTypes.filter((t) => t !== typeId));
+    } else {
+      onChangeHiddenNodeTypes([...hiddenNodeTypes, typeId]);
+    }
+  };
 
   const handleFieldChange = <K extends keyof ThemeConfiguration>(
     key: K,
@@ -127,6 +166,7 @@ export const ThemeConfigurator: React.FC<ThemeConfiguratorProps> = ({
   const handleReset = () => {
     onChangeTheme(DEFAULT_THEME_CONFIG);
     onChangeSmartColorMode('semantic');
+    onChangeHiddenNodeTypes([]);
     onChangeCanvasSurface('dark');
   };
 
@@ -235,6 +275,156 @@ export const ThemeConfigurator: React.FC<ThemeConfiguratorProps> = ({
                 </button>
               );
             })}
+          </div>
+
+          {/* Node-Type Filter Dropdown (excludes selected node types from smart coloring analysis without changing source code) */}
+          <div ref={nodeFilterRef} className="pt-2 space-y-1.5 relative">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-slate-300 flex items-center gap-1.5">
+                <Filter className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                <span>Knotentypen in Analyse</span>
+              </span>
+              {hiddenNodeTypes.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => onChangeHiddenNodeTypes([])}
+                  className="text-[11px] text-indigo-300 hover:text-indigo-200 hover:underline whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Alle einblenden
+                </button>
+              )}
+            </div>
+
+            <button
+              type="button"
+              aria-expanded={isNodeFilterOpen}
+              aria-haspopup="listbox"
+              onClick={() => setIsNodeFilterOpen((prev) => !prev)}
+              className={`w-full min-h-[40px] px-3 py-2 text-xs rounded-lg border transition-colors flex items-center justify-between gap-2 cursor-pointer ${
+                hiddenNodeTypes.length > 0
+                  ? 'bg-indigo-950/50 border-indigo-500/70 text-slate-100'
+                  : 'bg-slate-900 lg:bg-slate-950 border-slate-800 text-slate-200 hover:border-slate-700'
+              }`}
+            >
+              <span className="flex items-center gap-2 min-w-0">
+                {hiddenNodeTypes.length > 0 ? (
+                  <EyeOff className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                ) : (
+                  <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                )}
+                <span className="truncate font-medium">
+                  {hiddenNodeTypes.length === 0
+                    ? `Alle Knotentypen sichtbar (${SMART_COLOR_NODE_TYPE_OPTIONS.length}/${SMART_COLOR_NODE_TYPE_OPTIONS.length})`
+                    : `${hiddenNodeTypes.length} ${
+                        hiddenNodeTypes.length === 1 ? 'Typ' : 'Typen'
+                      } ausgeblendet${
+                        (logicSummary.hiddenNodeCount || 0) > 0
+                          ? ` · ${logicSummary.hiddenNodeCount} Knoten`
+                          : ''
+                      }`}
+                </span>
+              </span>
+              <ChevronDown
+                className={`w-4 h-4 text-slate-400 shrink-0 transition-transform duration-150 ${
+                  isNodeFilterOpen ? 'rotate-180' : ''
+                }`}
+              />
+            </button>
+
+            {isNodeFilterOpen && (
+              <div
+                role="listbox"
+                aria-multiselectable="true"
+                aria-label="Knotentypen aus Smart-Coloring-Analyse filtern"
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 shadow-lg overflow-hidden z-30"
+              >
+                <div className="divide-y divide-slate-800/80 max-h-64 overflow-y-auto">
+                  {SMART_COLOR_NODE_TYPE_OPTIONS.map((opt) => {
+                    const isHidden = hiddenNodeTypes.includes(opt.id);
+                    const isChecked = !isHidden;
+                    const typeCount = logicSummary.detectedTypeCounts?.[opt.id] ?? 0;
+
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        role="option"
+                        aria-selected={isChecked}
+                        onClick={() => handleToggleNodeType(opt.id)}
+                        className={`w-full text-left px-3 py-2.5 flex items-start justify-between gap-2.5 transition-colors cursor-pointer ${
+                          isChecked
+                            ? 'hover:bg-slate-900/90 text-slate-100'
+                            : 'bg-slate-900/40 hover:bg-slate-900/80 text-slate-400'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2.5 min-w-0">
+                          <span
+                            className={`mt-0.5 w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
+                              isChecked
+                                ? 'bg-indigo-600 border-indigo-500 text-white'
+                                : 'bg-slate-950 border-slate-600 text-transparent'
+                            }`}
+                          >
+                            <Check className="w-3 h-3" />
+                          </span>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className="w-2.5 h-2.5 rounded-xs shrink-0"
+                                style={{ backgroundColor: opt.swatchColor }}
+                              />
+                              <span
+                                className={`text-xs font-medium truncate ${
+                                  isHidden ? 'line-through text-slate-500' : 'text-slate-100'
+                                }`}
+                              >
+                                {opt.label}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-500 leading-snug mt-0.5">
+                              {opt.description}
+                            </div>
+                          </div>
+                        </div>
+
+                        <span
+                          className={`text-[11px] font-mono tabular-nums shrink-0 mt-0.5 ${
+                            typeCount > 0 ? 'text-slate-300' : 'text-slate-600'
+                          }`}
+                        >
+                          {typeCount}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="px-3 py-2 bg-slate-900/90 border-t border-slate-800 flex items-center justify-between gap-2 text-[11px] text-slate-400">
+                  <span>Code bleibt unverändert</span>
+                  <button
+                    type="button"
+                    onClick={() => setIsNodeFilterOpen(false)}
+                    className="text-indigo-300 hover:text-indigo-200 font-medium whitespace-nowrap cursor-pointer"
+                  >
+                    Fertig
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {hiddenNodeTypes.length > 0 && !isNodeFilterOpen && (
+              <p className="text-[11px] text-slate-400 leading-snug">
+                Ausgeblendet:{' '}
+                <span className="text-slate-200">
+                  {hiddenNodeTypes
+                    .map(
+                      (id) =>
+                        SMART_COLOR_NODE_TYPE_OPTIONS.find((opt) => opt.id === id)?.label || id
+                    )
+                    .join(' · ')}
+                </span>
+              </p>
+            )}
           </div>
         </section>
 
@@ -551,6 +741,9 @@ export const ThemeConfigurator: React.FC<ThemeConfiguratorProps> = ({
     </aside>
   );
 };
+
+export const ThemeConfigurator = React.memo(ThemeConfiguratorInner);
+ThemeConfigurator.displayName = 'ThemeConfigurator';
 
 interface ColorFieldProps {
   label: string;

@@ -24,6 +24,7 @@ import {
   isAnnouncementOrEndpointTargetName,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
+  promoteEntryModuleToMain,
 } from '../utils/scriptCallflowParser';
 import {
   CALLFLOW_CHECKLIST_ACCEPT,
@@ -125,18 +126,9 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       (m) => canonicalScriptMatchKey(m.scriptNumber) === 'main' || m.isMaster
     );
     const primaryIdx = mainIdx >= 0 ? mainIdx : 0;
-    const primaryScriptNumber = modules[primaryIdx]?.scriptNumber || 'Main';
-
-    let normalizedModules = modules.map((m, idx) => {
-      if (idx !== primaryIdx) return m;
-      return {
-        ...m,
-        isMaster: modules.length === 1 ? true : m.isMaster,
-        outgoingNumbers: m.outgoingNumbers.filter(
-          (t) => canonicalScriptMatchKey(t) !== canonicalScriptMatchKey(m.scriptNumber)
-        ),
-      };
-    });
+    const rawPrimaryNumber = modules[primaryIdx]?.scriptNumber || 'Main';
+    let normalizedModules = promoteEntryModuleToMain(modules, rawPrimaryNumber);
+    const primaryScriptNumber = 'Main';
 
     const effectivePool = activePool !== undefined ? activePool : folderPool;
     let resolveSummary: FolderAutoResolveSummary | null = null;
@@ -367,7 +359,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       ) || parsedModules[0];
 
     onStartNewCallflow({
-      title: primaryMod?.scriptName || activeMasterNumber || 'Callflow',
+      title: 'Main (Einstiegsskript)',
       workspace,
       folderPool,
       folderSummary: folderResolveSummary,
@@ -456,10 +448,10 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
               >
                 <div className="space-y-1 min-w-0">
                   <div className="text-xs font-semibold text-slate-100">
-                    Start-/Masterscript (`.s` / Visio) laden oder kompletten Skript-Ordner zuweisen
+                    Einstiegsskript „Main“ (`.s` / Visio) laden oder Skript-Ordner zuweisen
                   </div>
                   <p className="text-[11px] text-slate-400 leading-relaxed">
-                    Weisen Sie Ihren Skript-Ordner (z. B. 600+ <code className="font-mono text-slate-300">Scriptname.s</code> Dateien) zu: Das Tool lädt ab Ihrem Start-Skript automatisch <strong className="text-slate-200">nur die tatsächlich aufgerufenen Folgeskripte rekursiv</strong> nach und ignoriert ungenutzte Altlast-Dateien.
+                    Ihr zuerst geladenes Startskript wird unabhängig vom Dateinamen fest als <strong className="text-slate-200">Main</strong> geführt (Ebene 1 zeigt die <strong className="text-slate-200">Master-Gesamtkarte</strong> aller Skripte). Bei zugewiesenem Skript-Ordner lädt das Tool automatisch <strong className="text-slate-200">nur die verknüpften Folgeskripte rekursiv</strong> nach.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -527,7 +519,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-400">
-                        Klicken Sie unten auf Ihr <strong className="text-slate-200">Start- oder Masterscript</strong> (oder laden Sie oben eine separate Start-Datei). Das Tool sucht anschließend alle verknüpften <code className="font-mono text-slate-300">Scriptname.s</code> Dateien automatisch rekursiv aus diesem Ordner.
+                        Klicken Sie unten auf Ihr <strong className="text-slate-200">Einstiegsskript</strong> (wird fest als <span className="font-mono text-indigo-300">Main</span> übernommen). Das Tool sucht anschließend alle verknüpften <code className="font-mono text-slate-300">Scriptname.s</code> Dateien automatisch rekursiv aus diesem Ordner.
                       </p>
                     </div>
                     <button
@@ -548,7 +540,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                       type="text"
                       value={folderSearchQuery}
                       onChange={(e) => setFolderSearchQuery(e.target.value)}
-                      placeholder={`Aus ${folderPool.totalFilesScanned} Dateien im Ordner nach Start-/Master-Skript suchen (z. B. Main, 4910, Master)...`}
+                      placeholder={`Aus ${folderPool.totalFilesScanned} Dateien im Ordner nach Einstiegsskript suchen (z. B. Main, 4910)...`}
                       className="w-full pl-8 pr-3 py-1.5 bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none"
                     />
                   </div>
@@ -592,7 +584,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                     setRawMasterText(e.target.value);
                     if (errorMsg) setErrorMsg(null);
                   }}
-                  placeholder={`Text für Ihr Start-/Masterscript hier einfügen...\nHinweis: /* ... */ Altlast-Kommentare werden automatisch ignoriert.\n\nBeispiel:\nIF DNIS_Range_Rheinland THEN assign 290xxxx to src_route_number assign Rheinland to Sys_brand END IF\nVALUE 101 : execute Script Vertrieb_Service\nVALUE 4501 : execute Script Fax_Eingang`}
+                  placeholder={`Text für Ihr Einstiegsskript (Main) hier einfügen...\nHinweis: /* ... */ Altlast-Kommentare werden automatisch ignoriert.\n\nBeispiel:\nIF DNIS_Range_Rheinland THEN assign 290xxxx to src_route_number assign Rheinland to Sys_brand END IF\nVALUE 101 : execute Script Vertrieb_Service\nVALUE 4501 : execute Script Fax_Eingang`}
                   className="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none resize-y"
                 />
               </div>
@@ -611,7 +603,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                   <ListChecks className="w-4 h-4 text-indigo-400 shrink-0" />
                   <div className="min-w-0">
                     <div className="text-xs font-semibold text-slate-100 truncate">
-                      Start-/Masterscript: <span className="font-mono">{activeMasterNumber}</span>
+                      Einstiegsskript: <span className="font-mono text-indigo-300">Main</span>
                     </div>
                     <div className="text-[11px] text-slate-400 font-mono tabular-nums">
                       {parsedModules.length} Skripte geladen ·{' '}
