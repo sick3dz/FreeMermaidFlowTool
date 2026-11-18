@@ -484,12 +484,6 @@ interface AaccOrgaContext {
   srcRouteNumber?: string;
 }
 
-const KNOWN_ORGA_PREFIXES: Array<{ code: string; name: string; namePattern: RegExp }> = [
-  { code: '290', name: 'Rheinland', namePattern: /\brheinland\b|rheinland(?:_?vers)?/i },
-  { code: '210', name: 'CreditLife', namePattern: /\bcredit[\s_-]?life\b/i },
-  { code: '6099', name: 'Rhion', namePattern: /\brhion\b/i },
-];
-
 function detectOrgaFromText(text: string | undefined): {
   organizationName?: string;
   orgaCode?: string;
@@ -498,26 +492,32 @@ function detectOrgaFromText(text: string | undefined): {
   const cleaned = text.trim();
   if (!cleaned) return {};
 
-  // 1. Check 02131 + Orga prefix or Orga prefix + xxxx/digits
-  const prefixMatch = cleaned.match(
-    /(?:^|[^0-9])(?:0?2131[\s\-/]*)?(6099|290|210)(?:[xX*]{1,6}|\d{0,6})?(?=$|[^0-9])/
+  let orgaCode: string | undefined;
+  let organizationName: string | undefined;
+
+  // 1. Generic route number prefix mask (e.g. "290xxxx", "100xxx", "01234 500xxxx")
+  const maskedRouteMatch = cleaned.match(
+    /(?:^|[^0-9])(?:\d{3,6}[\s\-/]+)?(\d{2,5})[xX*]{2,6}(?=$|[^0-9A-Za-z])/
   );
-  if (prefixMatch && prefixMatch[1]) {
-    const code = prefixMatch[1];
-    const found = KNOWN_ORGA_PREFIXES.find((o) => o.code === code);
-    if (found) {
-      return { orgaCode: found.code, organizationName: found.name };
+  if (maskedRouteMatch && maskedRouteMatch[1]) {
+    orgaCode = maskedRouteMatch[1];
+  }
+
+  // 2. Generic DNIS_Range_<Organization> or Mandant_<Organization> identifier
+  const dnisRangeMatch = cleaned.match(
+    /\b(?:DNIS_Range|Mandant|Orga|Brand)_([A-Za-z0-9ÄÖÜäöüß_-]{2,40})\b/i
+  );
+  if (dnisRangeMatch && dnisRangeMatch[1]) {
+    const rawName = dnisRangeMatch[1].replace(/^_+|_+$/g, '');
+    if (rawName && !/^\d+$/.test(rawName)) {
+      organizationName = rawName;
     }
   }
 
-  // 2. Check organization name keywords (e.g. Sys_brand = Rheinland, DNIS_Range_CreditLife)
-  for (const orga of KNOWN_ORGA_PREFIXES) {
-    if (orga.namePattern.test(cleaned)) {
-      return { orgaCode: orga.code, organizationName: orga.name };
-    }
-  }
-
-  return {};
+  return {
+    ...(orgaCode ? { orgaCode } : {}),
+    ...(organizationName ? { organizationName } : {}),
+  };
 }
 
 function mergeOrgaContext(
@@ -1644,7 +1644,7 @@ function parseAaccScriptBlocks(
           candidateLine
         ) &&
         !/^(?:prio|zeitplan|feiertag|bedingung|ansage|taste)\b/i.test(candidateLine) &&
-        !/^(?:02131|290|210|6099)\b/.test(candidateLine) &&
+        !/^\d{2,6}[xX*]{2,6}\b/.test(candidateLine) &&
         !candidateLine.includes('->') &&
         !candidateLine.includes('=>') &&
         candidateLine.length >= 3
@@ -2103,21 +2103,21 @@ function parseAaccScriptBlocks(
     ): AaccOrgaContext => {
       let merged = mergeOrgaContext(getStackOrga(), localCtx);
 
-      // 1. Check VALUE numbers for 02131 + 290/210/6099 or 290xxxx/210xxxx/6099xxxx
+      // 1. Check VALUE numbers for masked prefix patterns
       if (!merged.organizationName || !merged.orgaCode) {
         for (const v of valueNums) {
           const fromVal = detectOrgaFromText(v);
-          if (fromVal.organizationName) {
+          if (fromVal.organizationName || fromVal.orgaCode) {
             merged = mergeOrgaContext(merged, fromVal);
             break;
           }
         }
       }
 
-      // 2. Check target script name or line text (e.g. Rheinland_Vertrieb, Rhion_Service, CL_...)
+      // 2. Check target script name or line text for dynamic DNIS_Range / Orga identifiers
       if (!merged.organizationName || !merged.orgaCode) {
         const fromTarget = detectOrgaFromText(`${targetScript || ''} ${lineText}`);
-        if (fromTarget.organizationName) {
+        if (fromTarget.organizationName || fromTarget.orgaCode) {
           merged = mergeOrgaContext(merged, fromTarget);
         }
       }
@@ -2894,7 +2894,7 @@ function parseAaccScriptBlocks(
       }
     }
 
-    // If the Masterscript had DNIS_Range Orga declarations (290 Rheinland, 210 CreditLife, 6099 Rhion)
+    // If the Masterscript had DNIS_Range Orga declarations
     // but some VALUE rules weren't inside IF blocks, try matching Orga from targetScript or add Orga context if no rules referenced it yet
     if (orgaRegistry.size > 0) {
       for (const orgaCtx of orgaRegistry.values()) {
@@ -2908,7 +2908,7 @@ function parseAaccScriptBlocks(
         if (!hasRuleWithOrga) {
           const labelBits = [
             orgaCtx.organizationName || orgaCtx.brandName || 'Orga-Bereich',
-            orgaCtx.srcRouteNumber || (orgaCtx.orgaCode ? `02131 ${orgaCtx.orgaCode}xxxx` : ''),
+            orgaCtx.srcRouteNumber || (orgaCtx.orgaCode ? `${orgaCtx.orgaCode}xxxx` : ''),
           ].filter(Boolean);
           const nextOrgaPrio = Math.max(
             rules.reduce((mx, r) => Math.max(mx, r.prio || 0), 19) + 1,
@@ -4104,7 +4104,58 @@ export function detectWorkspaceIssues(
           resolvedAt: rec?.resolvedAt,
         });
       }
+
+      // 3. Completeness inquiry: Unresolved SondZeit / Schedule variable without concrete time window
+      const rawSchedule = (rule.schedule || '').trim();
+      const usesSondZeitToken =
+        /\b(?:sondzeit|sys_sondzeit|sonderzeit)\b/i.test(rawSchedule) &&
+        !/\d{1,2}:\d{2}/.test(rawSchedule);
+      if (usesSondZeitToken) {
+        const hasSondZeitDefInMod = Boolean(
+          mod.rawText &&
+            /\b(?:sondzeit|sys_sondzeit)\b[\s\S]{0,160}?\d{1,2}\s*:\s*\d{2}/i.test(mod.rawText)
+        );
+        if (!hasSondZeitDefInMod) {
+          const id = `unclear:${modKey}:${rule.id}:sondzeit`;
+          const rec = resolvedMap[id];
+          if (!issues.some((existing) => existing.id === id)) {
+            issues.push({
+              id,
+              type: 'unclear-transition',
+              status: rec ? 'resolved' : 'open',
+              sourceScriptNumber: mod.scriptNumber,
+              ruleId: rule.id,
+              title: `Öffnungszeiten-Parameter prüfen [${mod.scriptNumber}]`,
+              question: `In [${mod.scriptNumber}] (${rule.stepName}) wird die Variable „${rawSchedule}“ geprüft, aber im Skript selbst ist kein konkretes Uhrzeitfenster (HH:MM) hinterlegt. Welches Zeitfenster gilt hier bzw. aus welchem Hauptskript wird es vererbt?`,
+              resolution: rec?.resolution,
+              resolutionNote: rec?.note,
+              linkedTargetNumber: rec?.linkedTargetNumber,
+              createdAt: now,
+              resolvedAt: rec?.resolvedAt,
+            });
+          }
+        }
+      }
     });
+
+    // 3b. Script-level completeness check: If a loaded script has no actionable routing rules at all
+    if (mod.rules.length === 0) {
+      const id = `unclear:${modKey}:empty-module`;
+      const rec = resolvedMap[id];
+      issues.push({
+        id,
+        type: 'unclear-transition',
+        status: rec ? 'resolved' : 'open',
+        sourceScriptNumber: mod.scriptNumber,
+        title: `Unvollständiges Skript [${mod.scriptNumber}]`,
+        question: `Aus dem eingelesenen Skript [${mod.scriptNumber}] konnten noch keine Routing-Regeln, Skillsets oder Zielverweise extrahiert werden. Bitte prüfen Sie den Skript-Inhalt oder ergänzen Sie das Ziel manuell.`,
+        resolution: rec?.resolution,
+        resolutionNote: rec?.note,
+        linkedTargetNumber: rec?.linkedTargetNumber,
+        createdAt: now,
+        resolvedAt: rec?.resolvedAt,
+      });
+    }
   });
 
   // 4. User-created manual questions
@@ -5492,7 +5543,7 @@ export function buildScriptDetailMermaid(
     }
     if (rule.organizationName) {
       const orgTag = rule.orgaCode
-        ? `${rule.organizationName} (02131 ${rule.orgaCode})`
+        ? `${rule.organizationName} (${rule.orgaCode})`
         : rule.organizationName;
       metaParts.push(`Orga: ${sanitizeMermaidText(orgTag)}`);
     }

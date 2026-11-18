@@ -160,7 +160,9 @@ import { NewCallflowModal } from './components/NewCallflowModal';
 import { NodeInlineEditorModal } from './components/NodeInlineEditorModal';
 import { OfflineDownloadModal } from './components/OfflineDownloadModal';
 import { OpeningHoursModal } from './components/OpeningHoursModal';
+import { LocalHtmlBuilderLanding } from './components/LocalHtmlBuilderLanding';
 import {
+  isRunningAsOfflineSingleFile,
   readStudioStorage,
   STUDIO_STORAGE_KEYS,
   writeStudioStorage,
@@ -304,6 +306,13 @@ function loadInitialScriptWorkspace(): ScriptWorkspace {
 }
 
 export default function App() {
+  if (!isRunningAsOfflineSingleFile()) {
+    return <LocalHtmlBuilderLanding />;
+  }
+  return <OfflineStudioApp />;
+}
+
+function OfflineStudioApp() {
   // Initial state starts empty (or restores user's own workspace from localStorage / offline seed)
   const [diagramTitle, setDiagramTitle] = useState<string>(() => {
     return readStudioStorage(STORAGE_KEYS.ACTIVE_TITLE) || 'Neuer Callflow';

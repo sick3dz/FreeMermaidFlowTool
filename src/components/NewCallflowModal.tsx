@@ -584,7 +584,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                     setRawMasterText(e.target.value);
                     if (errorMsg) setErrorMsg(null);
                   }}
-                  placeholder={`Text für Ihr Einstiegsskript (Main) hier einfügen...\nHinweis: /* ... */ Altlast-Kommentare werden automatisch ignoriert.\n\nBeispiel:\nIF DNIS_Range_Rheinland THEN assign 290xxxx to src_route_number assign Rheinland to Sys_brand END IF\nVALUE 101 : execute Script Vertrieb_Service\nVALUE 4501 : execute Script Fax_Eingang`}
+                  placeholder={`Text für Ihr Einstiegsskript (Main) hier einfügen...\nHinweis: /* ... */ Altlast-Kommentare werden automatisch ignoriert.\n\nBeispiel:\nIF DNIS_Range_Nord THEN assign 100xxxx to src_route_number assign Mandant_Nord to Sys_brand END IF\nVALUE 101 : execute Script Vertrieb_Service\nVALUE 4501 : execute Script Fax_Eingang`}
                   className="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none resize-y"
                 />
               </div>
