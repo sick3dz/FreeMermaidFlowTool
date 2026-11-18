@@ -4064,14 +4064,21 @@ export function detectWorkspaceIssues(
         ) ||
         /\b(?:abwurf|auflegen|mailbox|hangup|disconnect)\b/i.test(rule.stepName);
 
+      const isOverflowRule =
+        /\b(?:überlauf|overflow)\b/i.test(rule.stepName) ||
+        /\b(?:überlauf|overflow)\b/i.test(rule.rawLine) ||
+        Boolean(rule.queueTarget);
+
       const isVisioLastUnclear =
         mod.origin === 'visio-new' &&
         idx === sorted.length - 1 &&
         !hasExplicitRoute &&
-        !isTerminalOrInitLabel;
+        !isTerminalOrInitLabel &&
+        !isOverflowRule;
       const isUnclearBranch =
         (/\?/.test(rule.stepName) || /\b(?:wenn|falls|entscheidung|verzweigung)\b/i.test(rule.stepName)) &&
         !hasExplicitRoute &&
+        !isOverflowRule &&
         idx === sorted.length - 1;
 
       if (isDeactivatedOverflow || hasExplicitTodoMarker || isVisioLastUnclear || isUnclearBranch) {
