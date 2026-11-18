@@ -484,6 +484,18 @@ interface AaccOrgaContext {
   srcRouteNumber?: string;
 }
 
+const TEAM_OR_FUNCTION_NAME_GUARD =
+  /^(?:team|skillset|service|kundenservice|vertrieb|schaden|vertrag|leistung|inkasso|hotline|backoffice|zentrale|empfang|rechtsschutz|kfz|leben|kranken|komposit|makler|agentur|partner|ueberlauf|überlauf|overflow|nacht|feiertag|sondzeit|fax|faxrouting|ansage|men[uü]|auswahl|default|main|master)$/i;
+
+export function isLikelyTeamOrDepartmentName(name: string | undefined): boolean {
+  if (!name) return false;
+  const clean = name.trim().replace(/^_+|_+$/g, '');
+  if (!clean) return true;
+  if (TEAM_OR_FUNCTION_NAME_GUARD.test(clean)) return true;
+  if (/^(?:s|q|nq|ag|sk|team|skill|abt)_/i.test(clean)) return true;
+  return false;
+}
+
 function detectOrgaFromText(text: string | undefined): {
   organizationName?: string;
   orgaCode?: string;
@@ -505,11 +517,11 @@ function detectOrgaFromText(text: string | undefined): {
 
   // 2. Generic DNIS_Range_<Organization> or Mandant_<Organization> identifier
   const dnisRangeMatch = cleaned.match(
-    /\b(?:DNIS_Range|Mandant|Orga|Brand)_([A-Za-z0-9ÄÖÜäöüß_-]{2,40})\b/i
+    /\b(?:DNIS_Range|Mandant|Orga|Brand|Gesellschaft)_([A-Za-z0-9ÄÖÜäöüß_-]{2,40})\b/i
   );
   if (dnisRangeMatch && dnisRangeMatch[1]) {
     const rawName = dnisRangeMatch[1].replace(/^_+|_+$/g, '');
-    if (rawName && !/^\d+$/.test(rawName)) {
+    if (rawName && !/^\d+$/.test(rawName) && !isLikelyTeamOrDepartmentName(rawName)) {
       organizationName = rawName;
     }
   }
@@ -518,6 +530,218 @@ function detectOrgaFromText(text: string | undefined): {
     ...(orgaCode ? { orgaCode } : {}),
     ...(organizationName ? { organizationName } : {}),
   };
+}
+
+export interface DiscoveredOrgaRule {
+  id: string;
+  organizationName: string;
+  orgaCode: string;
+  srcRouteNumber?: string;
+  matchedCount: number;
+  enabled: boolean;
+}
+
+export function extractDiscoveredOrganizationsFromModules(
+  modules: ScriptModule[]
+): DiscoveredOrgaRule[] {
+  const byKey = new Map<string, DiscoveredOrgaRule>();
+
+  const upsert = (name?: string, code?: string, route?: string, increment = 1) => {
+    const cleanName = (name || '').trim();
+    const cleanCode = (code || '').trim().replace(/[xX*]+$/g, '');
+    if (!cleanName && !cleanCode) return;
+    if (cleanName && isLikelyTeamOrDepartmentName(cleanName) && !cleanCode) return;
+
+    // Try finding existing entry by code or by name
+    let matchKey = '';
+    for (const [k, existing] of byKey.entries()) {
+      if (cleanCode && existing.orgaCode && existing.orgaCode === cleanCode) {
+        matchKey = k;
+        break;
+      }
+      if (
+        cleanName &&
+        existing.organizationName &&
+        canonicalScriptMatchKey(existing.organizationName) === canonicalScriptMatchKey(cleanName)
+      ) {
+        matchKey = k;
+        break;
+      }
+    }
+
+    if (!matchKey) {
+      matchKey = canonicalScriptMatchKey(cleanCode || cleanName);
+      byKey.set(matchKey, {
+        id: `orga-${matchKey}-${byKey.size + 1}`,
+        organizationName: cleanName || (cleanCode ? `Gesellschaft ${cleanCode}` : 'Gesellschaft'),
+        orgaCode: cleanCode,
+        srcRouteNumber: route || (cleanCode ? `${cleanCode}xxxx` : undefined),
+        matchedCount: increment,
+        enabled: true,
+      });
+    } else {
+      const prev = byKey.get(matchKey)!;
+      byKey.set(matchKey, {
+        ...prev,
+        organizationName:
+          cleanName && !/^Gesellschaft\s+\d+$/i.test(cleanName)
+            ? cleanName
+            : prev.organizationName,
+        orgaCode: cleanCode || prev.orgaCode,
+        srcRouteNumber: route || prev.srcRouteNumber,
+        matchedCount: prev.matchedCount + increment,
+      });
+    }
+  };
+
+  modules.forEach((mod) => {
+    if (mod.entryOrganizationName && !isLikelyTeamOrDepartmentName(mod.entryOrganizationName)) {
+      upsert(mod.entryOrganizationName, undefined, undefined, 1);
+    }
+    mod.rules.forEach((r) => {
+      const effectiveName = r.organizationName || r.brandName;
+      const effectiveCode =
+        r.orgaCode ||
+        (r.srcRouteNumber
+          ? r.srcRouteNumber.match(/(\d{2,5})[xX*]{2,6}/)?.[1]
+          : undefined);
+      if (effectiveName || effectiveCode) {
+        upsert(effectiveName, effectiveCode, r.srcRouteNumber, 1);
+      }
+    });
+  });
+
+  return Array.from(byKey.values());
+}
+
+export function applyConfirmedOrgaRulesToModules(
+  modules: ScriptModule[],
+  orgaRules: DiscoveredOrgaRule[]
+): ScriptModule[] {
+  const activeRules = orgaRules.filter(
+    (r) => r.enabled && (r.organizationName.trim() || r.orgaCode.trim())
+  );
+  if (activeRules.length === 0) return modules;
+
+  const matchNumberToOrga = (numStr: string): DiscoveredOrgaRule | undefined => {
+    const digits = numStr.replace(/\D+/g, '');
+    if (!digits) return undefined;
+    // Sort by longest prefix first (e.g. 6099 before 290)
+    const sorted = [...activeRules]
+      .filter((r) => r.orgaCode.trim().length > 0)
+      .sort((a, b) => b.orgaCode.trim().length - a.orgaCode.trim().length);
+    for (const rule of sorted) {
+      const code = rule.orgaCode.trim().replace(/\D+/g, '');
+      if (!code) continue;
+      if (digits.startsWith(code)) return rule;
+      // Also match after an area code prefix (e.g. 4-6 digit area code + orgaCode)
+      const idx = digits.indexOf(code);
+      if (idx >= 3 && idx <= 6 && digits.length - idx >= code.length + 2) {
+        return rule;
+      }
+    }
+    return undefined;
+  };
+
+  const matchTextToOrga = (text: string | undefined): DiscoveredOrgaRule | undefined => {
+    if (!text) return undefined;
+    for (const rule of activeRules) {
+      const name = rule.organizationName.trim();
+      if (name && name.length >= 2) {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?:$|[^A-Za-z0-9])`, 'i').test(text)) {
+          return rule;
+        }
+      }
+    }
+    return undefined;
+  };
+
+  // Track which organization calls which target script from Main/Dispatcher
+  const targetScriptOrgaMap = new Map<string, DiscoveredOrgaRule>();
+
+  const firstPass = modules.map((mod) => {
+    const updatedRules = mod.rules.map((r) => {
+      let matched: DiscoveredOrgaRule | undefined;
+      if (r.orgaCode) {
+        matched = activeRules.find((ar) => ar.orgaCode.trim() === r.orgaCode?.trim());
+      }
+      if (!matched && (r.organizationName || r.brandName)) {
+        matched = matchTextToOrga(`${r.organizationName || ''} ${r.brandName || ''}`);
+      }
+      if (!matched && r.valueNumbers && r.valueNumbers.length > 0) {
+        for (const v of r.valueNumbers) {
+          matched = matchNumberToOrga(v);
+          if (matched) break;
+        }
+      }
+      if (!matched && r.targetNumber) {
+        matched = matchTextToOrga(r.targetNumber);
+      }
+
+      if (matched) {
+        const orgName = matched.organizationName.trim();
+        const orgCode = matched.orgaCode.trim();
+        if (r.targetNumber) {
+          targetScriptOrgaMap.set(canonicalScriptMatchKey(r.targetNumber), matched);
+        }
+        r.choices.forEach((ch) => {
+          if (ch.targetNumber) {
+            targetScriptOrgaMap.set(canonicalScriptMatchKey(ch.targetNumber), matched!);
+          }
+        });
+        return {
+          ...r,
+          organizationName: orgName || r.organizationName,
+          brandName: orgName || r.brandName,
+          orgaCode: orgCode || r.orgaCode,
+          srcRouteNumber:
+            matched.srcRouteNumber || (orgCode ? `${orgCode}xxxx` : r.srcRouteNumber),
+        };
+      }
+
+      // If previous organizationName was disabled/removed by user in wizard, clear it
+      if (r.organizationName || r.brandName) {
+        const stillEnabled = activeRules.some(
+          (ar) =>
+            canonicalScriptMatchKey(ar.organizationName) ===
+            canonicalScriptMatchKey(r.organizationName || r.brandName || '')
+        );
+        if (!stillEnabled) {
+          return {
+            ...r,
+            organizationName: undefined,
+            brandName: undefined,
+            orgaCode: undefined,
+          };
+        }
+      }
+
+      return r;
+    });
+
+    return {
+      ...mod,
+      rules: updatedRules,
+    };
+  });
+
+  return firstPass.map((mod) => {
+    const mKey = canonicalScriptMatchKey(mod.scriptNumber);
+    const inherited =
+      targetScriptOrgaMap.get(mKey) ||
+      (mod.cdnAlias ? targetScriptOrgaMap.get(canonicalScriptMatchKey(mod.cdnAlias)) : undefined) ||
+      matchTextToOrga(mod.scriptNumber) ||
+      matchTextToOrga(mod.scriptName);
+
+    if (inherited) {
+      return {
+        ...mod,
+        entryOrganizationName: inherited.organizationName.trim(),
+      };
+    }
+    return mod;
+  });
 }
 
 function mergeOrgaContext(
@@ -1965,10 +2189,18 @@ function parseAaccScriptBlocks(
     };
 
     const registerOrga = (ctx: AaccOrgaContext) => {
-      const key = canonicalScriptMatchKey(ctx.orgaCode || ctx.organizationName || ctx.brandName || '');
-      if (!key) return;
-      const prev = orgaRegistry.get(key);
-      orgaRegistry.set(key, mergeOrgaContext(prev, ctx));
+      const codeKey = ctx.orgaCode ? canonicalScriptMatchKey(ctx.orgaCode) : '';
+      const nameKey =
+        ctx.organizationName || ctx.brandName
+          ? canonicalScriptMatchKey(ctx.organizationName || ctx.brandName || '')
+          : '';
+      if (!codeKey && !nameKey) return;
+      const existing =
+        (codeKey ? orgaRegistry.get(codeKey) : undefined) ||
+        (nameKey ? orgaRegistry.get(nameKey) : undefined);
+      const merged = mergeOrgaContext(existing, ctx);
+      if (codeKey) orgaRegistry.set(codeKey, merged);
+      if (nameKey) orgaRegistry.set(nameKey, merged);
     };
 
     const extractCcmaIntrinsicsFromText = (rawTextLine: string): string[] => {
@@ -2103,9 +2335,32 @@ function parseAaccScriptBlocks(
     ): AaccOrgaContext => {
       let merged = mergeOrgaContext(getStackOrga(), localCtx);
 
-      // 1. Check VALUE numbers for masked prefix patterns
+      // 1. Check VALUE numbers against discovered orgaRegistry prefixes (e.g. 290, 210, 6099) or masked patterns
       if (!merged.organizationName || !merged.orgaCode) {
+        const sortedReg = Array.from(orgaRegistry.values())
+          .filter((r) => Boolean(r.orgaCode))
+          .sort((a, b) => (b.orgaCode?.length || 0) - (a.orgaCode?.length || 0));
+
         for (const v of valueNums) {
+          const digits = v.replace(/\D+/g, '');
+          let matchedReg: AaccOrgaContext | undefined;
+          for (const regItem of sortedReg) {
+            const code = (regItem.orgaCode || '').replace(/\D+/g, '');
+            if (!code) continue;
+            if (digits.startsWith(code)) {
+              matchedReg = regItem;
+              break;
+            }
+            const idx = digits.indexOf(code);
+            if (idx >= 3 && idx <= 6 && digits.length - idx >= code.length + 2) {
+              matchedReg = regItem;
+              break;
+            }
+          }
+          if (matchedReg) {
+            merged = mergeOrgaContext(matchedReg, merged);
+            break;
+          }
           const fromVal = detectOrgaFromText(v);
           if (fromVal.organizationName || fromVal.orgaCode) {
             merged = mergeOrgaContext(merged, fromVal);
@@ -2137,7 +2392,8 @@ function parseAaccScriptBlocks(
         for (const regCtx of orgaRegistry.values()) {
           if (
             regCtx.brandName &&
-            new RegExp(`\\b${regCtx.brandName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(
+            !isLikelyTeamOrDepartmentName(regCtx.brandName) &&
+            new RegExp(`(?:^|_|-)${regCtx.brandName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|_|-)`, 'i').test(
               targetScript
             )
           ) {
@@ -2147,10 +2403,10 @@ function parseAaccScriptBlocks(
         }
       }
 
-      // Ensure brandName -> organizationName fallback for known codes
-      if (!merged.organizationName && merged.brandName) {
+      // Ensure brandName -> organizationName fallback (unless it's a generic team name)
+      if (!merged.organizationName && merged.brandName && !isLikelyTeamOrDepartmentName(merged.brandName)) {
         const fromBrand = detectOrgaFromText(merged.brandName);
-        if (fromBrand.organizationName) {
+        if (fromBrand.organizationName || fromBrand.orgaCode) {
           merged = mergeOrgaContext(merged, fromBrand);
         } else {
           merged.organizationName = merged.brandName;
@@ -2167,16 +2423,18 @@ function parseAaccScriptBlocks(
         if (/^src_route_number$/i.test(a.variable)) {
           next.srcRouteNumber = a.value;
           const det = detectOrgaFromText(a.value);
-          if (det.organizationName) {
+          if (det.organizationName || det.orgaCode) {
             next = mergeOrgaContext(next, det);
           }
         } else if (/^Sys_brand$/i.test(a.variable)) {
-          next.brandName = a.value;
-          const det = detectOrgaFromText(a.value);
-          if (det.organizationName) {
-            next = mergeOrgaContext(next, det);
-          } else if (!next.organizationName) {
-            next.organizationName = a.value;
+          if (!isLikelyTeamOrDepartmentName(a.value)) {
+            next.brandName = a.value;
+            const det = detectOrgaFromText(a.value);
+            if (det.organizationName || det.orgaCode) {
+              next = mergeOrgaContext(next, det);
+            } else if (!next.organizationName) {
+              next.organizationName = a.value;
+            }
           }
         }
       }

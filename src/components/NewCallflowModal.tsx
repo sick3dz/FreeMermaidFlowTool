@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowLeft,
   ArrowRight,
+  Building2,
   CheckCircle2,
   FileText,
   FolderSearch,
@@ -10,6 +11,7 @@ import {
   ListChecks,
   Plus,
   Search,
+  Trash2,
   X,
 } from 'lucide-react';
 import {
@@ -18,9 +20,12 @@ import {
   ScriptWorkspace,
 } from '../types/mermaidStudio';
 import {
+  DiscoveredOrgaRule,
+  applyConfirmedOrgaRulesToModules,
   buildScriptWorkspace,
   canonicalScriptMatchKey,
   detectMasterScriptChecklist,
+  extractDiscoveredOrganizationsFromModules,
   isAnnouncementOrEndpointTargetName,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
@@ -78,6 +83,11 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
   const [draftTargets, setDraftTargets] = useState<DraftConfirmedTarget[]>([]);
   const [manualTargetInput, setManualTargetInput] = useState('');
 
+  // Discovered & confirmed parent Organizations (Gesellschaften / Mandanten & Vorwahl-Präfixe)
+  const [discoveredOrgas, setDiscoveredOrgas] = useState<DiscoveredOrgaRule[]>([]);
+  const [newOrgaName, setNewOrgaName] = useState('');
+  const [newOrgaPrefix, setNewOrgaPrefix] = useState('');
+
   // Assigned Folder Pool (.s directory with 600+ files)
   const [folderPool, setFolderPool] = useState<FolderScriptPool | null>(null);
   const [folderSearchQuery, setFolderSearchQuery] = useState('');
@@ -112,6 +122,9 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     setActiveMasterNumber('Main');
     setDraftTargets([]);
     setManualTargetInput('');
+    setDiscoveredOrgas([]);
+    setNewOrgaName('');
+    setNewOrgaPrefix('');
     setFolderPool(null);
     setFolderSearchQuery('');
     setFolderResolveSummary(null);
@@ -145,6 +158,8 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       setFolderResolveSummary(resolveSummary);
     }
 
+    const extractedOrgas = extractDiscoveredOrganizationsFromModules(normalizedModules);
+
     const previewChecklist = detectMasterScriptChecklist(
       normalizedModules,
       [],
@@ -175,6 +190,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     });
 
     setParsedModules(normalizedModules);
+    setDiscoveredOrgas(extractedOrgas);
     setActiveMasterNumber(primaryScriptNumber);
     setDraftTargets(targets);
     setErrorMsg(null);
@@ -329,6 +345,27 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     setManualTargetInput('');
   };
 
+  const handleAddCustomOrgaRule = () => {
+    const cleanName = newOrgaName.trim();
+    const cleanPrefix = newOrgaPrefix.trim().replace(/[^0-9]/g, '');
+    if (!cleanName && !cleanPrefix) return;
+
+    const effectiveName = cleanName || `Mandant_${cleanPrefix}`;
+    setDiscoveredOrgas((prev) => [
+      ...prev,
+      {
+        id: `orga-custom-${Date.now()}-${prev.length + 1}`,
+        organizationName: effectiveName,
+        orgaCode: cleanPrefix,
+        srcRouteNumber: cleanPrefix ? `${cleanPrefix}xxxx` : undefined,
+        matchedCount: 0,
+        enabled: true,
+      },
+    ]);
+    setNewOrgaName('');
+    setNewOrgaPrefix('');
+  };
+
   const handleConfirmAndStart = () => {
     const externalEndpoints = draftTargets
       .filter((t) => t.decision === 'external')
@@ -345,18 +382,18 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
         label: 'Im Start-Assistent ergänzt',
       }));
 
-    const workspace = buildScriptWorkspace(parsedModules, {
+    const modulesWithConfirmedOrgas = applyConfirmedOrgaRulesToModules(
+      parsedModules,
+      discoveredOrgas
+    );
+
+    const workspace = buildScriptWorkspace(modulesWithConfirmedOrgas, {
       externalEndpoints,
       ignoredChecklistTargets,
       manualLinks,
       masterScriptNumber: activeMasterNumber,
-      treatUnresolvedAsEndpoint: Boolean(folderPool) || parsedModules.length >= 2,
+      treatUnresolvedAsEndpoint: Boolean(folderPool) || modulesWithConfirmedOrgas.length >= 2,
     });
-
-    const primaryMod =
-      parsedModules.find(
-        (m) => canonicalScriptMatchKey(m.scriptNumber) === canonicalScriptMatchKey(activeMasterNumber)
-      ) || parsedModules[0];
 
     onStartNewCallflow({
       title: 'Main (Einstiegsskript)',
@@ -370,8 +407,8 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
   const requestedCount = draftTargets.filter((t) => t.decision === 'request').length;
   const presentCount = draftTargets.filter((t) => t.decision === 'present').length;
   const externalCount = draftTargets.filter((t) => t.decision === 'external').length;
-  const ignoredCount = draftTargets.filter((t) => t.decision === 'ignore').length;
   const hasRequestableTargets = draftTargets.some((t) => !t.isAlreadyPresent);
+  const activeOrgaCount = discoveredOrgas.filter((o) => o.enabled).length;
 
   return (
     <div
@@ -696,6 +733,163 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
                   {errorMsg}
                 </div>
               )}
+
+              {/* Interactive Parent Organization & Prefix Confirmation (Mandanten vs. Teams) */}
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-indigo-500/40 space-y-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="text-xs font-semibold text-indigo-200 flex items-center gap-1.5">
+                      <Building2 className="w-4 h-4 text-indigo-400 shrink-0" />
+                      <span>
+                        Erkannte Gesellschaften / Mandanten & Vorwahl-Präfixe ({activeOrgaCount}{' '}
+                        aktiv)
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Strikte Trennung zwischen <strong className="text-slate-200">übergeordneten Gesellschaften</strong>{' '}
+                      (z. B. 3 oder mehr Mandanten via <code className="font-mono text-slate-300">DNIS_Range_*</code>,{' '}
+                      <code className="font-mono text-slate-300">Sys_brand</code> & Vorwahl-Präfix) und darunterliegenden{' '}
+                      <strong className="text-slate-200">Fach-Teams / Skillsets</strong> (Service, Vertrieb, Schaden).
+                      Nichts ist im Quellcode hinterlegt – bitte hier lokal prüfen oder ergänzen:
+                    </p>
+                  </div>
+                </div>
+
+                {discoveredOrgas.length === 0 ? (
+                  <div className="px-3 py-2 rounded-lg bg-slate-900/90 border border-slate-800 text-[11px] text-slate-400">
+                    Im Skript wurden noch keine expliziten <code className="font-mono text-slate-300">Sys_brand</code> /{' '}
+                    <code className="font-mono text-slate-300">DNIS_Range</code> Vorwahl-Zuweisungen erkannt. Sie können Ihre
+                    Gesellschaften (z. B. 3 Mandanten + Vorwahl-Präfixe) unten direkt eintragen, damit alle Rufnummern
+                    automatisch zugeordnet werden.
+                  </div>
+                ) : (
+                  <div className="space-y-1.5 max-h-44 overflow-y-auto pr-0.5">
+                    {discoveredOrgas.map((orga, idx) => (
+                      <div
+                        key={orga.id}
+                        className={`px-2.5 py-2 rounded-lg border transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
+                          orga.enabled
+                            ? 'bg-slate-900/90 border-slate-800'
+                            : 'bg-slate-950/50 border-slate-800/50 opacity-60'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <input
+                            type="checkbox"
+                            checked={orga.enabled}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setDiscoveredOrgas((prev) =>
+                                prev.map((item) =>
+                                  item.id === orga.id ? { ...item, enabled: checked } : item
+                                )
+                              );
+                            }}
+                            title="Als übergeordnete Gesellschaft aktivieren"
+                            className="w-4 h-4 rounded border-slate-700 bg-slate-950 text-indigo-600 focus:ring-indigo-500 shrink-0 cursor-pointer"
+                          />
+                          <span className="text-[10px] font-mono tabular-nums text-slate-500 shrink-0">
+                            #{idx + 1}
+                          </span>
+                          <input
+                            type="text"
+                            value={orga.organizationName}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setDiscoveredOrgas((prev) =>
+                                prev.map((item) =>
+                                  item.id === orga.id ? { ...item, organizationName: val } : item
+                                )
+                              );
+                            }}
+                            placeholder="Gesellschaft / Mandant"
+                            className="min-w-0 flex-1 px-2 py-1 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded text-xs font-mono text-slate-100 focus:outline-none"
+                          />
+                          <div className="flex items-center gap-1 shrink-0">
+                            <span className="text-[10px] font-mono text-slate-400">Präfix:</span>
+                            <input
+                              type="text"
+                              value={orga.orgaCode}
+                              onChange={(e) => {
+                                const val = e.target.value.replace(/[^0-9]/g, '');
+                                setDiscoveredOrgas((prev) =>
+                                  prev.map((item) =>
+                                    item.id === orga.id ? { ...item, orgaCode: val } : item
+                                  )
+                                );
+                              }}
+                              placeholder="z.B. 100"
+                              className="w-20 px-2 py-1 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded text-xs font-mono text-indigo-300 placeholder:text-slate-600 focus:outline-none"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
+                          <span
+                            className="text-[10px] font-mono text-slate-400 truncate max-w-[180px]"
+                            title={orga.srcRouteNumber || 'Manuell beim Import ergänzt'}
+                          >
+                            {orga.matchedCount > 0
+                              ? `${orga.matchedCount} Rufnr./Zuweisungen`
+                              : orga.srcRouteNumber || 'Manuell ergänzt'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDiscoveredOrgas((prev) =>
+                                prev.filter((item) => item.id !== orga.id)
+                              )
+                            }
+                            title="Eintrag entfernen (z. B. falls Team statt Gesellschaft)"
+                            className="p-1 text-slate-500 hover:text-rose-400 hover:bg-slate-800 rounded transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Add additional Organization / Prefix (supports 3 or any number of companies) */}
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
+                  <input
+                    type="text"
+                    value={newOrgaName}
+                    onChange={(e) => setNewOrgaName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddCustomOrgaRule();
+                      }
+                    }}
+                    placeholder="Weitere Gesellschaft / Organisation (z. B. Mandant Nord)..."
+                    className="flex-1 min-w-0 px-2.5 py-1.5 bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none"
+                  />
+                  <input
+                    type="text"
+                    value={newOrgaPrefix}
+                    onChange={(e) => setNewOrgaPrefix(e.target.value.replace(/[^0-9]/g, ''))}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleAddCustomOrgaRule();
+                      }
+                    }}
+                    placeholder="Vorwahl/Präfix (z. B. 100)"
+                    className="sm:w-44 px-2.5 py-1.5 bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg text-xs font-mono text-indigo-300 placeholder:text-slate-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddCustomOrgaRule}
+                    disabled={!newOrgaName.trim() && !newOrgaPrefix.trim()}
+                    className="px-3 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/30 disabled:opacity-40 border border-indigo-500/40 text-indigo-200 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Gesellschaft / Vorwahl hinzufügen</span>
+                  </button>
+                </div>
+              </div>
 
               <p className="text-xs text-slate-400 leading-relaxed">
                 Prüfen Sie die erkannten Ziel-Skripte entlang der Callflow-Kette (bereits aus dem
