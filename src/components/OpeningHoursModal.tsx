@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import {
   Clock,
   Search,
@@ -9,7 +9,6 @@ import {
   Calendar,
   ExternalLink,
   Layers,
-  ArrowRight,
   ShieldAlert,
   FileSpreadsheet,
 } from 'lucide-react';
@@ -17,7 +16,6 @@ import { CallflowScheduleSummaryRow, ScriptWorkspace } from '../types/mermaidStu
 import {
   buildWorkspaceScheduleOverview,
   exportOpeningHoursCsv,
-  formatScriptDisplayLabel,
   canonicalScriptMatchKey,
 } from '../utils/scriptCallflowParser';
 
@@ -37,8 +35,9 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'with-hours' | 'holiday' | 'without-hours'>('all');
   const [copied, setCopied] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // Close on Escape key
+  // Close on Escape key & auto-focus search input
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -47,7 +46,13 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    const timer = setTimeout(() => {
+      searchInputRef.current?.focus();
+    }, 60);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      clearTimeout(timer);
+    };
   }, [isOpen, onClose]);
 
   // Compute schedule overview rows across all scripts
@@ -67,7 +72,7 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
     [allRows]
   );
 
-  // Filtered rows
+  // Filtered rows with robust search
   const filteredRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return allRows.filter((r) => {
@@ -76,11 +81,12 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
       if (filter === 'without-hours' && (r.hasSchedule || r.hasHoliday)) return false;
 
       if (!q) return true;
+      const cleanHours = (r.openingHours || '').toLowerCase().replace(/:\s+/g, ':');
       return (
         r.scriptNumber.toLowerCase().includes(q) ||
         r.scriptName.toLowerCase().includes(q) ||
         r.stepName.toLowerCase().includes(q) ||
-        r.openingHours.toLowerCase().includes(q) ||
+        cleanHours.includes(q) ||
         r.holidayAndSpecial.toLowerCase().includes(q) ||
         r.closedOrOverflowAction.toLowerCase().includes(q)
       );
@@ -107,7 +113,8 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
     const header = '| Skript | Name | Prio / Schritt | Öffnungszeiten (SondZeit) | Feiertag / Sonderstatus | Aktion / Überlauf |\n|---|---|---|---|---|---|';
     const lines = allRows.map((r) => {
       const escCell = (s: string) => (s || '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
-      return `| ${escCell(r.scriptNumber)} | ${escCell(r.scriptName)} | ${r.prio ? `Prio ${r.prio}: ` : ''}${escCell(r.stepName)} | ${escCell(r.openingHours)} | ${escCell(r.holidayAndSpecial)} | ${escCell(r.closedOrOverflowAction)} |`;
+      const cleanHours = (r.openingHours || '').replace(/:\s+/g, ':');
+      return `| ${escCell(r.scriptNumber)} | ${escCell(r.scriptName)} | ${r.prio ? `Prio ${r.prio}: ` : ''}${escCell(r.stepName)} | ${escCell(cleanHours)} | ${escCell(r.holidayAndSpecial)} | ${escCell(r.closedOrOverflowAction)} |`;
     });
     const md = [header, ...lines].join('\n');
     navigator.clipboard.writeText(md).then(() => {
@@ -123,16 +130,16 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="opening-hours-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/80 backdrop-blur-sm overflow-y-auto"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl flex flex-col w-full max-w-5xl max-h-[90vh] overflow-hidden">
+      <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl flex flex-col w-full max-w-5xl max-h-[80vh] my-auto overflow-hidden">
         {/* Modal Header */}
-        <div className="px-5 py-4 border-b border-slate-800 bg-slate-950/80 flex items-center justify-between gap-3">
+        <div className="px-5 py-4 border-b border-slate-800 bg-slate-950/90 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="p-2 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0">
+            <div className="p-2.5 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0">
               <Clock className="w-5 h-5" />
             </div>
             <div className="min-w-0">
@@ -143,7 +150,7 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                 >
                   Öffnungszeiten &amp; Zeitpläne (SondZeit)
                 </h2>
-                <span className="px-2 py-0.5 rounded text-xs font-mono bg-amber-500/20 text-amber-200 border border-amber-500/40">
+                <span className="px-2 py-0.5 rounded-md text-xs font-mono bg-amber-500/20 text-amber-200 border border-amber-500/40 tabular-nums">
                   {totalCount} Regeln in {workspace.modules.length} Skripten
                 </span>
               </div>
@@ -164,9 +171,9 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
         </div>
 
         {/* Quick KPI Stat Bar */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 px-5 py-3 bg-slate-950/40 border-b border-slate-800 shrink-0">
-          <div className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
-            <div className="p-1.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 px-5 py-3 bg-slate-950/50 border-b border-slate-800 shrink-0">
+          <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
+            <div className="p-1.5 rounded-lg bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
               <Layers className="w-4 h-4" />
             </div>
             <div className="min-w-0">
@@ -177,8 +184,8 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
             </div>
           </div>
 
-          <div className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
-            <div className="p-1.5 rounded-md bg-sky-500/20 text-sky-300 border border-sky-500/30">
+          <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
+            <div className="p-1.5 rounded-lg bg-sky-500/20 text-sky-300 border border-sky-500/30">
               <Clock className="w-4 h-4" />
             </div>
             <div className="min-w-0">
@@ -189,8 +196,8 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
             </div>
           </div>
 
-          <div className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
-            <div className="p-1.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30">
+          <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
+            <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30">
               <Calendar className="w-4 h-4" />
             </div>
             <div className="min-w-0">
@@ -201,8 +208,8 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
             </div>
           </div>
 
-          <div className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
-            <div className="p-1.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+          <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
+            <div className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
               <ShieldAlert className="w-4 h-4" />
             </div>
             <div className="min-w-0">
@@ -215,16 +222,16 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
         </div>
 
         {/* Toolbar: Filter Chips + Search + Export */}
-        <div className="px-5 py-3 border-b border-slate-800 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 shrink-0">
+        <div className="px-5 py-3 border-b border-slate-800 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 shrink-0 bg-slate-900">
           {/* Filter Chips */}
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
             <button
               type="button"
               onClick={() => setFilter('all')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer ${
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer tabular-nums ${
                 filter === 'all'
                   ? 'bg-indigo-600/25 border-indigo-500 text-indigo-100 font-semibold shadow-xs'
-                  : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
               }`}
             >
               Alle ({totalCount})
@@ -232,10 +239,10 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
             <button
               type="button"
               onClick={() => setFilter('with-hours')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1.5 tabular-nums ${
                 filter === 'with-hours'
                   ? 'bg-sky-600/25 border-sky-500 text-sky-100 font-semibold shadow-xs'
-                  : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
               }`}
             >
               <Clock className="w-3 h-3 text-sky-400" />
@@ -244,10 +251,10 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
             <button
               type="button"
               onClick={() => setFilter('holiday')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1.5 tabular-nums ${
                 filter === 'holiday'
                   ? 'bg-amber-600/25 border-amber-500 text-amber-100 font-semibold shadow-xs'
-                  : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
               }`}
             >
               <Calendar className="w-3 h-3 text-amber-400" />
@@ -256,10 +263,10 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
             <button
               type="button"
               onClick={() => setFilter('without-hours')}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer ${
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer tabular-nums ${
                 filter === 'without-hours'
                   ? 'bg-slate-800 border-slate-600 text-slate-100 font-semibold shadow-xs'
-                  : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
               }`}
             >
               24/7 ({withoutHoursCount})
@@ -268,22 +275,26 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
 
           {/* Search + Action Buttons */}
           <div className="flex items-center gap-2">
-            <div className="relative flex-1 md:w-64">
-              <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <div className="relative flex-1 md:w-72">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
+                ref={searchInputRef}
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Skript, Uhrzeit (08:00), Mo-Fr..."
-                aria-label="Öffnungszeiten durchsuchen"
-                className="w-full pl-8 pr-7 py-1.5 bg-slate-950 border border-slate-800 focus:border-amber-500 rounded-lg text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none font-mono"
+                placeholder="Skript, Uhrzeit (08:00), Mo-Fr, Feiertag..."
+                aria-label="Öffnungszeiten und Skripte durchsuchen"
+                className="w-full pl-9 pr-8 py-2 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none font-mono shadow-sm"
               />
               {searchQuery && (
                 <button
                   type="button"
-                  onClick={() => setSearchQuery('')}
+                  onClick={() => {
+                    setSearchQuery('');
+                    searchInputRef.current?.focus();
+                  }}
                   title="Suche leeren"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer p-0.5"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
@@ -294,7 +305,7 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
               type="button"
               onClick={handleCopyMarkdown}
               title="Tabelle als Markdown in Zwischenablage kopieren"
-              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-xl text-xs font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-sm"
             >
               {copied ? (
                 <>
@@ -313,7 +324,7 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
               type="button"
               onClick={handleDownloadCsv}
               title="Öffnungszeiten als Excel CSV exportieren"
-              className="px-2.5 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-xs"
+              className="px-3 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-sm"
             >
               <Download className="w-3.5 h-3.5" />
               <span>Excel (.csv)</span>
@@ -321,19 +332,19 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
           </div>
         </div>
 
-        {/* Content Table / Card List */}
+        {/* Content Table Container (Scrollable with internal body) */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-5">
           {filteredRows.length > 0 ? (
-            <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/60 shadow-inner">
+            <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/70 shadow-inner">
               <table className="w-full border-collapse text-left text-xs font-mono">
                 <thead>
-                  <tr className="border-b border-slate-800 bg-slate-950/90 text-slate-400 text-[11px] font-semibold select-none">
-                    <th className="py-2.5 px-3 whitespace-nowrap">Skript</th>
-                    <th className="py-2.5 px-3 whitespace-nowrap">Regel / Schritt</th>
-                    <th className="py-2.5 px-3 min-w-[220px]">Öffnungszeiten (SondZeit)</th>
-                    <th className="py-2.5 px-3 min-w-[140px]">Feiertag / Sonderstatus</th>
-                    <th className="py-2.5 px-3 min-w-[200px]">Aktion bei Schließung / Überlauf</th>
-                    <th className="py-2.5 px-3 text-right whitespace-nowrap">Aktion</th>
+                  <tr className="border-b border-slate-800 bg-slate-950/95 text-slate-400 text-[11px] font-semibold select-none sticky top-0 z-10">
+                    <th className="py-3 px-3.5 whitespace-nowrap">Skript</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap">Regel / Schritt</th>
+                    <th className="py-3 px-3.5 min-w-[240px]">Öffnungszeiten (SondZeit)</th>
+                    <th className="py-3 px-3.5 min-w-[150px]">Feiertag / Sonderstatus</th>
+                    <th className="py-3 px-3.5 min-w-[210px]">Aktion bei Schließung / Überlauf</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap">Aktion</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-850">
@@ -344,8 +355,9 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                         /^(?:main|start|master(?:script)?)$/i.test(row.scriptNumber));
 
                     const hasTimes = row.hasSchedule;
+                    const cleanHours = (row.openingHours || '').replace(/:\s+/g, ':');
                     const isSondZeit =
-                      /sondzeit/i.test(row.openingHours) ||
+                      /sondzeit/i.test(cleanHours) ||
                       /sondzeit/i.test(row.scriptName) ||
                       /sondzeit/i.test(row.scriptNumber);
 
@@ -357,10 +369,10 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                         }`}
                       >
                         {/* Script column */}
-                        <td className="py-2.5 px-3 align-top whitespace-nowrap">
+                        <td className="py-3 px-3.5 align-top whitespace-nowrap">
                           <div className="flex items-center gap-1.5">
                             <span
-                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                              className={`px-2 py-0.5 rounded-md text-[10px] font-bold tabular-nums ${
                                 isMainMod
                                   ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/40'
                                   : 'bg-slate-800 text-slate-200 border border-slate-700'
@@ -377,10 +389,10 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                         </td>
 
                         {/* Step / Prio column */}
-                        <td className="py-2.5 px-3 align-top whitespace-nowrap">
+                        <td className="py-3 px-3.5 align-top whitespace-nowrap">
                           <div className="flex items-center gap-1.5">
                             {row.prio !== undefined && (
-                              <span className="px-1 py-0.2 rounded text-[10px] bg-slate-800 text-slate-300 border border-slate-700">
+                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 border border-slate-700 tabular-nums">
                                 Prio {row.prio}
                               </span>
                             )}
@@ -390,31 +402,33 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                           </div>
                         </td>
 
-                        {/* Opening hours column */}
-                        <td className="py-2.5 px-3 align-top">
+                        {/* Opening hours column with prominent time display */}
+                        <td className="py-3 px-3.5 align-top">
                           <div className="flex items-start gap-1.5">
                             {hasTimes ? (
-                              <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-sky-500/15 text-sky-200 border border-sky-500/35 font-semibold text-[11px] shadow-xs">
+                              <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-sky-500/15 text-sky-100 border border-sky-500/40 font-bold text-xs shadow-xs">
                                 <Clock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                                <span className="tabular-nums">{row.openingHours}</span>
+                                <span className="tabular-nums font-mono text-[13px] tracking-tight text-sky-200">
+                                  {cleanHours}
+                                </span>
                                 {isSondZeit && (
-                                  <span className="px-1 py-0.2 rounded text-[9px] bg-amber-500/25 text-amber-200 border border-amber-500/35 uppercase">
+                                  <span className="px-1.5 py-0.2 rounded text-[9px] bg-amber-500/25 text-amber-200 border border-amber-500/35 uppercase font-medium">
                                     SondZeit
                                   </span>
                                 )}
                               </div>
                             ) : (
                               <span className="text-slate-400 italic font-sans text-[11px]">
-                                {row.openingHours}
+                                {cleanHours}
                               </span>
                             )}
                           </div>
                         </td>
 
                         {/* Holiday / Special status column */}
-                        <td className="py-2.5 px-3 align-top">
+                        <td className="py-3 px-3.5 align-top">
                           {row.hasHoliday ? (
-                            <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-200 border border-amber-500/35 text-[11px]">
+                            <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-500/15 text-amber-200 border border-amber-500/35 text-[11px]">
                               <Calendar className="w-3 h-3 text-amber-400 shrink-0" />
                               <span>{row.holidayAndSpecial}</span>
                             </div>
@@ -424,14 +438,14 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                         </td>
 
                         {/* Overflow / action column */}
-                        <td className="py-2.5 px-3 align-top">
-                          <div className="text-slate-300 text-[11px] font-sans break-words">
+                        <td className="py-3 px-3.5 align-top">
+                          <div className="text-slate-300 text-[11px] font-sans break-words leading-relaxed">
                             {row.closedOrOverflowAction || '—'}
                           </div>
                         </td>
 
                         {/* Action jump button */}
-                        <td className="py-2.5 px-3 align-top text-right whitespace-nowrap">
+                        <td className="py-3 px-3.5 align-top text-right whitespace-nowrap">
                           {onJumpToScript && (
                             <button
                               type="button"
@@ -440,7 +454,7 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                                 onClose();
                               }}
                               title={`Skript [${row.scriptNumber}] im Callflow-Diagramm öffnen`}
-                              className="px-2 py-1 bg-slate-800 hover:bg-indigo-600 hover:text-white text-slate-300 border border-slate-700 hover:border-indigo-500 rounded text-[11px] font-sans font-medium transition-colors inline-flex items-center gap-1 cursor-pointer"
+                              className="px-2.5 py-1.5 bg-slate-800 hover:bg-indigo-600 hover:text-white text-slate-300 border border-slate-700 hover:border-indigo-500 rounded-lg text-[11px] font-sans font-medium transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
                             >
                               <span>Im Diagramm</span>
                               <ExternalLink className="w-3 h-3" />
@@ -472,7 +486,7 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                   setSearchQuery('');
                   setFilter('all');
                 }}
-                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-medium transition-colors cursor-pointer"
               >
                 Filter zurücksetzen
               </button>
@@ -481,16 +495,16 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="px-5 py-3 border-t border-slate-800 bg-slate-950/80 flex items-center justify-between gap-3 text-xs text-slate-400 font-mono">
+        <div className="px-5 py-3 border-t border-slate-800 bg-slate-950/90 flex items-center justify-between gap-3 text-xs text-slate-400 font-mono shrink-0">
           <div>
-            Zeige <span className="text-slate-200 font-bold">{filteredRows.length}</span> von{' '}
-            <span className="text-slate-200 font-bold">{totalCount}</span> Zeitregeln
+            Zeige <span className="text-slate-200 font-bold tabular-nums">{filteredRows.length}</span> von{' '}
+            <span className="text-slate-200 font-bold tabular-nums">{totalCount}</span> Zeitregeln
           </div>
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={handleDownloadCsv}
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg font-sans font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
+              className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-sans font-medium transition-colors flex items-center gap-1.5 cursor-pointer shadow-sm"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-sky-400" />
               <span>CSV Exportieren</span>
@@ -498,7 +512,7 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-sans font-semibold transition-colors cursor-pointer"
+              className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-sans font-semibold transition-colors cursor-pointer shadow-sm"
             >
               Schließen
             </button>

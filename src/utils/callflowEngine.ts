@@ -6074,13 +6074,100 @@ export function generateInteractiveCallflowHtml(
       });
     });
 
+    function renderSchedulesModalContent() {
+      const body = document.getElementById('modal-sched-body');
+      const subtitle = document.getElementById('schedules-modal-subtitle');
+      if (!body) return;
+      const an = PAYLOAD.analysis;
+      const rows = an ? (an.scheduleRows || []) : [];
+      if (subtitle) subtitle.textContent = rows.length + ' Zeitregeln im Callflow';
+
+      const q = (document.getElementById('modal-sched-search') ? document.getElementById('modal-sched-search').value : '').trim().toLowerCase();
+      const filtered = q
+        ? rows.filter(r => (r.scriptNumber + ' ' + r.scriptName + ' ' + r.stepName + ' ' + (r.openingHours || '').replace(/:\s+/g, ':') + ' ' + r.holidayAndSpecial + ' ' + r.closedOrOverflowAction).toLowerCase().includes(q))
+        : rows;
+
+      if (!rows.length) {
+        body.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;font-size:12px;">Keine Öffnungszeiten oder Zeitpläne im Callflow gefunden.</div>';
+        return;
+      }
+
+      body.innerHTML =
+        '<div class="an-table-wrap">' +
+          '<table class="an-table"><thead><tr><th>Skript</th><th>Regel / Schritt</th><th>Öffnungszeiten (SondZeit)</th><th>Feiertag</th><th>Überlauf / Aktion</th><th>Aktion</th></tr></thead><tbody>' +
+          (filtered.length ? filtered.map((r, i) =>
+            '<tr>' +
+              '<td><strong>[' + esc(r.scriptNumber) + ']</strong> ' + esc(r.scriptName) + '</td>' +
+              '<td>' + (r.prio ? 'Prio ' + r.prio + ' · ' : '') + esc(r.stepName) + '</td>' +
+              '<td><span style="font-family:monospace;font-weight:bold;color:var(--accent-text);font-size:12px;">' + esc((r.openingHours || '').replace(/:\s+/g, ':')) + '</span></td>' +
+              '<td>' + (r.hasHoliday ? esc(r.holidayAndSpecial) : '—') + '</td>' +
+              '<td>' + esc(r.closedOrOverflowAction || '—') + '</td>' +
+              '<td style="text-align:right;"><button type="button" class="sched-jump-btn" data-snum="' + esc(r.scriptNumber) + '" style="padding:3px 8px;font-size:10.5px;background:var(--bg-input);border:1px solid var(--border);color:var(--text-main);border-radius:4px;cursor:pointer;">Im Diagramm</button></td>' +
+            '</tr>'
+          ).join('') : '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px;">Keine Treffer für „' + q + '“</td></tr>') +
+          '</tbody></table>' +
+        '</div>';
+
+      body.querySelectorAll('.sched-jump-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const snum = btn.getAttribute('data-snum');
+          const viewKey = 'script:' + snum;
+          if (viewsByKey.has(viewKey)) {
+            switchView(viewKey);
+            const overlay = document.getElementById('schedules-modal-overlay');
+            if (overlay) overlay.style.display = 'none';
+          }
+        });
+      });
+    }
+
     const btnOpenSchedules = document.getElementById('btn-open-schedules');
-    if (btnOpenSchedules) {
+    const schedulesOverlay = document.getElementById('schedules-modal-overlay');
+    const btnCloseSchedulesModal = document.getElementById('btn-close-schedules-modal');
+    const modalSchedSearch = document.getElementById('modal-sched-search');
+    const btnModalCsv = document.getElementById('btn-modal-csv');
+
+    if (btnOpenSchedules && schedulesOverlay) {
       btnOpenSchedules.addEventListener('click', () => {
-        switchAsideTab('analysis');
-        activeAnalysisSubtab = 'schedules';
-        document.querySelectorAll('#an-subtabs .an-subtab').forEach(b => b.classList.toggle('active', b.getAttribute('data-subtab') === 'schedules'));
-        renderAnalysisTab();
+        schedulesOverlay.style.display = 'flex';
+        if (modalSchedSearch) modalSchedSearch.value = '';
+        renderSchedulesModalContent();
+        if (modalSchedSearch) setTimeout(() => modalSchedSearch.focus(), 50);
+      });
+    }
+
+    if (btnCloseSchedulesModal && schedulesOverlay) {
+      btnCloseSchedulesModal.addEventListener('click', () => {
+        schedulesOverlay.style.display = 'none';
+      });
+    }
+
+    if (schedulesOverlay) {
+      schedulesOverlay.addEventListener('click', (e) => {
+        if (e.target === schedulesOverlay) {
+          schedulesOverlay.style.display = 'none';
+        }
+      });
+    }
+
+    if (modalSchedSearch) {
+      modalSchedSearch.addEventListener('input', () => {
+        renderSchedulesModalContent();
+      });
+    }
+
+    if (btnModalCsv) {
+      btnModalCsv.addEventListener('click', () => {
+        const an = PAYLOAD.analysis;
+        const rows = an ? (an.scheduleRows || []) : [];
+        downloadUtf8Csv(
+          'callflow-oeffnungszeiten.csv',
+          ['Skript-Nr.', 'Skript-Name', 'Prio', 'Schritt / Regel', 'Öffnungszeiten', 'Feiertag / Sonderzeit', 'Aktion / Überlauf / Ziel', 'Status'],
+          rows.map(r => [
+            r.scriptNumber, r.scriptName, r.prio ?? '—', r.stepName, r.openingHours, r.holidayAndSpecial, r.closedOrOverflowAction,
+            r.hasSchedule && r.hasHoliday ? 'Öffnungszeiten + Feiertag' : r.hasSchedule ? 'Öffnungszeiten hinterlegt' : r.hasHoliday ? 'Feiertag / Sonderzeit' : 'Ohne Zeitangabe (24/7)'
+          ])
+        );
       });
     }
 
@@ -6350,6 +6437,27 @@ export function generateInteractiveCallflowHtml(
 
     runInitialPreloadAndBoot();
   </script>
+
+  <!-- Opening Hours Modal Overlay -->
+  <div id="schedules-modal-overlay" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.8);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:20px;">
+    <div style="background:var(--bg-card);border:1px solid var(--border-strong);border-radius:12px;width:100%;max-width:960px;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 25px 50px rgba(0,0,0,0.5);overflow:hidden;">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);background:var(--bg-header);display:flex;align-items:center;justify-content:space-between;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="padding:8px;background:var(--amber-bg);color:var(--amber-text);border-radius:8px;font-weight:bold;">🕒</div>
+          <div>
+            <h2 style="margin:0;font-size:15px;color:var(--text-main);">Öffnungszeiten &amp; Zeitpläne (SondZeit)</h2>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px;" id="schedules-modal-subtitle">Übersicht aller Zeitregeln</div>
+          </div>
+        </div>
+        <button type="button" id="btn-close-schedules-modal" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:4px 8px;" title="Schließen">✕</button>
+      </div>
+      <div style="padding:12px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;background:var(--bg-input);">
+        <input type="text" id="modal-sched-search" placeholder="Skript, Uhrzeit (08:00), Mo-Fr suchen..." style="flex:1;background:var(--bg-card);border:1px solid var(--border);color:var(--text-main);padding:6px 10px;border-radius:6px;font-size:11.5px;font-family:inherit;outline:none;" />
+        <button type="button" id="btn-modal-csv" style="padding:6px 12px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;">CSV Exportieren</button>
+      </div>
+      <div id="modal-sched-body" style="flex:1;overflow-y:auto;padding:16px 20px;"></div>
+    </div>
+  </div>
 </body>
 </html>`;
 }
