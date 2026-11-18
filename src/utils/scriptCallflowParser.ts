@@ -4047,7 +4047,11 @@ export function detectWorkspaceIssues(
       if (hasManualRuleLink) return;
 
       const hasExplicitRoute = Boolean(
-        rule.targetNumber || rule.queueTarget || rule.choices.length > 0
+        rule.targetNumber ||
+          rule.queueTarget ||
+          rule.announcement ||
+          rule.isDisconnect ||
+          rule.choices.length > 0
       );
       const isDeactivatedOverflow =
         /\(deaktiviert\s*=\s*0\)/i.test(rule.stepName) && !rule.targetNumber && !rule.queueTarget;
