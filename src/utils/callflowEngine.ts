@@ -3664,6 +3664,41 @@ export function generateInteractiveCallflowHtml(
       padding-right: 6px;
       border-right: 1px solid var(--border-strong);
     }
+    .view-search-box {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 2px 6px;
+      height: 26px;
+      box-sizing: border-box;
+    }
+    .view-search-box:focus-within {
+      border-color: var(--accent);
+    }
+    .view-search-box input {
+      border: none;
+      background: transparent;
+      color: var(--text-main);
+      font-size: 11px;
+      font-family: inherit;
+      outline: none;
+      width: 110px;
+    }
+    .view-search-box button {
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 10px;
+      padding: 0 2px;
+      line-height: 1;
+    }
+    .view-search-box button:hover {
+      color: var(--text-main);
+    }
     .edge-detail-box {
       border-color: var(--amber-border);
       background: var(--bg-card);
@@ -3798,7 +3833,13 @@ export function generateInteractiveCallflowHtml(
     <div class="brand">${safeTitle} · Interaktiver Callflow</div>
     <div class="controls">
       <div class="view-bar" id="view-bar">
+        <div class="view-search-box" id="view-search-box" title="Skripte nach Nummer oder Name durchsuchen">
+          <span style="font-size:11px;opacity:0.6;user-select:none;">🔍</span>
+          <input type="text" id="view-filter-input" placeholder="Skript suchen..." aria-label="Skripte durchsuchen" />
+          <button type="button" id="btn-clear-view-filter" style="display:none;" title="Suche leeren">✕</button>
+        </div>
         <select id="view-select" title="Zwischen Ebene 1 (Master-Gesamtkarte) und Ebene 2 (Einzel-Skripte inkl. Main) wechseln"></select>
+        <button type="button" id="btn-open-schedules" title="Alle Öffnungszeiten & SondZeit-Pläne in der Analyse-Seitenleiste anzeigen" style="padding:2px 7px;font-size:11px;font-weight:600;border-radius:4px;border:1px solid var(--amber-border);background:var(--amber-bg);color:var(--amber-text);cursor:pointer;display:inline-flex;align-items:center;gap:4px;">🕒 Öffnungszeiten</button>
         <button id="btn-master-back" style="display:none;" title="Zurück zur Master-Gesamtkarte (Ebene 1)">← Master-Karte</button>
       </div>
       <div class="seg-group" id="pathmode-group" title="Pfad-Färbung umschalten: Modus A (Semantik) vs. Modus B (Verzweigungen)">
@@ -3973,6 +4014,8 @@ export function generateInteractiveCallflowHtml(
     let nodeMap = new Map(GRAPH.nodes.map(n => [n.id, n]));
 
     const viewSelectEl = document.getElementById('view-select');
+    const viewFilterInput = document.getElementById('view-filter-input');
+    const clearViewFilterBtn = document.getElementById('btn-clear-view-filter');
     const masterBackBtn = document.getElementById('btn-master-back');
     const selectEl = document.getElementById('node-select');
     const searchEl = document.getElementById('node-search');
@@ -4379,16 +4422,54 @@ export function generateInteractiveCallflowHtml(
       ).join('');
     }
 
-    function populateViewSelect() {
+    function populateViewSelect(filterQuery) {
       if (!viewSelectEl) return;
+      const q = (filterQuery !== undefined ? filterQuery : (viewFilterInput ? viewFilterInput.value : '')).trim().toLowerCase();
       viewSelectEl.innerHTML = '';
-      PAYLOAD.views.forEach(v => {
+
+      const views = PAYLOAD.views || [];
+      const filtered = q
+        ? views.filter(v => {
+            if (v.key === 'master') {
+              return 'master'.includes(q) || 'gesamt'.includes(q) || 'karte'.includes(q) || 'ebene 1'.includes(q) || 'einstieg'.includes(q) || 'alle'.includes(q);
+            }
+            const labelLower = (v.label || '').toLowerCase();
+            const keyLower = (v.key || '').toLowerCase();
+            return labelLower.includes(q) || keyLower.includes(q);
+          })
+        : views;
+
+      if (filtered.length === 0) {
         const opt = document.createElement('option');
-        opt.value = v.key;
-        opt.textContent = v.label;
+        opt.value = '';
+        opt.textContent = 'Kein Treffer („' + q + '“)';
+        opt.disabled = true;
         viewSelectEl.appendChild(opt);
-      });
-      viewSelectEl.value = activeViewKey;
+      } else {
+        filtered.forEach(v => {
+          const opt = document.createElement('option');
+          opt.value = v.key;
+          opt.textContent = v.label;
+          viewSelectEl.appendChild(opt);
+        });
+      }
+
+      if (filtered.some(v => v.key === activeViewKey)) {
+        viewSelectEl.value = activeViewKey;
+      } else if (activeViewKey && viewsByKey.has(activeViewKey)) {
+        const activeV = viewsByKey.get(activeViewKey);
+        const opt = document.createElement('option');
+        opt.value = activeV.key;
+        opt.textContent = activeV.label + ' (Aktiv)';
+        viewSelectEl.prepend(opt);
+        viewSelectEl.value = activeViewKey;
+      } else if (filtered.length > 0) {
+        viewSelectEl.value = filtered[0].key;
+      }
+
+      if (clearViewFilterBtn) {
+        clearViewFilterBtn.style.display = q ? 'inline-block' : 'none';
+      }
       if (masterBackBtn) {
         masterBackBtn.style.display = (PAYLOAD.views.length > 1 && activeViewKey !== 'master') ? 'inline-block' : 'none';
       }
@@ -5944,6 +6025,16 @@ export function generateInteractiveCallflowHtml(
       });
     });
 
+    const btnOpenSchedules = document.getElementById('btn-open-schedules');
+    if (btnOpenSchedules) {
+      btnOpenSchedules.addEventListener('click', () => {
+        switchAsideTab('analysis');
+        activeAnalysisSubtab = 'schedules';
+        document.querySelectorAll('#an-subtabs .an-subtab').forEach(b => b.classList.toggle('active', b.getAttribute('data-subtab') === 'schedules'));
+        renderAnalysisTab();
+      });
+    }
+
     document.getElementById('btn-clear-edge').addEventListener('click', () => {
       activeEdge = null;
       applyCombinedCanvasState(false);
@@ -5970,6 +6061,33 @@ export function generateInteractiveCallflowHtml(
       renderNodeTypeFilters();
       applyCombinedCanvasState(false);
     });
+
+    if (viewFilterInput) {
+      viewFilterInput.addEventListener('input', () => {
+        populateViewSelect();
+      });
+      viewFilterInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          if (viewSelectEl && viewSelectEl.value) {
+            switchView(viewSelectEl.value);
+            viewFilterInput.blur();
+          }
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          viewFilterInput.value = '';
+          populateViewSelect();
+          viewFilterInput.blur();
+        }
+      });
+    }
+    if (clearViewFilterBtn) {
+      clearViewFilterBtn.addEventListener('click', () => {
+        if (viewFilterInput) viewFilterInput.value = '';
+        populateViewSelect();
+        if (viewFilterInput) viewFilterInput.focus();
+      });
+    }
 
     if (viewSelectEl) {
       viewSelectEl.addEventListener('change', e => switchView(e.target.value));

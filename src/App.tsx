@@ -5,6 +5,7 @@ import {
   ArrowRight,
   Check,
   CheckCircle2,
+  Clock,
   Code2,
   Copy,
   Download,
@@ -151,12 +152,14 @@ import {
 } from './utils/callflowFileImporter';
 import { ThemeConfigurator } from './components/ThemeConfigurator';
 import { CallflowInspector } from './components/CallflowInspector';
+import { SearchableScriptDropdown } from './components/SearchableScriptDropdown';
 import { TemplateGalleryModal } from './components/TemplateGalleryModal';
 import { ExportModal } from './components/ExportModal';
 import { MultiScriptModal } from './components/MultiScriptModal';
 import { NewCallflowModal } from './components/NewCallflowModal';
 import { NodeInlineEditorModal } from './components/NodeInlineEditorModal';
 import { OfflineDownloadModal } from './components/OfflineDownloadModal';
+import { OpeningHoursModal } from './components/OpeningHoursModal';
 import {
   readStudioStorage,
   STUDIO_STORAGE_KEYS,
@@ -404,6 +407,7 @@ export default function App() {
   } | null>(null);
   const [isNewCallflowModalOpen, setIsNewCallflowModalOpen] = useState<boolean>(false);
   const [isMultiScriptModalOpen, setIsMultiScriptModalOpen] = useState<boolean>(false);
+  const [isOpeningHoursModalOpen, setIsOpeningHoursModalOpen] = useState<boolean>(false);
   const [multiScriptPrefillNumber, setMultiScriptPrefillNumber] = useState<string | null>(null);
   const [isDraggingCanvasFile, setIsDraggingCanvasFile] = useState<boolean>(false);
   const [canvasFileDropNotice, setCanvasFileDropNotice] = useState<{
@@ -4907,38 +4911,35 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
-                <select
-                  aria-label="Skript-Ansicht direkt umschalten"
-                  value={
-                    callflowViewLevel.level === 'master'
-                      ? 'master'
-                      : `detail:${callflowViewLevel.scriptNumber}`
-                  }
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val === 'master') {
-                      handleSwitchCallflowViewLevel({ level: 'master' });
-                    } else if (val.startsWith('detail:')) {
-                      handleSwitchCallflowViewLevel({
-                        level: 'detail',
-                        scriptNumber: val.slice('detail:'.length),
-                      });
-                    }
-                  }}
-                  className="bg-slate-900 border border-slate-800 rounded-md px-2 py-1 text-[11px] font-mono text-slate-200 focus:outline-none focus:border-indigo-500 max-w-[230px] cursor-pointer"
+                <SearchableScriptDropdown
+                  viewLevel={callflowViewLevel}
+                  modules={scriptWorkspace.modules}
+                  onSwitchViewLevel={handleSwitchCallflowViewLevel}
+                  variant="compact"
+                  align="right"
+                />
+
+                <button
+                  type="button"
+                  onClick={() => setIsOpeningHoursModalOpen(true)}
+                  title="Alle Öffnungszeiten & SondZeit-Pläne im Callflow anzeigen"
+                  className="px-2 py-1 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 hover:border-amber-500/60 text-amber-200 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer shadow-xs"
                 >
-                  <option value="master">Ebene 1: Master-Gesamtkarte</option>
-                  {scriptWorkspace.modules.map((mod) => {
-                    const isMainMod =
-                      canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
-                      (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(mod.scriptNumber));
-                    return (
-                      <option key={mod.scriptNumber} value={`detail:${mod.scriptNumber}`}>
-                        {isMainMod ? 'Ebene 2: Main (Einstiegsskript)' : `Ebene 2: ${formatScriptDisplayLabel(mod)}`}
-                      </option>
-                    );
-                  })}
-                </select>
+                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Öffnungszeiten</span>
+                  {(() => {
+                    const count = (scriptWorkspace.modules || []).reduce((acc, m) => {
+                      const hasHours =
+                        m.rules.some((r) => Boolean(r.schedule)) || /sondzeit/i.test(m.scriptName);
+                      return acc + (hasHours ? 1 : 0);
+                    }, 0);
+                    return count > 0 ? (
+                      <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-amber-500/30 text-amber-100 font-mono font-bold tabular-nums">
+                        {count}
+                      </span>
+                    ) : null;
+                  })()}
+                </button>
 
                 <button
                   type="button"
@@ -6481,6 +6482,15 @@ export default function App() {
           handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber }, ws)
         }
         prefillScriptNumber={multiScriptPrefillNumber}
+      />
+
+      <OpeningHoursModal
+        isOpen={isOpeningHoursModalOpen}
+        onClose={() => setIsOpeningHoursModalOpen(false)}
+        workspace={scriptWorkspace}
+        onJumpToScript={(scriptNumber) => {
+          handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber });
+        }}
       />
 
       <NewCallflowModal

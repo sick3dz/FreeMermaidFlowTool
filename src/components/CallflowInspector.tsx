@@ -64,6 +64,7 @@ import {
   FolderScriptFileEntry,
   FolderScriptPool,
 } from '../utils/callflowFileImporter';
+import { SearchableScriptDropdown } from './SearchableScriptDropdown';
 
 interface CallflowInspectorProps {
   graph: CallflowGraph;
@@ -1101,41 +1102,13 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
 
           {scriptWorkspace.modules.length > 0 && (
             <div className="space-y-2">
-              <select
-                aria-label="Ansichtsebene oder Teil-Skript wählen"
-                value={
-                  viewLevel.level === 'master'
-                    ? 'master'
-                    : `detail:${viewLevel.scriptNumber}`
-                }
-                onChange={(e) => {
-                  const val = e.target.value;
-                  if (val === 'master') {
-                    onSwitchViewLevel({ level: 'master' });
-                  } else if (val.startsWith('detail:')) {
-                    onSwitchViewLevel({
-                      level: 'detail',
-                      scriptNumber: val.slice('detail:'.length),
-                    });
-                  }
-                }}
-                className="w-full px-2.5 py-1.5 text-xs bg-slate-900 border border-slate-700 rounded-lg text-slate-100 font-mono focus:outline-none focus:border-indigo-500 cursor-pointer"
-              >
-                <option value="master">
-                  Ebene 1: Master-Gesamtkarte ({scriptWorkspace.modules.length} Skripte)
-                </option>
-                {scriptWorkspace.modules.map((mod) => {
-                  const isMainMod =
-                    canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
-                    (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(mod.scriptNumber));
-                  return (
-                    <option key={mod.scriptNumber} value={`detail:${mod.scriptNumber}`}>
-                      Ebene 2: {isMainMod ? 'Main (Einstiegsskript)' : formatScriptDisplayLabel(mod)}{' '}
-                      ({mod.rules.length} Regeln)
-                    </option>
-                  );
-                })}
-              </select>
+              <SearchableScriptDropdown
+                viewLevel={viewLevel}
+                modules={scriptWorkspace.modules}
+                onSwitchViewLevel={onSwitchViewLevel}
+                variant="full"
+                align="left"
+              />
 
               {viewLevel.level === 'detail' && (
                 <button
