@@ -5938,10 +5938,13 @@ export function generateInteractiveCallflowHtml(
             const el = document.createElement('div');
             el.className = 'an-item';
             el.innerHTML = '<div class="row-between"><span class="an-item-title">' + esc(s.name) + '</span><span class="an-tag">' + esc(s.role) + ' · ' + s.usages.length + 'x</span></div>';
-            s.usages.slice(0, 4).forEach(u => {
+            s.usages.slice(0, 6).forEach(u => {
               const btn = document.createElement('button');
               btn.className = 'node-chip';
-              btn.innerHTML = '<span>' + esc(u.scriptNumber + ' · ' + (u.stepName || u.scriptName)) + '</span><span class="badge">Zeigen →</span>';
+              let subtitle = '[' + u.scriptNumber + '] ' + u.scriptName;
+              if (u.stepName) subtitle += ' · ' + u.stepName;
+              if (u.prio !== undefined) subtitle += ' (Prio ' + u.prio + ')';
+              btn.innerHTML = '<span>' + esc(subtitle) + '</span><span class="badge">Zeigen →</span>';
               btn.onclick = () => jumpToScriptOrNode(u.scriptNumber, s.name);
               el.appendChild(btn);
             });

@@ -1762,17 +1762,34 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                                 : 'Queue-Regel'}
                             </span>
                           </div>
-                          <div className="flex flex-wrap gap-1 pt-0.5">
+                          <div className="space-y-1.5 pt-1">
                             {sk.usages.map((u, idx) => (
-                              <button
+                              <div
                                 key={`${u.scriptNumber}-${idx}`}
-                                type="button"
                                 onClick={() => jumpToScriptInInspector(u.scriptNumber, true)}
-                                className="px-2 py-0.5 rounded bg-slate-950 hover:bg-indigo-950/60 border border-slate-800 hover:border-indigo-500/40 text-[11px] font-mono text-slate-200 transition-colors cursor-pointer"
+                                className="p-2 rounded bg-slate-950/80 hover:bg-indigo-950/40 border border-slate-800 hover:border-indigo-500/40 transition-colors cursor-pointer text-xs space-y-0.5"
                               >
-                                [{u.scriptNumber}]
-                                {u.prio !== undefined ? ` Prio ${u.prio}` : ''}
-                              </button>
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="font-mono font-semibold text-indigo-300 truncate">
+                                    [{u.scriptNumber}] {u.scriptName}
+                                  </span>
+                                  {u.prio !== undefined && (
+                                    <span className="px-1.5 py-0.5 bg-slate-800 rounded text-[10px] font-mono text-slate-300 shrink-0">
+                                      Prio {u.prio}
+                                    </span>
+                                  )}
+                                </div>
+                                {u.stepName && (
+                                  <div className="text-[11px] text-slate-300 font-medium truncate">
+                                    Schritt: {u.stepName}
+                                  </div>
+                                )}
+                                {u.context && (
+                                  <div className="text-[10px] text-slate-400 font-mono truncate">
+                                    Bedingung / Zeit: {u.context}
+                                  </div>
+                                )}
+                              </div>
                             ))}
                           </div>
                         </div>
