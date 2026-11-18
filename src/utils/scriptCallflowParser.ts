@@ -4051,7 +4051,9 @@ export function detectWorkspaceIssues(
           rule.queueTarget ||
           rule.announcement ||
           rule.isDisconnect ||
-          rule.choices.length > 0
+          rule.choices.length > 0 ||
+          /\bassign\b/i.test(rule.rawLine) ||
+          /\b(sys_team_skillset|sys_ueberlauf_skillset|sys_musik|skillset|queue|warteschlange)\b/i.test(`${rule.stepName} ${rule.rawLine}`)
       );
       const isDeactivatedOverflow =
         /\(deaktiviert\s*=\s*0\)/i.test(rule.stepName) && !rule.targetNumber && !rule.queueTarget;
@@ -4059,10 +4061,10 @@ export function detectWorkspaceIssues(
         `${rule.stepName} ${rule.rawLine}`
       );
       const isTerminalOrInitLabel =
-        /^(?:init\b|ende\b|end\b|abwurf|auflegen|mailbox|ansage|begrüßung|begruessung|willkommen|musik|start)/i.test(
+        /^(?:init\b|ende\b|end\b|abwurf|auflegen|mailbox|ansage|begrüßung|begruessung|willkommen|musik|start|call-men[uü]|men[uü]|menue|auswahl|menu)/i.test(
           rule.stepName.trim()
         ) ||
-        /\b(?:abwurf|auflegen|mailbox|hangup|disconnect)\b/i.test(rule.stepName);
+        /\b(?:abwurf|auflegen|mailbox|hangup|disconnect|call-men[uü]|men[uü]|menue|auswahl|menu)\b/i.test(rule.stepName);
 
       const isOverflowRule =
         /\b(?:überlauf|overflow)\b/i.test(rule.stepName) ||
@@ -4079,9 +4081,10 @@ export function detectWorkspaceIssues(
         (/\?/.test(rule.stepName) || /\b(?:wenn|falls|entscheidung|verzweigung)\b/i.test(rule.stepName)) &&
         !hasExplicitRoute &&
         !isOverflowRule &&
+        !isTerminalOrInitLabel &&
         idx === sorted.length - 1;
 
-      if (isDeactivatedOverflow || hasExplicitTodoMarker || isVisioLastUnclear || isUnclearBranch) {
+      if (hasExplicitTodoMarker || isVisioLastUnclear || isUnclearBranch) {
         const id = `unclear:${modKey}:${rule.id}`;
         const rec = resolvedMap[id] || resolvedMap[`unclear:${mod.scriptNumber}:${rule.id}`];
         issues.push({
@@ -5586,7 +5589,41 @@ export function buildScriptDetailMermaid(
       );
     }
 
-    if (rule.targetNumber) {
+    let targetHandledBySubNode = false;
+    if (rule.schedule) {
+      const resolvedSched = resolveScheduleWithSondZeit(rule.schedule, mod, workspace).displayText;
+      const schedNodeId = `SCHED_${modSuffix}_${idx}`;
+      const schedLabel = `🕒 Öffnungszeiten: ${resolvedSched}`;
+      lines.push(`        ${schedNodeId}(["${sanitizeMermaidText(schedLabel)}"])`);
+      lines.push(`        ${stepId} -->${sanitizeMermaidEdgeLabel(`Zeitbedingung`)} ${schedNodeId}`);
+      if (rule.targetNumber) {
+        targetHandledBySubNode = true;
+        if (canonicalScriptMatchKey(rule.targetNumber) === modKey) {
+          lines.push(`        ${schedNodeId} -->${sanitizeMermaidEdgeLabel(`↻ Rücksprung`)} ${entryId}`);
+        } else {
+          const jumpId = registerExternalJump(rule.targetNumber);
+          lines.push(`        ${schedNodeId} -->${sanitizeMermaidEdgeLabel(`Ziel`)} ${jumpId}`);
+        }
+      }
+    }
+
+    if (rule.holiday) {
+      const holidayNodeId = `HOLIDAY_${modSuffix}_${idx}`;
+      const holidayLabel = `📅 Feiertag: ${rule.holiday}`;
+      lines.push(`        ${holidayNodeId}(["${sanitizeMermaidText(holidayLabel)}"])`);
+      lines.push(`        ${stepId} -->${sanitizeMermaidEdgeLabel(`Feiertag`)} ${holidayNodeId}`);
+      if (rule.targetNumber) {
+        targetHandledBySubNode = true;
+        if (canonicalScriptMatchKey(rule.targetNumber) === modKey) {
+          lines.push(`        ${holidayNodeId} -->${sanitizeMermaidEdgeLabel(`↻ Rücksprung`)} ${entryId}`);
+        } else {
+          const jumpId = registerExternalJump(rule.targetNumber);
+          lines.push(`        ${holidayNodeId} -->${sanitizeMermaidEdgeLabel(`Ziel`)} ${jumpId}`);
+        }
+      }
+    }
+
+    if (rule.targetNumber && !targetHandledBySubNode) {
       if (canonicalScriptMatchKey(rule.targetNumber) === modKey) {
         lines.push(`        ${stepId} -.->${sanitizeMermaidEdgeLabel(`↻ Schleife ${safeModRef}`)} ${entryId}`);
       } else {
@@ -5598,18 +5635,22 @@ export function buildScriptDetailMermaid(
       }
     }
 
-    rule.choices.forEach((ch) => {
+    rule.choices.forEach((ch, cIdx) => {
       const isNamed = /^(?:Feiertag|Zeitplan|Bedingung|Sprung)$/i.test(ch.choice);
       const baseChoiceText = isNamed ? ch.choice : `Taste ${ch.choice}`;
+      const choiceNodeId = `CHOICE_${modSuffix}_${idx}_${cIdx}`;
       const choiceLabel = ch.label
-        ? `${baseChoiceText}: ${ch.label}`
-        : baseChoiceText;
+        ? `DTMF ${ch.choice}: ${ch.label}`
+        : `DTMF ${ch.choice}`;
+
+      lines.push(`        ${choiceNodeId}(["${sanitizeMermaidText(choiceLabel)}"])`);
+      lines.push(`        ${stepId} -->${sanitizeMermaidEdgeLabel(`Wahl ${ch.choice}`)} ${choiceNodeId}`);
 
       if (canonicalScriptMatchKey(ch.targetNumber) === modKey) {
-        lines.push(`        ${stepId} -.->${sanitizeMermaidEdgeLabel(`↻ ${choiceLabel}`)} ${entryId}`);
+        lines.push(`        ${choiceNodeId} -->${sanitizeMermaidEdgeLabel(`↻ Rücksprung`)} ${entryId}`);
       } else {
         const jumpId = registerExternalJump(ch.targetNumber);
-        lines.push(`        ${stepId} -.->${sanitizeMermaidEdgeLabel(choiceLabel)} ${jumpId}`);
+        lines.push(`        ${choiceNodeId} -->${sanitizeMermaidEdgeLabel(ch.label || `Ziel`)} ${jumpId}`);
       }
     });
   });
