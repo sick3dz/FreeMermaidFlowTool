@@ -1,13 +1,11 @@
 import React, { useState } from 'react';
 import {
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Code2,
-  Cpu,
   Download,
-  FolderSearch,
-  GitBranch,
   HardDriveDownload,
-  Layers,
   Loader2,
   Lock,
   ShieldCheck,
@@ -21,6 +19,25 @@ import { SmartColorMode } from '../types/mermaidStudio';
 
 type ToolCategory = 'all' | 'engine' | 'parsers' | 'analysis' | 'exports';
 type TechStackTab = 'mermaid-pipeline' | 'aacc-compiler' | 'offline-sandbox';
+type TopTechSpecId = 'graph-engine' | 'layout-solver' | 'air-gapped' | 'runtime-protocol';
+
+interface TopTechSpecBox {
+  id: TopTechSpecId;
+  label: string;
+  primaryValue: string;
+  subValue: string;
+  valueColorClass: string;
+  activeBorderClass: string;
+  deepDiveTitle: string;
+  summary: string;
+  shortFacts: Array<{ label: string; value: string }>;
+  technicalBullets: string[];
+  codeSnippet: {
+    title: string;
+    fileHint: string;
+    code: string;
+  };
+}
 
 interface EmbeddedToolSpec {
   id: string;
@@ -31,7 +48,180 @@ interface EmbeddedToolSpec {
   techStackLine: string;
   description: string;
   capabilities: string[];
+  technicalFacts: Array<{ label: string; value: string }>;
+  deepDiveNotes: string[];
+  codeSnippet: {
+    title: string;
+    code: string;
+  };
 }
+
+interface WorkflowStepSpec {
+  id: string;
+  stepBadge: string;
+  title: string;
+  summary: string;
+  technicalFacts: Array<{ label: string; value: string }>;
+  deepDiveBullets: string[];
+  codeSnippet: {
+    title: string;
+    code: string;
+  };
+}
+
+const TOP_TECH_SPECS: TopTechSpecBox[] = [
+  {
+    id: 'graph-engine',
+    label: 'Graph-Engine',
+    primaryValue: 'Mermaid v11.12',
+    subValue: 'ESM Inline-Bundle',
+    valueColorClass: 'text-emerald-300',
+    activeBorderClass: 'border-emerald-500/70 bg-slate-900',
+    deepDiveTitle: 'Mermaid.js v11.12 ESM Graph-Engine & Dual-Layer SVG/Canvas2D Renderer',
+    summary:
+      'Vollständig lokal eingebettete Mermaid-v11-Laufzeit. Kompiliert deklarative Flowchart-Grammatik über einen Jison/Langium-Parser in einen abstrakten Syntaxbaum (AST) und erzeugt standardkonformes Vektor-SVG mit automatischer Hardware-Beschleunigung.',
+    shortFacts: [
+      { label: 'Parser-Grammatik', value: 'Jison / Langium AST (flowchart LR & TD)' },
+      { label: 'Max. Textgröße', value: '500.000 Zeichen pro Diagramm' },
+      { label: 'Max. Kanten (Edges)', value: '4.000 Verbindungen pro Graph' },
+      { label: 'Großgraphen-Schutz', value: 'Auto-Switch ab > 80 Knoten auf native <text>' },
+    ],
+    technicalBullets: [
+      'Verhindert Browser-Reflow-Lags bei großen Callflows durch automatisches Umschalten von HTML-<foreignObject> auf native SVG-<text>-Elemente.',
+      'Erzeugt im Hintergrund einen GPU-beschleunigten Canvas2D-Bitmap-Proxy (createImageBitmap), der beim Panning und Zoomen mit 60 FPS übernimmt.',
+      'Injiziert nach dem SVG-Rendering magnetische 4-Seiten-Verbindungsports sowie klickbare Drilldown-Handler für Zielskripte (JUMP_*).',
+    ],
+    codeSnippet: {
+      title: 'MERMAID V11 KONFIGURATION & AUTO-SCALING',
+      fileHint: 'src/utils/mermaidEngine.ts',
+      code: `const isLargeDiagram = nodeEstimate > 80 || lineCount > 140;
+mermaid.initialize({
+  startOnLoad: false,
+  securityLevel: 'strict',
+  maxTextSize: 500000,
+  maxEdges: 4000,
+  flowchart: {
+    htmlLabels: !isLargeDiagram, // Native SVG <text> ab 80 Knoten
+    nodeSpacing: isLargeDiagram ? 32 : 46,
+    rankSpacing: isLargeDiagram ? 44 : 62,
+    curve: 'basis',
+  },
+});
+const { svg } = await mermaid.render(renderId, effectiveCode);`,
+    },
+  },
+  {
+    id: 'layout-solver',
+    label: 'Layout-Solver',
+    primaryValue: 'Dagre & ELK.js',
+    subValue: 'Sugiyama Layered',
+    valueColorClass: 'text-indigo-300',
+    activeBorderClass: 'border-indigo-500/70 bg-slate-900',
+    deepDiveTitle: 'Mathematische Graph-Layout-Solver: Dagre & Eclipse Layout Kernel (ELK.js)',
+    summary:
+      'Zwei komplementäre Layout-Algorithmen berechnen die kreuzungsminimierte X/Y-Positionierung aller Callflow-Knoten, Subgraphen und Entscheidungsbäume direkt im Browser-Arbeitsspeicher.',
+    shortFacts: [
+      { label: 'Primär-Solver', value: 'Dagre (Sugiyama Layered Graph Drawing)' },
+      { label: 'Enterprise-Solver', value: '@mermaid-js/layout-elk (Eclipse ELK 0.9+)' },
+      { label: 'Rang-Zuweisung', value: 'Network-Simplex & Longest-Path Ranking' },
+      { label: 'Koordinaten-Solver', value: 'Brandes-Köpf (O(V + E) Vertikal-Ausrichtung)' },
+    ],
+    technicalBullets: [
+      'Phase 1 (Cycle Removal): Erkennt Rücksprünge und Schleifen über Depth-First-Search (DFS) und kehrt rückwärtsgerichtete Kanten temporär um.',
+      'Phase 2 & 3 (Layering & Crossing Minimization): Weist Knoten hierarchischen Ebenen zu und minimiert Kantenkreuzungen über die Barycenter-Heuristik.',
+      'ELK-Support: Über %%{init: {"flowchart": {"defaultRenderer": "elk"}}}%% kann jederzeit auf orthogonales Eclipse-ELK-Routing für tief verschachtelte Subgraphen gewechselt werden.',
+    ],
+    codeSnippet: {
+      title: 'SUGIYAMA / ELK.JS LAYOUT-PIPELINE',
+      fileHint: 'mermaid.registerLayoutLoaders(elkLayouts)',
+      code: `// 1. Eclipse ELK Layout-Loader lokal registrieren
+mermaid.registerLayoutLoaders(elkLayouts);
+
+// 2. Vierstufige Sugiyama-Berechnung (Dagre / ELK Layered):
+// [A] Greedy Cycle Removal   -> Azyklischer Graph (DAG)
+// [B] Network-Simplex Rank   -> Hierarchische Spalten (LR / TD)
+// [C] Barycenter Ordering    -> Minimierung von Linienkreuzungen
+// [D] Brandes-Köpf Placement -> Exakte X/Y-Knoten- & Bezier-Splines`,
+    },
+  },
+  {
+    id: 'air-gapped',
+    label: 'Externe Requests',
+    primaryValue: '0 Byte (Air-Gapped)',
+    subValue: 'Kein CDN / Kein Fetch',
+    valueColorClass: 'text-emerald-300',
+    activeBorderClass: 'border-emerald-500/70 bg-slate-900',
+    deepDiveTitle: '100 % Air-Gapped Architektur: 0 Byte Netzwerkverkehr & Zero-CDN Garantie',
+    summary:
+      'Die generierte Offline-HTML-Datei führt zur Laufzeit keinerlei HTTP/HTTPS-Requests, WebSocket-Verbindungen oder dynamische Chunk-Nachladevorgänge aus. Alle Bibliotheken sind statisch im Dokument verankert.',
+    shortFacts: [
+      { label: 'Ausgehender Traffic', value: '0 Byte (keine Fetch-/XHR-/Beacon-Calls)' },
+      { label: 'Externe Skripte/CDNs', value: 'Keine (kein unpkg, jsDelivr, Google Fonts)' },
+      { label: 'Dynamische Imports', value: 'Beim Build vollständig inline aufgelöst' },
+      { label: 'Datenschutz / Compliance', value: 'Rufnummern & .s-Skripte bleiben 100 % lokal' },
+    ],
+    technicalBullets: [
+      'Keine externen <script src="...">, <link rel="stylesheet" href="..."> oder Font-Requests – funktioniert auf komplett vom Internet getrennten Sprungservern und Terminalservern.',
+      'Alle 60+ sonst asynchron nachgeladenen Mermaid-Diagramm-Chunks werden beim Packaging per Inline-Dynamic-Imports zu einem einzigen synchronen Bundle verschmolzen.',
+      'Keinerlei Telemetrie, kein Cloud-Speicher und keine Hinterlegung von Gesellschaftsnamen oder Vorwahlen im Programmcode.',
+    ],
+    codeSnippet: {
+      title: 'BUILD-TIME SINGLE-BUNDLE INLINING (ZERO CHUNKS)',
+      fileHint: 'scripts/buildOfflineApp.mjs',
+      code: `// Vite / Rollup Build-Konfiguration für 100 % Air-Gapped HTML:
+build: {
+  cssCodeSplit: false,
+  assetsInlineLimit: 100_000_000,
+  rollupOptions: {
+    output: {
+      inlineDynamicImports: true, // Eliminiert sämtliche externen Chunk-Reloads
+      manualChunks: undefined,
+    },
+  },
+}`,
+    },
+  },
+  {
+    id: 'runtime-protocol',
+    label: 'Laufzeit-Protokoll',
+    primaryValue: 'file:// & RAM',
+    subValue: 'LocalStorage + Fallback',
+    valueColorClass: 'text-sky-300',
+    activeBorderClass: 'border-sky-500/70 bg-slate-900',
+    deepDiveTitle: 'Lokales file:// Laufzeit-Protokoll, Browser-RAM & Resiliente Persistenz',
+    summary:
+      'Entwickelt für den direkten Doppelklick-Start über das lokale Dateisystem (file://). Kombiniert Browser-LocalStorage, einen In-Memory-Fallback für restriktive Gruppenrichtlinien und eingebettete HTML-Seeds.',
+    shortFacts: [
+      { label: 'Start-Protokolle', value: 'file:// (Doppelklick) · http(s):// Intranet' },
+      { label: 'Datei-Einlesung', value: 'HTML5 FileReader (ArrayBuffer & Text im RAM)' },
+      { label: 'Zeichenkodierung', value: 'Auto-Detect UTF-8 / Windows-1252 / ISO-8859-1' },
+      { label: 'Persistenz-Kaskade', value: 'HTML-Seed → LocalStorage → In-Memory Map' },
+    ],
+    technicalBullets: [
+      'Erkennt beim Start automatisch window.__IS_OFFLINE_SINGLEFILE__ sowie window.location.protocol === "file:" und bootet ohne Umwege direkt in das Callflow-Studio.',
+      'Falls strikte Enterprise-Browser-Policies localStorage unter file:// blockieren, fängt ein transparenter In-Memory-Adapter alle Lese-/Schreibzugriffe absturzfrei ab.',
+      'Über den Self-Replicating HTML-Export kann der gesamte Arbeitsstand direkt in eine neue .html-Datei serialisiert und auf Netzlaufwerken archiviert werden.',
+    ],
+    codeSnippet: {
+      title: 'FILE:// DETEKTION & RESILIENTE STORAGE-KASKADE',
+      fileHint: 'src/utils/offlineBundleDetector.ts',
+      code: `export function isRunningAsOfflineSingleFile(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    window.__IS_OFFLINE_SINGLEFILE__ === true ||
+    window.location.protocol === 'file:' ||
+    Boolean(document.getElementById('mermaid-offline-app-script'))
+  );
+}
+
+// Persistenz-Fallback bei blockiertem file:// LocalStorage:
+function safeStorageSet(key: string, value: string): void {
+  try { window.localStorage.setItem(key, value); }
+  catch { memoryStorageFallback.set(key, value); }
+}`,
+    },
+  },
+];
 
 const EMBEDDED_TOOLS: EmbeddedToolSpec[] = [
   {
@@ -48,6 +238,25 @@ const EMBEDDED_TOOLS: EmbeddedToolSpec[] = [
       'Dual-Layer Hardware-Beschleunigung: Vektor-SVG im Ruhezustand + Canvas2D Bitmap-Proxy für 60fps Pan & Zoom',
       'Smart-Color AST/DOM-Injektion: Klassifiziert Knoten-IDs (`S_`, `QUEUE_`, `NQ_`, `CHOICE_`, `SCHED_`) in 4 semantische Farbmodi',
     ],
+    technicalFacts: [
+      { label: 'Knoten-Formen', value: 'Stadium ([...]), Hexagon {{...}}, Zylinder [(...)]' },
+      { label: 'Farbmodi', value: 'Semantic Roles · Subgraph Clusters · High-Contrast · Standard' },
+      { label: 'Interaktive Layer', value: 'Live Drag-Offsets · 4-Seiten Connect-Ports · Minimap' },
+    ],
+    deepDiveNotes: [
+      'Jeder gerenderte SVG-Knoten wird nach dem Layout-Lauf im DOM inspiziert und erhält semantische CSS-Klassen sowie Event-Listener für Pfad-Highlighting (Upstream/Downstream).',
+      'Manuelle Knotenverschiebungen (Drag & Drop auf der Zeichenfläche) werden als Transformations-Matrix im Workspace gespeichert und überleben Code-Updates.',
+    ],
+    codeSnippet: {
+      title: 'SMART-COLOR AST KLASSIFIZIERUNG & SVG POST-PROCESSING',
+      code: `// Semantische Knoten-Klassifizierung im generierten Mermaid-Code:
+classDef roleEntry fill:#065f46,stroke:#10b981,color:#ecfdf5,stroke-width:2px;
+classDef roleStep fill:#1e1b4b,stroke:#6366f1,color:#e0e7ff,stroke-width:1.5px;
+classDef roleQueue fill:#312e81,stroke:#818cf8,color:#eef2ff,stroke-width:2px;
+classDef roleSchedule fill:#451a03,stroke:#f59e0b,color:#fef3c7,stroke-width:1.5px;
+class SELF_Main roleEntry;
+class QUEUE_Service roleQueue;`,
+    },
   },
   {
     id: 'avaya-aacc-parser',
@@ -61,8 +270,29 @@ const EMBEDDED_TOOLS: EmbeddedToolSpec[] = [
     capabilities: [
       'Parst ASSIGN-Direktiven (`Sys_Team_Skillset`, `Sys_Ueberlauf_Skillset`, `Sys_Musik`, `Sys_brand`) & IF/WHERE/VALUE-Blöcke',
       'Generiert für DTMF-Call-Menüs dedizierte Stadium-Subknoten (`CHOICE_<mod>_<idx>`) mit direkten Zielkanten (`JUMP_<target>`)',
-      'Erkennt `QUEUE TO SKILLSET`, `NETWORK SKILLSET`, `GIVE RAN`, `GIVE MUSIC`, `ROUTE CALL` und `DISCONNECT`',
+      'Trennt beim Import strikt zwischen übergeordneten Gesellschaften (Mandanten/Vorwahlen) und Fach-Teams/Skillsets',
     ],
+    technicalFacts: [
+      { label: 'Kommentar-Filter', value: 'Entfernt /* ... */ Block- & // Zeilenkommentare vorab' },
+      { label: 'Ebenen-Architektur', value: 'Ebene 1: Master-Netzwerk · Ebene 2: Skript-Regelgraph' },
+      { label: 'Mandanten-Schutz', value: 'isLikelyTeamOrDepartmentName() verhindert Team-Fehlzuordnung' },
+    ],
+    deepDiveNotes: [
+      'Erkennt übergeordnete Gesellschaften dynamisch aus IF DNIS_Range_<Name>, assign <Präfix>xxxx to src_route_number und assign <Name> to Sys_brand – und fragt diese beim Import interaktiv ab.',
+      'Vererbt bestätigte Gesellschaften über VALUE-Rufnummern-Präfixe automatisch an die aufgerufenen Folgeskripte, ohne Teams (Service, Vertrieb, Schaden) mit Gesellschaften zu verwechseln.',
+    ],
+    codeSnippet: {
+      title: 'AVAYA AACC (.S) → MERMAID TRANSPILER-REGELN',
+      code: `// Eingabe (Avaya AACC .s Syntax):
+IF DNIS_Range_MandantA THEN
+  assign 100xxxx to src_route_number
+  assign Mandant_A to Sys_brand
+END IF
+VALUE 1001234 : execute Script Service_Menu
+
+// Transpilierte Mermaid-Struktur (Ebene 1 & Ebene 2):
+S_Main(["★ [Main] Einstiegsskript"]) -->|"[Mandant_A] Rufnr. 1001234"| S_Service_Menu`,
+    },
   },
   {
     id: 'visio-folder-importer',
@@ -78,6 +308,28 @@ const EMBEDDED_TOOLS: EmbeddedToolSpec[] = [
       'BFS-Auto-Resolver durchsucht zugewiesene lokale Ordner rekursiv nach fehlenden 4-stelligen Ziel-Skripten',
       'Nativ kompatibel mit `.s`, `.txt`, `.vsdx`, `.vdx`, `.csv`, `.tsv`, `.json` und `.mmd`',
     ],
+    technicalFacts: [
+      { label: 'Visio-Container', value: 'ZIP-Inflate von visio/pages/page1..N.xml & rels' },
+      { label: 'Ordner-Indexierung', value: '600+ .s-Dateien in < 150ms per Map<canonicalKey, File>' },
+      { label: 'Rekursiver Resolver', value: 'Breadth-First-Search (BFS) entlang aktiver Sprungziele' },
+    ],
+    deepDiveNotes: [
+      'Beim Zuweisen eines kompletten Skript-Ordners werden nicht blind alle 600+ Altlast-Dateien geladen, sondern ausgehend vom Startskript (Main) nur diejenigen .s-Dateien rekursiv nachgeladen, die tatsächlich in der aktiven Telefonschaltung aufgerufen werden.',
+      'Übersprungene Altlast-Dateien im Ordner werden im Import-Bericht transparent ausgewiesen.',
+    ],
+    codeSnippet: {
+      title: 'REKURSIVER BFS-ORDNER-RESOLVER & VSDX XML-EXTRACTOR',
+      code: `// Rekursive BFS-Auflösung verknüpfter .s-Folgeskripte aus Ordner-Pool:
+while (queue.length > 0) {
+  const targetRef = queue.shift()!;
+  const entry = folderPool.byCanonicalKey.get(canonicalScriptMatchKey(targetRef));
+  if (entry && !loadedKeys.has(entry.canonicalKey)) {
+    const parsed = await importCallflowFile(entry.file);
+    mergedModules.push(...parsed.modules);
+    enqueueNewJumpTargets(parsed.modules, queue, loadedKeys);
+  }
+}`,
+    },
   },
   {
     id: 'opening-hours-engine',
@@ -93,6 +345,26 @@ const EMBEDDED_TOOLS: EmbeddedToolSpec[] = [
       'Erzeugt im Detail-Diagramm dedizierte `SCHED_`- (🕒) und `HOLIDAY_`-Unterknoten (📅) mit direkten Zielverbindungen',
       'UTF-8 BOM Excel-CSV-Export (`callflow-oeffnungszeiten.csv`) sowie Markdown-Tabellen-Kopierfunktion',
     ],
+    technicalFacts: [
+      { label: 'Zeit-Normalisierung', value: '9:00..16:59 / 0800-1700 → 09:00–16:59 Uhr' },
+      { label: 'Cross-Script Lookup', value: 'Löst SondZeit_* Variablen über Master/Sub-Skripte auf' },
+      { label: 'Vollständigkeits-Check', value: 'Meldet unaufgelöste SondZeit-Variablen zur Nachfrage' },
+    ],
+    deepDiveNotes: [
+      'Wenn ein Unter-Skript auf eine Zeitvariable wie SondZeit_Team_A prüft, die erst im übergeordneten Master- oder Zeit-Skript definiert wurde, verknüpft der Solver die Zeitfenster automatisch skriptübergreifend.',
+      'Fehlt das definierende Zeitskript noch im Workspace, erzeugt die Logikprüfung einen präzisen Rückfrage-Hinweis.',
+    ],
+    codeSnippet: {
+      title: 'ZEITFENSTER- & FEIERTAGS-SUBKNOTEN IM MERMAID-GRAPH',
+      code: `// Generierte Mermaid-Unterknoten für Zeitpläne & Feiertage:
+SCHED_1040_1(["🕒 Mo-Fr 08:00–17:59 Uhr (SondZeit_Service)"])
+HOLIDAY_1040_1(["📅 Feiertagsprüfung: Bundesweit / 24.12. / 31.12."])
+
+STEP_1040_1 -->|Zeitfenster offen| SCHED_1040_1
+SCHED_1040_1 -->|Innerhalb Öffnungszeit| QUEUE_S_Service[("🎧 Queue: S_Service")]
+STEP_1040_1 -->|Feiertag aktiv| HOLIDAY_1040_1
+HOLIDAY_1040_1 -->|Ansage & Ende| JUMP_Ansage_Feiertag`,
+    },
   },
   {
     id: 'logic-health-registry',
@@ -108,6 +380,27 @@ const EMBEDDED_TOOLS: EmbeddedToolSpec[] = [
       'Skillset- & Queue-Register listet für jedes Skillset alle aufrufenden Skripte, Regelschritte, Bedingungen und Prioritäten',
       'Bidirektionale Kreuzreferenz-Matrix (Caller / Callee), Ansagen-/RAN-Inventar und Systemvariablen-Tracking',
     ],
+    technicalFacts: [
+      { label: 'Zyklus-Erkennung', value: 'DFS Recursion-Stack Pfad-Analyse (A → B → A)' },
+      { label: 'False-Positive-Schutz', value: 'Erkennt Queue, Ansage, ASSIGN & deaktiviert=0 als valide' },
+      { label: 'Register-Ansichten', value: 'Skillsets · Ansagen/RAN · Systemvariablen · Caller/Callee' },
+    ],
+    deepDiveNotes: [
+      'Prüft beim Einlesen automatisch, ob alle referenzierten Zielskripte, Skillsets und SondZeit-Definitionen vollständig vorliegen oder ob gezielte Nachfragen (offene Ziel-Skripte in der Checkliste) bestehen.',
+      'Jeder Befund enthält einen 1-Klick-Deep-Link, der direkt in das betroffene Skript und die exakte Regel springt.',
+    ],
+    codeSnippet: {
+      title: 'STATISCHE ROUTING- & VOLLSTÄNDIGKEITS-VALIDIERUNG',
+      code: `const hasExplicitValidOutcome = (rule: ScriptRule): boolean =>
+  Boolean(
+    rule.targetScriptNumber ||
+    rule.queueTarget ||
+    rule.overflowQueueTarget ||
+    (rule.assignedVariables && rule.assignedVariables.length > 0) ||
+    (rule.menuChoices && rule.menuChoices.length > 0) ||
+    /deaktiviert\\s*=\\s*0|disconnect|give\\s+ran|give\\s+music/i.test(rule.actionText)
+  );`,
+    },
   },
   {
     id: 'standalone-exports',
@@ -123,6 +416,121 @@ const EMBEDDED_TOOLS: EmbeddedToolSpec[] = [
       'Self-Replicating Studio Export: Liest `#mermaid-offline-app-script` aus dem DOM und injiziert `window.__MERMAID_OFFLINE_SEED__`',
       'Abgeflachte Routing-Matrix (`.csv`), technisches Migrations-Konzept (`.md`), XML-bereinigtes `.svg` und High-DPI `.png`',
     ],
+    technicalFacts: [
+      { label: 'DOM-Quine Prinzip', value: 'Klont eigenen JS/CSS-Code aus dem laufenden DOM' },
+      { label: 'XSS-Schutz im Seed', value: 'Maskiert </script>, <!-- und Unicode-Line-Terminatoren' },
+      { label: 'Export-Formate', value: '.html (Studio & Viewer) · .svg · .png · .csv · .md · .json' },
+    ],
+    deepDiveNotes: [
+      'Selbst wenn Sie bereits offline in einer heruntergeladenen .html-Datei arbeiten, kann diese Datei ohne Server erneut eine frische .html-Datei mit Ihrem aktuellen Callflow-Stand generieren (DOM-Quine).',
+      'Der Read-Only HTML-Viewer rendert vor dem Speichern alle Skript-SVGs im Hintergrund vor, sodass Empfänger im Fachbereich sofort durch alle Ebenen klicken können.',
+    ],
+    codeSnippet: {
+      title: 'DOM-QUINE SELF-REPLICATION & XSS-SAFE SEED INJECTION',
+      code: `// Liest das laufende Inline-Bundle aus dem DOM & bettet den aktuellen Workspace ein:
+const inlineScript = document.getElementById('mermaid-offline-app-script')?.textContent;
+const safeSeedJson = JSON.stringify(seedPayload)
+  .replace(/</g, '\\\\u003c')
+  .replace(/>/g, '\\\\u003e');
+
+const seedTag = \`<script id="mermaid-offline-seed">
+  window.__MERMAID_OFFLINE_SEED__ = \${safeSeedJson};
+</script>\`;`,
+    },
+  },
+];
+
+const WORKFLOW_STEPS: WorkflowStepSpec[] = [
+  {
+    id: 'step-01-bundle',
+    stepBadge: '01 · Bündelung',
+    title: 'Alle Engines inline im HTML',
+    summary:
+      'Der Builder verpackt React 19, Tailwind-Styles, Mermaid.js v11, ELK-Graph-Layout und JSZip direkt in <script>- und <style>-Blöcke einer einzigen Datei.',
+    technicalFacts: [
+      { label: 'Bundle-Mechanismus', value: 'Synchrones Single-File HTML5 Dokument' },
+      { label: 'Enthaltene Laufzeiten', value: 'React 19 + Mermaid v11.12 + ELK.js + Dagre + JSZip' },
+    ],
+    deepDiveBullets: [
+      'Kompiliert den gesamten TypeScript-Quellcode inklusive aller Icons (Lucide SVG) und CSS-Regeln in ein einziges, portables HTML-Artefakt.',
+      'Setzt optionale Start-Voreinstellungen (Arbeitsmodus, dunkle/helle Zeichenfläche, Smart-Color-Logik) direkt als initialen Seed.',
+    ],
+    codeSnippet: {
+      title: 'INLINE DOM-STRUKTUR DER GENERIERTEN HTML',
+      code: `<style id="mermaid-offline-app-style">/* Tailwind v4 + Studio CSS */</style>
+<script id="mermaid-offline-flag">window.__IS_OFFLINE_SINGLEFILE__ = true;</script>
+<script id="mermaid-offline-app-script">/* React 19 + Mermaid v11 + ELK + Parser */</script>`,
+    },
+  },
+  {
+    id: 'step-02-execution',
+    stepBadge: '02 · Ausführung',
+    title: 'Direktstart über file://',
+    summary:
+      'Beim Öffnen der heruntergeladenen HTML-Datei erkennt die Anwendung das Flag __IS_OFFLINE_SINGLEFILE__ bzw. file:// und startet sofort das volle Callflow-Studio.',
+    technicalFacts: [
+      { label: 'Boot-Weiche', value: 'isRunningAsOfflineSingleFile() in src/App.tsx' },
+      { label: 'Installationsbedarf', value: '0 Abhängigkeiten (kein Node.js / kein Webserver)' },
+    ],
+    deepDiveBullets: [
+      'Während die Online-Webseite ausschließlich diesen HTML-Builder anzeigt, schaltet derselbe Code in der heruntergeladenen HTML-Datei beim Öffnen automatisch in die volle Studio-Oberfläche (OfflineStudioApp) um.',
+      'Läuft auf jedem Standard-Browser (Chrome, Edge, Firefox) unter Windows, macOS und Linux direkt aus dem Download-Ordner oder von einem USB-/Netzlaufwerk.',
+    ],
+    codeSnippet: {
+      title: 'AUTOMATISCHE BOOT-WEICHE (BUILDER VS. OFFLINE-STUDIO)',
+      code: `export function App() {
+  const isOfflineSingleFile = useMemo(() => isRunningAsOfflineSingleFile(), []);
+  // Online -> Nur Local HTML Builder | Heruntergeladene HTML -> Volles Studio
+  if (!isOfflineSingleFile) return <LocalHtmlBuilderLanding />;
+  return <OfflineStudioApp />;
+}`,
+    },
+  },
+  {
+    id: 'step-03-memory',
+    stepBadge: '03 · Dateiverarbeitung',
+    title: 'Lokaler Browser-Speicher (RAM)',
+    summary:
+      'Avaya-Skripte (.s), ganze Skript-Ordner und Visio-Dateien (.vsdx) werden rein lokal im Arbeitsspeicher analysiert und zu Mermaid-Graphen gerendert.',
+    technicalFacts: [
+      { label: 'I/O-Schnittstelle', value: 'FileReader API & webkitdirectory Ordner-Zugriff' },
+      { label: 'Mandanten-Abfrage', value: 'Lokale Bestätigung von Gesellschaften & Vorwahlen' },
+    ],
+    deepDiveBullets: [
+      'Liest Einzeldateien oder komplette Ordnerstrukturen über lokale File-Handles in den Browser-Heap ein, ohne dass ein einziges Byte den Rechner verlässt.',
+      'Fragt beim Import erkannte übergeordnete Gesellschaften (3 oder mehr Mandanten + Vorwahl-Präfixe) interaktiv ab und trennt diese sauber von darunterliegenden Fach-Teams.',
+    ],
+    codeSnippet: {
+      title: 'IN-MEMORY FILE & FOLDER DECODING IM BROWSER',
+      code: `const buffer = await file.arrayBuffer();
+const text = decodeCallflowBufferWithFallback(buffer); // UTF-8 & Windows-1252
+const modules = parseCallflowTextWithFallback(text, { isMasterHint: true });
+const discoveredOrgas = extractDiscoveredOrganizationsFromModules(modules);`,
+    },
+  },
+  {
+    id: 'step-04-persistence',
+    stepBadge: '04 · Persistenz & Weitergabe',
+    title: 'Snapshot-Speicherung in HTML',
+    summary:
+      'Aus der lokalen Offline-App heraus können Sie jederzeit wieder eine neue Offline-HTML inkl. eingebettetem Callflow-Projektstand oder einen Read-Only HTML-Viewer für Kollegen exportieren.',
+    technicalFacts: [
+      { label: 'Projekt-Speicherung', value: 'Self-Contained HTML-Snapshot oder JSON-Workspace' },
+      { label: 'Fachbereichs-Export', value: 'Interaktiver Read-Only HTML-Viewer mit Pre-Baked SVGs' },
+    ],
+    deepDiveBullets: [
+      'Ermöglicht versionierbare Einzeldateien pro Kundenprojekt oder Release-Stand (z. B. Callflow_Stand_Q4.html), die bei Doppelklick exakt den gespeicherten Callflow öffnen.',
+      'Ergänzt durch strukturierte Exporte für Excel-Routing-Matrizen (.csv), Öffnungszeiten-Tabellen (.csv), Migrations-Dokumentation (.md) sowie Vektor-SVG und High-DPI PNG.',
+    ],
+    codeSnippet: {
+      title: 'WORKSPACE-SEED WIEDERHERSTELLUNG BEIM ÖFFNEN',
+      code: `const embeddedSeed = getEmbeddedOfflineSeed();
+if (embeddedSeed?.scriptWorkspace) {
+  hydrateStudioFromEmbeddedSeed(embeddedSeed);
+} else {
+  hydrateStudioFromLocalStorageOrMemoryFallback();
+}`,
+    },
   },
 ];
 
@@ -140,6 +548,15 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     useState<SmartColorMode>('semantic');
   const [activeCategory, setActiveCategory] = useState<ToolCategory>('all');
   const [activeTechTab, setActiveTechTab] = useState<TechStackTab>('mermaid-pipeline');
+
+  // Expandable state for the 4 top technical boxes (e.g., Graph-Engine, Layout-Solver, etc.)
+  const [activeTopSpecId, setActiveTopSpecId] = useState<TopTechSpecId | null>(null);
+
+  // Expandable state for the 6 embedded tool cards
+  const [expandedToolIds, setExpandedToolIds] = useState<Record<string, boolean>>({});
+
+  // Expandable state for the 4 workflow step boxes
+  const [expandedStepIds, setExpandedStepIds] = useState<Record<string, boolean>>({});
 
   const [isBuilding, setIsBuilding] = useState<boolean>(false);
   const [buildResult, setBuildResult] = useState<{
@@ -212,6 +629,35 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     activeCategory === 'all'
       ? EMBEDDED_TOOLS
       : EMBEDDED_TOOLS.filter((tool) => tool.category === activeCategory);
+
+  const activeTopSpec = TOP_TECH_SPECS.find((item) => item.id === activeTopSpecId) || null;
+
+  const areAllFilteredToolsExpanded =
+    filteredTools.length > 0 && filteredTools.every((t) => Boolean(expandedToolIds[t.id]));
+
+  const toggleAllFilteredTools = () => {
+    const nextState = !areAllFilteredToolsExpanded;
+    setExpandedToolIds((prev) => {
+      const next = { ...prev };
+      filteredTools.forEach((t) => {
+        next[t.id] = nextState;
+      });
+      return next;
+    });
+  };
+
+  const areAllWorkflowStepsExpanded = WORKFLOW_STEPS.every((s) =>
+    Boolean(expandedStepIds[s.id])
+  );
+
+  const toggleAllWorkflowSteps = () => {
+    const nextState = !areAllWorkflowStepsExpanded;
+    const next: Record<string, boolean> = {};
+    WORKFLOW_STEPS.forEach((s) => {
+      next[s.id] = nextState;
+    });
+    setExpandedStepIds(next);
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col overflow-x-hidden selection:bg-emerald-500/30 selection:text-emerald-200">
@@ -302,7 +748,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
           id="builder"
           className="grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8 lg:gap-10 items-stretch"
         >
-          {/* Left Column: Explanation & Technical Local Guarantee (second on mobile so builder CTA is immediate, or clear stacked) */}
+          {/* Left Column: Explanation & Technical Local Guarantee */}
           <div className="lg:col-span-7 flex flex-col justify-between space-y-6">
             <div className="space-y-3 sm:space-y-4">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] sm:text-xs font-mono text-emerald-400">
@@ -336,39 +782,129 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
               </p>
             </div>
 
-            {/* Technical Specs Bar (Tabular Numerals) */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 pt-3 border-t border-slate-800/90 font-mono tabular-nums">
-              <div className="bg-slate-900/60 border border-slate-800/90 rounded-lg p-3 space-y-0.5">
-                <div className="text-[11px] text-slate-400">Graph-Engine</div>
-                <div className="text-xs sm:text-sm font-semibold text-emerald-300">
-                  Mermaid v11.12
-                </div>
-                <div className="text-[10px] text-slate-400">ESM Inline-Bundle</div>
+            {/* Expandable Technical Specs Bar (4 bordered boxes + connected deep-dive panel) */}
+            <div className="pt-3 border-t border-slate-800/90 space-y-3">
+              <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
+                <span>
+                  Klicken Sie auf eine der 4 Technik-Boxen für Architektur-Parameter &amp; Code:
+                </span>
+                {activeTopSpecId && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTopSpecId(null)}
+                    className="text-xs font-mono text-emerald-400 hover:text-emerald-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Details schließen ▴
+                  </button>
+                )}
               </div>
 
-              <div className="bg-slate-900/60 border border-slate-800/90 rounded-lg p-3 space-y-0.5">
-                <div className="text-[11px] text-slate-400">Layout-Solver</div>
-                <div className="text-xs sm:text-sm font-semibold text-indigo-300">
-                  Dagre &amp; ELK.js
-                </div>
-                <div className="text-[10px] text-slate-400">Sugiyama Layered</div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4 font-mono tabular-nums">
+                {TOP_TECH_SPECS.map((spec) => {
+                  const isExpanded = activeTopSpecId === spec.id;
+                  return (
+                    <button
+                      key={spec.id}
+                      type="button"
+                      aria-expanded={isExpanded}
+                      onClick={() =>
+                        setActiveTopSpecId((prev) => (prev === spec.id ? null : spec.id))
+                      }
+                      className={`text-left rounded-lg p-3 border transition-colors flex flex-col justify-between gap-2 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 ${
+                        isExpanded
+                          ? spec.activeBorderClass
+                          : 'bg-slate-900/60 border-slate-800/90 hover:border-slate-700 hover:bg-slate-900/90'
+                      }`}
+                    >
+                      <div className="space-y-0.5 w-full">
+                        <div className="flex items-center justify-between gap-1 text-[11px] text-slate-400">
+                          <span className="truncate">{spec.label}</span>
+                          {isExpanded ? (
+                            <ChevronUp className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                          ) : (
+                            <ChevronDown className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                          )}
+                        </div>
+                        <div className={`text-xs sm:text-sm font-semibold ${spec.valueColorClass}`}>
+                          {spec.primaryValue}
+                        </div>
+                        <div className="text-[10px] text-slate-400">{spec.subValue}</div>
+                      </div>
+
+                      <div className="pt-1.5 border-t border-slate-800/80 flex items-center justify-between text-[10px] text-slate-400 w-full">
+                        <span>{isExpanded ? 'Details aktiv' : 'Mehr Infos'}</span>
+                        <span className="text-emerald-400">{isExpanded ? '▴' : '▾'}</span>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
 
-              <div className="bg-slate-900/60 border border-slate-800/90 rounded-lg p-3 space-y-0.5">
-                <div className="text-[11px] text-slate-400">Externe Requests</div>
-                <div className="text-xs sm:text-sm font-semibold text-emerald-300">
-                  0 Byte (Air-Gapped)
-                </div>
-                <div className="text-[10px] text-slate-400">Kein CDN / Kein Fetch</div>
-              </div>
+              {/* Connected Expandable Deep-Dive Drawer for the selected top box */}
+              {activeTopSpec && (
+                <div className="bg-slate-900/95 border border-slate-800 rounded-xl p-4 sm:p-5 space-y-4">
+                  <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
+                    <div className="space-y-1">
+                      <div className="text-[11px] font-mono text-emerald-400">
+                        TECHNISCHE SPEZIFIKATION · {activeTopSpec.label.toUpperCase()}
+                      </div>
+                      <h3 className="text-sm sm:text-base font-semibold text-slate-100">
+                        {activeTopSpec.deepDiveTitle}
+                      </h3>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTopSpecId(null)}
+                      className="px-2.5 py-1 text-xs font-mono text-slate-400 hover:text-slate-100 bg-slate-950 border border-slate-800 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Einklappen ▴
+                    </button>
+                  </div>
 
-              <div className="bg-slate-900/60 border border-slate-800/90 rounded-lg p-3 space-y-0.5">
-                <div className="text-[11px] text-slate-400">Laufzeit-Protokoll</div>
-                <div className="text-xs sm:text-sm font-semibold text-sky-300">
-                  file:// &amp; RAM
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    {activeTopSpec.summary}
+                  </p>
+
+                  <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-stretch">
+                    {/* Left: Short Facts & Architecture Bullets */}
+                    <div className="xl:col-span-6 space-y-3 flex flex-col justify-between">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono tabular-nums">
+                        {activeTopSpec.shortFacts.map((fact, idx) => (
+                          <div
+                            key={idx}
+                            className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 space-y-0.5"
+                          >
+                            <div className="text-[10px] text-slate-400">{fact.label}</div>
+                            <div className="text-[11px] font-semibold text-slate-100 break-words">
+                              {fact.value}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <ul className="space-y-1.5 text-xs text-slate-300">
+                        {activeTopSpec.technicalBullets.map((bullet, idx) => (
+                          <li key={idx} className="flex items-start gap-2">
+                            <span className="text-emerald-400 font-mono shrink-0">✓</span>
+                            <span className="leading-relaxed">{bullet}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    {/* Right: Code / Config Block */}
+                    <div className="xl:col-span-6 bg-slate-950 border border-slate-800 rounded-lg p-3.5 flex flex-col justify-between space-y-2.5 font-mono text-xs">
+                      <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400 border-b border-slate-800 pb-2">
+                        <span>{activeTopSpec.codeSnippet.title}</span>
+                        <span className="text-emerald-400">{activeTopSpec.codeSnippet.fileHint}</span>
+                      </div>
+                      <pre className="text-[11px] leading-relaxed text-slate-200 overflow-x-auto whitespace-pre">
+                        {activeTopSpec.codeSnippet.code}
+                      </pre>
+                    </div>
+                  </div>
                 </div>
-                <div className="text-[10px] text-slate-400">LocalStorage + Fallback</div>
-              </div>
+              )}
             </div>
 
             {/* Key Local Architecture Facts */}
@@ -900,7 +1436,7 @@ const { svg } = await mermaid.render(id, code);
           )}
         </section>
 
-        {/* Section 3: Overview of all embedded Tools & Parsers */}
+        {/* Section 3: Overview of all embedded Tools & Parsers (6 expandable cards) */}
         <section
           id="eingebundene-tools"
           className="border-t border-slate-800/90 pt-10 sm:pt-12 space-y-6"
@@ -912,150 +1448,303 @@ const { svg } = await mermaid.render(id, code);
               </h2>
               <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
                 Alle 6 Kernmodule sind ohne Zusatzinstallation direkt in der heruntergeladenen
-                HTML-Datei aktiv.
+                HTML-Datei aktiv. Jede Box lässt sich für tiefere technische Parameter &amp;
+                Code-Beispiele aufklappen.
               </p>
             </div>
 
-            {/* Interactive Category Filter Tabs (scrolls smoothly on narrow mobile screens) */}
-            <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-lg overflow-x-auto max-w-full self-start">
-              {(
-                [
-                  { id: 'all', label: 'Alle Module (6)' },
-                  { id: 'engine', label: 'Rendering & Layout' },
-                  { id: 'parsers', label: 'Avaya & Visio Parser' },
-                  { id: 'analysis', label: 'Analyse & Zeitpläne' },
-                  { id: 'exports', label: 'Exporte & Doku' },
-                ] as Array<{ id: ToolCategory; label: string }>
-              ).map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setActiveCategory(tab.id)}
-                  className={`min-h-[36px] px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    activeCategory === tab.id
-                      ? 'bg-slate-800 text-slate-100'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              ))}
+            <div className="flex flex-wrap items-center gap-2 self-start">
+              {/* Interactive Category Filter Tabs */}
+              <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-lg overflow-x-auto max-w-full">
+                {(
+                  [
+                    { id: 'all', label: 'Alle Module (6)' },
+                    { id: 'engine', label: 'Rendering & Layout' },
+                    { id: 'parsers', label: 'Avaya & Visio Parser' },
+                    { id: 'analysis', label: 'Analyse & Zeitpläne' },
+                    { id: 'exports', label: 'Exporte & Doku' },
+                  ] as Array<{ id: ToolCategory; label: string }>
+                ).map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setActiveCategory(tab.id)}
+                    className={`min-h-[36px] px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      activeCategory === tab.id
+                        ? 'bg-slate-800 text-slate-100'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={toggleAllFilteredTools}
+                className="min-h-[38px] px-3 py-1.5 text-xs font-mono text-emerald-300 hover:text-emerald-200 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                {areAllFilteredToolsExpanded ? (
+                  <>
+                    <ChevronUp className="w-3.5 h-3.5" />
+                    <span>Alle Details einklappen</span>
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown className="w-3.5 h-3.5" />
+                    <span>Alle Details ausklappen</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-            {filteredTools.map((tool) => (
-              <div
-                key={tool.id}
-                className="bg-slate-900/75 border border-slate-800 rounded-xl p-4 sm:p-6 flex flex-col justify-between space-y-4 sm:space-y-5"
-              >
-                <div className="space-y-2.5">
-                  <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-slate-400 font-mono">
-                    <span>{tool.categoryLabel}</span>
-                    <span className="text-emerald-400">{tool.versionOrTag}</span>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 items-start">
+            {filteredTools.map((tool) => {
+              const isExpanded = Boolean(expandedToolIds[tool.id]);
+              return (
+                <div
+                  key={tool.id}
+                  className={`border rounded-xl p-4 sm:p-6 flex flex-col justify-between space-y-4 sm:space-y-5 transition-colors ${
+                    isExpanded
+                      ? 'bg-slate-900 border-emerald-500/50'
+                      : 'bg-slate-900/75 border-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-slate-400 font-mono">
+                      <span>{tool.categoryLabel}</span>
+                      <span className="text-emerald-400">{tool.versionOrTag}</span>
+                    </div>
+
+                    <h3 className="text-sm sm:text-base font-semibold text-slate-100 leading-snug">
+                      {tool.title}
+                    </h3>
+
+                    <div className="text-[11px] font-mono text-indigo-300 bg-slate-950/90 border border-slate-800/90 rounded px-2.5 py-1.5 break-words">
+                      {tool.techStackLine}
+                    </div>
+
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      {tool.description}
+                    </p>
                   </div>
 
-                  <h3 className="text-sm sm:text-base font-semibold text-slate-100 leading-snug">
-                    {tool.title}
-                  </h3>
+                  <ul className="space-y-2 pt-3.5 border-t border-slate-800/80 text-xs text-slate-300">
+                    {tool.capabilities.map((cap, idx) => (
+                      <li key={idx} className="flex items-start gap-2">
+                        <span className="text-emerald-400 font-mono shrink-0">✓</span>
+                        <span className="leading-relaxed">{cap}</span>
+                      </li>
+                    ))}
+                  </ul>
 
-                  <div className="text-[11px] font-mono text-indigo-300 bg-slate-950/90 border border-slate-800/90 rounded px-2.5 py-1.5 break-words">
-                    {tool.techStackLine}
+                  {/* Expandable Toggle Button */}
+                  <div className="pt-2 border-t border-slate-800/80">
+                    <button
+                      type="button"
+                      aria-expanded={isExpanded}
+                      onClick={() =>
+                        setExpandedToolIds((prev) => ({
+                          ...prev,
+                          [tool.id]: !prev[tool.id],
+                        }))
+                      }
+                      className="w-full min-h-[38px] px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-950/80 border border-slate-800 hover:border-emerald-500/40 text-xs font-mono text-emerald-300 flex items-center justify-between gap-2 transition-colors cursor-pointer"
+                    >
+                      <span>
+                        {isExpanded
+                          ? 'Technische Details & Code einklappen'
+                          : 'Technische Details & Code ausklappen'}
+                      </span>
+                      {isExpanded ? (
+                        <ChevronUp className="w-4 h-4 shrink-0" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4 shrink-0" />
+                      )}
+                    </button>
+
+                    {isExpanded && (
+                      <div className="mt-3 pt-3 border-t border-slate-800 space-y-3">
+                        {/* Combined Short-Facts Grid */}
+                        <div className="space-y-1.5 font-mono tabular-nums">
+                          {tool.technicalFacts.map((fact, fIdx) => (
+                            <div
+                              key={fIdx}
+                              className="px-2.5 py-1.5 rounded bg-slate-950/90 border border-slate-800/90 flex flex-col gap-0.5"
+                            >
+                              <span className="text-[10px] text-slate-400">{fact.label}</span>
+                              <span className="text-[11px] text-slate-100 font-semibold break-words">
+                                {fact.value}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Deep-Dive Architectural Notes */}
+                        <ul className="space-y-1.5 text-[11px] text-slate-300 leading-relaxed">
+                          {tool.deepDiveNotes.map((note, nIdx) => (
+                            <li key={nIdx} className="flex items-start gap-1.5">
+                              <span className="text-indigo-400 font-mono shrink-0">→</span>
+                              <span>{note}</span>
+                            </li>
+                          ))}
+                        </ul>
+
+                        {/* Code / Config Snippet */}
+                        <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2 font-mono">
+                          <div className="text-[10px] text-emerald-400 border-b border-slate-800 pb-1.5">
+                            {tool.codeSnippet.title}
+                          </div>
+                          <pre className="text-[10px] leading-relaxed text-slate-200 overflow-x-auto whitespace-pre">
+                            {tool.codeSnippet.code}
+                          </pre>
+                        </div>
+                      </div>
+                    )}
                   </div>
-
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    {tool.description}
-                  </p>
                 </div>
-
-                <ul className="space-y-2 pt-3.5 border-t border-slate-800/80 text-xs text-slate-300">
-                  {tool.capabilities.map((cap, idx) => (
-                    <li key={idx} className="flex items-start gap-2">
-                      <span className="text-emerald-400 font-mono shrink-0">✓</span>
-                      <span className="leading-relaxed">{cap}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
 
-        {/* Section 4: Explanation how 100% local execution works */}
+        {/* Section 4: Explanation how 100% local execution works (4 expandable workflow boxes) */}
         <section
           id="lokal-architektur"
           className="border-t border-slate-800/90 pt-10 sm:pt-12 space-y-6"
         >
-          <div className="max-w-3xl space-y-2">
-            <h2 className="text-xl sm:text-2xl font-bold text-slate-100">
-              Ablauf: Vom HTML-Builder zum lokalen Offline-Arbeitsplatz
-            </h2>
-            <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
-              So greifen Bundle-Generierung, lokaler Doppelklick-Start und In-Memory-Analyse
-              ineinander:
-            </p>
+          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+            <div className="max-w-3xl space-y-2">
+              <h2 className="text-xl sm:text-2xl font-bold text-slate-100">
+                Ablauf: Vom HTML-Builder zum lokalen Offline-Arbeitsplatz
+              </h2>
+              <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
+                So greifen Bundle-Generierung, lokaler Doppelklick-Start und In-Memory-Analyse
+                ineinander (klicken Sie auf einen Schritt für technische Details &amp; Code):
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={toggleAllWorkflowSteps}
+              className="self-start min-h-[38px] px-3 py-1.5 text-xs font-mono text-emerald-300 hover:text-emerald-200 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {areAllWorkflowStepsExpanded ? (
+                <>
+                  <ChevronUp className="w-3.5 h-3.5" />
+                  <span>Alle 4 Schritte einklappen</span>
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="w-3.5 h-3.5" />
+                  <span>Alle 4 Schritte ausklappen</span>
+                </>
+              )}
+            </button>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 sm:p-5 space-y-2">
-              <div className="text-xs font-mono text-emerald-400 tabular-nums">
-                01 · Bündelung
-              </div>
-              <h3 className="text-sm font-semibold text-slate-100">
-                Alle Engines inline im HTML
-              </h3>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Der Builder verpackt React 19, Tailwind-Styles, Mermaid.js v11, ELK-Graph-Layout
-                und JSZip direkt in{' '}
-                <code className="font-mono text-slate-300">&lt;script&gt;</code>- und{' '}
-                <code className="font-mono text-slate-300">&lt;style&gt;</code>-Blöcke einer
-                einzigen Datei.
-              </p>
-            </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 items-start">
+            {WORKFLOW_STEPS.map((stepItem) => {
+              const isExpanded = Boolean(expandedStepIds[stepItem.id]);
+              return (
+                <div
+                  key={stepItem.id}
+                  className={`border rounded-xl p-4 sm:p-5 flex flex-col justify-between space-y-3 transition-colors ${
+                    isExpanded
+                      ? 'bg-slate-900 border-emerald-500/50'
+                      : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2 text-xs font-mono text-emerald-400 tabular-nums">
+                      <span>{stepItem.stepBadge}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedStepIds((prev) => ({
+                            ...prev,
+                            [stepItem.id]: !prev[stepItem.id],
+                          }))
+                        }
+                        className="text-[11px] text-slate-400 hover:text-emerald-300 flex items-center gap-1 cursor-pointer"
+                      >
+                        <span>{isExpanded ? 'Weniger' : 'Details'}</span>
+                        {isExpanded ? (
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        ) : (
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
 
-            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 sm:p-5 space-y-2">
-              <div className="text-xs font-mono text-emerald-400 tabular-nums">
-                02 · Ausführung
-              </div>
-              <h3 className="text-sm font-semibold text-slate-100">
-                Direktstart über file://
-              </h3>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Beim Öffnen der heruntergeladenen HTML-Datei erkennt die Anwendung das Flag{' '}
-                <code className="font-mono text-slate-300">__IS_OFFLINE_SINGLEFILE__</code> bzw.{' '}
-                <code className="font-mono text-slate-300">file://</code> und startet sofort das
-                volle Callflow-Studio.
-              </p>
-            </div>
+                    <h3 className="text-sm font-semibold text-slate-100">
+                      {stepItem.title}
+                    </h3>
 
-            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 sm:p-5 space-y-2">
-              <div className="text-xs font-mono text-emerald-400 tabular-nums">
-                03 · Dateiverarbeitung
-              </div>
-              <h3 className="text-sm font-semibold text-slate-100">
-                Lokaler Browser-Speicher (RAM)
-              </h3>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Avaya-Skripte (<code className="font-mono text-slate-300">.s</code>), ganze
-                Skript-Ordner und Visio-Dateien (<code className="font-mono text-slate-300">.vsdx</code>)
-                werden rein lokal im Arbeitsspeicher analysiert und zu Mermaid-Graphen
-                gerendert.
-              </p>
-            </div>
+                    <p className="text-xs text-slate-400 leading-relaxed">
+                      {stepItem.summary}
+                    </p>
+                  </div>
 
-            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 sm:p-5 space-y-2">
-              <div className="text-xs font-mono text-emerald-400 tabular-nums">
-                04 · Persistenz &amp; Weitergabe
-              </div>
-              <h3 className="text-sm font-semibold text-slate-100">
-                Snapshot-Speicherung in HTML
-              </h3>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Aus der lokalen Offline-App heraus können Sie jederzeit wieder eine neue
-                Offline-HTML inkl. eingebettetem Callflow-Projektstand oder einen Read-Only
-                HTML-Viewer für Kollegen exportieren.
-              </p>
-            </div>
+                  <button
+                    type="button"
+                    aria-expanded={isExpanded}
+                    onClick={() =>
+                      setExpandedStepIds((prev) => ({
+                        ...prev,
+                        [stepItem.id]: !prev[stepItem.id],
+                      }))
+                    }
+                    className="w-full min-h-[36px] px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-emerald-500/40 text-[11px] font-mono text-emerald-300 flex items-center justify-between gap-2 transition-colors cursor-pointer"
+                  >
+                    <span>{isExpanded ? 'Technik & Code ausblenden' : 'Technik & Code anzeigen'}</span>
+                    {isExpanded ? (
+                      <ChevronUp className="w-3.5 h-3.5 shrink-0" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                  </button>
+
+                  {isExpanded && (
+                    <div className="pt-2.5 border-t border-slate-800 space-y-2.5">
+                      <div className="space-y-1.5 font-mono tabular-nums">
+                        {stepItem.technicalFacts.map((fact, idx) => (
+                          <div
+                            key={idx}
+                            className="px-2 py-1.5 rounded bg-slate-950 border border-slate-800/90"
+                          >
+                            <div className="text-[10px] text-slate-400">{fact.label}</div>
+                            <div className="text-[11px] font-semibold text-slate-100 break-words">
+                              {fact.value}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <ul className="space-y-1 text-[11px] text-slate-300 leading-relaxed">
+                        {stepItem.deepDiveBullets.map((b, idx) => (
+                          <li key={idx} className="flex items-start gap-1.5">
+                            <span className="text-emerald-400 font-mono shrink-0">✓</span>
+                            <span>{b}</span>
+                          </li>
+                        ))}
+                      </ul>
+
+                      <div className="bg-slate-950 border border-slate-800 rounded-lg p-2.5 space-y-1.5 font-mono">
+                        <div className="text-[10px] text-emerald-400 border-b border-slate-800 pb-1">
+                          {stepItem.codeSnippet.title}
+                        </div>
+                        <pre className="text-[10px] leading-relaxed text-slate-200 overflow-x-auto whitespace-pre">
+                          {stepItem.codeSnippet.code}
+                        </pre>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
           {/* Bottom Call-To-Action Banner */}
