@@ -22,6 +22,12 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Strict layout/paint/compositor isolation for Chromium Blink/Skia canvas viewport */
+.mermaid-canvas-viewport {
+  contain: strict;
+  isolation: isolate;
+}
+
 /* Prevent flex containers or preflight rules from shrinking large Mermaid SVGs
    and maintain a permanent GPU composite layer to avoid re-rasterization stutter */
 .mermaid-canvas-stage {
@@ -41,6 +47,10 @@
 /* Zero-re-render cursor & gesture isolation during canvas pan/wheel/pinch */
 [data-panning="true"] {
   cursor: grabbing !important;
+}
+
+[data-transforming="true"] .mermaid-canvas-stage svg {
+  shape-rendering: optimizeSpeed;
 }
 
 [data-transforming="true"] .mermaid-canvas-stage svg,

@@ -4,6 +4,7 @@ export type MermaidLayoutEngine = 'dagre' | 'elk';
 export type FlowchartCurve = 'basis' | 'bumpX' | 'bumpY' | 'cardinal' | 'catmullRom' | 'linear' | 'monotoneX' | 'monotoneY' | 'natural' | 'step' | 'stepAfter' | 'stepBefore';
 export type DiagramDirection = 'TB' | 'TD' | 'RL' | 'LR' | 'BT';
 export type SmartColorMode = 'standard' | 'semantic' | 'clusters' | 'high-contrast';
+export type PathColorMode = 'semantic' | 'branches';
 
 export type SmartColorNodeType =
   | 'announcement'
@@ -21,6 +22,8 @@ export interface LegendItem {
   borderColor: string;
   textColor: string;
   count: number;
+  kind?: 'node' | 'edge';
+  dashed?: boolean;
 }
 
 export interface LogicAnalysisSummary {

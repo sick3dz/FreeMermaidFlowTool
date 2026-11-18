@@ -1,6 +1,7 @@
 import mermaid from 'mermaid';
 import {
   DiagramDirection,
+  PathColorMode,
   SmartColorMode,
   SmartColorNodeType,
   ThemeConfiguration,
@@ -105,6 +106,70 @@ export function hasCachedMermaidDiagram(
 ): boolean {
   const key = buildMermaidRenderCacheKey(code, themeConfig, forceNativeSvgLabels);
   return svgRenderCache.has(key);
+}
+
+/**
+ * Estimates whether a Mermaid diagram crosses the Blink/Skia <foreignObject> threshold
+ * where native SVG <text>/<tspan> vector labels noticeably improve pan/zoom frame rate.
+ */
+export function shouldUseNativeSvgLabels(
+  code: string,
+  thresholds: { maxHtmlNodes?: number; maxHtmlEdges?: number } = {}
+): boolean {
+  const maxHtmlNodes = thresholds.maxHtmlNodes ?? 45;
+  const maxHtmlEdges = thresholds.maxHtmlEdges ?? 75;
+  const trimmed = code.trim();
+  if (!trimmed) return false;
+
+  const withoutDirectives = trimmed
+    .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '')
+    .replace(/%%\{[\s\S]*?\}%%/g, '');
+
+  const lines = withoutDirectives.split('\n');
+  let headerToken = '';
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t || t.startsWith('%%')) continue;
+    headerToken = t.split(/[\s({]/)[0]?.toLowerCase() || '';
+    break;
+  }
+
+  if (headerToken !== 'flowchart' && headerToken !== 'graph') {
+    return false;
+  }
+
+  let edgeCount = 0;
+  const nodeIds = new Set<string>();
+  const edgeArrowRegex = /--?>|-\.-?>|==?>|<-->|<-\.->|---/g;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (
+      !line ||
+      line.startsWith('%%') ||
+      /^(?:flowchart|graph|subgraph|end|direction|classDef|class|style|linkStyle|click)\b/i.test(
+        line
+      )
+    ) {
+      continue;
+    }
+
+    const arrows = line.match(edgeArrowRegex);
+    if (arrows && arrows.length > 0) {
+      edgeCount += arrows.length;
+      if (edgeCount >= maxHtmlEdges) return true;
+    }
+
+    const idMatches = line.match(/\b([A-Za-z_][A-Za-z0-9_.-]*)\s*(?=\[|\(|\{|-->|-\.->|==>|---)/g);
+    if (idMatches) {
+      for (let j = 0; j < idMatches.length; j++) {
+        nodeIds.add(idMatches[j].trim());
+        if (nodeIds.size >= maxHtmlNodes) return true;
+      }
+    }
+  }
+
+  return nodeIds.size >= maxHtmlNodes || edgeCount >= maxHtmlEdges;
 }
 
 async function ensureElkLayoutRegistered(): Promise<void> {
@@ -364,9 +429,13 @@ export function detectDiagramTypeLabel(code: string): string {
  * solely for rendering, so sliders in the Callflow Inspector always take effect immediately
  * while preserving optional YAML frontmatter (`--- ... ---`).
  */
-function prepareCodeWithRuntimeLayout(code: string, themeConfig: ThemeConfiguration): string {
+function prepareCodeWithRuntimeLayout(
+  code: string,
+  themeConfig: ThemeConfiguration,
+  forceNativeSvgLabels = false
+): string {
   const strippedInit = code.replace(/^\s*%%\{init:[\s\S]*?\}%%\s*\n?/gm, '').trimStart();
-  const runtimeInit = buildInitDirectiveBlock(themeConfig);
+  const runtimeInit = buildInitDirectiveBlock(themeConfig, forceNativeSvgLabels);
   const frontmatterMatch = strippedInit.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
   if (frontmatterMatch) {
     const fm = frontmatterMatch[0];
@@ -431,7 +500,7 @@ export async function renderLocalMermaidDiagram(
     configureMermaidEngine(themeConfig, forceNativeSvgLabels);
 
     // Apply live UI layout/spacing directive on top of code so sliders never get ignored by stale init blocks
-    const renderCode = prepareCodeWithRuntimeLayout(trimmed, themeConfig);
+    const renderCode = prepareCodeWithRuntimeLayout(trimmed, themeConfig, forceNativeSvgLabels);
 
     // Single-pass render (mermaid.render validates & layouts in one step; parse() runs only on error for exact line numbers)
     renderCounter += 1;
@@ -451,7 +520,11 @@ export async function renderLocalMermaidDiagram(
           look: 'classic',
         };
         configureMermaidEngine(fallbackConfig, forceNativeSvgLabels, true);
-        const fallbackRenderCode = prepareCodeWithRuntimeLayout(trimmed, fallbackConfig);
+        const fallbackRenderCode = prepareCodeWithRuntimeLayout(
+          trimmed,
+          fallbackConfig,
+          forceNativeSvgLabels
+        );
         renderCounter += 1;
         const fallbackId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
         const fallbackRendered = await mermaid.render(fallbackId, fallbackRenderCode);
@@ -557,7 +630,10 @@ export function updateDiagramDirection(code: string, newDirection: DiagramDirect
  * Generates a standard Mermaid %%{init: ...}%% directive block from the visual theme configuration
  * and injects or updates it at the top of the user's code.
  */
-export function buildInitDirectiveBlock(themeConfig: ThemeConfiguration): string {
+export function buildInitDirectiveBlock(
+  themeConfig: ThemeConfiguration,
+  forceNativeSvgLabels = false
+): string {
   const nodeSpacing = Number.isFinite(themeConfig.nodeSpacing) ? themeConfig.nodeSpacing : 55;
   const rankSpacing = Number.isFinite(themeConfig.rankSpacing) ? themeConfig.rankSpacing : 70;
   const initPayload: Record<string, unknown> = {
@@ -566,6 +642,7 @@ export function buildInitDirectiveBlock(themeConfig: ThemeConfiguration): string
     layout: themeConfig.layoutEngine || 'dagre',
     flowchart: {
       curve: themeConfig.curve,
+      ...(forceNativeSvgLabels ? { htmlLabels: false } : {}),
       nodeSpacing,
       rankSpacing,
       padding: Math.max(12, Math.min(48, Math.round(nodeSpacing * 0.25))),
@@ -916,6 +993,7 @@ export async function exportSvgToPngBlob(
     smartColorMode: SmartColorMode;
     hiddenNodeTypes?: SmartColorNodeType[];
     canvasSurface: 'dark' | 'light';
+    pathColorMode?: PathColorMode;
   }
 ): Promise<{ blob: Blob; width: number; height: number }> {
   try {
@@ -934,7 +1012,8 @@ export async function exportSvgToPngBlob(
           fallbackOptions.smartColorMode,
           fallbackOptions.canvasSurface,
           fallbackOptions.themeConfig.lineColor,
-          fallbackOptions.hiddenNodeTypes
+          fallbackOptions.hiddenNodeTypes,
+          fallbackOptions.pathColorMode || 'semantic'
         );
         return await rasterizeSvgStringToPng(colored.svg, scale, backgroundMode);
       }

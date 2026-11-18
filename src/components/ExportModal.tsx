@@ -18,6 +18,7 @@ import {
 import {
   CallflowGraph,
   HtmlExportProgress,
+  PathColorMode,
   SmartColorMode,
   SmartColorNodeType,
   ThemeConfiguration,
@@ -35,6 +36,7 @@ interface ExportModalProps {
   defaultBackground: 'dark' | 'light';
   themeConfig: ThemeConfiguration;
   smartColorMode: SmartColorMode;
+  pathColorMode?: PathColorMode;
   hiddenNodeTypes?: SmartColorNodeType[];
   callflowGraph: CallflowGraph;
   scriptCount?: number;
@@ -55,6 +57,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   defaultBackground,
   themeConfig,
   smartColorMode,
+  pathColorMode = 'semantic',
   hiddenNodeTypes = [],
   callflowGraph,
   scriptCount = 0,
@@ -94,7 +97,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         smartColorMode,
         'dark',
         themeConfig.lineColor,
-        hiddenNodeTypes
+        hiddenNodeTypes,
+        pathColorMode
       ).svg;
     }
     return sourceSvg;
@@ -125,6 +129,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         smartColorMode,
         hiddenNodeTypes,
         canvasSurface: targetSurface,
+        pathColorMode,
       });
       triggerLocalDownload(blob, `${safeFilename}-${pngScale}x-${width}x${height}.png`);
       setExportStatus(`PNG (${width} × ${height} px) wurde lokal gerendert und heruntergeladen.`);
@@ -164,7 +169,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           diagramTitle,
           htmlSvg,
           callflowGraph,
-          targetSurface
+          targetSurface,
+          { initialPathColorMode: pathColorMode }
         );
       }
       const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });

@@ -50,6 +50,7 @@ import {
   HtmlExportProgress,
   LogicAnalysisSummary,
   NodePositionOffset,
+  PathColorMode,
   SavedDiagram,
   ScriptOrigin,
   ScriptWorkspace,
@@ -70,6 +71,7 @@ import {
   isColorDark,
   prepareStandaloneSvg,
   renderLocalMermaidDiagram,
+  shouldUseNativeSvgLabels,
   triggerLocalDownload,
   updateDiagramDirection,
 } from './utils/mermaidEngine';
@@ -87,8 +89,10 @@ import {
   disconnectEdgeInMermaidCode,
   findNearestMagneticPort,
   generateInteractiveCallflowHtml,
+  InteractiveCallflowHtmlAnalysisPayload,
   InteractiveCallflowHtmlView,
   LiveSvgDomIndex,
+  materializeActiveNodePortsInDom,
   parseCallflowGraph,
   PortSide,
   resolveClickedEdgeFromSvgElement,
@@ -103,11 +107,14 @@ import {
 } from './utils/callflowEngine';
 import {
   addBuildingBlockToWorkspace,
+  analyzeWorkspaceLogicHealth,
   applyIssueResolutionToWorkspace,
   buildMasterOverviewMermaid,
   buildSafeFallbackMasterMermaid,
   buildScriptDetailMermaid,
   buildScriptWorkspace,
+  buildWorkspaceRoutingMatrix,
+  buildWorkspaceScheduleOverview,
   canonicalScriptMatchKey,
   connectNodesInWorkspace,
   deleteNodeFromWorkspace,
@@ -115,6 +122,7 @@ import {
   EditableCallflowNodeSnapshot,
   EditableNodeConnectionItem,
   extractScriptNumberFromNodeId,
+  extractWorkspaceResourceRegistry,
   formatScriptDisplayLabel,
   inspectWorkspaceNodeForEdit,
   looksLikeRawCallflowScript,
@@ -283,6 +291,11 @@ export default function App() {
       return saved;
     }
     return 'semantic';
+  });
+
+  const [pathColorMode, setPathColorMode] = useState<PathColorMode>(() => {
+    const saved = readStudioStorage(STORAGE_KEYS.PATH_COLOR_MODE);
+    return saved === 'branches' ? 'branches' : 'semantic';
   });
 
   const [hiddenSmartNodeTypes, setHiddenSmartNodeTypes] = useState<SmartColorNodeType[]>(() => {
@@ -533,6 +546,7 @@ export default function App() {
       writeStudioStorage(STORAGE_KEYS.ACTIVE_TITLE, diagramTitle);
       writeStudioStorage(STORAGE_KEYS.ACTIVE_THEME, JSON.stringify(themeConfig));
       writeStudioStorage(STORAGE_KEYS.SMART_COLOR_MODE, smartColorMode);
+      writeStudioStorage(STORAGE_KEYS.PATH_COLOR_MODE, pathColorMode);
       writeStudioStorage(
         STORAGE_KEYS.HIDDEN_SMART_NODE_TYPES,
         JSON.stringify(hiddenSmartNodeTypes)
@@ -546,6 +560,7 @@ export default function App() {
     diagramTitle,
     themeConfig,
     smartColorMode,
+    pathColorMode,
     hiddenSmartNodeTypes,
     canvasSurface,
     workspaceMode,
@@ -684,7 +699,12 @@ export default function App() {
         });
         return;
       }
-      const result = await renderLocalMermaidDiagram(effectiveMermaidCode, themeConfig);
+      const useNativeSvgLabels = shouldUseNativeSvgLabels(effectiveMermaidCode);
+      const result = await renderLocalMermaidDiagram(
+        effectiveMermaidCode,
+        themeConfig,
+        useNativeSvgLabels
+      );
       if (isCancelled) return;
       if (result.svg !== null) {
         hasBaseRenderedSvgRef.current = true;
@@ -701,7 +721,11 @@ export default function App() {
           scriptWorkspaceFallbackRef.current,
           currentDirection || 'LR'
         );
-        const fallbackResult = await renderLocalMermaidDiagram(fallbackCode, themeConfig);
+        const fallbackResult = await renderLocalMermaidDiagram(
+          fallbackCode,
+          themeConfig,
+          shouldUseNativeSvgLabels(fallbackCode)
+        );
         if (isCancelled) return;
         if (fallbackResult.svg !== null) {
           hasBaseRenderedSvgRef.current = true;
@@ -780,7 +804,8 @@ export default function App() {
       smartColorMode,
       canvasSurface,
       themeConfig.lineColor,
-      hiddenSmartNodeTypes
+      hiddenSmartNodeTypes,
+      pathColorMode
     );
 
     return {
@@ -791,6 +816,7 @@ export default function App() {
     baseRenderedSvg,
     effectiveMermaidCode,
     smartColorMode,
+    pathColorMode,
     hiddenSmartNodeTypes,
     canvasSurface,
     themeConfig.lineColor,
@@ -855,6 +881,9 @@ export default function App() {
     );
     setHoveredLockTargetsInDom(index, null, null, selectedCallflowEdge);
     applyLiveNodeOffsetsToDom(index, activeNodeOffsets, isVisualEditMode);
+    if (selectedCallflowNodeId && isVisualEditMode) {
+      materializeActiveNodePortsInDom(index, selectedCallflowNodeId, true);
+    }
   }, [baseColoredSvg, callflowGraph]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fast-path: update Spotlight & selected edge padlock visibility in-place (zero SVG rebuild)
@@ -879,12 +908,15 @@ export default function App() {
     selectedCallflowEdge,
   ]);
 
-  // Fast-path: update Node Offsets & Connection Ports in-place (zero SVG rebuild)
+  // Fast-path: update Node Offsets & lazily materialize active selected node ports (zero SVG rebuild)
   useLayoutEffect(() => {
     const index = liveSvgIndexRef.current;
     if (!index) return;
     applyLiveNodeOffsetsToDom(index, activeNodeOffsets, isVisualEditMode);
-  }, [activeNodeOffsets, isVisualEditMode]);
+    if (selectedCallflowNodeId && isVisualEditMode) {
+      materializeActiveNodePortsInDom(index, selectedCallflowNodeId, true);
+    }
+  }, [activeNodeOffsets, isVisualEditMode, selectedCallflowNodeId]);
 
   // Global Escape & Delete/Backspace shortcut handler
   useEffect(() => {
@@ -1440,6 +1472,7 @@ export default function App() {
 
       snappedPortRef.current = null;
       if (liveSvgIndexRef.current) {
+        materializeActiveNodePortsInDom(liveSvgIndexRef.current, wireSourceNodeId, true);
         setMagneticSnapTargetInDom(liveSvgIndexRef.current, null, true);
       }
 
@@ -2964,6 +2997,7 @@ export default function App() {
         smartColorMode,
         hiddenNodeTypes: hiddenSmartNodeTypes,
         canvasSurface,
+        pathColorMode,
       });
       const safeName =
         diagramTitle.toLowerCase().replace(/[^a-z0-9äöüß_-]+/gi, '-') || 'mermaid-diagramm';
@@ -3014,26 +3048,56 @@ export default function App() {
             };
 
       if (scriptWorkspace.modules.length === 0) {
-        const adjustedSvg =
-          targetSurface !== canvasSurface
-            ? applySmartLogicColoring(
-                currentExportSvg,
+        const rawUnfilteredSvg = baseRenderedSvg
+          ? applyNodeOffsetsToSvg(
+              applySmartLogicColoring(
+                baseRenderedSvg,
                 code,
                 smartColorMode,
                 targetSurface,
                 exportThemeConfig.lineColor,
-                hiddenSmartNodeTypes
-              ).svg
-            : currentExportSvg;
+                [],
+                pathColorMode
+              ).svg,
+              activeNodeOffsets,
+              callflowGraph,
+              false
+            )
+          : targetSurface !== canvasSurface
+          ? applySmartLogicColoring(
+              currentExportSvg,
+              code,
+              smartColorMode,
+              targetSurface,
+              exportThemeConfig.lineColor,
+              [],
+              pathColorMode
+            ).svg
+          : currentExportSvg;
         return {
           html: generateInteractiveCallflowHtml(
             diagramTitle,
-            adjustedSvg,
+            rawUnfilteredSvg,
             callflowGraph,
-            targetSurface
+            targetSurface,
+            {
+              initialPathColorMode: pathColorMode,
+              initialHiddenNodeTypes: hiddenSmartNodeTypes,
+              initialIsolateSubgraph: isolateSubgraphMode,
+              analysis: null,
+            }
           ),
         };
       }
+
+      const analysisPayload: InteractiveCallflowHtmlAnalysisPayload = {
+        openIssues: scriptWorkspace.issues || [],
+        healthFindings: analyzeWorkspaceLogicHealth(scriptWorkspace),
+        scheduleRows: buildWorkspaceScheduleOverview(scriptWorkspace),
+        registry: extractWorkspaceResourceRegistry(scriptWorkspace),
+        routingMatrixRows: buildWorkspaceRoutingMatrix(scriptWorkspace),
+        masterScriptNumber: scriptWorkspace.masterScriptNumber,
+      };
 
       const abortController = new AbortController();
       exportAbortControllerRef.current = abortController;
@@ -3125,7 +3189,11 @@ export default function App() {
             rawSvg = baseRenderedSvg;
             wasCacheHit = true;
           } else {
-            const res = await renderLocalMermaidDiagram(spec.mermaidCode, exportThemeConfig);
+            const res = await renderLocalMermaidDiagram(
+              spec.mermaidCode,
+              exportThemeConfig,
+              shouldUseNativeSvgLabels(spec.mermaidCode)
+            );
             rawSvg = res.svg;
             wasCacheHit = Boolean(res.fromCache);
           }
@@ -3146,7 +3214,8 @@ export default function App() {
               smartColorMode,
               targetSurface,
               exportThemeConfig.lineColor,
-              hiddenSmartNodeTypes
+              [],
+              pathColorMode
             ).svg;
             const withOffsets = applyNodeOffsetsToSvg(
               colored,
@@ -3194,7 +3263,13 @@ export default function App() {
               diagramTitle,
               currentExportSvg,
               callflowGraph,
-              targetSurface
+              targetSurface,
+              {
+                initialPathColorMode: pathColorMode,
+                initialHiddenNodeTypes: hiddenSmartNodeTypes,
+                initialIsolateSubgraph: isolateSubgraphMode,
+                analysis: analysisPayload,
+              }
             ),
           };
         }
@@ -3213,6 +3288,10 @@ export default function App() {
             {
               views,
               activeViewKey: activeKey,
+              initialPathColorMode: pathColorMode,
+              initialHiddenNodeTypes: hiddenSmartNodeTypes,
+              initialIsolateSubgraph: isolateSubgraphMode,
+              analysis: analysisPayload,
             }
           ),
         };
@@ -3230,6 +3309,7 @@ export default function App() {
       canvasSurface,
       code,
       smartColorMode,
+      pathColorMode,
       hiddenSmartNodeTypes,
       diagramTitle,
       callflowGraph,
@@ -3238,6 +3318,7 @@ export default function App() {
       baseRenderedSvg,
       effectiveMermaidCode,
       isolateSubgraphMode,
+      activeNodeOffsets,
     ]
   );
 
@@ -3936,6 +4017,41 @@ export default function App() {
                 </div>
               )}
 
+              {/* Segmented A / B Path Color Switcher: Modus A (Semantik) vs Modus B (Verzweigung) */}
+              <div
+                role="group"
+                aria-label="Pfad-Färbungsmodus"
+                className="flex items-center gap-0.5 p-0.5 bg-slate-950 border border-slate-800 rounded-lg shrink-0"
+                title="Verbindungspfade einfärben: Modus A nach Semantik (Entscheidung, Fallback, Queue, Zyklus) oder Modus B nach Verzweigung/Zweig"
+              >
+                <button
+                  type="button"
+                  onClick={() => setPathColorMode('semantic')}
+                  title="Modus A: Pfade nach Bedeutung/Typ färben (Entscheidung, Fallback, Queue, Fehler, Zyklus)"
+                  className={`px-2 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer ${
+                    pathColorMode === 'semantic'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                  }`}
+                >
+                  <span className="font-mono text-[10px] opacity-80">A</span>
+                  <span>Semantik</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPathColorMode('branches')}
+                  title="Modus B: Jede Verzweigung (Branch/Zweig) in eigener Farbe durchverfolgen"
+                  className={`px-2 py-1 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer ${
+                    pathColorMode === 'branches'
+                      ? 'bg-indigo-600 text-white shadow-xs'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                  }`}
+                >
+                  <span className="font-mono text-[10px] opacity-80">B</span>
+                  <span>Verzweigung</span>
+                </button>
+              </div>
+
               {/* 1-Click ELK Anti-Overlap Engine Switch */}
               <button
                 type="button"
@@ -4535,7 +4651,7 @@ export default function App() {
             }}
             className={`flex-1 relative flex items-center justify-center ${
               coloredSvg
-                ? `overflow-hidden touch-none ${
+                ? `mermaid-canvas-viewport overflow-hidden touch-none ${
                     isVisualEditMode && visualEditTool === 'connect'
                       ? 'cursor-crosshair'
                       : 'cursor-grab'
@@ -4555,7 +4671,7 @@ export default function App() {
             {isDraggingCanvasFile && (
               <div
                 data-canvas-ui="true"
-                className="absolute inset-3 z-30 rounded-2xl border-2 border-dashed border-indigo-400 bg-slate-950/90 backdrop-blur-xs flex flex-col items-center justify-center gap-2.5 p-6 text-center pointer-events-none shadow-2xl"
+                className="absolute inset-3 z-30 rounded-2xl border-2 border-dashed border-indigo-400 bg-slate-950/95 flex flex-col items-center justify-center gap-2.5 p-6 text-center pointer-events-none shadow-2xl"
               >
                 <div className="w-11 h-11 rounded-xl bg-indigo-500/15 border border-indigo-500/40 flex items-center justify-center">
                   <FolderUp className="w-5 h-5 text-indigo-400" />
@@ -5151,37 +5267,142 @@ export default function App() {
             )}
           </div>
 
-          {/* Interactive Logic Legend & Callflow Hint Footer Bar */}
+          {/* Interactive Logic Legend & Path Swatch Footer Bar */}
           {coloredSvg && (
             <div className="px-3 sm:px-4 py-2 border-t border-slate-800 bg-slate-900/95 flex items-center justify-between gap-4 overflow-x-auto text-xs shrink-0">
-              <div className="flex items-center gap-4 overflow-x-auto">
-                <span className="text-indigo-300 font-medium whitespace-nowrap shrink-0">
-                  Tipp: Knoten antippen für Callflow-Pfad
-                </span>
-                <span className="text-slate-700" aria-hidden="true">
-                  |
-                </span>
-                {logicSummary.legend.length > 0 && (
-                  <div className="flex items-center gap-3 overflow-x-auto">
-                    {logicSummary.legend.map((item) => (
-                      <div
-                        key={item.id}
-                        className="flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                      >
-                        <span
-                          className="w-3 h-3 rounded-xs border shrink-0"
-                          style={{
-                            backgroundColor: item.fillColor,
-                            borderColor: item.borderColor,
-                          }}
-                        />
-                        <span className="text-slate-200">{item.label}</span>
-                        <span className="text-slate-500 font-mono tabular-nums">
-                          ({item.count})
-                        </span>
+              <div className="flex items-center gap-3.5 overflow-x-auto">
+                {callflowTrace && !isolateSubgraphMode ? (
+                  <>
+                    <span className="text-amber-300 font-semibold whitespace-nowrap shrink-0">
+                      Aktiver Pfad:
+                    </span>
+                    <div className="flex items-center gap-3 overflow-x-auto">
+                      {callflowDirectionFilter !== 'downstream' && (
+                        <div className="flex items-center gap-1.5 whitespace-nowrap shrink-0">
+                          <span
+                            className="w-4 h-0 border-t-[2.5px] border-solid shrink-0"
+                            style={{ borderTopColor: canvasSurface === 'dark' ? '#38bdf8' : '#0284c7' }}
+                          />
+                          <span className="text-slate-200">Woher (Eingehend)</span>
+                          <span className="text-slate-500 font-mono tabular-nums">
+                            ({callflowTrace.upstreamEdges.length})
+                          </span>
+                        </div>
+                      )}
+                      {callflowDirectionFilter !== 'upstream' && (
+                        <div className="flex items-center gap-1.5 whitespace-nowrap shrink-0">
+                          <span
+                            className="w-4 h-0 border-t-[2.5px] border-solid shrink-0"
+                            style={{ borderTopColor: canvasSurface === 'dark' ? '#34d399' : '#059669' }}
+                          />
+                          <span className="text-slate-200">Wohin (Ausgehend)</span>
+                          <span className="text-slate-500 font-mono tabular-nums">
+                            ({callflowTrace.downstreamEdges.length})
+                          </span>
+                        </div>
+                      )}
+                      {callflowTrace.cycleEdges.length > 0 && (
+                        <div className="flex items-center gap-1.5 whitespace-nowrap shrink-0">
+                          <span
+                            className="w-4 h-0 border-t-[2.5px] border-dashed shrink-0"
+                            style={{ borderTopColor: canvasSurface === 'dark' ? '#fb7185' : '#e11d48' }}
+                          />
+                          <span className="text-slate-200">Zyklus / Rücksprung</span>
+                          <span className="text-slate-500 font-mono tabular-nums">
+                            ({callflowTrace.cycleEdges.length})
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    <span className="text-slate-700 shrink-0" aria-hidden="true">
+                      |
+                    </span>
+                    <div className="flex items-center gap-2.5 whitespace-nowrap shrink-0 text-[11px] text-slate-400">
+                      <span className="inline-flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 rounded-xs border border-amber-400 bg-amber-950/70" />
+                        Fokus
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 rounded-xs border border-sky-400 bg-sky-950/70" />
+                        Aufrufer
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 rounded-xs border border-emerald-400 bg-emerald-950/70" />
+                        Folgeschritte
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="w-2.5 h-2.5 rounded-xs border border-rose-400 bg-rose-950/70" />
+                        Endpunkt
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-indigo-300 font-medium whitespace-nowrap shrink-0">
+                      {pathColorMode === 'branches'
+                        ? 'Pfade (B: Verzweigung):'
+                        : 'Pfade (A: Semantik):'}
+                    </span>
+                    {logicSummary.legend.filter((it) => it.kind === 'edge').length > 0 ? (
+                      <div className="flex items-center gap-3 overflow-x-auto">
+                        {logicSummary.legend
+                          .filter((it) => it.kind === 'edge')
+                          .map((item) => (
+                            <div
+                              key={item.id}
+                              className="flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                            >
+                              <span
+                                className={`w-4 h-0 border-t-[2.5px] shrink-0 ${
+                                  item.dashed ? 'border-dashed' : 'border-solid'
+                                }`}
+                                style={{ borderTopColor: item.borderColor }}
+                              />
+                              <span className="text-slate-200">{item.label}</span>
+                              <span className="text-slate-500 font-mono tabular-nums">
+                                ({item.count})
+                              </span>
+                            </div>
+                          ))}
                       </div>
-                    ))}
-                  </div>
+                    ) : (
+                      <span className="text-slate-400 whitespace-nowrap shrink-0">
+                        Knoten antippen für Callflow-Pfad
+                      </span>
+                    )}
+                    {logicSummary.legend.filter((it) => it.kind !== 'edge').length > 0 && (
+                      <>
+                        <span className="text-slate-700 shrink-0" aria-hidden="true">
+                          |
+                        </span>
+                        <span className="text-slate-400 font-medium whitespace-nowrap shrink-0">
+                          Knoten:
+                        </span>
+                        <div className="flex items-center gap-3 overflow-x-auto">
+                          {logicSummary.legend
+                            .filter((it) => it.kind !== 'edge')
+                            .map((item) => (
+                              <div
+                                key={item.id}
+                                className="flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                              >
+                                <span
+                                  className="w-3 h-3 rounded-xs border shrink-0"
+                                  style={{
+                                    backgroundColor: item.fillColor,
+                                    borderColor: item.borderColor,
+                                  }}
+                                />
+                                <span className="text-slate-200">{item.label}</span>
+                                <span className="text-slate-500 font-mono tabular-nums">
+                                  ({item.count})
+                                </span>
+                              </div>
+                            ))}
+                        </div>
+                      </>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -5374,7 +5595,7 @@ export default function App() {
       {/* Mobile Bottom Navigation Bar */}
       <nav
         aria-label="Mobile Arbeitsbereich-Navigation"
-        className={`lg:hidden h-14 border-t border-slate-800 bg-slate-950/95 backdrop-blur-md grid ${
+        className={`lg:hidden h-14 border-t border-slate-800 bg-slate-950 grid ${
           workspaceMode === 'guided' ? 'grid-cols-2' : 'grid-cols-5'
         } items-center px-1.5 shrink-0 z-30`}
       >
@@ -5486,6 +5707,7 @@ export default function App() {
         defaultBackground={canvasSurface}
         themeConfig={themeConfig}
         smartColorMode={smartColorMode}
+        pathColorMode={pathColorMode}
         hiddenNodeTypes={hiddenSmartNodeTypes}
         callflowGraph={callflowGraph}
         scriptCount={scriptWorkspace.modules.length}
@@ -5499,7 +5721,7 @@ export default function App() {
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-md bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl p-4 shadow-2xl space-y-3"
+          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-md bg-slate-900/98 border border-slate-700/80 rounded-xl p-4 shadow-2xl space-y-3"
         >
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">

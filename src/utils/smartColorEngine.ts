@@ -1,6 +1,7 @@
 import {
   LegendItem,
   LogicAnalysisSummary,
+  PathColorMode,
   SmartColorMode,
   SmartColorNodeType,
 } from '../types/mermaidStudio';
@@ -73,7 +74,7 @@ interface RolePalette {
   light: { fill: string; border: string; text: string };
 }
 
-const SEMANTIC_PALETTES: Record<SemanticRoleId, RolePalette> = {
+export const SEMANTIC_PALETTES: Record<SemanticRoleId, RolePalette> = {
   'start-actor': {
     id: 'start-actor',
     label: 'Client / Einstieg / Akteur',
@@ -465,6 +466,761 @@ function applyGroupTextStyle(group: Element, textColor: string, fontWeight?: str
   });
 }
 
+// ============================================================================
+// Edge / Path Differentiation (Modus A: Semantik vs. Modus B: Verzweigung)
+// ============================================================================
+
+export type SemanticEdgeCategory =
+  | 'edge-flow'
+  | 'edge-decision'
+  | 'edge-queue'
+  | 'edge-fallback'
+  | 'edge-error'
+  | 'edge-cycle'
+  | 'edge-external';
+
+export interface ParsedCodeEdgeMeta {
+  index: number;
+  from: string;
+  to: string;
+  label: string;
+  isDashed: boolean;
+}
+
+interface SvgMarkerRegistry {
+  markersById: Map<string, Element>;
+  defsEl: Element | null;
+}
+
+const svgMarkerRegistryCache = new WeakMap<SVGSVGElement, SvgMarkerRegistry>();
+
+function getSvgMarkerRegistry(svgEl: SVGSVGElement): SvgMarkerRegistry {
+  const cached = svgMarkerRegistryCache.get(svgEl);
+  if (cached) return cached;
+
+  const markersById = new Map<string, Element>();
+  svgEl.querySelectorAll('defs marker, marker').forEach((m) => {
+    const id = m.getAttribute('id');
+    if (id && !markersById.has(id)) {
+      markersById.set(id, m);
+    }
+  });
+  const defsEl = svgEl.querySelector('defs');
+  const reg = { markersById, defsEl };
+  svgMarkerRegistryCache.set(svgEl, reg);
+  return reg;
+}
+
+function extractMarkerIdFromUrl(val: string | null | undefined): string | null {
+  if (!val) return null;
+  const match = val.match(/url\(\s*['"]?(?:[^'"#)]*)#([^'")\s]+)['"]?\s*\)/i);
+  return match ? match[1] : null;
+}
+
+/**
+ * Sets stroke color on an SVG edge path and clones its `<marker>` arrowheads per color
+ * so every differentiated path renders with matching arrowhead color in Chromium, SVG & PNG exports.
+ */
+export function applyColorToEdgePathAndMarkers(
+  svgEl: SVGSVGElement,
+  pathEl: SVGElement,
+  color: string
+): void {
+  pathEl.style.stroke = color;
+  pathEl.setAttribute('stroke', color);
+
+  const registry = getSvgMarkerRegistry(svgEl);
+  const safeHex = color.replace(/[^a-z0-9]/gi, '').toLowerCase() || 'c';
+
+  const markerAttrs: Array<{ attr: 'marker-end' | 'marker-start'; styleProp: 'markerEnd' | 'markerStart' }> = [
+    { attr: 'marker-end', styleProp: 'markerEnd' },
+    { attr: 'marker-start', styleProp: 'markerStart' },
+  ];
+
+  for (const { attr, styleProp } of markerAttrs) {
+    const rawRef = pathEl.style[styleProp] || pathEl.getAttribute(attr);
+    const rawMarkerId = extractMarkerIdFromUrl(rawRef);
+    if (!rawMarkerId) continue;
+
+    const baseMarkerId = rawMarkerId.replace(/__c_[a-z0-9]+$/i, '');
+    const targetMarkerId = `${baseMarkerId}__c_${safeHex}`;
+
+    if (!registry.markersById.has(targetMarkerId)) {
+      const origMarker =
+        registry.markersById.get(baseMarkerId) || registry.markersById.get(rawMarkerId);
+      if (!origMarker) continue;
+
+      const cloned = origMarker.cloneNode(true) as Element;
+      cloned.setAttribute('id', targetMarkerId);
+      cloned.setAttribute('data-colored-marker', 'true');
+
+      cloned.querySelectorAll('path, polygon, circle, rect, polyline').forEach((child) => {
+        const svgChild = child as SVGElement;
+        const origFill = svgChild.style.fill || child.getAttribute('fill') || '';
+        if (origFill !== 'none') {
+          svgChild.style.fill = color;
+          child.setAttribute('fill', color);
+        }
+        svgChild.style.stroke = color;
+        child.setAttribute('stroke', color);
+      });
+
+      const parentContainer = origMarker.parentNode || registry.defsEl || svgEl;
+      parentContainer.appendChild(cloned);
+      registry.markersById.set(targetMarkerId, cloned);
+    }
+
+    const nextUrl = `url(#${targetMarkerId})`;
+    pathEl.setAttribute(attr, nextUrl);
+    pathEl.style[styleProp] = nextUrl;
+  }
+}
+
+const EDGE_CODE_RESERVED_IDS = new Set([
+  'flowchart',
+  'graph',
+  'sequencediagram',
+  'statediagram',
+  'statediagram-v2',
+  'classdiagram',
+  'erdiagram',
+  'subgraph',
+  'end',
+  'direction',
+  'style',
+  'classdef',
+  'class',
+  'click',
+  'linkstyle',
+  'participant',
+  'actor',
+  'note',
+  'loop',
+  'alt',
+  'else',
+  'opt',
+  'par',
+  'activate',
+  'deactivate',
+  'autonumber',
+  'TB',
+  'TD',
+  'BT',
+  'RL',
+  'LR',
+]);
+
+function splitStatementsOutsideQuotesForEdges(line: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let inDouble = false;
+  let inSingle = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      current += ch;
+    } else if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      current += ch;
+    } else if (ch === ';' && !inDouble && !inSingle) {
+      if (current.trim()) parts.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function extractSimpleNodeIdFromToken(rawToken: string): string | null {
+  let token = rawToken.trim().replace(/:::[A-Za-z0-9_-]+$/, '').trim();
+  if (!token) return null;
+  if (token === '[*]') return 'START_END';
+  const v11 = token.match(/^([A-Za-z0-9_.-]+)\s*@\s*\{[\s\S]*\}$/);
+  if (v11) {
+    return EDGE_CODE_RESERVED_IDS.has(v11[1].toLowerCase()) ? null : v11[1];
+  }
+  const withShape = token.match(/^([A-Za-z0-9_.-]+)\s*[\[(\{>]/);
+  if (withShape) {
+    return EDGE_CODE_RESERVED_IDS.has(withShape[1].toLowerCase()) ? null : withShape[1];
+  }
+  const plain = token.match(/^([A-Za-z0-9_.-]+)$/);
+  if (plain) {
+    return EDGE_CODE_RESERVED_IDS.has(plain[1].toLowerCase()) ? null : plain[1];
+  }
+  return null;
+}
+
+export function parseCodeEdgeMetaList(code: string): ParsedCodeEdgeMeta[] {
+  const edges: ParsedCodeEdgeMeta[] = [];
+  const cleaned = code
+    .replace(/%%\{[\s\S]*?\}%%/g, '')
+    .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/m, '');
+
+  const statements: string[] = [];
+  for (const rawLine of cleaned.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('%%')) continue;
+    const withoutComment = line.replace(/\s+%%[^"']*$/, '').trim();
+    if (!withoutComment) continue;
+    statements.push(...splitStatementsOutsideQuotesForEdges(withoutComment));
+  }
+
+  for (const line of statements) {
+    if (/^(classDef|class|style|linkStyle|click|direction|accTitle|accDescr|participant|actor)\b/i.test(line)) {
+      continue;
+    }
+
+    const seqMatch = line.match(
+      /^([A-Za-z0-9_.-]+)\s*(->>|-->>|->|-->|-x|--x|-\)|--\))\+?-?\s*([A-Za-z0-9_.-]+)\s*:\s*(.*)$/
+    );
+    if (seqMatch) {
+      edges.push({
+        index: edges.length,
+        from: seqMatch[1],
+        to: seqMatch[3],
+        label: seqMatch[4].replace(/^["'`]|["'`]$/g, '').replace(/<br\s*\/?>/gi, ' ').trim(),
+        isDashed: seqMatch[2].includes('--'),
+      });
+      continue;
+    }
+
+    const arrowRegex =
+      /\s*(<-->|<-\.->|<==>|-->|-\.->|==>|---|-\.-|==|--\s+[^-|\n]+\s+-->|-\.\s+[^.|\n]+\s+\.->|==\s+[^=|\n]+\s+==>)\s*(?:\|([^|]*)\|)?\s*/g;
+    if (!arrowRegex.test(line)) continue;
+    arrowRegex.lastIndex = 0;
+
+    const segments: string[] = [];
+    const arrows: Array<{ label: string; isDashed: boolean; bidirectional: boolean }> = [];
+    let lastIdx = 0;
+    let m: RegExpExecArray | null;
+    while ((m = arrowRegex.exec(line)) !== null) {
+      segments.push(line.slice(lastIdx, m.index).trim());
+      const rawArrow = m[1].trim();
+      let edgeLabel = (m[2] || '').trim();
+      const inlineMatch = rawArrow.match(
+        /^--\s+(.+?)\s+-->$|^-\.\s+(.+?)\s+\.->$|^==\s+(.+?)\s+==>$/
+      );
+      if (inlineMatch) {
+        edgeLabel = (inlineMatch[1] || inlineMatch[2] || inlineMatch[3] || '').trim();
+      }
+      arrows.push({
+        label: edgeLabel.replace(/^["'`]|["'`]$/g, '').replace(/<br\s*\/?>/gi, ' ').trim(),
+        isDashed: rawArrow.includes('-.'),
+        bidirectional: rawArrow.startsWith('<'),
+      });
+      lastIdx = arrowRegex.lastIndex;
+    }
+    segments.push(line.slice(lastIdx).trim());
+
+    for (let i = 0; i < arrows.length; i++) {
+      const leftRaw = segments[i];
+      const rightRaw = segments[i + 1];
+      if (!leftRaw || !rightRaw) continue;
+      for (const lPart of leftRaw.split('&')) {
+        for (const rPart of rightRaw.split('&')) {
+          const from = extractSimpleNodeIdFromToken(lPart);
+          const to = extractSimpleNodeIdFromToken(rPart);
+          if (!from || !to) continue;
+          edges.push({
+            index: edges.length,
+            from,
+            to,
+            label: arrows[i].label,
+            isDashed: arrows[i].isDashed,
+          });
+          if (arrows[i].bidirectional) {
+            edges.push({
+              index: edges.length,
+              from: to,
+              to: from,
+              label: arrows[i].label,
+              isDashed: arrows[i].isDashed,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return edges;
+}
+
+/**
+ * Finds true cycle back-edges via 3-color DFS (no false positives on converging DAG branches).
+ */
+function detectCycleEdgeIndices(edges: ParsedCodeEdgeMeta[]): Set<number> {
+  const cycleIndices = new Set<number>();
+  const adj = new Map<string, ParsedCodeEdgeMeta[]>();
+  const inDeg = new Map<string, number>();
+
+  for (const e of edges) {
+    const list = adj.get(e.from) || [];
+    list.push(e);
+    adj.set(e.from, list);
+    if (!inDeg.has(e.from)) inDeg.set(e.from, 0);
+    inDeg.set(e.to, (inDeg.get(e.to) || 0) + 1);
+  }
+
+  const state = new Map<string, 0 | 1 | 2>();
+  const roots = Array.from(inDeg.entries())
+    .filter(([, d]) => d === 0)
+    .map(([id]) => id);
+  const visitOrder = [...roots, ...Array.from(inDeg.keys())];
+
+  const dfs = (u: string) => {
+    state.set(u, 1);
+    const outgoing = adj.get(u) || [];
+    for (const edge of outgoing) {
+      const st = state.get(edge.to) || 0;
+      if (st === 1) {
+        cycleIndices.add(edge.index);
+      } else if (st === 0) {
+        dfs(edge.to);
+      }
+    }
+    state.set(u, 2);
+  };
+
+  for (const nodeId of visitOrder) {
+    if ((state.get(nodeId) || 0) === 0) {
+      dfs(nodeId);
+    }
+  }
+
+  return cycleIndices;
+}
+
+interface EdgeVisualStyle {
+  id: SemanticEdgeCategory;
+  label: string;
+  color: string;
+  dashed: boolean;
+  strokeWidth: string;
+}
+
+const SEMANTIC_EDGE_STYLES: Record<
+  SemanticEdgeCategory,
+  { label: string; dark: string; light: string; dashed: boolean; strokeWidth: string }
+> = {
+  'edge-flow': {
+    label: 'Standard-Fluss',
+    dark: '#818cf8',
+    light: '#4f46e5',
+    dashed: false,
+    strokeWidth: '2px',
+  },
+  'edge-decision': {
+    label: 'Bedingung / Auswahl / Taste',
+    dark: '#38bdf8',
+    light: '#0284c7',
+    dashed: false,
+    strokeWidth: '2.2px',
+  },
+  'edge-queue': {
+    label: 'Queue / Skillset / Async',
+    dark: '#a78bfa',
+    light: '#7c3aed',
+    dashed: false,
+    strokeWidth: '2.3px',
+  },
+  'edge-external': {
+    label: 'Sprung / Route / Verknüpfung',
+    dark: '#2dd4bf',
+    light: '#0d9488',
+    dashed: false,
+    strokeWidth: '2.3px',
+  },
+  'edge-fallback': {
+    label: 'Fallback / Nein / Weiter',
+    dark: '#fbbf24',
+    light: '#d97706',
+    dashed: true,
+    strokeWidth: '2.2px',
+  },
+  'edge-error': {
+    label: 'Fehler / Timeout / Abbruch',
+    dark: '#f43f5e',
+    light: '#dc2626',
+    dashed: true,
+    strokeWidth: '2.4px',
+  },
+  'edge-cycle': {
+    label: 'Zyklus / Rücksprung',
+    dark: '#fb7185',
+    light: '#e11d48',
+    dashed: true,
+    strokeWidth: '2.5px',
+  },
+};
+
+export function classifySemanticEdgeStyle(
+  labelText: string,
+  isDashed: boolean,
+  isCycle: boolean,
+  canvasSurface: 'dark' | 'light',
+  fromRole?: SemanticRoleId,
+  toRole?: SemanticRoleId
+): EdgeVisualStyle {
+  const lower = labelText.toLowerCase();
+  let cat: SemanticEdgeCategory = 'edge-flow';
+
+  if (
+    isCycle ||
+    labelText.includes('↻') ||
+    /\b(zyklus|cycle|schleife|loop|rücksprung|wiederhol)\b/i.test(lower)
+  ) {
+    cat = 'edge-cycle';
+  } else if (
+    toRole === 'error-alert' ||
+    /\b(fehler|error|fail|failed|out of service|oos|abort|abbruch|timeout|ungültig|invalid|nicht gefunden|missing|denied|verweigert|unavailable|down)\b/i.test(
+      lower
+    )
+  ) {
+    cat = 'edge-error';
+  } else if (
+    /\b(fallback|default|weiter|nein|no|false|sonst|else|otherwise|standard|kein|none|skip)\b/i.test(
+      lower
+    ) ||
+    (isDashed && toRole !== 'async-queue')
+  ) {
+    cat = 'edge-fallback';
+  } else if (
+    toRole === 'async-queue' ||
+    /\b(queue|network-queue|skillset|async|event|bus|wait|warte|musik|hold|publish|subscribe)\b/i.test(
+      lower
+    )
+  ) {
+    cat = 'edge-queue';
+  } else if (
+    fromRole === 'decision-gate' ||
+    /\b(ja|yes|true|ok|match|treffer|bedingung|condition|if|check|auth|zeitplan|schedule|feiertag|holiday|taste|dtmf|ivr|wahl|auswahl|option|case|menu)\b/i.test(
+      lower
+    )
+  ) {
+    cat = 'edge-decision';
+  } else if (
+    /\b(route|sprung|jump|sub|include|verknüpft|linked|wohin|transfer|weiterleitung|forward|redirect|cti|db|database|hdx|readvar|api|http|webhook|extern|endpunkt)\b/i.test(
+      lower
+    )
+  ) {
+    cat = 'edge-external';
+  }
+
+  const def = SEMANTIC_EDGE_STYLES[cat];
+  return {
+    id: cat,
+    label: def.label,
+    color: canvasSurface === 'dark' ? def.dark : def.light,
+    dashed: def.dashed || (isDashed && cat === 'edge-queue'),
+    strokeWidth: def.strokeWidth,
+  };
+}
+
+const BRANCH_PALETTE = [
+  { label: 'Zweig 1 (Blau)', dark: '#38bdf8', light: '#0284c7' },
+  { label: 'Zweig 2 (Smaragd)', dark: '#34d399', light: '#059669' },
+  { label: 'Zweig 3 (Bernstein)', dark: '#fbbf24', light: '#d97706' },
+  { label: 'Zweig 4 (Violett)', dark: '#a78bfa', light: '#7c3aed' },
+  { label: 'Zweig 5 (Türkis)', dark: '#2dd4bf', light: '#0d9488' },
+  { label: 'Zweig 6 (Orange)', dark: '#fb923c', light: '#ea580c' },
+  { label: 'Zweig 7 (Pink)', dark: '#f472b6', light: '#db2777' },
+  { label: 'Zweig 8 (Indigo)', dark: '#818cf8', light: '#4f46e5' },
+];
+
+function computeBranchIndexByEdge(
+  edges: ParsedCodeEdgeMeta[],
+  cycleIndices: Set<number>
+): Map<number, number> {
+  const edgeBranch = new Map<number, number>();
+  const outByNode = new Map<string, ParsedCodeEdgeMeta[]>();
+  const inDegree = new Map<string, number>();
+
+  for (const e of edges) {
+    if (!inDegree.has(e.from)) inDegree.set(e.from, 0);
+    if (!inDegree.has(e.to)) inDegree.set(e.to, 0);
+    if (cycleIndices.has(e.index)) continue;
+    const list = outByNode.get(e.from) || [];
+    list.push(e);
+    outByNode.set(e.from, list);
+    inDegree.set(e.to, (inDegree.get(e.to) || 0) + 1);
+  }
+
+  const nodeBranch = new Map<string, number>();
+  const visitedNodes = new Set<string>();
+  const roots = Array.from(inDegree.entries())
+    .filter(([, d]) => d === 0)
+    .map(([id]) => id);
+  const startOrder = roots.length > 0 ? roots : Array.from(inDegree.keys());
+
+  let nextGlobalBranch = 0;
+
+  for (const startId of startOrder) {
+    if (visitedNodes.has(startId)) continue;
+    if (!nodeBranch.has(startId)) {
+      nodeBranch.set(startId, nextGlobalBranch % BRANCH_PALETTE.length);
+      nextGlobalBranch += 1;
+    }
+
+    const queue: string[] = [startId];
+    while (queue.length > 0) {
+      const u = queue.shift()!;
+      if (visitedNodes.has(u)) continue;
+      visitedNodes.add(u);
+
+      const parentBranch = nodeBranch.get(u) ?? 0;
+      const outgoing = outByNode.get(u) || [];
+
+      if (outgoing.length === 1) {
+        const edge = outgoing[0];
+        edgeBranch.set(edge.index, parentBranch);
+        if (!nodeBranch.has(edge.to)) {
+          nodeBranch.set(edge.to, parentBranch);
+        }
+        if (!visitedNodes.has(edge.to)) queue.push(edge.to);
+      } else if (outgoing.length > 1) {
+        outgoing.forEach((edge, siblingIdx) => {
+          const branchIdx =
+            siblingIdx === 0
+              ? parentBranch
+              : (parentBranch + siblingIdx) % BRANCH_PALETTE.length;
+          edgeBranch.set(edge.index, branchIdx);
+          if (!nodeBranch.has(edge.to)) {
+            nodeBranch.set(edge.to, branchIdx);
+          }
+          if (!visitedNodes.has(edge.to)) queue.push(edge.to);
+        });
+        nextGlobalBranch = Math.max(nextGlobalBranch, parentBranch + outgoing.length);
+      }
+    }
+  }
+
+  return edgeBranch;
+}
+
+function applyPathColorDifferentiation(
+  svgEl: SVGSVGElement,
+  code: string,
+  pathColorMode: PathColorMode,
+  canvasSurface: 'dark' | 'light',
+  syntaxRoleMap: Map<string, SemanticRoleId>,
+  legendMap: Map<string, LegendItem>
+): void {
+  const codeEdges = parseCodeEdgeMetaList(code);
+  const cycleIndices = detectCycleEdgeIndices(codeEdges);
+  const branchByEdge =
+    pathColorMode === 'branches'
+      ? computeBranchIndexByEdge(codeEdges, cycleIndices)
+      : new Map<number, number>();
+
+  let edgeElements = Array.from(
+    svgEl.querySelectorAll(
+      'g.edgePaths > *, g.edgePath, path.transition, path.relationshipLine'
+    )
+  ).filter((el) => el.getAttribute('data-smart-hidden') !== 'true');
+
+  if (edgeElements.length === 0) {
+    edgeElements = Array.from(
+      svgEl.querySelectorAll('line.messageLine0, line.messageLine1, path.messageLine0, path.messageLine1')
+    ).filter((el) => el.getAttribute('data-smart-hidden') !== 'true');
+  }
+
+  const edgeLabels = Array.from(svgEl.querySelectorAll('g.edgeLabels > *, g.edgeLabel'));
+  const labelsByDataId = new Map<string, string>();
+  const labelElsByDataId = new Map<string, Element>();
+  edgeLabels.forEach((lblEl) => {
+    const dataId =
+      lblEl.getAttribute('data-id') ||
+      lblEl.querySelector('[data-id]')?.getAttribute('data-id') ||
+      lblEl.getAttribute('id') ||
+      '';
+    const text = (lblEl.textContent || '').replace(/\s+/g, ' ').trim();
+    if (dataId) {
+      labelElsByDataId.set(dataId, lblEl);
+      if (text) labelsByDataId.set(dataId, text);
+    }
+  });
+
+  // Pre-build edge matcher pairs sorted longest IDs first
+  const consumedCodeEdgeIdx = new Set<number>();
+  const compiledMatchers = [...codeEdges]
+    .sort((a, b) => b.from.length + b.to.length - (a.from.length + a.to.length))
+    .map((e) => {
+      const fEsc = e.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const tEsc = e.to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return {
+        edge: e,
+        exactLsLe: new RegExp(`(?:^|\\s)LS_${fEsc}\\s+LE_${tEsc}(?:\\s|$)`),
+        exactL: new RegExp(`(?:^|[-\\s])L[-_]${fEsc}[-_]${tEsc}(?:[-_]\\d+(?:[-_]\\d+)?)?(?=$|\\s)`, 'i'),
+        generic: new RegExp(`(?:^|[-_L\\s])${fEsc}[-_]${tEsc}(?:[-_]\\d+|\\s|$)`, 'i'),
+      };
+    });
+
+  const matchCodeEdge = (edgeEl: Element, idx: number): ParsedCodeEdgeMeta | null => {
+    const nestedDataId =
+      edgeEl.getAttribute('data-id') ||
+      edgeEl.querySelector('[data-id]')?.getAttribute('data-id') ||
+      '';
+    const meta = `${edgeEl.getAttribute('id') || ''} ${nestedDataId} ${edgeEl.getAttribute('class') || ''}`;
+
+    for (const m of compiledMatchers) {
+      if (consumedCodeEdgeIdx.has(m.edge.index)) continue;
+      if (
+        m.exactLsLe.test(meta) ||
+        m.exactL.test(meta) ||
+        m.generic.test(meta) ||
+        meta.includes(`-${m.edge.from}-${m.edge.to}-`) ||
+        meta.includes(`_${m.edge.from}_${m.edge.to}_`)
+      ) {
+        consumedCodeEdgeIdx.add(m.edge.index);
+        return m.edge;
+      }
+    }
+
+    if (idx < codeEdges.length && !consumedCodeEdgeIdx.has(codeEdges[idx].index)) {
+      consumedCodeEdgeIdx.add(codeEdges[idx].index);
+      return codeEdges[idx];
+    }
+    return null;
+  };
+
+  const getEdgeLabelText = (edgeEl: Element, idx: number, codeEdge: ParsedCodeEdgeMeta | null): string => {
+    if (codeEdge?.label) return codeEdge.label;
+    const dataId =
+      edgeEl.getAttribute('data-id') ||
+      edgeEl.querySelector('[data-id]')?.getAttribute('data-id') ||
+      edgeEl.getAttribute('id') ||
+      '';
+    if (dataId && labelsByDataId.has(dataId)) {
+      return labelsByDataId.get(dataId) || '';
+    }
+    if (edgeLabels.length === edgeElements.length && edgeLabels[idx]) {
+      return (edgeLabels[idx].textContent || '').replace(/\s+/g, ' ').trim();
+    }
+    return '';
+  };
+
+  edgeElements.forEach((edgeEl, idx) => {
+    const codeEdge = matchCodeEdge(edgeEl, idx);
+    const labelText = getEdgeLabelText(edgeEl, idx, codeEdge);
+    if (codeEdge) {
+      edgeEl.setAttribute('data-edge-from', codeEdge.from);
+      edgeEl.setAttribute('data-edge-to', codeEdge.to);
+      if (labelText) edgeEl.setAttribute('data-edge-label', labelText);
+
+      const eDataId =
+        edgeEl.getAttribute('data-id') ||
+        edgeEl.querySelector('[data-id]')?.getAttribute('data-id') ||
+        edgeEl.getAttribute('id') ||
+        '';
+      const matchedLblEl =
+        (eDataId ? labelElsByDataId.get(eDataId) : undefined) ||
+        (edgeLabels.length === edgeElements.length ? edgeLabels[idx] : undefined);
+      if (matchedLblEl) {
+        matchedLblEl.setAttribute('data-edge-from', codeEdge.from);
+        matchedLblEl.setAttribute('data-edge-to', codeEdge.to);
+        if (labelText) matchedLblEl.setAttribute('data-edge-label', labelText);
+      }
+    }
+    const isCycle =
+      (codeEdge !== null && cycleIndices.has(codeEdge.index)) ||
+      labelText.includes('↻') ||
+      /\b(zyklus|cycle|schleife|loop|rücksprung)\b/i.test(labelText);
+
+    const shapeTag = edgeEl.tagName.toLowerCase();
+    const shapes =
+      shapeTag === 'path' || shapeTag === 'line'
+        ? [edgeEl]
+        : Array.from(edgeEl.querySelectorAll('path, line'));
+
+    if (shapes.length === 0) return;
+
+    const firstShape = shapes[0];
+    const styleAttr = firstShape.getAttribute('style') || '';
+    const dashAttr = firstShape.getAttribute('stroke-dasharray') || '';
+    const isDashed =
+      Boolean(codeEdge?.isDashed) ||
+      dashAttr.length > 0 ||
+      styleAttr.includes('stroke-dasharray') ||
+      firstShape.classList.contains('edge-pattern-dotted') ||
+      firstShape.classList.contains('edge-pattern-dashed') ||
+      firstShape.classList.contains('messageLine1');
+
+    let legendId = '';
+    let legendLabel = '';
+    let color = '';
+    let applyDashed = isDashed;
+    let strokeWidth = '2.2px';
+
+    if (pathColorMode === 'branches') {
+      if (isCycle) {
+        const cycDef = SEMANTIC_EDGE_STYLES['edge-cycle'];
+        legendId = 'branch-cycle';
+        legendLabel = cycDef.label;
+        color = canvasSurface === 'dark' ? cycDef.dark : cycDef.light;
+        applyDashed = true;
+        strokeWidth = cycDef.strokeWidth;
+      } else {
+        const branchIdx =
+          codeEdge !== null
+            ? (branchByEdge.get(codeEdge.index) ?? idx % BRANCH_PALETTE.length)
+            : idx % BRANCH_PALETTE.length;
+        const pal = BRANCH_PALETTE[branchIdx % BRANCH_PALETTE.length];
+        legendId = `branch-${branchIdx % BRANCH_PALETTE.length}`;
+        legendLabel = pal.label;
+        color = canvasSurface === 'dark' ? pal.dark : pal.light;
+        applyDashed = isDashed;
+        strokeWidth = '2.3px';
+      }
+    } else {
+      const fromRole = codeEdge ? syntaxRoleMap.get(codeEdge.from) : undefined;
+      const toRole = codeEdge ? syntaxRoleMap.get(codeEdge.to) : undefined;
+      const sem = classifySemanticEdgeStyle(
+        labelText,
+        isDashed,
+        isCycle,
+        canvasSurface,
+        fromRole,
+        toRole
+      );
+      legendId = sem.id;
+      legendLabel = sem.label;
+      color = sem.color;
+      applyDashed = sem.dashed;
+      strokeWidth = sem.strokeWidth;
+    }
+
+    shapes.forEach((shape) => {
+      const svgShape = shape as SVGElement;
+      applyColorToEdgePathAndMarkers(svgEl, svgShape, color);
+      svgShape.style.strokeWidth = strokeWidth;
+      shape.setAttribute('data-path-colored', 'true');
+      if (applyDashed) {
+        svgShape.style.strokeDasharray = '6 4';
+        shape.setAttribute('stroke-dasharray', '6 4');
+      }
+    });
+
+    const existingLegend = legendMap.get(legendId);
+    if (existingLegend) {
+      existingLegend.count += 1;
+    } else {
+      legendMap.set(legendId, {
+        id: legendId,
+        label: legendLabel,
+        fillColor: color,
+        borderColor: color,
+        textColor: canvasSurface === 'dark' ? '#f8fafc' : '#0f172a',
+        count: 1,
+        kind: 'edge',
+        dashed: applyDashed,
+      });
+    }
+  });
+}
+
 /**
  * Resolves a safe, high-contrast line color for dark mode (never black/dark gray).
  */
@@ -513,9 +1269,9 @@ ${scopePrefix}line.actor-line {
 }
 ${scopePrefix}.arrowheadPath,
 ${scopePrefix}.arrowMarkerPath,
-${scopePrefix}marker path,
-${scopePrefix}marker circle,
-${scopePrefix}marker polygon {
+${scopePrefix}marker:not([data-colored-marker="true"]) path,
+${scopePrefix}marker:not([data-colored-marker="true"]) circle,
+${scopePrefix}marker:not([data-colored-marker="true"]) polygon {
   fill: ${solidColor};
   stroke: ${solidColor};
 }
@@ -542,12 +1298,15 @@ ${scopePrefix}.labelBkg {
     svgEl.insertBefore(nsStyle, svgEl.firstChild);
   }
 
-  // 2. Directly inspect and fix edge paths & lines (handles inline styles or ELK/Dagre stroke attributes)
+  // 2. Directly inspect and fix edge paths & lines (never overwrite already differentiated edges)
   const edgeShapes = svgEl.querySelectorAll(
     'g.edgePaths path, g.edgePath path, path.flowchart-link, path.transition, path.relationshipLine, line.messageLine0, line.messageLine1, line.actor-line, g.mindmap-edges path, path.edge'
   );
 
   edgeShapes.forEach((el) => {
+    if (el.getAttribute('data-path-colored') === 'true' || el.closest('[data-path-colored="true"]')) {
+      return;
+    }
     const svgShape = el as SVGElement;
     const inlineStroke = svgShape.style.stroke || el.getAttribute('stroke') || '';
     const dashed = isDashedEdge(el);
@@ -567,11 +1326,12 @@ ${scopePrefix}.labelBkg {
     }
   });
 
-  // 3. Fix all SVG markers & arrowheads so none stay default SVG black (#000)
+  // 3. Fix uncolored SVG markers & arrowheads so none stay default SVG black (#000)
   const markerShapes = svgEl.querySelectorAll(
     'defs marker path, defs marker polygon, defs marker circle, marker path, marker polygon, marker circle, .arrowheadPath, .arrowMarkerPath'
   );
   markerShapes.forEach((mEl) => {
+    if (mEl.closest('[data-colored-marker="true"]')) return;
     const svgMarker = mEl as SVGElement;
     const curFill = svgMarker.style.fill || mEl.getAttribute('fill') || '';
     const curStroke = svgMarker.style.stroke || mEl.getAttribute('stroke') || '';
@@ -586,6 +1346,52 @@ ${scopePrefix}.labelBkg {
   });
 }
 
+const MAX_SMART_COLOR_CACHE = 80;
+const smartColorResultCache = new Map<
+  string,
+  { svg: string; summary: LogicAnalysisSummary }
+>();
+
+function computeSmartColorFastHash(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${(hash >>> 0).toString(36)}_${input.length}`;
+}
+
+function buildSmartColorCacheKey(
+  rawSvg: string,
+  code: string,
+  mode: SmartColorMode,
+  canvasSurface: 'dark' | 'light',
+  preferredLineColor?: string,
+  hiddenNodeTypes: SmartColorNodeType[] = [],
+  pathColorMode: PathColorMode = 'semantic'
+): string {
+  const hiddenKey = hiddenNodeTypes.length > 0 ? [...hiddenNodeTypes].sort().join(',') : '';
+  return [
+    computeSmartColorFastHash(rawSvg),
+    computeSmartColorFastHash(code),
+    mode,
+    pathColorMode,
+    canvasSurface,
+    preferredLineColor || '',
+    hiddenKey,
+  ].join('|');
+}
+
+function cloneSummary(summary: LogicAnalysisSummary): LogicAnalysisSummary {
+  return {
+    ...summary,
+    legend: summary.legend.map((item) => ({ ...item })),
+    detectedTypeCounts: summary.detectedTypeCounts
+      ? { ...summary.detectedTypeCounts }
+      : undefined,
+  };
+}
+
 /**
  * Applies Smart Logic Coloring to a rendered Mermaid SVG string and returns both the enhanced SVG
  * and the logic analysis summary (including recommended mode and active legend items).
@@ -596,8 +1402,28 @@ export function applySmartLogicColoring(
   mode: SmartColorMode,
   canvasSurface: 'dark' | 'light',
   preferredLineColor?: string,
-  hiddenNodeTypes: SmartColorNodeType[] = []
+  hiddenNodeTypes: SmartColorNodeType[] = [],
+  pathColorMode: PathColorMode = 'semantic'
 ): { svg: string; summary: LogicAnalysisSummary } {
+  const cacheKey = buildSmartColorCacheKey(
+    rawSvg,
+    code,
+    mode,
+    canvasSurface,
+    preferredLineColor,
+    hiddenNodeTypes,
+    pathColorMode
+  );
+  const cached = smartColorResultCache.get(cacheKey);
+  if (cached) {
+    smartColorResultCache.delete(cacheKey);
+    smartColorResultCache.set(cacheKey, cached);
+    return {
+      svg: cached.svg,
+      summary: cloneSummary(cached.summary),
+    };
+  }
+
   const parser = new DOMParser();
   const safeSvg = sanitizeSvgForXmlParser(rawSvg);
   const doc = parser.parseFromString(safeSvg, 'image/svg+xml');
@@ -680,6 +1506,12 @@ export function applySmartLogicColoring(
       node
     );
     nodeClassificationMap.set(node, { ...classified, shapeHint });
+    node.setAttribute('data-node-type', classified.filterType);
+    node.setAttribute('data-semantic-role', classified.semanticRole);
+    const resolvedIdForAttr = extractNodeIdFromSvgElement(node, sortedKnownIds);
+    if (resolvedIdForAttr && !node.getAttribute('data-callflow-node-id')) {
+      node.setAttribute('data-callflow-node-id', resolvedIdForAttr);
+    }
     detectedTypeCounts[classified.filterType] =
       (detectedTypeCounts[classified.filterType] || 0) + 1;
 
@@ -687,9 +1519,8 @@ export function applySmartLogicColoring(
       hiddenNodeElements.add(node);
       (node as SVGElement).style.display = 'none';
       node.setAttribute('data-smart-hidden', 'true');
-      const resolvedId = extractNodeIdFromSvgElement(node, sortedKnownIds);
-      if (resolvedId) {
-        hiddenSvgNodeIds.add(resolvedId);
+      if (resolvedIdForAttr) {
+        hiddenSvgNodeIds.add(resolvedIdForAttr);
       }
     }
   });
@@ -765,31 +1596,6 @@ export function applySmartLogicColoring(
   }
 
   const darkLineColor = resolveDarkModeLineColor(preferredLineColor);
-
-  if (mode === 'standard') {
-    if (canvasSurface === 'dark') {
-      ensureDarkModeEdgeVisibility(svgEl, darkLineColor, darkLineColor, false);
-    }
-    const serializer = new XMLSerializer();
-    return {
-      svg:
-        canvasSurface === 'dark' || hiddenNodeElements.size > 0
-          ? serializer.serializeToString(svgEl)
-          : rawSvg,
-      summary: {
-        activeMode: mode,
-        recommendedMode,
-        recommendationReason,
-        legend: [],
-        nodeCount: nodeGroups.length,
-        hiddenNodeCount: hiddenNodeElements.size,
-        detectedTypeCounts,
-        clusterCount: Math.max(clusterGroups.length, subgraphCountInCode),
-        asyncEdgeCount: asyncEdgeCountInCode,
-      },
-    };
-  }
-
   const legendMap = new Map<string, LegendItem>();
 
   // MODE 1: SEMANTIC ROLES (Knoten-Rollen + Datenfluss-Akzente)
@@ -839,25 +1645,8 @@ export function applySmartLogicColoring(
           borderColor: colors.border,
           textColor: colors.text,
           count: 1,
+          kind: 'node',
         });
-      }
-    });
-
-    // Also subtly differentiate dashed async edges vs solid edges
-    const allPaths = svgEl.querySelectorAll('g.edgePath path.path, g.edgePaths path');
-    allPaths.forEach((pathEl) => {
-      const styleAttr = pathEl.getAttribute('style') || '';
-      const dashAttr = pathEl.getAttribute('stroke-dasharray') || '';
-      const isDashed =
-        dashAttr.length > 0 ||
-        styleAttr.includes('stroke-dasharray') ||
-        pathEl.classList.contains('edge-pattern-dotted') ||
-        pathEl.classList.contains('edge-pattern-dashed');
-
-      if (isDashed) {
-        const asyncColor = canvasSurface === 'dark' ? '#c084fc' : '#7c3aed';
-        (pathEl as SVGElement).style.stroke = asyncColor;
-        (pathEl as SVGElement).style.strokeWidth = '2.2px';
       }
     });
   }
@@ -975,56 +1764,17 @@ export function applySmartLogicColoring(
       });
       applyGroupTextStyle(node, text, '700');
     });
-
-    let syncCount = 0;
-    let asyncCount = 0;
-    const allPaths = svgEl.querySelectorAll(
-      'g.edgePath path.path, g.edgePaths path, line.messageLine0, line.messageLine1'
-    );
-    allPaths.forEach((pathEl) => {
-      const styleAttr = pathEl.getAttribute('style') || '';
-      const dashAttr = pathEl.getAttribute('stroke-dasharray') || '';
-      const isDashed =
-        dashAttr.length > 0 ||
-        styleAttr.includes('stroke-dasharray') ||
-        pathEl.classList.contains('edge-pattern-dotted') ||
-        pathEl.classList.contains('edge-pattern-dashed') ||
-        pathEl.classList.contains('messageLine1');
-
-      if (isDashed) {
-        asyncCount += 1;
-        const asyncStroke = canvasSurface === 'dark' ? '#f59e0b' : '#d97706';
-        (pathEl as SVGElement).style.stroke = asyncStroke;
-        (pathEl as SVGElement).style.strokeWidth = '2.5px';
-      } else {
-        syncCount += 1;
-        const syncStroke = canvasSurface === 'dark' ? '#38bdf8' : '#0284c7';
-        (pathEl as SVGElement).style.stroke = syncStroke;
-        (pathEl as SVGElement).style.strokeWidth = '2.5px';
-      }
-    });
-
-    if (syncCount > 0) {
-      legendMap.set('flow-sync', {
-        id: 'flow-sync',
-        label: 'Synchroner Hauptpfad',
-        fillColor: canvasSurface === 'dark' ? '#0c4a6e' : '#e0f2fe',
-        borderColor: canvasSurface === 'dark' ? '#38bdf8' : '#0284c7',
-        textColor: canvasSurface === 'dark' ? '#f0f9ff' : '#0c4a6e',
-        count: syncCount,
-      });
-    }
-    if (asyncCount > 0) {
-      legendMap.set('flow-async', {
-        id: 'flow-async',
-        label: 'Asynchroner Event-Fluss',
-        fillColor: canvasSurface === 'dark' ? '#78350f' : '#fef3c7',
-        borderColor: canvasSurface === 'dark' ? '#f59e0b' : '#d97706',
-        textColor: canvasSurface === 'dark' ? '#fffbeb' : '#78350f',
-        count: asyncCount,
-      });
-    }
   }
+
+  // Differentiate edge paths & arrowheads cleanly in Mode A ('semantic') or Mode B ('branches')
+  applyPathColorDifferentiation(
+    svgEl,
+    code,
+    pathColorMode,
+    canvasSurface,
+    syntaxRoleMap,
+    legendMap
+  );
 
   if (canvasSurface === 'dark') {
     const asyncCol =
@@ -1038,7 +1788,7 @@ export function applySmartLogicColoring(
       svgEl,
       solidCol,
       asyncCol,
-      mode === 'high-contrast'
+      false
     );
   }
 
@@ -1147,7 +1897,7 @@ export function applySmartLogicColoring(
   }
 
   const serializer = new XMLSerializer();
-  return {
+  const result = {
     svg: serializer.serializeToString(svgEl),
     summary: {
       activeMode: mode,
@@ -1160,6 +1910,22 @@ export function applySmartLogicColoring(
       clusterCount: Math.max(clusterGroups.length, subgraphCountInCode),
       asyncEdgeCount: Math.max(asyncEdgeCountInCode, edgeGroups.length),
     },
+  };
+
+  if (smartColorResultCache.has(cacheKey)) {
+    smartColorResultCache.delete(cacheKey);
+  }
+  smartColorResultCache.set(cacheKey, result);
+  if (smartColorResultCache.size > MAX_SMART_COLOR_CACHE) {
+    const oldestKey = smartColorResultCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      smartColorResultCache.delete(oldestKey);
+    }
+  }
+
+  return {
+    svg: result.svg,
+    summary: cloneSummary(result.summary),
   };
 }
 

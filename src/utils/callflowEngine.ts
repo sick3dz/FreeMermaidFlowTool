@@ -3,14 +3,26 @@ import {
   CallflowDirectionFilter,
   CallflowEdge,
   CallflowGraph,
+  CallflowHealthFinding,
   CallflowHopDepth,
   CallflowNode,
   CallflowNodeRole,
+  CallflowOpenIssue,
+  CallflowResourceRegistry,
+  CallflowRoutingMatrixRow,
+  CallflowScheduleSummaryRow,
   CallflowTraceResult,
   NodePositionOffset,
+  PathColorMode,
+  SmartColorNodeType,
 } from '../types/mermaidStudio';
 import { toMermaidNodeSuffix } from './scriptCallflowParser';
 import { sanitizeSvgForXmlParser } from './mermaidEngine';
+import {
+  applyColorToEdgePathAndMarkers,
+  SEMANTIC_PALETTES,
+  SMART_COLOR_NODE_TYPE_OPTIONS,
+} from './smartColorEngine';
 
 const RESERVED_KEYWORDS = new Set([
   'flowchart',
@@ -784,6 +796,12 @@ export function applyCallflowSpotlightToSvg(
   const cycleOnlyEdges = visibleEdges.filter((e) =>
     cycleEdgeKeys.has(`${e.from}->${e.to}`)
   );
+  const downstreamEdgeKeySet = new Set(
+    trace.downstreamEdges.map((e) => `${e.from}->${e.to}`)
+  );
+  const downstreamVisibleEdges = visibleEdges.filter(
+    (e) => !cycleEdgeKeys.has(`${e.from}->${e.to}`) && downstreamEdgeKeySet.has(`${e.from}->${e.to}`)
+  );
 
   // Style all node groups
   const nodeGroups = Array.from(
@@ -877,6 +895,13 @@ export function applyCallflowSpotlightToSvg(
       isEdgeOnActivePath &&
       cycleOnlyEdges.length > 0 &&
       matchesSvgEdge(edgeEl, cycleOnlyEdges);
+    const isDownstreamEdge =
+      isEdgeOnActivePath &&
+      !isCycleEdge &&
+      (directionFilter === 'downstream' ||
+        (directionFilter === 'both' &&
+          downstreamVisibleEdges.length > 0 &&
+          matchesSvgEdge(edgeEl, downstreamVisibleEdges)));
 
     if (isEdgeOnActivePath) {
       activeEdgeIndices.add(idx);
@@ -887,9 +912,9 @@ export function applyCallflowSpotlightToSvg(
           : Array.from(edgeEl.querySelectorAll('path'));
       const activeStroke = isCycleEdge
         ? isDark
-          ? '#94a3b8'
-          : '#64748b'
-        : directionFilter === 'downstream'
+          ? '#fb7185'
+          : '#e11d48'
+        : isDownstreamEdge
         ? isDark
           ? '#34d399'
           : '#059669'
@@ -897,9 +922,8 @@ export function applyCallflowSpotlightToSvg(
         ? '#38bdf8'
         : '#0284c7';
       pathNodes.forEach((p) => {
-        (p as SVGElement).style.stroke = activeStroke;
-        (p as SVGElement).style.strokeWidth = isCycleEdge ? '2.5px' : '3px';
-        p.setAttribute('stroke', activeStroke);
+        applyColorToEdgePathAndMarkers(svgEl, p as SVGElement, activeStroke);
+        (p as SVGElement).style.strokeWidth = isCycleEdge ? '2.6px' : '3px';
         if (isCycleEdge) {
           (p as SVGElement).style.strokeDasharray = '6 4';
         }
@@ -1409,9 +1433,14 @@ interface ParsedLivePathData {
   pathEl: SVGPathElement;
   origD: string;
   origStrokeAttr: string | null;
+  origDasharrayAttr: string | null;
+  origMarkerEndAttr: string | null;
+  origMarkerStartAttr: string | null;
   origStyleStroke: string;
   origStyleStrokeWidth: string;
   origStyleDasharray: string;
+  origStyleMarkerEnd: string;
+  origStyleMarkerStart: string;
   parts: string[];
   pairs: Array<{
     xIdx: number;
@@ -1432,7 +1461,7 @@ export interface LiveSvgPortHandle {
   side: PortSide;
   localX: number;
   localY: number;
-  el: SVGGElement;
+  el: SVGGElement | null;
 }
 
 export interface NodeLocalBox {
@@ -1449,6 +1478,8 @@ export interface LiveSvgNodeHandle {
   groupEl: SVGGElement;
   baseTx: number;
   baseTy: number;
+  currentDx: number;
+  currentDy: number;
   restTransform: string;
   box: NodeLocalBox;
   occupiedPortCounts: Record<PortSide, number>;
@@ -1470,6 +1501,7 @@ export interface LiveSvgNodeHandle {
     color: string;
     fontWeight: string;
   }>;
+  portsMaterialized: boolean;
   ports: Record<PortSide, LiveSvgPortHandle>;
 }
 
@@ -1488,6 +1520,8 @@ export interface LiveSvgEdgeHandle {
   labelBaseTx: number;
   labelBaseTy: number;
   labelRestTransform: string;
+  hasLockGeometry: boolean;
+  lockPos: { x: number; y: number };
   lockEl: SVGGElement | null;
   origEndPt: { x: number; y: number };
   origPrevPt: { x: number; y: number };
@@ -1502,14 +1536,21 @@ export interface LiveSvgDomIndex {
   allEdges: LiveSvgEdgeHandle[];
   edgesByNode: Map<string, LiveSvgEdgeHandle[]>;
   clusters: SVGElement[];
+  locksLayerEl: SVGGElement | null;
+  isVisualEditMode: boolean;
 }
 
 function parseLivePathTokens(pathEl: SVGPathElement): ParsedLivePathData {
   const origD = pathEl.getAttribute('d') || '';
   const origStrokeAttr = pathEl.getAttribute('stroke');
+  const origDasharrayAttr = pathEl.getAttribute('stroke-dasharray');
+  const origMarkerEndAttr = pathEl.getAttribute('marker-end');
+  const origMarkerStartAttr = pathEl.getAttribute('marker-start');
   const origStyleStroke = pathEl.style.stroke || '';
   const origStyleStrokeWidth = pathEl.style.strokeWidth || '';
   const origStyleDasharray = pathEl.style.strokeDasharray || '';
+  const origStyleMarkerEnd = pathEl.style.markerEnd || '';
+  const origStyleMarkerStart = pathEl.style.markerStart || '';
 
   const norm = normalizeSvgPathToAbsolute(origD);
 
@@ -1517,9 +1558,14 @@ function parseLivePathTokens(pathEl: SVGPathElement): ParsedLivePathData {
     pathEl,
     origD,
     origStrokeAttr,
+    origDasharrayAttr,
+    origMarkerEndAttr,
+    origMarkerStartAttr,
     origStyleStroke,
     origStyleStrokeWidth,
     origStyleDasharray,
+    origStyleMarkerEnd,
+    origStyleMarkerStart,
     parts: norm.parts,
     pairs: norm.pairs,
     startPt: norm.startPt,
@@ -1586,100 +1632,138 @@ function getNodeLocalBox(
   return { minX: -68, maxX: 68, minY: -24, maxY: 24, cx: 0, cy: 0 };
 }
 
-function createFourPortHandles(
-  nodeGroup: SVGGElement,
-  nodeId: string,
-  box: NodeLocalBox
-): Record<PortSide, LiveSvgPortHandle> {
-  // Remove any stale legacy or previously built port handles on re-index
-  nodeGroup.querySelectorAll('.callflow-connect-port').forEach((el) => el.remove());
-
+function createPortMetadataFromBox(box: NodeLocalBox): Record<PortSide, LiveSvgPortHandle> {
   // Place ports slightly outside the node border (+6px) so they never sit directly on top of arrowheads
   const rimPad = 6;
-  const coords: Record<PortSide, { x: number; y: number }> = {
-    top: { x: box.cx, y: box.minY - rimPad },
-    right: { x: box.maxX + rimPad, y: box.cy },
-    bottom: { x: box.cx, y: box.maxY + rimPad },
-    left: { x: box.minX - rimPad, y: box.cy },
+  return {
+    top: { side: 'top', localX: box.cx, localY: box.minY - rimPad, el: null },
+    right: { side: 'right', localX: box.maxX + rimPad, localY: box.cy, el: null },
+    bottom: { side: 'bottom', localX: box.cx, localY: box.maxY + rimPad, el: null },
+    left: { side: 'left', localX: box.minX - rimPad, localY: box.cy, el: null },
   };
+}
+
+function buildSinglePortElement(
+  doc: Document,
+  svgNs: string,
+  nodeId: string,
+  port: LiveSvgPortHandle,
+  occupiedCount: number,
+  isVisualEditMode: boolean
+): SVGGElement {
+  const portGroup = doc.createElementNS(svgNs, 'g') as SVGGElement;
+  portGroup.setAttribute('class', 'callflow-connect-port');
+  portGroup.setAttribute('data-port-node-id', nodeId);
+  portGroup.setAttribute('data-port-side', port.side);
+  portGroup.setAttribute('data-port-occupied', occupiedCount > 0 ? 'true' : 'false');
+  portGroup.setAttribute(
+    'transform',
+    `translate(${Number(port.localX.toFixed(1))}, ${Number(port.localY.toFixed(1))})`
+  );
+  portGroup.setAttribute('style', 'cursor: crosshair;');
+  portGroup.style.display = isVisualEditMode ? '' : 'none';
+
+  const portTitle = doc.createElementNS(svgNs, 'title');
+  portTitle.textContent =
+    occupiedCount > 0
+      ? `Seite belegt (${occupiedCount} Pfeil${occupiedCount > 1 ? 'e' : ''}) — beim Andocken wird automatisch eine freie Seite gewählt oder versetzt`
+      : 'Freier Andockpunkt — hierher ziehen für überschneidungsfreies Andocken';
+  portGroup.appendChild(portTitle);
+
+  const hitCircle = doc.createElementNS(svgNs, 'circle');
+  hitCircle.setAttribute('r', '12');
+  hitCircle.setAttribute('fill', 'transparent');
+  hitCircle.setAttribute('data-port-node-id', nodeId);
+  hitCircle.setAttribute('data-port-side', port.side);
+  portGroup.appendChild(hitCircle);
+
+  const bodyGroup = doc.createElementNS(svgNs, 'g');
+  bodyGroup.setAttribute('class', 'callflow-port-body');
+  bodyGroup.setAttribute('data-port-node-id', nodeId);
+  bodyGroup.setAttribute('data-port-side', port.side);
+
+  const haloCircle = doc.createElementNS(svgNs, 'circle');
+  haloCircle.setAttribute('class', 'callflow-port-halo');
+  haloCircle.setAttribute('r', '10.5');
+  haloCircle.setAttribute('fill', 'rgba(16, 185, 129, 0.18)');
+  haloCircle.setAttribute('stroke', '#10b981');
+  haloCircle.setAttribute('stroke-width', '2');
+  haloCircle.setAttribute('data-port-node-id', nodeId);
+  haloCircle.setAttribute('data-port-side', port.side);
+  bodyGroup.appendChild(haloCircle);
+
+  const outerCircle = doc.createElementNS(svgNs, 'circle');
+  outerCircle.setAttribute('class', 'callflow-port-outer');
+  outerCircle.setAttribute('r', '6');
+  outerCircle.setAttribute('fill', '#4f46e5');
+  outerCircle.setAttribute('stroke', '#e0e7ff');
+  outerCircle.setAttribute('stroke-width', '2');
+  outerCircle.setAttribute('data-port-node-id', nodeId);
+  outerCircle.setAttribute('data-port-side', port.side);
+  bodyGroup.appendChild(outerCircle);
+
+  const innerDot = doc.createElementNS(svgNs, 'circle');
+  innerDot.setAttribute('r', '2.1');
+  innerDot.setAttribute('fill', '#ffffff');
+  innerDot.setAttribute('data-port-node-id', nodeId);
+  innerDot.setAttribute('data-port-side', port.side);
+  bodyGroup.appendChild(innerDot);
+
+  portGroup.appendChild(bodyGroup);
+  return portGroup as SVGGElement;
+}
+
+/**
+ * Lazily materializes the 4 connection ports on a single active/hovered SVG node group
+ * so large diagrams mount without thousands of redundant SVG port elements.
+ */
+export function ensureNodePortsMaterialized(
+  node: LiveSvgNodeHandle,
+  isVisualEditMode: boolean
+): void {
+  const portDisplay = isVisualEditMode ? '' : 'none';
+  if (node.portsMaterialized) {
+    (['top', 'right', 'bottom', 'left'] as PortSide[]).forEach((side) => {
+      const el = node.ports[side].el;
+      if (el && el.style.display !== portDisplay) {
+        el.style.display = portDisplay;
+      }
+    });
+    return;
+  }
 
   const svgNs = 'http://www.w3.org/2000/svg';
-  const doc = nodeGroup.ownerDocument;
+  const doc = node.groupEl.ownerDocument;
+  (['top', 'right', 'bottom', 'left'] as PortSide[]).forEach((side) => {
+    const port = node.ports[side];
+    if (!port.el) {
+      const el = buildSinglePortElement(
+        doc,
+        svgNs,
+        node.nodeId,
+        port,
+        node.occupiedPortCounts[side],
+        isVisualEditMode
+      );
+      node.groupEl.appendChild(el);
+      port.el = el;
+    } else {
+      port.el.style.display = portDisplay;
+    }
+  });
+  node.portsMaterialized = true;
+}
 
-  const buildOnePort = (side: PortSide): LiveSvgPortHandle => {
-    const pt = coords[side];
-    const portGroup = doc.createElementNS(svgNs, 'g');
-    portGroup.setAttribute('class', 'callflow-connect-port');
-    portGroup.setAttribute('data-port-node-id', nodeId);
-    portGroup.setAttribute('data-port-side', side);
-    portGroup.setAttribute('data-port-occupied', 'false');
-    portGroup.setAttribute(
-      'transform',
-      `translate(${Number(pt.x.toFixed(1))}, ${Number(pt.y.toFixed(1))})`
-    );
-    portGroup.setAttribute('style', 'cursor: crosshair;');
-
-    const portTitle = doc.createElementNS(svgNs, 'title');
-    portTitle.textContent =
-      'Von diesem Andockpunkt zu einem Ziel-Knoten ziehen, um eine Verbindung zu knüpfen';
-    portGroup.appendChild(portTitle);
-
-    const hitCircle = doc.createElementNS(svgNs, 'circle');
-    hitCircle.setAttribute('r', '12');
-    hitCircle.setAttribute('fill', 'transparent');
-    hitCircle.setAttribute('data-port-node-id', nodeId);
-    hitCircle.setAttribute('data-port-side', side);
-    portGroup.appendChild(hitCircle);
-
-    const bodyGroup = doc.createElementNS(svgNs, 'g');
-    bodyGroup.setAttribute('class', 'callflow-port-body');
-    bodyGroup.setAttribute('data-port-node-id', nodeId);
-    bodyGroup.setAttribute('data-port-side', side);
-
-    const haloCircle = doc.createElementNS(svgNs, 'circle');
-    haloCircle.setAttribute('class', 'callflow-port-halo');
-    haloCircle.setAttribute('r', '10.5');
-    haloCircle.setAttribute('fill', 'rgba(16, 185, 129, 0.18)');
-    haloCircle.setAttribute('stroke', '#10b981');
-    haloCircle.setAttribute('stroke-width', '2');
-    haloCircle.setAttribute('data-port-node-id', nodeId);
-    haloCircle.setAttribute('data-port-side', side);
-    bodyGroup.appendChild(haloCircle);
-
-    const outerCircle = doc.createElementNS(svgNs, 'circle');
-    outerCircle.setAttribute('class', 'callflow-port-outer');
-    outerCircle.setAttribute('r', '6');
-    outerCircle.setAttribute('fill', '#4f46e5');
-    outerCircle.setAttribute('stroke', '#e0e7ff');
-    outerCircle.setAttribute('stroke-width', '2');
-    outerCircle.setAttribute('data-port-node-id', nodeId);
-    outerCircle.setAttribute('data-port-side', side);
-    bodyGroup.appendChild(outerCircle);
-
-    const innerDot = doc.createElementNS(svgNs, 'circle');
-    innerDot.setAttribute('r', '2.1');
-    innerDot.setAttribute('fill', '#ffffff');
-    innerDot.setAttribute('data-port-node-id', nodeId);
-    innerDot.setAttribute('data-port-side', side);
-    bodyGroup.appendChild(innerDot);
-
-    portGroup.appendChild(bodyGroup);
-    nodeGroup.appendChild(portGroup);
-
-    return {
-      side,
-      localX: pt.x,
-      localY: pt.y,
-      el: portGroup,
-    };
-  };
-
-  return {
-    top: buildOnePort('top'),
-    right: buildOnePort('right'),
-    bottom: buildOnePort('bottom'),
-    left: buildOnePort('left'),
-  };
+export function materializeActiveNodePortsInDom(
+  index: LiveSvgDomIndex,
+  nodeId: string | null | undefined,
+  isVisualEditMode: boolean
+): void {
+  if (!nodeId || !isVisualEditMode) return;
+  const node = index.nodes.get(nodeId);
+  if (node) {
+    ensureNodePortsMaterialized(node, isVisualEditMode);
+  }
 }
 
 /**
@@ -1899,8 +1983,10 @@ export function buildLiveSvgDomIndex(
     }
   }
 
-  // Clean up any stale hit-paths or padlock overlays from an earlier index pass
-  svgEl.querySelectorAll('.callflow-edge-hit, .callflow-edge-locks-layer').forEach((el) => el.remove());
+  // Clean up any stale hit-paths, lazy port groups, or padlock overlays from an earlier index pass
+  svgEl
+    .querySelectorAll('.callflow-connect-port, .callflow-edge-hit, .callflow-edge-locks-layer')
+    .forEach((el) => el.remove());
 
   const nodes = new Map<string, LiveSvgNodeHandle>();
   const nodeGroups = Array.from(
@@ -1947,13 +2033,15 @@ export function buildLiveSvgDomIndex(
     }));
 
     const box = getNodeLocalBox(groupEl, shapeEls);
-    const ports = createFourPortHandles(groupEl, matchedId, box);
+    const ports = createPortMetadataFromBox(box);
 
     nodes.set(matchedId, {
       nodeId: matchedId,
       groupEl,
       baseTx: x,
       baseTy: y,
+      currentDx: 0,
+      currentDy: 0,
       restTransform: rest,
       box,
       occupiedPortCounts: { top: 0, right: 0, bottom: 0, left: 0 },
@@ -1963,6 +2051,7 @@ export function buildLiveSvgDomIndex(
       origTextStyles,
       htmlEls,
       origHtmlStyles,
+      portsMaterialized: false,
       ports,
     });
   });
@@ -1997,10 +2086,6 @@ export function buildLiveSvgDomIndex(
   const edgesByNode = new Map<string, LiveSvgEdgeHandle[]>();
   const svgNs = 'http://www.w3.org/2000/svg';
   const doc = svgEl.ownerDocument;
-
-  const locksLayer = doc.createElementNS(svgNs, 'g');
-  locksLayer.setAttribute('class', 'callflow-edge-locks-layer');
-
   const usedLabelEls = new Set<SVGElement>();
 
   edgeElements.forEach((edgeEl, idx) => {
@@ -2104,12 +2189,10 @@ export function buildLiveSvgDomIndex(
       toNode.occupiedPortCounts[side] += 1;
     }
 
-    let lockEl: SVGGElement | null = null;
-    if (mainPath) {
-      const lockPos = computeLockPositionOnSegment(origEndPt, origPrevPt, edgeTx, edgeTy);
-      lockEl = createEdgeLockBadge(doc, svgNs, matched.from, matched.to, labelText, lockPos);
-      locksLayer.appendChild(lockEl);
-    }
+    const hasLockGeometry = Boolean(mainPath);
+    const lockPos = hasLockGeometry
+      ? computeLockPositionOnSegment(origEndPt, origPrevPt, edgeTx, edgeTy)
+      : { x: 0, y: 0 };
 
     const labelTransform = matchedLabel
       ? parseTranslateFromTransform(matchedLabel.getAttribute('transform'))
@@ -2130,7 +2213,9 @@ export function buildLiveSvgDomIndex(
       labelBaseTx: labelTransform.x,
       labelBaseTy: labelTransform.y,
       labelRestTransform: labelTransform.rest,
-      lockEl,
+      hasLockGeometry,
+      lockPos,
+      lockEl: null,
       origEndPt,
       origPrevPt,
       prevT,
@@ -2147,26 +2232,6 @@ export function buildLiveSvgDomIndex(
     }
   });
 
-  // Mark port occupancy attributes so free sides appear prominently when dragging new wires
-  nodes.forEach((node) => {
-    (['top', 'right', 'bottom', 'left'] as PortSide[]).forEach((side) => {
-      const count = node.occupiedPortCounts[side];
-      const portEl = node.ports[side].el;
-      portEl.setAttribute('data-port-occupied', count > 0 ? 'true' : 'false');
-      const titleEl = portEl.querySelector('title');
-      if (titleEl) {
-        titleEl.textContent =
-          count > 0
-            ? `Seite belegt (${count} Pfeil${count > 1 ? 'e' : ''}) — beim Andocken wird automatisch eine freie Seite gewählt oder versetzt`
-            : 'Freier Andockpunkt — hierher ziehen für überschneidungsfreies Andocken';
-      }
-    });
-  });
-
-  if (locksLayer.childNodes.length > 0) {
-    svgEl.appendChild(locksLayer);
-  }
-
   const clusters = Array.from(svgEl.querySelectorAll('g.cluster')) as SVGElement[];
 
   return {
@@ -2177,6 +2242,8 @@ export function buildLiveSvgDomIndex(
     allEdges,
     edgesByNode,
     clusters,
+    locksLayerEl: null,
+    isVisualEditMode: false,
   };
 }
 
@@ -2198,9 +2265,10 @@ function applyTangentialScreenOffset(
 }
 
 /**
- * Magnetic snap search across 4-side node ports within `snapRadiusPx` screen pixels.
- * Strongly prioritizes UNOCCUPIED port sides so new lines never overlap existing arrowheads;
- * if all 4 sides already have arrows, applies a clean tangential rim offset.
+ * Zero-reflow magnetic snap search across 4-side node ports within `snapRadiusPx` screen pixels.
+ * Projects cached local port coordinates via a single cached parent `getScreenCTM()` matrix
+ * instead of calling `getBoundingClientRect()` on thousands of SVG nodes, then lazily materializes
+ * port handles ONLY for the active hovered/snapped node.
  */
 export function findNearestMagneticPort(
   index: LiveSvgDomIndex,
@@ -2211,17 +2279,62 @@ export function findNearestMagneticPort(
   hoveredNodeId: string | null = null
 ): MagneticSnapResult | null {
   const sides: PortSide[] = ['top', 'right', 'bottom', 'left'];
+  const ctmByParent = new Map<Element, DOMMatrix | null>();
+  let svgRootCtm: DOMMatrix | null | undefined;
+
+  const getPortClientCoords = (
+    node: LiveSvgNodeHandle,
+    side: PortSide
+  ): { x: number; y: number } | null => {
+    const port = node.ports[side];
+    const parentEl = node.groupEl.parentElement;
+    let ctm: DOMMatrix | null = null;
+
+    if (parentEl) {
+      if (ctmByParent.has(parentEl)) {
+        ctm = ctmByParent.get(parentEl) ?? null;
+      } else {
+        ctm =
+          (parentEl as unknown as SVGGraphicsElement).getScreenCTM?.() ??
+          index.svgEl.getScreenCTM?.() ??
+          null;
+        ctmByParent.set(parentEl, ctm);
+      }
+    } else {
+      if (svgRootCtm === undefined) {
+        svgRootCtm = index.svgEl.getScreenCTM?.() ?? null;
+      }
+      ctm = svgRootCtm;
+    }
+
+    if (ctm) {
+      const ux = node.baseTx + node.currentDx + port.localX;
+      const uy = node.baseTy + node.currentDy + port.localY;
+      return {
+        x: ctm.a * ux + ctm.c * uy + ctm.e,
+        y: ctm.b * ux + ctm.d * uy + ctm.f,
+      };
+    }
+
+    if (port.el) {
+      const rect = port.el.getBoundingClientRect();
+      if (rect.width > 0 || rect.height > 0) {
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      }
+    }
+    return null;
+  };
+
   let bestFree: MagneticSnapResult | null = null;
   let bestOccupied: MagneticSnapResult | null = null;
 
   index.nodes.forEach((node) => {
     if (node.nodeId === excludeNodeId) return;
     for (const side of sides) {
-      const port = node.ports[side];
-      const rect = port.el.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) continue;
-      const baseX = rect.left + rect.width / 2;
-      const baseY = rect.top + rect.height / 2;
+      const coords = getPortClientCoords(node, side);
+      if (!coords) continue;
+      const baseX = coords.x;
+      const baseY = coords.y;
       const dist = Math.hypot(baseX - clientX, baseY - clientY);
       if (dist > snapRadiusPx) continue;
       const occupiedCount = node.occupiedPortCounts[side];
@@ -2252,21 +2365,25 @@ export function findNearestMagneticPort(
     }
   });
 
-  if (bestFree) return bestFree;
+  if (bestFree) {
+    const matchedNode = index.nodes.get((bestFree as MagneticSnapResult).nodeId);
+    if (matchedNode) ensureNodePortsMaterialized(matchedNode, true);
+    return bestFree;
+  }
 
   // If cursor is inside a target node box, automatically select a FREE port side on that node
   // (or tangential offset if all 4 sides are already occupied) rather than snapping onto an existing arrowhead.
   if (hoveredNodeId && hoveredNodeId !== excludeNodeId) {
     const hoveredNode = index.nodes.get(hoveredNodeId);
     if (hoveredNode) {
+      ensureNodePortsMaterialized(hoveredNode, true);
       let hoveredFree: MagneticSnapResult | null = null;
       let hoveredOcc: MagneticSnapResult | null = null;
       for (const side of sides) {
-        const port = hoveredNode.ports[side];
-        const rect = port.el.getBoundingClientRect();
-        if (rect.width === 0 && rect.height === 0) continue;
-        const baseX = rect.left + rect.width / 2;
-        const baseY = rect.top + rect.height / 2;
+        const coords = getPortClientCoords(hoveredNode, side);
+        if (!coords) continue;
+        const baseX = coords.x;
+        const baseY = coords.y;
         const dist = Math.hypot(baseX - clientX, baseY - clientY);
         const occupiedCount = hoveredNode.occupiedPortCounts[side];
         if (occupiedCount === 0) {
@@ -2299,11 +2416,17 @@ export function findNearestMagneticPort(
     }
   }
 
+  if (bestOccupied) {
+    const matchedNode = index.nodes.get((bestOccupied as MagneticSnapResult).nodeId);
+    if (matchedNode) ensureNodePortsMaterialized(matchedNode, true);
+  }
+
   return bestOccupied;
 }
 
 /**
- * Highlights the active magnetic snap port on the SVG without touching React state.
+ * Highlights the active magnetic snap port on the SVG without touching React state,
+ * lazily creating port DOM handles on the target node if needed.
  */
 export function setMagneticSnapTargetInDom(
   index: LiveSvgDomIndex,
@@ -2317,15 +2440,50 @@ export function setMagneticSnapTargetInDom(
 
   if (target) {
     const node = index.nodes.get(target.nodeId);
-    const portEl = node?.ports[target.side]?.el;
-    if (portEl) {
-      portEl.classList.add('is-snap-target');
+    if (node) {
+      ensureNodePortsMaterialized(node, true);
+      const portEl = node.ports[target.side]?.el;
+      if (portEl) {
+        portEl.classList.add('is-snap-target');
+      }
     }
   }
 }
 
+function ensureEdgeLockMaterialized(
+  index: LiveSvgDomIndex,
+  edge: LiveSvgEdgeHandle
+): SVGGElement | null {
+  if (!edge.hasLockGeometry) return null;
+  if (edge.lockEl) {
+    edge.lockEl.setAttribute('transform', `translate(${edge.lockPos.x}, ${edge.lockPos.y})`);
+    return edge.lockEl;
+  }
+
+  const svgNs = 'http://www.w3.org/2000/svg';
+  const doc = index.svgEl.ownerDocument;
+  if (!index.locksLayerEl) {
+    const layer = doc.createElementNS(svgNs, 'g');
+    layer.setAttribute('class', 'callflow-edge-locks-layer');
+    index.svgEl.appendChild(layer);
+    index.locksLayerEl = layer as SVGGElement;
+  }
+
+  const lockEl = createEdgeLockBadge(
+    doc,
+    svgNs,
+    edge.from,
+    edge.to,
+    edge.labelText,
+    edge.lockPos
+  );
+  index.locksLayerEl.appendChild(lockEl);
+  edge.lockEl = lockEl;
+  return lockEl;
+}
+
 /**
- * Reveals padlock badges cleanly when hovering a line, hovering a docked node, or selecting an edge.
+ * Lazily reveals padlock badges ONLY when hovering a line, hovering a docked node, or selecting an edge.
  */
 export function setHoveredLockTargetsInDom(
   index: LiveSvgDomIndex,
@@ -2333,14 +2491,24 @@ export function setHoveredLockTargetsInDom(
   hoveredNodeId: string | null,
   selectedEdge: SelectedCallflowEdge | null
 ): void {
+  if (hoveredNodeId && index.isVisualEditMode) {
+    materializeActiveNodePortsInDom(index, hoveredNodeId, true);
+  }
+
   for (let i = 0; i < index.allEdges.length; i++) {
     const edge = index.allEdges[i];
-    if (!edge.lockEl) continue;
+    if (!edge.hasLockGeometry) continue;
     const isVisible =
       (selectedEdge !== null && edge.from === selectedEdge.from && edge.to === selectedEdge.to) ||
       (hoveredEdge !== null && edge.from === hoveredEdge.from && edge.to === hoveredEdge.to) ||
       (hoveredNodeId !== null && (edge.to === hoveredNodeId || edge.from === hoveredNodeId));
-    edge.lockEl.classList.toggle('is-visible', isVisible);
+
+    if (isVisible) {
+      const lockEl = ensureEdgeLockMaterialized(index, edge);
+      lockEl?.classList.add('is-visible');
+    } else if (edge.lockEl) {
+      edge.lockEl.classList.remove('is-visible');
+    }
   }
 }
 
@@ -2399,7 +2567,7 @@ function updateLiveEdgeGeometry(
     );
   }
 
-  if (edge.lockEl) {
+  if (edge.hasLockGeometry) {
     const curEnd = {
       x: edge.origEndPt.x + (hasShift ? dxTo : 0),
       y: edge.origEndPt.y + (hasShift ? dyTo : 0),
@@ -2409,12 +2577,15 @@ function updateLiveEdgeGeometry(
       y: edge.origPrevPt.y + (hasShift ? dyFrom * (1 - edge.prevT) + dyTo * edge.prevT : 0),
     };
     const nextLockPos = computeLockPositionOnSegment(curEnd, curPrev, edge.edgeTx, edge.edgeTy);
-    edge.lockEl.setAttribute('transform', `translate(${nextLockPos.x}, ${nextLockPos.y})`);
+    edge.lockPos = nextLockPos;
+    if (edge.lockEl) {
+      edge.lockEl.setAttribute('transform', `translate(${nextLockPos.x}, ${nextLockPos.y})`);
+    }
   }
 }
 
 /**
- * Updates node transforms, hover port availability, and edge geometry directly in the live SVG DOM.
+ * Updates node transforms, materialized hover port availability, and edge geometry directly in the live SVG DOM.
  */
 export function applyLiveNodeOffsetsToDom(
   index: LiveSvgDomIndex,
@@ -2426,12 +2597,15 @@ export function applyLiveNodeOffsetsToDom(
   let minDeltaY = 0;
   let maxDeltaY = 0;
 
+  index.isVisualEditMode = isVisualEditMode;
   index.svgEl.classList.toggle('is-visual-edit', isVisualEditMode);
 
   index.nodes.forEach((node) => {
     const off = nodeOffsets[node.nodeId];
     const dx = off && Math.abs(off.dx) > 0.5 ? off.dx : 0;
     const dy = off && Math.abs(off.dy) > 0.5 ? off.dy : 0;
+    node.currentDx = dx;
+    node.currentDy = dy;
     const nextX = Number((node.baseTx + dx).toFixed(2));
     const nextY = Number((node.baseTy + dy).toFixed(2));
     node.groupEl.setAttribute(
@@ -2439,11 +2613,14 @@ export function applyLiveNodeOffsetsToDom(
       `translate(${nextX}, ${nextY})${node.restTransform ? ` ${node.restTransform}` : ''}`
     );
     node.groupEl.style.cursor = isVisualEditMode ? 'move' : 'pointer';
-    const portDisplay = isVisualEditMode ? '' : 'none';
-    node.ports.top.el.style.display = portDisplay;
-    node.ports.right.el.style.display = portDisplay;
-    node.ports.bottom.el.style.display = portDisplay;
-    node.ports.left.el.style.display = portDisplay;
+
+    if (node.portsMaterialized) {
+      const portDisplay = isVisualEditMode ? '' : 'none';
+      if (node.ports.top.el) node.ports.top.el.style.display = portDisplay;
+      if (node.ports.right.el) node.ports.right.el.style.display = portDisplay;
+      if (node.ports.bottom.el) node.ports.bottom.el.style.display = portDisplay;
+      if (node.ports.left.el) node.ports.left.el.style.display = portDisplay;
+    }
 
     if (dx < minDeltaX) minDeltaX = dx;
     if (dx > maxDeltaX) maxDeltaX = dx;
@@ -2523,6 +2700,22 @@ function restoreNodeOriginalStyles(node: LiveSvgNodeHandle): void {
   });
 }
 
+function restoreParsedPathStyles(p: ParsedLivePathData): void {
+  p.pathEl.style.stroke = p.origStyleStroke;
+  p.pathEl.style.strokeWidth = p.origStyleStrokeWidth;
+  p.pathEl.style.strokeDasharray = p.origStyleDasharray;
+  p.pathEl.style.markerEnd = p.origStyleMarkerEnd;
+  p.pathEl.style.markerStart = p.origStyleMarkerStart;
+  if (p.origStrokeAttr !== null) p.pathEl.setAttribute('stroke', p.origStrokeAttr);
+  else p.pathEl.removeAttribute('stroke');
+  if (p.origDasharrayAttr !== null) p.pathEl.setAttribute('stroke-dasharray', p.origDasharrayAttr);
+  else p.pathEl.removeAttribute('stroke-dasharray');
+  if (p.origMarkerEndAttr !== null) p.pathEl.setAttribute('marker-end', p.origMarkerEndAttr);
+  else p.pathEl.removeAttribute('marker-end');
+  if (p.origMarkerStartAttr !== null) p.pathEl.setAttribute('marker-start', p.origMarkerStartAttr);
+  else p.pathEl.removeAttribute('marker-start');
+}
+
 /**
  * Applies or cleanly clears Callflow path spotlighting and/or clicked-edge highlighting directly
  * on the mounted SVG DOM in <1-2ms with zero XML parsing or DOM replacement.
@@ -2553,21 +2746,14 @@ export function applyLiveSpotlightToDom(
           edge.edgeEl.style.opacity = '1';
           if (edge.labelEl) edge.labelEl.style.opacity = '1';
           edge.paths.forEach((p) => {
-            p.pathEl.style.stroke = selColor;
+            applyColorToEdgePathAndMarkers(index.svgEl, p.pathEl, selColor);
             p.pathEl.style.strokeWidth = '4px';
-            p.pathEl.setAttribute('stroke', selColor);
             p.pathEl.style.strokeDasharray = p.origStyleDasharray;
           });
         } else {
           edge.edgeEl.style.opacity = '0.22';
           if (edge.labelEl) edge.labelEl.style.opacity = '0.22';
-          edge.paths.forEach((p) => {
-            p.pathEl.style.stroke = p.origStyleStroke;
-            p.pathEl.style.strokeWidth = p.origStyleStrokeWidth;
-            p.pathEl.style.strokeDasharray = p.origStyleDasharray;
-            if (p.origStrokeAttr !== null) p.pathEl.setAttribute('stroke', p.origStrokeAttr);
-            else p.pathEl.removeAttribute('stroke');
-          });
+          edge.paths.forEach(restoreParsedPathStyles);
         }
       });
 
@@ -2577,7 +2763,7 @@ export function applyLiveSpotlightToDom(
       return;
     }
 
-    // Restore original Smart Logic colors & full opacity cleanly
+    // Restore original Smart Logic & Path colors & full opacity cleanly
     index.nodes.forEach((node) => {
       node.groupEl.style.opacity = '';
       restoreNodeOriginalStyles(node);
@@ -2588,13 +2774,7 @@ export function applyLiveSpotlightToDom(
       if (edge.labelEl) {
         edge.labelEl.style.opacity = edge.origLabelOpacity;
       }
-      edge.paths.forEach((p) => {
-        p.pathEl.style.stroke = p.origStyleStroke;
-        p.pathEl.style.strokeWidth = p.origStyleStrokeWidth;
-        p.pathEl.style.strokeDasharray = p.origStyleDasharray;
-        if (p.origStrokeAttr !== null) p.pathEl.setAttribute('stroke', p.origStrokeAttr);
-        else p.pathEl.removeAttribute('stroke');
-      });
+      edge.paths.forEach(restoreParsedPathStyles);
     });
 
     index.clusters.forEach((cl) => {
@@ -2610,6 +2790,9 @@ export function applyLiveSpotlightToDom(
   );
 
   const visibleEdgeKeySet = new Set(visibleEdges.map((e) => `${e.from}->${e.to}`));
+  const downstreamEdgeKeySet = new Set(
+    trace.downstreamEdges.map((e) => `${e.from}->${e.to}`)
+  );
   const terminalIdSet = new Set(trace.terminalPoints.map((t) => t.id));
 
   index.nodes.forEach((node) => {
@@ -2667,15 +2850,20 @@ export function applyLiveSpotlightToDom(
     const edgeKey = `${edge.from}->${edge.to}`;
     const isEdgeOnActivePath = visibleEdgeKeySet.has(edgeKey);
     const isCycleEdge = isEdgeOnActivePath && cycleEdgeKeys.has(edgeKey);
+    const isDownstreamEdge =
+      isEdgeOnActivePath &&
+      !isCycleEdge &&
+      (directionFilter === 'downstream' ||
+        (directionFilter === 'both' && downstreamEdgeKeySet.has(edgeKey)));
 
     if (isEdgeOnActivePath) {
       edge.edgeEl.style.opacity = '1';
       if (edge.labelEl) edge.labelEl.style.opacity = '1';
       const activeStroke = isCycleEdge
         ? isDark
-          ? '#94a3b8'
-          : '#64748b'
-        : directionFilter === 'downstream'
+          ? '#fb7185'
+          : '#e11d48'
+        : isDownstreamEdge
         ? isDark
           ? '#34d399'
           : '#059669'
@@ -2683,21 +2871,14 @@ export function applyLiveSpotlightToDom(
         ? '#38bdf8'
         : '#0284c7';
       edge.paths.forEach((p) => {
-        p.pathEl.style.stroke = activeStroke;
-        p.pathEl.style.strokeWidth = isCycleEdge ? '2.5px' : '3px';
-        p.pathEl.setAttribute('stroke', activeStroke);
+        applyColorToEdgePathAndMarkers(index.svgEl, p.pathEl, activeStroke);
+        p.pathEl.style.strokeWidth = isCycleEdge ? '2.6px' : '3px';
         p.pathEl.style.strokeDasharray = isCycleEdge ? '6 4' : p.origStyleDasharray;
       });
     } else {
       edge.edgeEl.style.opacity = '0.12';
       if (edge.labelEl) edge.labelEl.style.opacity = '0.12';
-      edge.paths.forEach((p) => {
-        p.pathEl.style.stroke = p.origStyleStroke;
-        p.pathEl.style.strokeWidth = p.origStyleStrokeWidth;
-        p.pathEl.style.strokeDasharray = p.origStyleDasharray;
-        if (p.origStrokeAttr !== null) p.pathEl.setAttribute('stroke', p.origStrokeAttr);
-        else p.pathEl.removeAttribute('stroke');
-      });
+      edge.paths.forEach(restoreParsedPathStyles);
     }
   });
 
@@ -2868,6 +3049,15 @@ export interface InteractiveCallflowHtmlView {
   scriptNumber?: string;
 }
 
+export interface InteractiveCallflowHtmlAnalysisPayload {
+  openIssues: CallflowOpenIssue[];
+  healthFindings: CallflowHealthFinding[];
+  scheduleRows: CallflowScheduleSummaryRow[];
+  registry: CallflowResourceRegistry;
+  routingMatrixRows: CallflowRoutingMatrixRow[];
+  masterScriptNumber?: string;
+}
+
 function escapeHtmlText(str: string): string {
   return str
     .replace(/&/g, '&amp;')
@@ -2879,10 +3069,12 @@ function escapeHtmlText(str: string): string {
 
 /**
  * Generates a 100% standalone, offline-capable interactive HTML file containing:
- * - True 1:1 SVG dimensions with Zoom up to 2000%, Zoom-to-Cursor & Auto-Focus on Node
- * - Full Callflow filters: Direction Filter (`Ganzer Pfad` / `Nur Woher` / `Nur Wohin`),
- *   Hop-Depth Filter (`Alle Ebenen` / `1 Schritt` / `2 Ebenen`), Cycle/Loop detection,
- *   Live Search, Role Quick-Filter, Strong Dimming, and optional Two-Level Master <-> Script views.
+ * - True 1:1 SVG dimensions with Zoom +/-, Fit, 1:1, Zoom-to-Cursor & Auto-Focus
+ * - Dark/Light surface toggle with automatic SVG node/edge/cluster contrast adaptation
+ * - Full Callflow filters: Direction, Hop-Depth, Node-Type Filter, Subgraph Isolation (display:none),
+ *   Edge-Click Details (Von -> Nach & Bedingung), Cycle detection, Live Search & Two-Level Master/Script views
+ * - Complete Read-Only Analysis Suite (Offene Punkte & Logik-Prüfung, Öffnungszeiten & Zeitpläne,
+ *   durchsuchbares Inventar & Routing-Matrix) inkl. Excel-kompatiblem CSV-Export
  */
 export function generateInteractiveCallflowHtml(
   diagramTitle: string,
@@ -2892,6 +3084,10 @@ export function generateInteractiveCallflowHtml(
   options?: {
     views?: InteractiveCallflowHtmlView[];
     activeViewKey?: string;
+    initialPathColorMode?: PathColorMode;
+    initialHiddenNodeTypes?: SmartColorNodeType[];
+    initialIsolateSubgraph?: boolean;
+    analysis?: InteractiveCallflowHtmlAnalysisPayload | null;
   }
 ): string {
   const effectiveViews: InteractiveCallflowHtmlView[] =
@@ -2911,6 +3107,10 @@ export function generateInteractiveCallflowHtml(
       ? options.activeViewKey
       : effectiveViews[0].key;
 
+  const initialPathColorMode: PathColorMode = options?.initialPathColorMode || 'semantic';
+  const initialHiddenNodeTypes: SmartColorNodeType[] = options?.initialHiddenNodeTypes || [];
+  const initialIsolateSubgraph = Boolean(options?.initialIsolateSubgraph);
+
   const serializedViews = effectiveViews.map((v) => ({
     key: v.key,
     label: v.label,
@@ -2923,8 +3123,11 @@ export function generateInteractiveCallflowHtml(
   }));
 
   const drillTargetsByNodeId: Record<string, { viewKey: string; scriptRef: string }> = {};
+  const viewKeyByScriptNumber: Record<string, string> = {};
   effectiveViews.forEach((v) => {
     if (!v.scriptNumber) return;
+    viewKeyByScriptNumber[v.scriptNumber] = v.key;
+    viewKeyByScriptNumber[v.scriptNumber.toLowerCase()] = v.key;
     const suffix = toMermaidNodeSuffix(v.scriptNumber);
     const entry = { viewKey: v.key, scriptRef: v.scriptNumber };
     drillTargetsByNodeId[`S_${suffix}`] = entry;
@@ -2936,134 +3139,345 @@ export function generateInteractiveCallflowHtml(
   const safePayloadJson = JSON.stringify({
     views: serializedViews,
     initialViewKey,
+    initialPathColorMode,
+    initialSurface: canvasSurface,
+    initialHiddenNodeTypes,
+    initialIsolateSubgraph,
     drillTargetsByNodeId,
+    viewKeyByScriptNumber,
+    nodeTypeOptions: SMART_COLOR_NODE_TYPE_OPTIONS,
+    semanticPalettes: SEMANTIC_PALETTES,
+    analysis: options?.analysis || null,
   }).replace(/<\/script>/gi, '<\\/script>');
 
   const initialSvg =
     effectiveViews.find((v) => v.key === initialViewKey)?.svg || svgString;
   const hasMultiViews = effectiveViews.length > 1;
   const safeTitle = escapeHtmlText(diagramTitle);
-  const bgHex = canvasSurface === 'dark' ? '#0b0f19' : '#f8fafc';
   const isDarkSurface = canvasSurface === 'dark';
 
   return `<!doctype html>
-<html lang="de" class="dark">
+<html lang="de" class="${isDarkSurface ? 'dark' : 'light'}">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${safeTitle} — Interaktiver Callflow Explorer</title>
   <style>
+    :root {
+      --bg-app: #090d16;
+      --bg-header: #0f172a;
+      --bg-aside: #0f172a;
+      --bg-card: #0b1120;
+      --bg-input: #1e293b;
+      --bg-seg: #020617;
+      --bg-hover: #334155;
+      --bg-canvas: #0b0f19;
+      --border: #1e293b;
+      --border-strong: #334155;
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --accent: #4f46e5;
+      --accent-hover: #4338ca;
+      --accent-border: #6366f1;
+      --accent-text: #a5b4fc;
+      --amber-bg: rgba(245, 158, 11, 0.16);
+      --amber-border: rgba(245, 158, 11, 0.45);
+      --amber-text: #fde68a;
+      --err-bg: rgba(244, 63, 94, 0.14);
+      --err-border: rgba(244, 63, 94, 0.42);
+      --err-text: #fda4af;
+      --warn-bg: rgba(245, 158, 11, 0.14);
+      --warn-border: rgba(245, 158, 11, 0.42);
+      --warn-text: #fcd34d;
+      --ok-bg: rgba(16, 185, 129, 0.14);
+      --ok-border: rgba(16, 185, 129, 0.42);
+      --ok-text: #6ee7b7;
+      --table-stripe: rgba(30, 41, 59, 0.42);
+    }
+    html.light {
+      --bg-app: #f1f5f9;
+      --bg-header: #ffffff;
+      --bg-aside: #ffffff;
+      --bg-card: #f8fafc;
+      --bg-input: #ffffff;
+      --bg-seg: #e2e8f0;
+      --bg-hover: #e2e8f0;
+      --bg-canvas: #f8fafc;
+      --border: #cbd5e1;
+      --border-strong: #94a3b8;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+      --text-dim: #64748b;
+      --accent: #4f46e5;
+      --accent-hover: #4338ca;
+      --accent-border: #4f46e5;
+      --accent-text: #4338ca;
+      --amber-bg: rgba(245, 158, 11, 0.14);
+      --amber-border: rgba(217, 119, 6, 0.5);
+      --amber-text: #92400e;
+      --err-bg: rgba(225, 29, 72, 0.1);
+      --err-border: rgba(225, 29, 72, 0.35);
+      --err-text: #9f1239;
+      --warn-bg: rgba(217, 119, 6, 0.12);
+      --warn-border: rgba(217, 119, 6, 0.35);
+      --warn-text: #92400e;
+      --ok-bg: rgba(5, 150, 105, 0.12);
+      --ok-border: rgba(5, 150, 105, 0.35);
+      --ok-text: #065f46;
+      --table-stripe: rgba(226, 232, 240, 0.55);
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #090d16;
-      color: #f1f5f9;
+      background: var(--bg-app);
+      color: var(--text-main);
       height: 100vh;
       display: flex;
       flex-direction: column;
       overflow: hidden;
     }
     header {
-      min-height: 54px;
-      padding: 8px 16px;
-      background: #0f172a;
-      border-bottom: 1px solid #1e293b;
+      min-height: 52px;
+      padding: 8px 14px;
+      background: var(--bg-header);
+      border-bottom: 1px solid var(--border);
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
-      gap: 10px;
+      gap: 8px;
+      z-index: 10;
     }
-    .brand { font-weight: 700; font-size: 14px; color: #f8fafc; white-space: nowrap; }
+    .brand {
+      font-weight: 700;
+      font-size: 13.5px;
+      color: var(--text-main);
+      white-space: nowrap;
+      letter-spacing: -0.01em;
+    }
     .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
     .seg-group {
       display: inline-flex;
-      background: #020617;
-      border: 1px solid #334155;
+      background: var(--bg-seg);
+      border: 1px solid var(--border-strong);
       border-radius: 7px;
       padding: 2px;
       gap: 2px;
+      flex-shrink: 0;
     }
     .seg-btn {
       background: transparent;
       border: none;
-      color: #94a3b8;
-      padding: 5px 9px;
+      color: var(--text-muted);
+      padding: 4px 8px;
       border-radius: 5px;
       font-size: 11px;
       font-weight: 500;
       cursor: pointer;
       white-space: nowrap;
+      flex-shrink: 0;
     }
+    .seg-btn:hover { color: var(--text-main); background: var(--bg-hover); }
     .seg-btn.active {
-      background: #4f46e5;
+      background: var(--accent);
       color: #ffffff;
       font-weight: 600;
     }
     input[type="text"], select, button {
-      background: #1e293b;
-      color: #f1f5f9;
-      border: 1px solid #334155;
+      background: var(--bg-input);
+      color: var(--text-main);
+      border: 1px solid var(--border-strong);
       border-radius: 6px;
       padding: 5px 9px;
       font-size: 12px;
+      font-family: inherit;
     }
-    button { cursor: pointer; }
-    button:hover { background: #334155; }
-    button.primary { background: #4f46e5; border-color: #6366f1; font-weight: 600; }
-    button.primary:hover { background: #4338ca; }
-    button.amber { background: rgba(245, 158, 11, 0.16); border-color: rgba(245, 158, 11, 0.45); color: #fde68a; }
-    button.amber:hover { background: rgba(245, 158, 11, 0.28); }
+    input[type="text"]:focus, select:focus {
+      outline: none;
+      border-color: var(--accent-border);
+    }
+    button {
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+    button:hover { background: var(--bg-hover); }
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent-border);
+      color: #ffffff;
+      font-weight: 600;
+    }
+    button.primary:hover { background: var(--accent-hover); }
+    button.btn-active {
+      background: var(--amber-bg);
+      border-color: var(--amber-border);
+      color: var(--amber-text);
+      font-weight: 600;
+    }
+    button.amber {
+      background: var(--amber-bg);
+      border-color: var(--amber-border);
+      color: var(--amber-text);
+      font-weight: 600;
+    }
+    button.amber:hover { opacity: 0.9; }
+    .zoom-readout {
+      padding: 0 7px;
+      font-size: 11px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-main);
+      display: inline-flex;
+      align-items: center;
+      min-width: 44px;
+      justify-content: center;
+    }
     main { flex: 1; display: flex; min-height: 0; overflow: hidden; }
+    .canvas-col { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
     #canvas-wrap {
       flex: 1;
-      background: ${bgHex};
+      background: var(--bg-canvas);
       position: relative;
       overflow: hidden;
+      contain: strict;
+      isolation: isolate;
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: grab;
     }
     #canvas-wrap:active { cursor: grabbing; }
+    #canvas-wrap[data-transforming="true"] #svg-stage svg,
+    #canvas-wrap[data-transforming="true"] #svg-stage svg * {
+      pointer-events: none !important;
+      transition: none !important;
+    }
+    #canvas-wrap[data-transforming="true"] #svg-stage svg {
+      shape-rendering: optimizeSpeed;
+    }
     #svg-stage {
       flex-shrink: 0;
       transform-origin: center center;
       contain: layout style;
+      will-change: transform;
+      backface-visibility: hidden;
       padding: 32px;
     }
     #svg-stage svg {
       max-width: none !important;
       display: block;
+      background: transparent !important;
+    }
+    #svg-stage svg g.edgePaths path,
+    #svg-stage svg g.edgePath path,
+    #svg-stage svg path.flowchart-link {
+      pointer-events: visibleStroke;
+      cursor: pointer;
+    }
+    #svg-stage svg g.edgeLabel,
+    #svg-stage svg g.edgeLabels > g {
+      cursor: pointer;
     }
     aside {
-      width: 370px;
-      background: #0f172a;
-      border-left: 1px solid #1e293b;
+      width: 392px;
+      background: var(--bg-aside);
+      border-left: 1px solid var(--border);
       display: flex;
       flex-direction: column;
-      overflow-y: auto;
-      padding: 14px;
-      gap: 11px;
+      min-height: 0;
+      flex-shrink: 0;
     }
+    .aside-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      padding: 10px 12px 8px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-header);
+      flex-shrink: 0;
+    }
+    .aside-tab {
+      background: var(--bg-seg);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 7px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+    .aside-tab:hover { color: var(--text-main); background: var(--bg-hover); }
+    .aside-tab.active {
+      background: var(--accent);
+      border-color: var(--accent-border);
+      color: #ffffff;
+    }
+    .tab-count {
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.16);
+      font-variant-numeric: tabular-nums;
+    }
+    .aside-tab:not(.active) .tab-count {
+      background: var(--bg-hover);
+      color: var(--text-main);
+    }
+    .tab-pane {
+      display: none;
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      flex-direction: column;
+      gap: 10px;
+      min-height: 0;
+    }
+    .tab-pane.active { display: flex; }
     .card {
-      background: #090d16;
-      border: 1px solid #1e293b;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
       border-radius: 8px;
       padding: 11px;
     }
-    .card h3 { font-size: 11px; color: #94a3b8; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .card h3 {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
     .filter-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
     .chip {
       padding: 4px 8px;
       font-size: 11px;
       border-radius: 5px;
-      background: #0f172a;
-      border: 1px solid #334155;
-      color: #cbd5e1;
+      background: var(--bg-input);
+      border: 1px solid var(--border-strong);
+      color: var(--text-muted);
       cursor: pointer;
+      white-space: nowrap;
     }
-    .chip.active { background: #4f46e5; border-color: #6366f1; color: #fff; font-weight: 600; }
+    .chip:hover { color: var(--text-main); }
+    .chip.active {
+      background: var(--accent);
+      border-color: var(--accent-border);
+      color: #ffffff;
+      font-weight: 600;
+    }
     .node-chip {
       display: flex;
       align-items: center;
@@ -3071,30 +3485,171 @@ export function generateInteractiveCallflowHtml(
       width: 100%;
       text-align: left;
       margin-top: 6px;
-      padding: 7px 10px;
+      padding: 7px 9px;
       border-radius: 6px;
-      background: #1e293b;
-      border: 1px solid #334155;
+      background: var(--bg-input);
+      border: 1px solid var(--border-strong);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-size: 11px;
-      color: #f1f5f9;
+      color: var(--text-main);
       cursor: pointer;
       gap: 8px;
     }
-    .node-chip:hover { border-color: #6366f1; }
-    .badge { font-size: 11px; color: #38bdf8; flex-shrink: 0; white-space: nowrap; }
-    .badge-cycle { font-size: 11px; color: #fb7185; flex-shrink: 0; white-space: nowrap; }
+    .node-chip:hover { border-color: var(--accent-border); background: var(--bg-hover); }
+    .badge { font-size: 11px; color: #0284c7; flex-shrink: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    html.dark .badge { color: #38bdf8; }
+    .badge-cycle { font-size: 11px; color: #e11d48; flex-shrink: 0; white-space: nowrap; }
+    html.dark .badge-cycle { color: #fb7185; }
     .row-between { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .muted-note { font-size: 11px; color: var(--text-muted); line-height: 1.45; }
+    #legend-bar {
+      padding: 7px 14px;
+      background: var(--bg-header);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      font-size: 11px;
+      color: var(--text-main);
+      flex-shrink: 0;
+    }
+    .leg-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .leg-line { width: 18px; height: 0; border-top-width: 2.5px; display: inline-block; }
+    .leg-count { color: var(--text-dim); font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; }
     .view-bar {
       display: ${hasMultiViews ? 'flex' : 'none'};
       align-items: center;
       gap: 6px;
       padding-right: 6px;
-      border-right: 1px solid #334155;
+      border-right: 1px solid var(--border-strong);
     }
-    @media (max-width: 900px) {
+    .edge-detail-box {
+      border-color: var(--amber-border);
+      background: var(--bg-card);
+    }
+    .edge-endpoint-row {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      margin-top: 6px;
+    }
+    .edge-cond-box {
+      margin-top: 8px;
+      padding: 7px 9px;
+      border-radius: 6px;
+      background: var(--bg-seg);
+      border: 1px solid var(--border);
+      font-size: 11.5px;
+      color: var(--text-main);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      word-break: break-word;
+    }
+    .an-subtabs {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 4px;
+    }
+    .an-subtab {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 6px 4px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+    }
+    .an-subtab.active {
+      background: var(--accent);
+      border-color: var(--accent-border);
+      color: #ffffff;
+    }
+    .an-item {
+      padding: 9px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .an-item.sev-error { border-color: var(--err-border); background: var(--err-bg); }
+    .an-item.sev-warning { border-color: var(--warn-border); background: var(--warn-bg); }
+    .an-item-title { font-size: 12px; font-weight: 600; color: var(--text-main); line-height: 1.35; }
+    .an-item-desc { font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+    .an-tag {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-card);
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .an-tag.err { border-color: var(--err-border); color: var(--err-text); background: var(--err-bg); }
+    .an-tag.warn { border-color: var(--warn-border); color: var(--warn-text); background: var(--warn-bg); }
+    .an-tag.ok { border-color: var(--ok-border); color: var(--ok-text); background: var(--ok-bg); }
+    .an-table-wrap {
+      overflow: auto;
+      max-height: 460px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--bg-card);
+    }
+    table.an-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      text-align: left;
+    }
+    table.an-table th {
+      position: sticky;
+      top: 0;
+      background: var(--bg-header);
+      color: var(--text-muted);
+      padding: 6px 7px;
+      border-bottom: 1px solid var(--border-strong);
+      font-weight: 600;
+      white-space: nowrap;
+      z-index: 2;
+    }
+    table.an-table td {
+      padding: 6px 7px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-main);
+      vertical-align: top;
+      font-variant-numeric: tabular-nums;
+    }
+    table.an-table tbody tr:nth-child(even) { background: var(--table-stripe); }
+    table.an-table tbody tr.clickable { cursor: pointer; }
+    table.an-table tbody tr.clickable:hover { background: var(--bg-hover); }
+    .nodetype-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 9px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      cursor: pointer;
+    }
+    .nodetype-row:hover { border-color: var(--accent-border); }
+    .nodetype-row.is-hidden { opacity: 0.55; }
+    .swatch-dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 3px;
+      flex-shrink: 0;
+      border: 1px solid rgba(255,255,255,0.25);
+    }
+    @media (max-width: 960px) {
       main { flex-direction: column; }
-      aside { width: 100%; height: 45vh; border-left: none; border-top: 1px solid #1e293b; }
+      aside { width: 100%; height: 46vh; border-left: none; border-top: 1px solid var(--border); }
     }
   </style>
 </head>
@@ -3106,6 +3661,10 @@ export function generateInteractiveCallflowHtml(
         <select id="view-select" title="Zwischen Ebene 1 (Master-Gesamtkarte) und Ebene 2 (Einzel-Skripte inkl. Main) wechseln"></select>
         <button id="btn-master-back" style="display:none;" title="Zurück zur Master-Gesamtkarte (Ebene 1)">← Master-Karte</button>
       </div>
+      <div class="seg-group" id="pathmode-group" title="Pfad-Färbung umschalten: Modus A (Semantik) vs. Modus B (Verzweigungen)">
+        <button class="seg-btn${initialPathColorMode === 'semantic' ? ' active' : ''}" data-pathmode="semantic">A: Semantik</button>
+        <button class="seg-btn${initialPathColorMode === 'branches' ? ' active' : ''}" data-pathmode="branches">B: Verzweigung</button>
+      </div>
       <div class="seg-group" id="dir-group" title="Richtungs-Filter">
         <button class="seg-btn active" data-dir="both">Ganzer Pfad</button>
         <button class="seg-btn" data-dir="upstream">Nur Woher</button>
@@ -3116,74 +3675,131 @@ export function generateInteractiveCallflowHtml(
         <button class="seg-btn" data-hop="1">1 Schritt</button>
         <button class="seg-btn" data-hop="2">2 Ebenen</button>
       </div>
-      <select id="dim-select" title="Darstellung nicht beteiligter Knoten">
-        <option value="0.12" selected>Nebenpfade: 12%</option>
-        <option value="0.30">Nebenpfade: 30%</option>
-        <option value="0">Nebenpfade: Aus (0%)</option>
-      </select>
+      <button id="btn-isolate" class="${initialIsolateSubgraph ? 'btn-active' : ''}" title="Ausgeblendete Knoten &amp; Verbindungen komplett ausblenden (Teilgraph isolieren)">Teilgraph isoliert</button>
+      <div class="seg-group" title="Zoom-Steuerung">
+        <button class="seg-btn" id="btn-zoom-out" title="Verkleinern (−)">−</button>
+        <span class="zoom-readout" id="zoom-readout">100%</span>
+        <button class="seg-btn" id="btn-zoom-in" title="Vergrößern (+)">+</button>
+      </div>
       <button id="btn-fit" title="Gesamtes Diagramm einpassen">Fit</button>
-      <button id="btn-100" class="primary" title="Echte 1:1 Originalgröße">1:1 (100%)</button>
-      <button id="btn-reset">Reset</button>
+      <button id="btn-100" class="primary" title="Echte 1:1 Originalgröße">1:1</button>
+      <button id="btn-theme" title="Hell/Dunkel-Darstellung umschalten">${isDarkSurface ? '☀ Hell' : '☾ Dunkel'}</button>
+      <button id="btn-reset" title="Alle Filter, Auswahl &amp; Zoom zurücksetzen">Reset</button>
     </div>
   </header>
   <main>
-    <div id="canvas-wrap">
-      <div id="svg-stage">${initialSvg}</div>
+    <div class="canvas-col">
+      <div id="canvas-wrap">
+        <div id="svg-stage">${initialSvg}</div>
+      </div>
+      <div id="legend-bar"></div>
     </div>
     <aside>
-      <div class="card">
-        <h3>Filter &amp; Skript-Auswahl</h3>
-        <input type="text" id="node-search" placeholder="Skript, Nummer oder Knoten suchen..." style="width:100%;margin-bottom:8px;" />
-        <select id="node-select" style="width:100%;font-family:monospace;">
-          <option value="">Alle Pfade anzeigen...</option>
-        </select>
-        <div class="filter-chips" id="role-chips">
-          <button class="chip active" data-role="all">Alle</button>
-          <button class="chip" data-role="entry">▶ Startpunkte</button>
-          <button class="chip" data-role="hub">◆ Verteiler</button>
-          <button class="chip" data-role="terminal">■ Endpunkte</button>
+      <div class="aside-tabs" id="aside-tabs">
+        <button class="aside-tab active" data-tab="path">Pfad</button>
+        <button class="aside-tab" data-tab="analysis">Analyse <span class="tab-count" id="badge-analysis-count">0</span></button>
+        <button class="aside-tab" data-tab="filter">Filter <span class="tab-count" id="badge-filter-count" style="display:none;">0</span></button>
+      </div>
+
+      <!-- TAB 1: PFAD & KNOTEN / KANTEN -->
+      <div class="tab-pane active" id="tab-path">
+        <div class="card">
+          <h3>Skript- &amp; Knoten-Suche</h3>
+          <input type="text" id="node-search" placeholder="Skript, Nummer oder Knoten suchen..." style="width:100%;margin-bottom:8px;" />
+          <select id="node-select" style="width:100%;font-family:monospace;">
+            <option value="">Alle Pfade anzeigen...</option>
+          </select>
+          <div class="filter-chips" id="role-chips">
+            <button class="chip active" data-role="all">Alle</button>
+            <button class="chip" data-role="entry">▶ Startpunkte</button>
+            <button class="chip" data-role="hub">◆ Verteiler</button>
+            <button class="chip" data-role="terminal">■ Endpunkte</button>
+          </div>
+          <div class="row-between" style="margin-top:10px;">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:var(--text-muted);">
+              <input type="checkbox" id="chk-autofocus" checked />
+              <span>Bei Auswahl automatisch 1:1 fokussieren</span>
+            </label>
+          </div>
         </div>
-        <div class="row-between" style="margin-top:10px;font-size:11px;color:#94a3b8;">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="chk-autofocus" checked />
-            <span>Bei Auswahl automatisch 1:1 fokussieren</span>
-          </label>
+
+        <div class="card edge-detail-box" id="card-edge-detail" style="display:none;">
+          <h3>
+            <span style="color:var(--amber-text);">Ausgewählte Verbindung</span>
+            <button id="btn-clear-edge" style="padding:2px 7px;font-size:10px;">Schließen</button>
+          </h3>
+          <div id="edge-detail-body"></div>
+        </div>
+
+        <div class="card">
+          <h3>Aktiver Callflow-Pfad</h3>
+          <div id="selected-info" class="muted-note" style="font-size:12.5px;color:var(--text-main);">
+            Klicken Sie auf einen Knoten oder eine Verbindung, um Pfad, Ebenen-Tiefe und Bedingungen zu prüfen.
+          </div>
+          <div id="drilldown-slot" style="margin-top:8px;"></div>
+        </div>
+
+        <div class="card" id="card-entries">
+          <h3 style="color:#0ea5e9;">1. Startpunkte (Ursprung)</h3>
+          <div id="list-entries" class="muted-note">–</div>
+        </div>
+        <div class="card" id="card-callers">
+          <h3 style="color:#3b82f6;">2. Direkte Aufrufer (Woher?)</h3>
+          <div id="list-callers" class="muted-note">–</div>
+        </div>
+        <div class="card" id="card-callees">
+          <h3 style="color:#10b981;">3. Direkte Folgeschritte (Wohin?)</h3>
+          <div id="list-callees" class="muted-note">–</div>
+        </div>
+        <div class="card" id="card-terminals">
+          <h3 style="color:#f43f5e;">4. Endpunkte (Terminierung)</h3>
+          <div id="list-terminals" class="muted-note">–</div>
+        </div>
+        <div class="card" id="card-cycles" style="display:none;border-color:var(--err-border);">
+          <h3 style="color:#f43f5e;">5. ↻ Erkannte Rücksprünge / Zyklen</h3>
+          <div id="list-cycles" class="muted-note">–</div>
         </div>
       </div>
 
-      <div class="card">
-        <h3>Aktiver Callflow-Pfad</h3>
-        <div id="selected-info" style="font-size: 13px; color: #cbd5e1; line-height: 1.45;">
-          Tippen oder klicken Sie im Diagramm auf einen Knoten, um <strong>Ursprung</strong>, <strong>Ebenen-Tiefe</strong> und <strong>Zyklen</strong> zu prüfen.
+      <!-- TAB 2: STUDIO ANALYSE (READ-ONLY) -->
+      <div class="tab-pane" id="tab-analysis">
+        <div class="an-subtabs" id="an-subtabs">
+          <button class="an-subtab active" data-subtab="issues">Logik</button>
+          <button class="an-subtab" data-subtab="schedules">Zeiten</button>
+          <button class="an-subtab" data-subtab="inventory">Inventar</button>
+          <button class="an-subtab" data-subtab="matrix">Matrix</button>
         </div>
-        <div id="drilldown-slot" style="margin-top:8px;"></div>
+        <div id="an-body" style="display:flex;flex-direction:column;gap:9px;"></div>
       </div>
-      <div class="card" id="card-entries">
-        <h3 style="color:#38bdf8;">1. Startpunkte (Ursprung)</h3>
-        <div id="list-entries" style="font-size:12px;color:#64748b;">–</div>
-      </div>
-      <div class="card" id="card-callers">
-        <h3 style="color:#60a5fa;">2. Direkte Aufrufer (Woher?)</h3>
-        <div id="list-callers" style="font-size:12px;color:#64748b;">–</div>
-      </div>
-      <div class="card" id="card-callees">
-        <h3 style="color:#34d399;">3. Direkte Folgeschritte (Wohin?)</h3>
-        <div id="list-callees" style="font-size:12px;color:#64748b;">–</div>
-      </div>
-      <div class="card" id="card-terminals">
-        <h3 style="color:#fb7185;">4. Endpunkte (Terminierung)</h3>
-        <div id="list-terminals" style="font-size:12px;color:#64748b;">–</div>
-      </div>
-      <div class="card" id="card-cycles" style="display:none;border-color:rgba(244,63,94,0.45);">
-        <h3 style="color:#fb7185;">5. ↻ Erkannte Rücksprünge / Zyklen</h3>
-        <div id="list-cycles" style="font-size:12px;color:#fda4af;">–</div>
+
+      <!-- TAB 3: KNOTEN-TYP-FILTER & ISOLATION -->
+      <div class="tab-pane" id="tab-filter">
+        <div class="card">
+          <h3>Teilgraph &amp; Nebenpfade</h3>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text-main);margin-bottom:9px;">
+            <input type="checkbox" id="chk-isolate" ${initialIsolateSubgraph ? 'checked' : ''} />
+            <span>Ausgeblendete komplett wegnehmen (Teilgraph isolieren)</span>
+          </label>
+          <div class="row-between" style="gap:6px;">
+            <select id="dim-select" style="flex:1;" title="Deckkraft nicht beteiligter Pfade (wenn nicht isoliert)">
+              <option value="0.12" selected>Nebenpfade: 12%</option>
+              <option value="0.30">Nebenpfade: 30%</option>
+              <option value="0">Nebenpfade: Aus (0%)</option>
+            </select>
+            <button id="btn-show-all-types">Alle einblenden</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Knoten-Typen ein-/ausblenden <span id="nodetype-summary" style="font-variant-numeric:tabular-nums;"></span></h3>
+          <div id="nodetype-filters" style="display:flex;flex-direction:column;gap:6px;"></div>
+        </div>
       </div>
     </aside>
   </main>
   <script>
     const PAYLOAD = ${safePayloadJson};
-    const IS_DARK = ${isDarkSurface ? 'true' : 'false'};
     const viewsByKey = new Map(PAYLOAD.views.map(v => [v.key, v]));
+    let isDarkSurface = PAYLOAD.initialSurface !== 'light';
     let activeViewKey = PAYLOAD.initialViewKey;
     let GRAPH = viewsByKey.get(activeViewKey).graph;
     let nodeMap = new Map(GRAPH.nodes.map(n => [n.id, n]));
@@ -3194,16 +3810,36 @@ export function generateInteractiveCallflowHtml(
     const searchEl = document.getElementById('node-search');
     const dimSelectEl = document.getElementById('dim-select');
     const autoFocusEl = document.getElementById('chk-autofocus');
+    const isolateBtn = document.getElementById('btn-isolate');
+    const isolateChk = document.getElementById('chk-isolate');
+    const themeBtn = document.getElementById('btn-theme');
+    const zoomReadoutEl = document.getElementById('zoom-readout');
     const stage = document.getElementById('svg-stage');
     const wrap = document.getElementById('canvas-wrap');
 
+    let activeAsideTab = 'path';
+    let activeAnalysisSubtab = 'issues';
+    let anIssueFilter = 'all';
+    let anIssueSearch = '';
+    let anSchedFilter = 'all';
+    let anSchedSearch = '';
+    let anInvCategory = 'skillsets';
+    let anInvSearch = '';
+    let anMatrixSearch = '';
+
     let activeNodeId = '';
+    let activeEdge = null; // { from, to, label }
+    let pathColorMode = PAYLOAD.initialPathColorMode || 'semantic';
     let directionFilter = 'both';
-    let hopDepth = 'all'; // 'all' | '1' | '2'
+    let hopDepth = 'all';
     let roleFilter = 'all';
     let dimOpacity = '0.12';
+    let isolateSubgraph = Boolean(PAYLOAD.initialIsolateSubgraph);
+    let hiddenNodeTypes = new Set(PAYLOAD.initialHiddenNodeTypes || []);
+    let currentEdgeLegend = [];
 
-    let zoom = 1, panX = 0, panY = 0, isDragging = false, startX = 0, startY = 0;
+    let zoom = 1, panX = 0, panY = 0, isDragging = false, startX = 0, startY = 0, downClientX = 0, downClientY = 0, didDrag = false;
+    let initialClusterStyles = new WeakMap();
 
     function esc(s) {
       return String(s || '')
@@ -3211,6 +3847,340 @@ export function generateInteractiveCallflowHtml(
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+    }
+
+    function escapeCsvCell(val) {
+      const str = String(val == null ? '' : val).replace(/\\r?\\n/g, ' ');
+      if (/[;"\\t]/.test(str)) {
+        return '"' + str.replace(/"/g, '""') + '"';
+      }
+      return str;
+    }
+
+    function downloadUtf8Csv(filename, headers, rows) {
+      const lines = [headers.map(escapeCsvCell).join(';')];
+      rows.forEach(r => lines.push(r.map(escapeCsvCell).join(';')));
+      const bomCsv = '\\uFEFF' + lines.join('\\r\\n');
+      const blob = new Blob([bomCsv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function switchAsideTab(tabId) {
+      activeAsideTab = tabId;
+      document.querySelectorAll('#aside-tabs .aside-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-tab') === tabId);
+      });
+      document.querySelectorAll('.tab-pane').forEach(pane => {
+        pane.classList.toggle('active', pane.id === 'tab-' + tabId);
+      });
+    }
+
+    function syncFilterBadge() {
+      const badge = document.getElementById('badge-filter-count');
+      if (!badge) return;
+      const cnt = hiddenNodeTypes.size + (isolateSubgraph ? 1 : 0);
+      badge.style.display = cnt > 0 ? 'inline-block' : 'none';
+      badge.textContent = String(cnt);
+    }
+
+    function syncIsolateUi() {
+      if (isolateBtn) isolateBtn.classList.toggle('btn-active', isolateSubgraph);
+      if (isolateChk) isolateChk.checked = isolateSubgraph;
+      syncFilterBadge();
+    }
+
+    function inferNodeTypeFallback(g, nodeObj) {
+      const existing = g.getAttribute('data-node-type');
+      if (existing) return existing;
+      const text = ((nodeObj ? nodeObj.label : '') + ' ' + (g.textContent || '')).toLowerCase();
+      if (/missing|fehlend|out of service|fehler|error|abbruch|timeout/.test(text)) return 'error-alert';
+      if (/ansage|audio|ran|musik|treatment|broadcast/.test(text)) return 'announcement';
+      if (/skillset|queue|warteschlange|event/.test(text)) return 'queue';
+      if (/db|datenbank|readvar|hdx|cti|route|extern/.test(text)) return 'storage';
+      if (/main|start|einstieg|client|actor/.test(text) || (nodeObj && nodeObj.role === 'entry') || g.querySelector('circle, ellipse')) return 'start-actor';
+      if (g.querySelector('polygon') || /\\?|bedingung|zeitplan|feiertag|dtmf|menu|gate|check|if/.test(text)) return 'decision';
+      return 'core-service';
+    }
+
+    function applyExportMarkerColor(svgEl, pathEl, color) {
+      pathEl.style.stroke = color;
+      pathEl.setAttribute('stroke', color);
+      if (!svgEl) return;
+      ['marker-end', 'marker-start'].forEach(attr => {
+        const sp = attr === 'marker-end' ? 'markerEnd' : 'markerStart';
+        const raw = pathEl.style[sp] || pathEl.getAttribute(attr) || '';
+        const m = raw.match(/#([^'")\\s]+)/);
+        if (!m) return;
+        const baseId = m[1].replace(/__c_[a-z0-9]+$/i, '');
+        const hex = color.replace(/[^a-z0-9]/gi, '').toLowerCase() || 'c';
+        const targetId = baseId + '__c_' + hex;
+        if (!Array.from(svgEl.querySelectorAll('defs marker, marker')).some(el => el.getAttribute('id') === targetId)) {
+          const orig = Array.from(svgEl.querySelectorAll('defs marker, marker')).find(el => el.getAttribute('id') === baseId);
+          if (orig) {
+            const cl = orig.cloneNode(true);
+            cl.setAttribute('id', targetId);
+            cl.setAttribute('data-colored-marker', 'true');
+            cl.querySelectorAll('path, polygon, circle, rect, polyline').forEach(ch => {
+              const f = ch.style.fill || ch.getAttribute('fill') || '';
+              if (f !== 'none') { ch.style.fill = color; ch.setAttribute('fill', color); }
+              ch.style.stroke = color; ch.setAttribute('stroke', color);
+            });
+            (orig.parentNode || svgEl.querySelector('defs') || svgEl).appendChild(cl);
+          }
+        }
+        const nextUrl = 'url(#' + targetId + ')';
+        pathEl.setAttribute(attr, nextUrl);
+        pathEl.style[sp] = nextUrl;
+      });
+    }
+
+    function detectExportCycleKeys() {
+      const cycleSet = new Set();
+      const adj = new Map();
+      GRAPH.edges.forEach((e, i) => {
+        if (!adj.has(e.from)) adj.set(e.from, []);
+        adj.get(e.from).push({ e, i });
+      });
+      const st = new Map();
+      const dfs = u => {
+        st.set(u, 1);
+        (adj.get(u) || []).forEach(({ e }) => {
+          const s = st.get(e.to) || 0;
+          if (s === 1) cycleSet.add(e.from + '->' + e.to);
+          else if (s === 0) dfs(e.to);
+        });
+        st.set(u, 2);
+      };
+      GRAPH.nodes.forEach(n => { if ((st.get(n.id) || 0) === 0) dfs(n.id); });
+      return cycleSet;
+    }
+
+    function computeExportBranches(cycleSet) {
+      const pal = [
+        { label: 'Zweig 1 (Blau)', c: isDarkSurface ? '#38bdf8' : '#0284c7' },
+        { label: 'Zweig 2 (Smaragd)', c: isDarkSurface ? '#34d399' : '#059669' },
+        { label: 'Zweig 3 (Bernstein)', c: isDarkSurface ? '#fbbf24' : '#d97706' },
+        { label: 'Zweig 4 (Violett)', c: isDarkSurface ? '#a78bfa' : '#7c3aed' },
+        { label: 'Zweig 5 (Türkis)', c: isDarkSurface ? '#2dd4bf' : '#0d9488' },
+        { label: 'Zweig 6 (Orange)', c: isDarkSurface ? '#fb923c' : '#ea580c' },
+        { label: 'Zweig 7 (Pink)', c: isDarkSurface ? '#f472b6' : '#db2777' },
+        { label: 'Zweig 8 (Indigo)', c: isDarkSurface ? '#818cf8' : '#4f46e5' },
+      ];
+      const outMap = new Map();
+      const inDeg = new Map();
+      GRAPH.nodes.forEach(n => inDeg.set(n.id, 0));
+      GRAPH.edges.forEach((e, i) => {
+        if (cycleSet.has(e.from + '->' + e.to)) return;
+        if (!outMap.has(e.from)) outMap.set(e.from, []);
+        outMap.get(e.from).push({ e, i });
+        inDeg.set(e.to, (inDeg.get(e.to) || 0) + 1);
+      });
+      const nodeBr = new Map();
+      const edgeBr = new Map();
+      const vis = new Set();
+      let nextBr = 0;
+      const roots = Array.from(inDeg.entries()).filter(([, d]) => d === 0).map(([id]) => id);
+      const order = roots.length ? roots : Array.from(inDeg.keys());
+      order.forEach(startId => {
+        if (vis.has(startId)) return;
+        if (!nodeBr.has(startId)) { nodeBr.set(startId, nextBr % pal.length); nextBr++; }
+        const q = [startId];
+        while (q.length) {
+          const u = q.shift();
+          if (vis.has(u)) continue;
+          vis.add(u);
+          const pb = nodeBr.get(u) || 0;
+          const out = outMap.get(u) || [];
+          out.forEach(({ e, i }, si) => {
+            const b = si === 0 ? pb : (pb + si) % pal.length;
+            edgeBr.set(i, b);
+            if (!nodeBr.has(e.to)) nodeBr.set(e.to, b);
+            if (!vis.has(e.to)) q.push(e.to);
+          });
+        }
+      });
+      return { pal, edgeBr };
+    }
+
+    function resolveGraphEdgeForElement(edgeEl, idxFallback, allEdgesRef) {
+      const df = edgeEl.getAttribute('data-edge-from') || '';
+      const dt = edgeEl.getAttribute('data-edge-to') || '';
+      const dl = edgeEl.getAttribute('data-edge-label') || '';
+      if (df && dt) {
+        const matched = GRAPH.edges.find(e => e.from === df && e.to === dt && (!dl || !e.label || e.label === dl));
+        return matched || { from: df, to: dt, label: dl };
+      }
+      const meta = (edgeEl.getAttribute('id') || '') + ' ' + (edgeEl.getAttribute('data-id') || '') + ' ' + (edgeEl.getAttribute('class') || '');
+      let codeIdx = GRAPH.edges.findIndex(e =>
+        meta.includes('-' + e.from + '-' + e.to + '-') ||
+        meta.includes('_' + e.from + '_' + e.to + '_') ||
+        meta.includes('L_' + e.from + '_' + e.to) ||
+        meta.includes('L-' + e.from + '-' + e.to)
+      );
+      if (codeIdx < 0 && typeof idxFallback === 'number' && idxFallback >= 0 && idxFallback < GRAPH.edges.length && (!allEdgesRef || allEdgesRef.length === GRAPH.edges.length)) {
+        codeIdx = idxFallback;
+      }
+      return codeIdx >= 0 ? GRAPH.edges[codeIdx] : null;
+    }
+
+    function recolorExportEdges() {
+      const svgEl = stage.querySelector('svg');
+      if (!svgEl) return;
+      const cycleSet = detectExportCycleKeys();
+      const { pal, edgeBr } = computeExportBranches(cycleSet);
+      const svgEdges = Array.from(stage.querySelectorAll('g.edgePaths > *, g.edgePath, path.flowchart-link'));
+      const legendMap = new Map();
+
+      svgEdges.forEach((edgeEl, idx) => {
+        const ge = resolveGraphEdgeForElement(edgeEl, idx, svgEdges);
+        const codeIdx = ge ? GRAPH.edges.indexOf(ge) : -1;
+        const lbl = (ge && ge.label) || '';
+        const isCyc = (ge && cycleSet.has(ge.from + '->' + ge.to)) || lbl.includes('↻') || /zyklus|cycle|schleife|loop/i.test(lbl);
+        const paths = edgeEl.tagName.toLowerCase() === 'path' ? [edgeEl] : Array.from(edgeEl.querySelectorAll('path'));
+        if (!paths.length) return;
+        const p0 = paths[0];
+        const isOrigDashed = Boolean(ge && ge.isAsync) || p0.classList.contains('edge-pattern-dotted') || p0.classList.contains('edge-pattern-dashed');
+
+        let lid = '', llabel = '', col = '', dashed = isOrigDashed, width = '2.2px';
+        if (pathColorMode === 'branches') {
+          if (isCyc) {
+            lid = 'branch-cycle'; llabel = 'Zyklus / Rücksprung';
+            col = isDarkSurface ? '#fb7185' : '#e11d48'; dashed = true; width = '2.5px';
+          } else {
+            const bi = codeIdx >= 0 && edgeBr.has(codeIdx) ? edgeBr.get(codeIdx) : (idx % pal.length);
+            lid = 'b-' + bi; llabel = pal[bi].label; col = pal[bi].c; width = '2.3px';
+          }
+        } else {
+          const low = lbl.toLowerCase();
+          if (isCyc) {
+            lid = 's-cyc'; llabel = 'Zyklus / Rücksprung'; col = isDarkSurface ? '#fb7185' : '#e11d48'; dashed = true; width = '2.5px';
+          } else if (/\\b(fehler|error|fail|out of service|oos|abort|abbruch|timeout|ungültig|invalid)\\b/i.test(low)) {
+            lid = 's-err'; llabel = 'Fehler / Timeout / Abbruch'; col = isDarkSurface ? '#f43f5e' : '#dc2626'; dashed = true; width = '2.4px';
+          } else if (/\\b(fallback|default|weiter|nein|no|false|sonst|else)\\b/i.test(low) || isOrigDashed) {
+            lid = 's-fb'; llabel = 'Fallback / Nein / Weiter'; col = isDarkSurface ? '#fbbf24' : '#d97706'; dashed = true; width = '2.2px';
+          } else if (/\\b(queue|network-queue|skillset|async|event|bus|wait|warte|musik)\\b/i.test(low)) {
+            lid = 's-q'; llabel = 'Queue / Skillset / Async'; col = isDarkSurface ? '#a78bfa' : '#7c3aed'; width = '2.3px';
+          } else if (/\\b(ja|yes|true|ok|match|treffer|bedingung|condition|zeitplan|feiertag|taste|dtmf|wahl|auswahl)\\b/i.test(low)) {
+            lid = 's-dec'; llabel = 'Bedingung / Auswahl / Taste'; col = isDarkSurface ? '#38bdf8' : '#0284c7'; width = '2.2px';
+          } else if (/\\b(route|sprung|jump|sub|include|verknüpft|wohin|transfer|cti|db|api)\\b/i.test(low)) {
+            lid = 's-ext'; llabel = 'Sprung / Route / Verknüpfung'; col = isDarkSurface ? '#2dd4bf' : '#0d9488'; width = '2.3px';
+          } else {
+            lid = 's-flow'; llabel = 'Standard-Fluss'; col = isDarkSurface ? '#818cf8' : '#4f46e5'; width = '2px';
+          }
+        }
+
+        paths.forEach(p => {
+          applyExportMarkerColor(svgEl, p, col);
+          p.style.strokeWidth = width;
+          p.style.strokeDasharray = dashed ? '6 4' : '';
+          p.dataset.origStored = '1';
+          p.dataset.origStroke = col;
+          p.dataset.origWidth = width;
+          p.dataset.origDash = dashed ? '6 4' : '';
+          p.dataset.origMarkerEnd = p.getAttribute('marker-end') || '';
+          p.dataset.origMarkerStart = p.getAttribute('marker-start') || '';
+        });
+
+        const cur = legendMap.get(lid);
+        if (cur) cur.count++;
+        else legendMap.set(lid, { label: llabel, color: col, dashed, count: 1 });
+      });
+
+      currentEdgeLegend = Array.from(legendMap.values());
+      renderLegendBar(null);
+    }
+
+    function applySvgSurfaceTheme() {
+      const svgEl = stage.querySelector('svg');
+      if (!svgEl) return;
+      const modeKey = isDarkSurface ? 'dark' : 'light';
+      const palettes = PAYLOAD.semanticPalettes || {};
+
+      stage.querySelectorAll('g.node, g.actor, g.statediagram-state').forEach(node => {
+        const role = node.getAttribute('data-semantic-role') || 'core-service';
+        const pal = palettes[role];
+        if (!pal) return;
+        const colors = pal[modeKey];
+        const shapes = node.querySelectorAll('rect, polygon, circle, ellipse, path.label-container, path.basic, g.label-container > path');
+        const targets = shapes.length ? Array.from(shapes) : Array.from(node.children).filter(el => ['rect','polygon','circle','ellipse','path'].includes(el.tagName.toLowerCase()));
+        targets.forEach(s => {
+          s.style.fill = colors.fill;
+          s.style.stroke = colors.border;
+        });
+        node.querySelectorAll('text, tspan, span, p, div').forEach(t => {
+          t.style.color = colors.text;
+          t.style.fill = colors.text;
+        });
+      });
+
+      stage.querySelectorAll('g.cluster').forEach(cluster => {
+        if (!initialClusterStyles.has(cluster)) {
+          const r = cluster.querySelector('rect');
+          const lbl = cluster.querySelector('text, span, p, div');
+          initialClusterStyles.set(cluster, {
+            surface: PAYLOAD.initialSurface,
+            fill: r ? (r.style.fill || r.getAttribute('fill') || '') : '',
+            stroke: r ? (r.style.stroke || r.getAttribute('stroke') || '') : '',
+            textCol: lbl ? (lbl.style.color || lbl.style.fill || '') : '',
+          });
+        }
+        const orig = initialClusterStyles.get(cluster);
+        const r = cluster.querySelector('rect');
+        if (orig && orig.surface === modeKey && orig.fill) {
+          if (r) { r.style.fill = orig.fill; r.style.stroke = orig.stroke; }
+          cluster.querySelectorAll('text, tspan, span, p, div').forEach(t => {
+            if (orig.textCol) { t.style.color = orig.textCol; t.style.fill = orig.textCol; }
+          });
+        } else {
+          if (r) {
+            r.style.fill = isDarkSurface ? 'rgba(30, 41, 59, 0.36)' : 'rgba(226, 232, 240, 0.65)';
+            r.style.stroke = isDarkSurface ? '#475569' : '#64748b';
+          }
+          cluster.querySelectorAll('text, tspan, span, p, div').forEach(t => {
+            t.style.color = isDarkSurface ? '#e2e8f0' : '#0f172a';
+            t.style.fill = isDarkSurface ? '#e2e8f0' : '#0f172a';
+          });
+        }
+      });
+
+      stage.querySelectorAll('g.edgeLabel rect, g.edgeLabels rect, .labelBkg').forEach(bg => {
+        bg.style.fill = isDarkSurface ? '#0f172a' : '#f8fafc';
+        bg.style.backgroundColor = isDarkSurface ? '#0f172a' : '#f8fafc';
+      });
+      stage.querySelectorAll('g.edgeLabel text, g.edgeLabel span, g.edgeLabel div, g.edgeLabel p').forEach(t => {
+        t.style.color = isDarkSurface ? '#e2e8f0' : '#0f172a';
+        t.style.fill = isDarkSurface ? '#e2e8f0' : '#0f172a';
+      });
+
+      recolorExportEdges();
+    }
+
+    function applySurfaceTheme(nextDark) {
+      isDarkSurface = Boolean(nextDark);
+      document.documentElement.classList.toggle('light', !isDarkSurface);
+      document.documentElement.classList.toggle('dark', isDarkSurface);
+      if (themeBtn) themeBtn.textContent = isDarkSurface ? '☀ Hell' : '☾ Dunkel';
+      applySvgSurfaceTheme();
+      applyCombinedCanvasState(false);
+    }
+
+    function renderLegendBar(spotlightItems) {
+      const bar = document.getElementById('legend-bar');
+      if (!bar) return;
+      const items = spotlightItems || currentEdgeLegend;
+      const prefix = spotlightItems
+        ? '<strong style="color:var(--amber-text);">Aktiver Pfad:</strong>'
+        : '<strong style="color:var(--accent-text);">Pfade (' + (pathColorMode === 'branches' ? 'Modus B: Verzweigung' : 'Modus A: Semantik') + '):</strong>';
+      bar.innerHTML = prefix + items.map(it =>
+        '<span class="leg-item"><span class="leg-line" style="border-top-color:' + it.color + ';border-top-style:' + (it.dashed ? 'dashed' : 'solid') + ';"></span><span>' + esc(it.label) + '</span>' + (it.count !== undefined ? '<span class="leg-count">(' + it.count + ')</span>' : '') + '</span>'
+      ).join('');
     }
 
     function populateViewSelect() {
@@ -3228,6 +4198,79 @@ export function generateInteractiveCallflowHtml(
       }
     }
 
+    function resolveNodeId(el) {
+      const g = el.closest('g.node, g.actor, g.statediagram-state');
+      if (!g) return null;
+      const cnf = g.getAttribute('data-callflow-node-id') || '';
+      if (cnf && nodeMap.has(cnf)) return cnf;
+      const dataId = g.getAttribute('data-id') || '';
+      if (dataId && nodeMap.has(dataId)) return dataId;
+      const domId = g.getAttribute('id') || '';
+      const text = (g.textContent || '').replace(/\\s+/g, ' ').trim();
+      const sorted = [...GRAPH.nodes].sort((a, b) => b.id.length - a.id.length);
+      for (const n of sorted) {
+        const rx = new RegExp('(?:^|[-_])' + n.id.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&') + '(?:[-_]\\\\d+|$)', 'i');
+        if (rx.test(domId)) return n.id;
+      }
+      for (const n of GRAPH.nodes) {
+        if (n.label === text || n.id === text) return n.id;
+      }
+      return null;
+    }
+
+    function stampMissingNodeMetadata() {
+      stage.querySelectorAll('g.node, g.actor, g.statediagram-state').forEach(g => {
+        const nid = resolveNodeId(g);
+        if (nid && !g.getAttribute('data-callflow-node-id')) {
+          g.setAttribute('data-callflow-node-id', nid);
+        }
+        const nObj = nid ? nodeMap.get(nid) : null;
+        if (!g.getAttribute('data-node-type')) {
+          g.setAttribute('data-node-type', inferNodeTypeFallback(g, nObj));
+        }
+      });
+    }
+
+    function renderNodeTypeFilters() {
+      const container = document.getElementById('nodetype-filters');
+      const summaryEl = document.getElementById('nodetype-summary');
+      if (!container) return;
+      const counts = {};
+      stage.querySelectorAll('g.node, g.actor, g.statediagram-state').forEach(g => {
+        const nt = g.getAttribute('data-node-type') || 'core-service';
+        counts[nt] = (counts[nt] || 0) + 1;
+      });
+      const options = PAYLOAD.nodeTypeOptions || [];
+      const activeCnt = options.filter(o => !hiddenNodeTypes.has(o.id)).length;
+      if (summaryEl) summaryEl.textContent = activeCnt + '/' + options.length;
+
+      container.innerHTML = '';
+      options.forEach(opt => {
+        const isHidden = hiddenNodeTypes.has(opt.id);
+        const cnt = counts[opt.id] || 0;
+        const row = document.createElement('label');
+        row.className = 'nodetype-row' + (isHidden ? ' is-hidden' : '');
+        row.innerHTML =
+          '<div style="display:flex;align-items:flex-start;gap:8px;min-width:0;flex:1;">' +
+            '<input type="checkbox" ' + (isHidden ? '' : 'checked') + ' style="margin-top:2px;flex-shrink:0;" />' +
+            '<span class="swatch-dot" style="background:' + esc(opt.swatchColor) + ';margin-top:3px;"></span>' +
+            '<div style="min-width:0;">' +
+              '<div style="font-size:12px;font-weight:600;color:var(--text-main);">' + esc(opt.label) + '</div>' +
+              '<div style="font-size:10.5px;color:var(--text-muted);line-height:1.3;">' + esc(opt.description) + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<span class="an-tag">' + cnt + '</span>';
+        row.querySelector('input').addEventListener('change', ev => {
+          if (ev.target.checked) hiddenNodeTypes.delete(opt.id);
+          else hiddenNodeTypes.add(opt.id);
+          syncFilterBadge();
+          renderNodeTypeFilters();
+          applyCombinedCanvasState(false);
+        });
+        container.appendChild(row);
+      });
+    }
+
     function normalizeSvgElement() {
       const svgEl = stage.querySelector('svg');
       if (!svgEl) return null;
@@ -3239,21 +4282,49 @@ export function generateInteractiveCallflowHtml(
         svgEl.style.height = Math.ceil(vb[3]) + 'px';
         svgEl.style.maxWidth = 'none';
       }
-      stage.querySelectorAll('g.edgePaths path, path.flowchart-link').forEach(p => {
-        if (p.dataset.origStored) return;
-        p.dataset.origStored = '1';
-        p.dataset.origStroke = p.style.stroke || p.getAttribute('stroke') || '';
-        p.dataset.origWidth = p.style.strokeWidth || p.getAttribute('stroke-width') || '';
-        p.dataset.origDash = p.style.strokeDasharray || p.getAttribute('stroke-dasharray') || '';
-      });
+      stampMissingNodeMetadata();
+      if (isDarkSurface !== (PAYLOAD.initialSurface !== 'light')) {
+        applySvgSurfaceTheme();
+      } else {
+        recolorExportEdges();
+      }
+
       stage.querySelectorAll('g.node, g.actor, g.statediagram-state').forEach(g => {
         g.style.cursor = 'pointer';
         g.addEventListener('click', e => {
+          if (didDrag) return;
           e.stopPropagation();
           const nid = resolveNodeId(g);
           if (nid) selectNode(nid, false);
         });
       });
+
+      const svgEdges = Array.from(stage.querySelectorAll('g.edgePaths > *, g.edgePath, path.flowchart-link'));
+      svgEdges.forEach((edgeEl, idx) => {
+        edgeEl.style.cursor = 'pointer';
+        edgeEl.addEventListener('click', e => {
+          if (didDrag) return;
+          e.stopPropagation();
+          const ge = resolveGraphEdgeForElement(edgeEl, idx, svgEdges);
+          if (ge) selectEdge(ge);
+        });
+      });
+
+      const svgLabels = Array.from(stage.querySelectorAll('g.edgeLabels > *, g.edgeLabel'));
+      svgLabels.forEach((lblEl, idx) => {
+        lblEl.style.cursor = 'pointer';
+        lblEl.addEventListener('click', e => {
+          if (didDrag) return;
+          e.stopPropagation();
+          let ge = resolveGraphEdgeForElement(lblEl, idx, svgLabels);
+          if (!ge && svgLabels.length === svgEdges.length && idx < svgEdges.length) {
+            ge = resolveGraphEdgeForElement(svgEdges[idx], idx, svgEdges);
+          }
+          if (ge) selectEdge(ge);
+        });
+      });
+
+      renderNodeTypeFilters();
       return svgEl;
     }
 
@@ -3265,10 +4336,11 @@ export function generateInteractiveCallflowHtml(
       nodeMap = new Map(GRAPH.nodes.map(n => [n.id, n]));
       stage.innerHTML = nextView.svg;
       activeNodeId = '';
+      activeEdge = null;
       normalizeSvgElement();
       populateViewSelect();
       populateSelect();
-      selectNode('', false);
+      applyCombinedCanvasState(false);
       fitToWindow();
     }
 
@@ -3294,14 +4366,27 @@ export function generateInteractiveCallflowHtml(
 
     let transformRafId = null;
     let zoomLabelTimer = null;
+    let transformIdleTimer = null;
+
+    function updateZoomReadouts() {
+      const pct = Math.round(zoom * 100) + '%';
+      if (zoomReadoutEl) zoomReadoutEl.textContent = pct;
+      const b100 = document.getElementById('btn-100');
+      if (b100) b100.textContent = '1:1';
+    }
 
     function applyTransformImmediate() {
-      stage.style.willChange = 'transform';
       stage.style.transform = 'translate3d(' + panX + 'px,' + panY + 'px,0) scale(' + zoom + ')';
     }
 
     function updateTransform(activeGesture) {
       if (activeGesture) {
+        wrap.dataset.transforming = 'true';
+        if (transformIdleTimer !== null) clearTimeout(transformIdleTimer);
+        transformIdleTimer = setTimeout(() => {
+          transformIdleTimer = null;
+          delete wrap.dataset.transforming;
+        }, 120);
         if (transformRafId === null) {
           transformRafId = requestAnimationFrame(() => {
             transformRafId = null;
@@ -3311,12 +4396,26 @@ export function generateInteractiveCallflowHtml(
         if (zoomLabelTimer !== null) clearTimeout(zoomLabelTimer);
         zoomLabelTimer = setTimeout(() => {
           zoomLabelTimer = null;
-          document.getElementById('btn-100').textContent = '1:1 (' + Math.round(zoom * 100) + '%)';
-        }, 90);
+          updateZoomReadouts();
+        }, 80);
         return;
       }
+      if (transformIdleTimer !== null) {
+        clearTimeout(transformIdleTimer);
+        transformIdleTimer = null;
+      }
+      delete wrap.dataset.transforming;
       applyTransformImmediate();
-      document.getElementById('btn-100').textContent = '1:1 (' + Math.round(zoom * 100) + '%)';
+      updateZoomReadouts();
+    }
+
+    function zoomBy(factor) {
+      const nextZoom = Math.min(20, Math.max(0.05, zoom * factor));
+      const ratio = nextZoom / Math.max(0.05, zoom);
+      panX = panX * ratio;
+      panY = panY * ratio;
+      zoom = nextZoom;
+      updateTransform(false);
     }
 
     function fitToWindow() {
@@ -3367,32 +4466,52 @@ export function generateInteractiveCallflowHtml(
       updateTransform(true);
     }, { passive: false });
 
-    wrap.addEventListener('mousedown', e => { isDragging = true; startX = e.clientX - panX; startY = e.clientY - panY; });
-    window.addEventListener('mousemove', e => { if (!isDragging) return; panX = e.clientX - startX; panY = e.clientY - startY; updateTransform(true); });
-    window.addEventListener('mouseup', () => { if (!isDragging) return; isDragging = false; updateTransform(false); });
+    wrap.addEventListener('mousedown', e => {
+      isDragging = true;
+      didDrag = false;
+      downClientX = e.clientX;
+      downClientY = e.clientY;
+      startX = e.clientX - panX;
+      startY = e.clientY - panY;
+    });
+    window.addEventListener('mousemove', e => {
+      if (!isDragging) return;
+      if (Math.hypot(e.clientX - downClientX, e.clientY - downClientY) > 4) didDrag = true;
+      panX = e.clientX - startX;
+      panY = e.clientY - startY;
+      updateTransform(true);
+    });
+    window.addEventListener('mouseup', () => {
+      if (!isDragging) return;
+      isDragging = false;
+      updateTransform(false);
+      setTimeout(() => { didDrag = false; }, 0);
+    });
+    wrap.addEventListener('click', e => {
+      if (didDrag) return;
+      if (!e.target.closest('g.node, g.actor, g.statediagram-state, g.edgePaths > *, g.edgePath, path.flowchart-link, g.edgeLabels > *, g.edgeLabel')) {
+        if (activeNodeId || activeEdge) {
+          activeNodeId = '';
+          activeEdge = null;
+          selectEl.value = '';
+          applyCombinedCanvasState(false);
+        }
+      }
+    });
 
+    document.getElementById('btn-zoom-in').addEventListener('click', () => zoomBy(1.25));
+    document.getElementById('btn-zoom-out').addEventListener('click', () => zoomBy(0.8));
     document.getElementById('btn-fit').addEventListener('click', fitToWindow);
     document.getElementById('btn-100').addEventListener('click', () => { zoom = 1; panX = 0; panY = 0; updateTransform(false); });
-
-    function resolveNodeId(el) {
-      const g = el.closest('g.node, g.actor, g.statediagram-state');
-      if (!g) return null;
-      const domId = g.getAttribute('id') || '';
-      const dataId = g.getAttribute('data-id') || '';
-      if (dataId && nodeMap.has(dataId)) return dataId;
-      const text = (g.textContent || '').replace(/\\s+/g, ' ').trim();
-      const sorted = [...GRAPH.nodes].sort((a, b) => b.id.length - a.id.length);
-      for (const n of sorted) {
-        const rx = new RegExp('(?:^|[-_])' + n.id.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&') + '(?:[-_]\\\\d+|$)', 'i');
-        if (rx.test(domId)) return n.id;
-      }
-      for (const n of GRAPH.nodes) {
-        if (n.label === text || n.id === text) return n.id;
-      }
-      return null;
-    }
+    themeBtn.addEventListener('click', () => applySurfaceTheme(!isDarkSurface));
 
     function matchesEdge(el, edgeList) {
+      const df = el.getAttribute('data-edge-from') || '';
+      const dt = el.getAttribute('data-edge-to') || '';
+      const dl = el.getAttribute('data-edge-label') || '';
+      if (df && dt) {
+        return edgeList.some(e => e.from === df && e.to === dt && (!e.label || !dl || e.label === dl));
+      }
       const meta = (el.getAttribute('id') || '') + ' ' + (el.getAttribute('data-id') || '') + ' ' + (el.getAttribute('class') || '');
       for (const e of edgeList) {
         if (meta.includes('-' + e.from + '-' + e.to + '-') || meta.includes('_' + e.from + '_' + e.to + '_') || meta.includes('L_' + e.from + '_' + e.to) || meta.includes('L-' + e.from + '-' + e.to)) {
@@ -3405,9 +4524,20 @@ export function generateInteractiveCallflowHtml(
     function restoreEdgeDefaults(edgeEl) {
       const paths = edgeEl.tagName.toLowerCase() === 'path' ? [edgeEl] : Array.from(edgeEl.querySelectorAll('path'));
       paths.forEach(p => {
-        if (p.dataset.origStroke !== undefined) p.style.stroke = p.dataset.origStroke;
+        if (p.dataset.origStroke !== undefined) {
+          p.style.stroke = p.dataset.origStroke;
+          p.setAttribute('stroke', p.dataset.origStroke);
+        }
         if (p.dataset.origWidth !== undefined) p.style.strokeWidth = p.dataset.origWidth;
         if (p.dataset.origDash !== undefined) p.style.strokeDasharray = p.dataset.origDash;
+        if (p.dataset.origMarkerEnd !== undefined) {
+          if (p.dataset.origMarkerEnd) { p.setAttribute('marker-end', p.dataset.origMarkerEnd); p.style.markerEnd = p.dataset.origMarkerEnd; }
+          else { p.removeAttribute('marker-end'); p.style.markerEnd = ''; }
+        }
+        if (p.dataset.origMarkerStart !== undefined) {
+          if (p.dataset.origMarkerStart) { p.setAttribute('marker-start', p.dataset.origMarkerStart); p.style.markerStart = p.dataset.origMarkerStart; }
+          else { p.removeAttribute('marker-start'); p.style.markerStart = ''; }
+        }
       });
     }
 
@@ -3424,34 +4554,226 @@ export function generateInteractiveCallflowHtml(
       });
     }
 
+    function renderEdgeDetailCard() {
+      const card = document.getElementById('card-edge-detail');
+      const body = document.getElementById('edge-detail-body');
+      if (!card || !body) return;
+      if (!activeEdge) {
+        card.style.display = 'none';
+        body.innerHTML = '';
+        return;
+      }
+      const fromN = nodeMap.get(activeEdge.from);
+      const toN = nodeMap.get(activeEdge.to);
+      card.style.display = 'block';
+      body.innerHTML =
+        '<div class="edge-endpoint-row">' +
+          '<button class="node-chip" id="btn-edge-from"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Von: ' + esc(fromN ? fromN.label : activeEdge.from) + '</span><span class="badge">Fokus →</span></button>' +
+          '<button class="node-chip" id="btn-edge-to"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Nach: ' + esc(toN ? toN.label : activeEdge.to) + '</span><span class="badge">Fokus →</span></button>' +
+        '</div>' +
+        '<div class="edge-cond-box">' +
+          '<div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;margin-bottom:3px;">Bedingung / Übergangslabel</div>' +
+          esc(activeEdge.label || 'Standardübergang (ohne Bedingung)') +
+        '</div>';
+      document.getElementById('btn-edge-from').onclick = () => selectNode(activeEdge.from, true);
+      document.getElementById('btn-edge-to').onclick = () => selectNode(activeEdge.to, true);
+    }
+
+    function updateClusterVisibility(visibleSvgNodes) {
+      const clusters = Array.from(stage.querySelectorAll('g.cluster'));
+      if (!clusters.length) return;
+      const shouldPrune = hiddenNodeTypes.size > 0 || (isolateSubgraph && (Boolean(activeNodeId) || Boolean(activeEdge) || roleFilter !== 'all' || Boolean((searchEl.value || '').trim())));
+      if (!shouldPrune) {
+        clusters.forEach(c => { c.style.display = ''; });
+        return;
+      }
+      const visCenters = visibleSvgNodes.map(n => {
+        try {
+          const b = n.getBBox();
+          const ctm = n.getCTM();
+          if (ctm) {
+            const cx = b.x + b.width / 2;
+            const cy = b.y + b.height / 2;
+            return { x: cx, y: cy, el: n };
+          }
+          return { x: b.x + b.width / 2, y: b.y + b.height / 2, el: n };
+        } catch {
+          return null;
+        }
+      }).filter(Boolean);
+
+      clusters.forEach(c => {
+        const innerMatch = Array.from(c.querySelectorAll('g.node, g.actor, g.statediagram-state')).some(n => n.style.display !== 'none');
+        if (innerMatch) { c.style.display = ''; return; }
+        try {
+          const cb = c.getBBox();
+          const hasAnyVis = visCenters.some(p => p.x >= cb.x && p.x <= cb.x + cb.width && p.y >= cb.y && p.y <= cb.y + cb.height);
+          c.style.display = hasAnyVis ? '' : 'none';
+        } catch {
+          c.style.display = '';
+        }
+      });
+    }
+
+    function selectEdge(edgeObj) {
+      activeEdge = edgeObj;
+      activeNodeId = '';
+      selectEl.value = '';
+      switchAsideTab('path');
+      applyCombinedCanvasState(false);
+    }
+
     function selectNode(targetId, shouldFocusCamera = false) {
+      activeEdge = null;
       activeNodeId = targetId || '';
       selectEl.value = activeNodeId;
+      applyCombinedCanvasState(shouldFocusCamera);
+    }
+
+    function applyCombinedCanvasState(shouldFocusCamera = false) {
       const allSvgNodes = Array.from(stage.querySelectorAll('g.node, g.actor, g.statediagram-state'));
       const allSvgEdges = Array.from(stage.querySelectorAll('g.edgePaths > *, g.edgePath, path.flowchart-link'));
       const allSvgLabels = Array.from(stage.querySelectorAll('g.edgeLabels > *, g.edgeLabel'));
       const drillSlot = document.getElementById('drilldown-slot');
       const cycleCard = document.getElementById('card-cycles');
       const cycleList = document.getElementById('list-cycles');
+      const svgElRef = stage.querySelector('svg');
 
       allSvgEdges.forEach(restoreEdgeDefaults);
+      renderEdgeDetailCard();
 
+      // Determine node IDs blocked by node-type filter
+      const allowedByType = new Set();
+      allSvgNodes.forEach(g => {
+        const nid = resolveNodeId(g);
+        const nt = g.getAttribute('data-node-type') || 'core-service';
+        const isAllowed = !hiddenNodeTypes.has(nt);
+        if (isAllowed && nid) allowedByType.add(nid);
+      });
+
+      const isEdgeAllowedByType = edgeEl => {
+        if (hiddenNodeTypes.size === 0) return true;
+        const ge = resolveGraphEdgeForElement(edgeEl, -1, allSvgEdges);
+        if (!ge) return true;
+        return allowedByType.has(ge.from) && allowedByType.has(ge.to);
+      };
+
+      // Case 1: Edge Click Detail Mode (no active node spotlight)
+      if (!activeNodeId && activeEdge) {
+        const endSet = new Set([activeEdge.from, activeEdge.to]);
+        const visibleSvgNodes = [];
+        allSvgNodes.forEach(g => {
+          const nid = resolveNodeId(g);
+          const nt = g.getAttribute('data-node-type') || 'core-service';
+          if (hiddenNodeTypes.has(nt)) { g.style.display = 'none'; return; }
+          const hit = nid && endSet.has(nid);
+          if (hit) {
+            g.style.display = '';
+            g.style.opacity = '1';
+            visibleSvgNodes.push(g);
+          } else {
+            g.style.display = isolateSubgraph ? 'none' : '';
+            g.style.opacity = dimOpacity;
+          }
+        });
+
+        const activeIdx = new Set();
+        allSvgEdges.forEach((edgeEl, idx) => {
+          if (!isEdgeAllowedByType(edgeEl)) { edgeEl.style.display = 'none'; return; }
+          const hit = matchesEdge(edgeEl, [activeEdge]);
+          if (hit) {
+            activeIdx.add(idx);
+            edgeEl.style.display = '';
+            edgeEl.style.opacity = '1';
+            const amberCol = isDarkSurface ? '#fbbf24' : '#d97706';
+            const paths = edgeEl.tagName.toLowerCase() === 'path' ? [edgeEl] : Array.from(edgeEl.querySelectorAll('path'));
+            paths.forEach(p => {
+              applyExportMarkerColor(svgElRef, p, amberCol);
+              p.style.strokeWidth = '3.5px';
+            });
+          } else {
+            edgeEl.style.display = isolateSubgraph ? 'none' : '';
+            edgeEl.style.opacity = dimOpacity;
+          }
+        });
+
+        allSvgLabels.forEach((lblEl, idx) => {
+          const hit = matchesEdge(lblEl, [activeEdge]) || (allSvgLabels.length === allSvgEdges.length && activeIdx.has(idx));
+          if (!isEdgeAllowedByType(lblEl)) { lblEl.style.display = 'none'; return; }
+          lblEl.style.display = (!hit && isolateSubgraph) ? 'none' : '';
+          lblEl.style.opacity = hit ? '1' : dimOpacity;
+        });
+
+        updateClusterVisibility(visibleSvgNodes);
+        renderLegendBar([{ label: 'Ausgewählte Verbindung', color: isDarkSurface ? '#fbbf24' : '#d97706', dashed: false, count: 1 }]);
+        const fromN = nodeMap.get(activeEdge.from);
+        const toN = nodeMap.get(activeEdge.to);
+        document.getElementById('selected-info').innerHTML =
+          'Verbindung: <strong style="color:var(--amber-text)">' + esc(fromN ? fromN.label : activeEdge.from) + ' → ' + esc(toN ? toN.label : activeEdge.to) + '</strong>';
+        drillSlot.innerHTML = '';
+        cycleCard.style.display = 'none';
+        return;
+      }
+
+      // Case 2: No active node & no active edge (Overview / Search / Role / Type Filter)
       if (!activeNodeId || !nodeMap.has(activeNodeId)) {
         const q = (searchEl.value || '').trim().toLowerCase();
+        const hasSearchOrRole = roleFilter !== 'all' || Boolean(q);
+        const visibleSvgNodes = [];
         allSvgNodes.forEach(g => {
+          const nt = g.getAttribute('data-node-type') || 'core-service';
+          if (hiddenNodeTypes.has(nt)) {
+            g.style.display = 'none';
+            return;
+          }
           const nid = resolveNodeId(g);
           const nObj = nid ? nodeMap.get(nid) : null;
           const matchRole = roleFilter === 'all' || (nObj && nObj.role === roleFilter);
           const matchSearch = !q || (nObj && (nObj.label.toLowerCase().includes(q) || nObj.id.toLowerCase().includes(q)));
-          g.style.opacity = (matchRole && matchSearch) ? '1' : dimOpacity;
+          const ok = matchRole && matchSearch;
+          if (!ok && isolateSubgraph && hasSearchOrRole) {
+            g.style.display = 'none';
+          } else {
+            g.style.display = '';
+            g.style.opacity = ok ? '1' : dimOpacity;
+            if (ok) visibleSvgNodes.push(g);
+          }
         });
-        allSvgEdges.forEach(e => e.style.opacity = (roleFilter === 'all' && !q) ? '1' : dimOpacity);
-        allSvgLabels.forEach(l => l.style.opacity = (roleFilter === 'all' && !q) ? '1' : dimOpacity);
 
-        document.getElementById('selected-info').innerHTML = 'Alle <strong>' + GRAPH.nodes.length + ' Knoten</strong> und <strong>' + GRAPH.edges.length + ' Verbindungen</strong> sichtbar.';
+        const hiddenEdgeIdx = new Set();
+        allSvgEdges.forEach((edgeEl, idx) => {
+          if (!isEdgeAllowedByType(edgeEl)) {
+            hiddenEdgeIdx.add(idx);
+            edgeEl.style.display = 'none';
+            return;
+          }
+          if (hasSearchOrRole && isolateSubgraph) {
+            const ge = resolveGraphEdgeForElement(edgeEl, idx, allSvgEdges);
+            const matchSrcDest = ge && visibleSvgNodes.some(vn => resolveNodeId(vn) === ge.from) && visibleSvgNodes.some(vn => resolveNodeId(vn) === ge.to);
+            if (!matchSrcDest) { edgeEl.style.display = 'none'; hiddenEdgeIdx.add(idx); return; }
+          }
+          edgeEl.style.display = '';
+          edgeEl.style.opacity = !hasSearchOrRole ? '1' : dimOpacity;
+        });
+
+        allSvgLabels.forEach((lblEl, idx) => {
+          if (hiddenEdgeIdx.has(idx) && allSvgLabels.length === allSvgEdges.length) {
+            lblEl.style.display = 'none';
+            return;
+          }
+          if (!isEdgeAllowedByType(lblEl)) { lblEl.style.display = 'none'; return; }
+          lblEl.style.display = '';
+          lblEl.style.opacity = !hasSearchOrRole ? '1' : dimOpacity;
+        });
+
+        updateClusterVisibility(visibleSvgNodes);
+        renderLegendBar(null);
+
+        document.getElementById('selected-info').innerHTML =
+          '<strong>' + visibleSvgNodes.length + ' von ' + GRAPH.nodes.length + ' Knoten</strong> und <strong>' + GRAPH.edges.length + ' Verbindungen</strong> im Diagramm.';
         drillSlot.innerHTML = '';
         cycleCard.style.display = 'none';
-        const filterFn = n => (!q || n.label.toLowerCase().includes(q) || n.id.toLowerCase().includes(q));
+        const filterFn = n => (!q || n.label.toLowerCase().includes(q) || n.id.toLowerCase().includes(q)) && allowedByType.has(n.id);
         renderList('list-entries', GRAPH.nodes.filter(n => n.inDegree === 0 && filterFn(n)).map(n => ({ ...n, badge: n.outDegree + ' Ausgänge' })));
         renderList('list-callers', []);
         renderList('list-callees', []);
@@ -3459,7 +4781,7 @@ export function generateInteractiveCallflowHtml(
         return;
       }
 
-      // BFS with depth + true 3-color DFS back-edge detection (no false positives on DAG convergence)
+      // Case 3: Active Node Spotlight (BFS + 3-Color Cycle Detection + Isolation + Node-Type filter)
       const upDepth = new Map([[activeNodeId, 0]]);
       const qUp = [{ id: activeNodeId, depth: 0 }];
       const upEdgesAll = [];
@@ -3479,7 +4801,7 @@ export function generateInteractiveCallflowHtml(
       }
 
       const upState = new Map();
-      const dfsUp = (u) => {
+      const dfsUp = u => {
         upState.set(u, 1);
         GRAPH.edges.forEach(e => {
           if (e.to !== u) return;
@@ -3487,9 +4809,7 @@ export function generateInteractiveCallflowHtml(
           if (st === 1) {
             const k = 'up:' + e.from + '->' + e.to;
             if (!cycleKeys.has(k)) { cycleKeys.add(k); cycles.push(e); }
-          } else if (st === 0) {
-            dfsUp(e.from);
-          }
+          } else if (st === 0) dfsUp(e.from);
         });
         upState.set(u, 2);
       };
@@ -3512,7 +4832,7 @@ export function generateInteractiveCallflowHtml(
       }
 
       const downState = new Map();
-      const dfsDown = (u) => {
+      const dfsDown = u => {
         downState.set(u, 1);
         GRAPH.edges.forEach(e => {
           if (e.from !== u) return;
@@ -3520,9 +4840,7 @@ export function generateInteractiveCallflowHtml(
           if (st === 1) {
             const k = 'down:' + e.from + '->' + e.to;
             if (!cycleKeys.has(k)) { cycleKeys.add(k); cycles.push(e); }
-          } else if (st === 0) {
-            dfsDown(e.to);
-          }
+          } else if (st === 0) dfsDown(e.to);
         });
         downState.set(u, 2);
       };
@@ -3545,6 +4863,7 @@ export function generateInteractiveCallflowHtml(
 
       const visibleEdges = baseEdges.filter(e => {
         if (!visibleNodes.has(e.from) || !visibleNodes.has(e.to)) return false;
+        if (hiddenNodeTypes.size > 0 && (!allowedByType.has(e.from) || !allowedByType.has(e.to))) return false;
         if (maxHops === Infinity) return true;
         const okUp = (directionFilter === 'both' || directionFilter === 'upstream') && upDepth.has(e.from) && upDepth.has(e.to) && upDepth.get(e.from) <= maxHops && upDepth.get(e.to) <= maxHops;
         const okDown = (directionFilter === 'both' || directionFilter === 'downstream') && downDepth.has(e.from) && downDepth.has(e.to) && downDepth.get(e.from) <= maxHops && downDepth.get(e.to) <= maxHops;
@@ -3552,47 +4871,96 @@ export function generateInteractiveCallflowHtml(
       });
 
       const cycleOnlyEdges = cycles.filter(ce => visibleEdges.some(ve => ve.from === ce.from && ve.to === ce.to));
+      const downEdgeKeySet = new Set(downEdgesAll.map(e => e.from + '->' + e.to));
+      const downVisibleEdges = visibleEdges.filter(e => !cycleOnlyEdges.some(ce => ce.from === e.from && ce.to === e.to) && downEdgeKeySet.has(e.from + '->' + e.to));
 
+      const visibleSvgNodes = [];
       allSvgNodes.forEach(g => {
+        const nt = g.getAttribute('data-node-type') || 'core-service';
+        if (hiddenNodeTypes.has(nt)) {
+          g.style.display = 'none';
+          return;
+        }
         const nid = resolveNodeId(g);
-        g.style.opacity = (nid && visibleNodes.has(nid)) ? '1' : dimOpacity;
+        const inSpot = nid && visibleNodes.has(nid);
+        if (!inSpot && isolateSubgraph) {
+          g.style.display = 'none';
+        } else {
+          g.style.display = '';
+          g.style.opacity = inSpot ? '1' : dimOpacity;
+          if (inSpot) visibleSvgNodes.push(g);
+        }
       });
 
       const activeIdx = new Set();
+      const hiddenEdgeIdx = new Set();
+      let upCount = 0, downCount = 0, cycCount = 0;
       allSvgEdges.forEach((edgeEl, idx) => {
+        if (!isEdgeAllowedByType(edgeEl)) {
+          hiddenEdgeIdx.add(idx);
+          edgeEl.style.display = 'none';
+          return;
+        }
         const ok = matchesEdge(edgeEl, visibleEdges);
         if (ok) {
           activeIdx.add(idx);
+          edgeEl.style.display = '';
           edgeEl.style.opacity = '1';
           const isCyc = cycleOnlyEdges.length > 0 && matchesEdge(edgeEl, cycleOnlyEdges);
+          const isDown = !isCyc && (directionFilter === 'downstream' || (directionFilter === 'both' && downVisibleEdges.length > 0 && matchesEdge(edgeEl, downVisibleEdges)));
+          if (isCyc) cycCount++;
+          else if (isDown) downCount++;
+          else upCount++;
           const strokeCol = isCyc
-            ? (IS_DARK ? '#94a3b8' : '#64748b')
-            : directionFilter === 'downstream'
-            ? (IS_DARK ? '#34d399' : '#059669')
-            : (IS_DARK ? '#38bdf8' : '#0284c7');
+            ? (isDarkSurface ? '#fb7185' : '#e11d48')
+            : isDown
+            ? (isDarkSurface ? '#34d399' : '#059669')
+            : (isDarkSurface ? '#38bdf8' : '#0284c7');
           const paths = edgeEl.tagName.toLowerCase() === 'path' ? [edgeEl] : Array.from(edgeEl.querySelectorAll('path'));
           paths.forEach(p => {
-            p.style.stroke = strokeCol;
-            p.style.strokeWidth = isCyc ? '2.5px' : '3px';
+            applyExportMarkerColor(svgElRef, p, strokeCol);
+            p.style.strokeWidth = isCyc ? '2.6px' : '3px';
             if (isCyc) p.style.strokeDasharray = '6 4';
           });
+        } else if (isolateSubgraph) {
+          hiddenEdgeIdx.add(idx);
+          edgeEl.style.display = 'none';
         } else {
+          edgeEl.style.display = '';
           edgeEl.style.opacity = dimOpacity;
         }
       });
+
       allSvgLabels.forEach((lblEl, idx) => {
+        if (hiddenEdgeIdx.has(idx) && allSvgLabels.length === allSvgEdges.length) {
+          lblEl.style.display = 'none';
+          return;
+        }
+        if (!isEdgeAllowedByType(lblEl)) { lblEl.style.display = 'none'; return; }
         const ok = matchesEdge(lblEl, visibleEdges) || (allSvgLabels.length === allSvgEdges.length && activeIdx.has(idx));
-        lblEl.style.opacity = ok ? '1' : dimOpacity;
+        if (!ok && isolateSubgraph) {
+          lblEl.style.display = 'none';
+        } else {
+          lblEl.style.display = '';
+          lblEl.style.opacity = ok ? '1' : dimOpacity;
+        }
       });
+
+      updateClusterVisibility(visibleSvgNodes);
+
+      const spotLeg = [];
+      if (upCount > 0) spotLeg.push({ label: 'Woher (Eingehend)', color: isDarkSurface ? '#38bdf8' : '#0284c7', dashed: false, count: upCount });
+      if (downCount > 0) spotLeg.push({ label: 'Wohin (Ausgehend)', color: isDarkSurface ? '#34d399' : '#059669', dashed: false, count: downCount });
+      if (cycCount > 0) spotLeg.push({ label: 'Zyklus / Rücksprung', color: isDarkSurface ? '#fb7185' : '#e11d48', dashed: true, count: cycCount });
+      renderLegendBar(spotLeg.length ? spotLeg : null);
 
       const nodeObj = nodeMap.get(activeNodeId);
       const dirText = directionFilter === 'upstream' ? 'Nur Woher' : directionFilter === 'downstream' ? 'Nur Wohin' : 'Ganzer Pfad';
       const hopText = hopDepth === 'all' ? 'Alle Ebenen' : (hopDepth === '1' ? '1 Schritt' : '2 Ebenen');
       document.getElementById('selected-info').innerHTML =
-        'Fokus: <strong style="color:#fbbf24">' + esc(nodeObj.label) + '</strong><br/>' +
-        '<span style="font-size:11px;color:#94a3b8;">' + dirText + ' · ' + hopText + ' · ' + visibleNodes.size + ' Knoten sichtbar</span>';
+        'Fokus: <strong style="color:var(--amber-text)">' + esc(nodeObj.label) + '</strong><br/>' +
+        '<span style="font-size:11px;color:var(--text-muted);">' + dirText + ' · ' + hopText + ' · ' + visibleSvgNodes.length + ' Knoten sichtbar</span>';
 
-      // Optional Drilldown button if node maps to another view in Multi-Script mode
       drillSlot.innerHTML = '';
       const drillTarget = PAYLOAD.drillTargetsByNodeId && PAYLOAD.drillTargetsByNodeId[activeNodeId];
       if (drillTarget && viewsByKey.has(drillTarget.viewKey) && drillTarget.viewKey !== activeViewKey) {
@@ -3615,33 +4983,25 @@ export function generateInteractiveCallflowHtml(
 
       renderList(
         'list-entries',
-        directionFilter === 'downstream'
-          ? []
-          : upNodesList.filter(x => x.node.inDegree === 0).map(x => ({ ...x.node, badge: '-' + x.depth + ' Ebene(n)' }))
+        directionFilter === 'downstream' ? [] : upNodesList.filter(x => x.node.inDegree === 0).map(x => ({ ...x.node, badge: '-' + x.depth + ' Ebene(n)' }))
       );
       renderList(
         'list-callers',
-        directionFilter === 'downstream'
-          ? []
-          : GRAPH.edges.filter(e => e.to === activeNodeId).map(e => {
-              const n = nodeMap.get(e.from);
-              return n ? { ...n, badge: e.label || '← -1' } : null;
-            }).filter(Boolean)
+        directionFilter === 'downstream' ? [] : GRAPH.edges.filter(e => e.to === activeNodeId).map(e => {
+          const n = nodeMap.get(e.from);
+          return n ? { ...n, badge: e.label || '← -1' } : null;
+        }).filter(Boolean)
       );
       renderList(
         'list-callees',
-        directionFilter === 'upstream'
-          ? []
-          : GRAPH.edges.filter(e => e.from === activeNodeId).map(e => {
-              const n = nodeMap.get(e.to);
-              return n ? { ...n, badge: e.label || '+1 →' } : null;
-            }).filter(Boolean)
+        directionFilter === 'upstream' ? [] : GRAPH.edges.filter(e => e.from === activeNodeId).map(e => {
+          const n = nodeMap.get(e.to);
+          return n ? { ...n, badge: e.label || '+1 →' } : null;
+        }).filter(Boolean)
       );
       renderList(
         'list-terminals',
-        directionFilter === 'upstream'
-          ? []
-          : downNodesList.filter(x => x.node.outDegree === 0).map(x => ({ ...x.node, badge: '+' + x.depth + ' Ebene(n)' }))
+        directionFilter === 'upstream' ? [] : downNodesList.filter(x => x.node.outDegree === 0).map(x => ({ ...x.node, badge: '+' + x.depth + ' Ebene(n)' }))
       );
 
       if (cycles.length > 0) {
@@ -3652,7 +5012,7 @@ export function generateInteractiveCallflowHtml(
           const toN = nodeMap.get(ce.to);
           const btn = document.createElement('button');
           btn.className = 'node-chip';
-          btn.style.borderColor = 'rgba(244,63,94,0.4)';
+          btn.style.borderColor = 'var(--err-border)';
           btn.innerHTML =
             '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">↻ ' +
             esc((fromN ? fromN.label : ce.from) + ' → ' + (toN ? toN.label : ce.to)) +
@@ -3669,6 +5029,398 @@ export function generateInteractiveCallflowHtml(
       }
     }
 
+    function jumpToScriptOrNode(scriptRef, preferredNodeTextOrId) {
+      let targetViewKey = activeViewKey;
+      if (scriptRef && PAYLOAD.viewKeyByScriptNumber) {
+        const vk = PAYLOAD.viewKeyByScriptNumber[scriptRef] || PAYLOAD.viewKeyByScriptNumber[String(scriptRef).toLowerCase()];
+        if (vk && viewsByKey.has(vk)) targetViewKey = vk;
+      }
+      if (targetViewKey !== activeViewKey) {
+        switchView(targetViewKey);
+      }
+      // Try finding exact or matching node in current GRAPH
+      let hitNode = null;
+      if (preferredNodeTextOrId) {
+        if (nodeMap.has(preferredNodeTextOrId)) hitNode = nodeMap.get(preferredNodeTextOrId);
+        if (!hitNode) {
+          const q = String(preferredNodeTextOrId).toLowerCase();
+          hitNode = GRAPH.nodes.find(n => n.id.toLowerCase() === q || n.id.toLowerCase().includes(q) || n.label.toLowerCase().includes(q));
+        }
+      }
+      if (!hitNode && scriptRef) {
+        const sq = String(scriptRef).toLowerCase();
+        hitNode = GRAPH.nodes.find(n => n.id.toLowerCase().includes(sq) || n.label.toLowerCase().includes(sq));
+      }
+      switchAsideTab('path');
+      if (hitNode) {
+        // Ensure node type isn't blocking our jump target
+        const svgNode = Array.from(stage.querySelectorAll('g.node, g.actor, g.statediagram-state')).find(g => resolveNodeId(g) === hitNode.id);
+        if (svgNode) {
+          const nt = svgNode.getAttribute('data-node-type');
+          if (nt && hiddenNodeTypes.has(nt)) {
+            hiddenNodeTypes.delete(nt);
+            syncFilterBadge();
+            renderNodeTypeFilters();
+          }
+        }
+        selectNode(hitNode.id, true);
+      }
+    }
+
+    function computeFallbackDiagnostics() {
+      const cyc = detectExportCycleKeys();
+      const entries = GRAPH.nodes.filter(n => n.inDegree === 0).length;
+      const deadEnds = GRAPH.nodes.filter(n => n.outDegree === 0);
+      const items = [];
+      cyc.forEach(k => {
+        const [from, to] = k.split('->');
+        items.push({ severity: 'error', title: 'Zyklus erkannt: ' + from + ' → ' + to, desc: 'Rücksprung im Graph erkannt.', targetId: from, tag: 'Zyklus' });
+      });
+      deadEnds.slice(0, 12).forEach(n => {
+        items.push({ severity: 'info', title: 'Endpunkt / Senke: ' + n.label, desc: n.inDegree + ' eingehende Verbindung(en), 0 ausgehende.', targetId: n.id, tag: 'Endpunkt' });
+      });
+      if (entries === 0 && GRAPH.nodes.length > 0) {
+        items.push({ severity: 'warning', title: 'Kein expliziter Einstiegsknoten (inDegree = 0)', desc: 'Alle Knoten besitzen mindestens eine eingehende Kante.', targetId: GRAPH.nodes[0].id, tag: 'Topologie' });
+      }
+      return items;
+    }
+
+    function renderAnalysisTab() {
+      const badge = document.getElementById('badge-analysis-count');
+      const body = document.getElementById('an-body');
+      if (!body) return;
+      const an = PAYLOAD.analysis;
+      const openList = an ? (an.openIssues || []).filter(i => i.status === 'open') : [];
+      const healthList = an ? (an.healthFindings || []) : [];
+      const fallbackDiag = !an ? computeFallbackDiagnostics() : [];
+      if (badge) badge.textContent = String(an ? (openList.length + healthList.length) : fallbackDiag.length);
+
+      body.innerHTML = '';
+
+      if (activeAnalysisSubtab === 'issues') {
+        const ctrl = document.createElement('div');
+        ctrl.className = 'card';
+        ctrl.innerHTML =
+          '<input type="text" id="an-issues-search" placeholder="Fehler, Skript oder Hinweis suchen..." value="' + esc(anIssueSearch) + '" style="width:100%;margin-bottom:7px;" />' +
+          '<div class="filter-chips" id="an-issues-chips">' +
+            '<button class="chip' + (anIssueFilter === 'all' ? ' active' : '') + '" data-f="all">Alle</button>' +
+            '<button class="chip' + (anIssueFilter === 'err' ? ' active' : '') + '" data-f="err">Offen &amp; Fehler</button>' +
+            '<button class="chip' + (anIssueFilter === 'warn' ? ' active' : '') + '" data-f="warn">Warnungen / Info</button>' +
+          '</div>';
+        body.appendChild(ctrl);
+        ctrl.querySelector('#an-issues-search').addEventListener('input', e => { anIssueSearch = e.target.value; renderAnalysisTab(); });
+        ctrl.querySelectorAll('#an-issues-chips .chip').forEach(c => c.addEventListener('click', () => { anIssueFilter = c.getAttribute('data-f'); renderAnalysisTab(); }));
+
+        const q = anIssueSearch.trim().toLowerCase();
+        const combined = [];
+        if (an) {
+          openList.forEach(iss => {
+            combined.push({
+              severity: 'error',
+              tag: 'Offener Punkt',
+              scriptRef: iss.sourceScriptNumber,
+              targetHint: iss.targetNumber || iss.sourceScriptNumber,
+              title: iss.title,
+              desc: iss.question + (iss.targetNumber ? ' (Ziel: ' + iss.targetNumber + ')' : ''),
+            });
+          });
+          healthList.forEach(hf => {
+            combined.push({
+              severity: hf.severity,
+              tag: hf.severity === 'error' ? 'Kritisch' : hf.severity === 'warning' ? 'Warnung' : 'Hinweis',
+              scriptRef: hf.scriptNumber,
+              targetHint: hf.ruleId || hf.scriptNumber,
+              title: hf.scriptNumber + ' · ' + hf.title,
+              desc: hf.description + (hf.recommendation ? ' — Empfehlung: ' + hf.recommendation : ''),
+            });
+          });
+        } else {
+          fallbackDiag.forEach(fd => {
+            combined.push({
+              severity: fd.severity,
+              tag: fd.tag,
+              scriptRef: '',
+              targetHint: fd.targetId,
+              title: fd.title,
+              desc: fd.desc,
+            });
+          });
+        }
+
+        const filtered = combined.filter(it => {
+          if (anIssueFilter === 'err' && it.severity !== 'error') return false;
+          if (anIssueFilter === 'warn' && it.severity === 'error') return false;
+          if (q && !(it.title + ' ' + it.desc + ' ' + it.scriptRef).toLowerCase().includes(q)) return false;
+          return true;
+        });
+
+        if (!filtered.length) {
+          const empty = document.createElement('div');
+          empty.className = 'card muted-note';
+          empty.textContent = 'Keine passenden Offenen Punkte oder Logik-Hinweise gefunden.';
+          body.appendChild(empty);
+          return;
+        }
+        filtered.slice(0, 120).forEach(it => {
+          const item = document.createElement('div');
+          item.className = 'an-item ' + (it.severity === 'error' ? 'sev-error' : it.severity === 'warning' ? 'sev-warning' : '');
+          item.innerHTML =
+            '<div class="row-between"><span class="an-tag ' + (it.severity === 'error' ? 'err' : it.severity === 'warning' ? 'warn' : '') + '">' + esc(it.tag) + '</span>' +
+            (it.scriptRef ? '<span class="an-tag">' + esc(it.scriptRef) + '</span>' : '') + '</div>' +
+            '<div class="an-item-title">' + esc(it.title) + '</div>' +
+            '<div class="an-item-desc">' + esc(it.desc) + '</div>' +
+            '<button class="node-chip" style="margin-top:3px;"><span>Im Diagramm zeigen</span><span class="badge">Fokus →</span></button>';
+          item.querySelector('button').onclick = () => jumpToScriptOrNode(it.scriptRef, it.targetHint);
+          body.appendChild(item);
+        });
+        return;
+      }
+
+      if (activeAnalysisSubtab === 'schedules') {
+        const rows = an ? (an.scheduleRows || []) : [];
+        const ctrl = document.createElement('div');
+        ctrl.className = 'card';
+        ctrl.innerHTML =
+          '<div class="row-between" style="margin-bottom:7px;">' +
+            '<input type="text" id="an-sched-search" placeholder="Skript, Zeit oder Feiertag suchen..." value="' + esc(anSchedSearch) + '" style="flex:1;" />' +
+            '<button id="btn-csv-schedules">CSV laden</button>' +
+          '</div>' +
+          '<div class="filter-chips" id="an-sched-chips">' +
+            '<button class="chip' + (anSchedFilter === 'all' ? ' active' : '') + '" data-f="all">Alle (' + rows.length + ')</button>' +
+            '<button class="chip' + (anSchedFilter === 'sched' ? ' active' : '') + '" data-f="sched">Mit Zeitplan</button>' +
+            '<button class="chip' + (anSchedFilter === 'hol' ? ' active' : '') + '" data-f="hol">Feiertage</button>' +
+            '<button class="chip' + (anSchedFilter === 'none' ? ' active' : '') + '" data-f="none">24/7</button>' +
+          '</div>';
+        body.appendChild(ctrl);
+        ctrl.querySelector('#an-sched-search').addEventListener('input', e => { anSchedSearch = e.target.value; renderAnalysisTab(); });
+        ctrl.querySelectorAll('#an-sched-chips .chip').forEach(c => c.addEventListener('click', () => { anSchedFilter = c.getAttribute('data-f'); renderAnalysisTab(); }));
+        ctrl.querySelector('#btn-csv-schedules').addEventListener('click', () => {
+          downloadUtf8Csv(
+            'callflow-oeffnungszeiten.csv',
+            ['Skript-Nr.', 'Skript-Name', 'Prio', 'Schritt / Regel', 'Öffnungszeiten', 'Feiertag / Sonderzeit', 'Aktion / Überlauf / Ziel', 'Status'],
+            rows.map(r => [
+              r.scriptNumber, r.scriptName, r.prio ?? '—', r.stepName, r.openingHours, r.holidayAndSpecial, r.closedOrOverflowAction,
+              r.hasSchedule && r.hasHoliday ? 'Öffnungszeiten + Feiertag' : r.hasSchedule ? 'Öffnungszeiten hinterlegt' : r.hasHoliday ? 'Feiertag / Sonderzeit' : 'Ohne Zeitangabe (24/7)'
+            ])
+          );
+        });
+
+        if (!an || !rows.length) {
+          const empty = document.createElement('div');
+          empty.className = 'card muted-note';
+          empty.textContent = an ? 'Keine Öffnungszeiten- oder Zeitplan-Einträge erkannt.' : 'Zeitplan-Analyse ist für Multi-Skript Callflows verfügbar.';
+          body.appendChild(empty);
+          return;
+        }
+
+        const q = anSchedSearch.trim().toLowerCase();
+        const filtered = rows.filter(r => {
+          if (anSchedFilter === 'sched' && !r.hasSchedule) return false;
+          if (anSchedFilter === 'hol' && !r.hasHoliday) return false;
+          if (anSchedFilter === 'none' && (r.hasSchedule || r.hasHoliday)) return false;
+          if (q && !(r.scriptNumber + ' ' + r.scriptName + ' ' + r.stepName + ' ' + r.openingHours + ' ' + r.holidayAndSpecial).toLowerCase().includes(q)) return false;
+          return true;
+        });
+
+        const tw = document.createElement('div');
+        tw.className = 'an-table-wrap';
+        tw.innerHTML =
+          '<table class="an-table"><thead><tr><th>Skript</th><th>Schritt</th><th>Zeiten</th><th>Feiertag</th><th>Überlauf</th></tr></thead><tbody>' +
+          filtered.slice(0, 150).map((r, i) =>
+            '<tr class="clickable" data-ridx="' + i + '"><td><strong>' + esc(r.scriptNumber) + '</strong></td><td>' + esc(r.stepName) + '</td><td>' + esc(r.openingHours || '—') + '</td><td>' + esc(r.holidayAndSpecial || '—') + '</td><td>' + esc(r.closedOrOverflowAction || '—') + '</td></tr>'
+          ).join('') +
+          '</tbody></table>';
+        body.appendChild(tw);
+        tw.querySelectorAll('tbody tr.clickable').forEach((tr, i) => {
+          tr.addEventListener('click', () => {
+            const row = filtered[i];
+            if (row) jumpToScriptOrNode(row.scriptNumber, row.ruleId || row.scriptNumber);
+          });
+        });
+        return;
+      }
+
+      if (activeAnalysisSubtab === 'inventory') {
+        const reg = an ? an.registry : null;
+        const ctrl = document.createElement('div');
+        ctrl.className = 'card';
+        ctrl.innerHTML =
+          '<input type="text" id="an-inv-search" placeholder="Skillset, Ansage, Variable oder Skript suchen..." value="' + esc(anInvSearch) + '" style="width:100%;margin-bottom:7px;" />' +
+          (reg
+            ? '<div class="filter-chips" id="an-inv-chips">' +
+                '<button class="chip' + (anInvCategory === 'skillsets' ? ' active' : '') + '" data-c="skillsets">Skillsets (' + reg.skillsets.length + ')</button>' +
+                '<button class="chip' + (anInvCategory === 'announcements' ? ' active' : '') + '" data-c="announcements">Ansagen (' + reg.announcements.length + ')</button>' +
+                '<button class="chip' + (anInvCategory === 'variables' ? ' active' : '') + '" data-c="variables">Variablen (' + reg.variables.length + ')</button>' +
+                '<button class="chip' + (anInvCategory === 'crossRefs' ? ' active' : '') + '" data-c="crossRefs">Kreuzref. (' + reg.crossRefs.length + ')</button>' +
+              '</div>'
+            : '<div class="muted-note">Knoten-Inventar im aktuellen Diagramm (' + GRAPH.nodes.length + ' Knoten)</div>');
+        body.appendChild(ctrl);
+        ctrl.querySelector('#an-inv-search').addEventListener('input', e => { anInvSearch = e.target.value; renderAnalysisTab(); });
+        ctrl.querySelectorAll('#an-inv-chips .chip').forEach(c => c.addEventListener('click', () => { anInvCategory = c.getAttribute('data-c'); renderAnalysisTab(); }));
+
+        const q = anInvSearch.trim().toLowerCase();
+        if (!reg) {
+          GRAPH.nodes.filter(n => !q || (n.label + ' ' + n.id).toLowerCase().includes(q)).slice(0, 100).forEach(n => {
+            const btn = document.createElement('button');
+            btn.className = 'node-chip';
+            btn.innerHTML = '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(n.label) + '</span><span class="badge">' + n.inDegree + ' / ' + n.outDegree + '</span>';
+            btn.onclick = () => selectNode(n.id, true);
+            body.appendChild(btn);
+          });
+          return;
+        }
+
+        if (anInvCategory === 'skillsets') {
+          const items = reg.skillsets.filter(s => !q || s.name.toLowerCase().includes(q) || s.usages.some(u => (u.scriptNumber + ' ' + u.scriptName).toLowerCase().includes(q)));
+          items.slice(0, 100).forEach(s => {
+            const el = document.createElement('div');
+            el.className = 'an-item';
+            el.innerHTML = '<div class="row-between"><span class="an-item-title">' + esc(s.name) + '</span><span class="an-tag">' + esc(s.role) + ' · ' + s.usages.length + 'x</span></div>';
+            s.usages.slice(0, 4).forEach(u => {
+              const btn = document.createElement('button');
+              btn.className = 'node-chip';
+              btn.innerHTML = '<span>' + esc(u.scriptNumber + ' · ' + (u.stepName || u.scriptName)) + '</span><span class="badge">Zeigen →</span>';
+              btn.onclick = () => jumpToScriptOrNode(u.scriptNumber, s.name);
+              el.appendChild(btn);
+            });
+            body.appendChild(el);
+          });
+        } else if (anInvCategory === 'announcements') {
+          const items = reg.announcements.filter(a => !q || a.idOrName.toLowerCase().includes(q) || a.usages.some(u => (u.scriptNumber + ' ' + u.scriptName).toLowerCase().includes(q)));
+          items.slice(0, 100).forEach(a => {
+            const el = document.createElement('div');
+            el.className = 'an-item';
+            el.innerHTML = '<div class="row-between"><span class="an-item-title">' + esc(a.idOrName) + '</span><span class="an-tag">' + a.usages.length + 'x</span></div>';
+            a.usages.slice(0, 4).forEach(u => {
+              const btn = document.createElement('button');
+              btn.className = 'node-chip';
+              btn.innerHTML = '<span>' + esc(u.scriptNumber + ' · ' + (u.stepName || u.scriptName)) + '</span><span class="badge">Zeigen →</span>';
+              btn.onclick = () => jumpToScriptOrNode(u.scriptNumber, a.idOrName);
+              el.appendChild(btn);
+            });
+            body.appendChild(el);
+          });
+        } else if (anInvCategory === 'variables') {
+          const items = reg.variables.filter(v => !q || v.variableName.toLowerCase().includes(q) || v.valuesByScript.some(vs => (vs.scriptNumber + ' ' + vs.value).toLowerCase().includes(q)));
+          items.slice(0, 100).forEach(v => {
+            const el = document.createElement('div');
+            el.className = 'an-item';
+            el.innerHTML = '<div class="row-between"><span class="an-item-title">' + esc(v.variableName) + '</span><span class="an-tag">' + v.valuesByScript.length + ' Skripte</span></div>';
+            v.valuesByScript.slice(0, 4).forEach(vs => {
+              const btn = document.createElement('button');
+              btn.className = 'node-chip';
+              btn.innerHTML = '<span>' + esc(vs.scriptNumber + ' = ' + vs.value) + '</span><span class="badge">Zeigen →</span>';
+              btn.onclick = () => jumpToScriptOrNode(vs.scriptNumber, v.variableName);
+              el.appendChild(btn);
+            });
+            body.appendChild(el);
+          });
+        } else {
+          const items = reg.crossRefs.filter(cr => !q || (cr.refKey + ' ' + cr.displayName).toLowerCase().includes(q));
+          items.slice(0, 100).forEach(cr => {
+            const el = document.createElement('div');
+            el.className = 'an-item';
+            const stCls = cr.status === 'missing' ? 'err' : cr.status === 'present' || cr.status === 'master' ? 'ok' : '';
+            el.innerHTML =
+              '<div class="row-between"><span class="an-item-title">' + esc(cr.displayName) + '</span><span class="an-tag ' + stCls + '">' + esc(cr.status) + '</span></div>' +
+              '<div class="an-item-desc">Aufrufer: ' + esc(cr.callers.join(', ') || '—') + ' | Ziele: ' + esc(cr.callees.join(', ') || '—') + '</div>' +
+              '<button class="node-chip"><span>Skript / Ziel im Graph öffnen</span><span class="badge">Fokus →</span></button>';
+            el.querySelector('button').onclick = () => jumpToScriptOrNode(cr.refKey, cr.refKey);
+            body.appendChild(el);
+          });
+        }
+        return;
+      }
+
+      if (activeAnalysisSubtab === 'matrix') {
+        const rows = an ? (an.routingMatrixRows || []) : [];
+        const ctrl = document.createElement('div');
+        ctrl.className = 'card';
+        ctrl.innerHTML =
+          '<div class="row-between" style="gap:6px;">' +
+            '<input type="text" id="an-matrix-search" placeholder="Routing-Matrix durchsuchen..." value="' + esc(anMatrixSearch) + '" style="flex:1;" />' +
+            '<button id="btn-csv-matrix">Matrix-CSV</button>' +
+          '</div>';
+        body.appendChild(ctrl);
+        ctrl.querySelector('#an-matrix-search').addEventListener('input', e => { anMatrixSearch = e.target.value; renderAnalysisTab(); });
+        ctrl.querySelector('#btn-csv-matrix').addEventListener('click', () => {
+          downloadUtf8Csv(
+            'callflow-routing-matrix.csv',
+            ['Skript-ID', 'Skript-Bezeichnung', 'Rolle', 'Prio', 'Regelschritt', 'Bedingung / Zeitplan / Feiertag', 'Ansage / RAN / Musik', 'Warteschlange / Skillset', 'Ziel-Skripte & DTMF-Auswahl', 'Referenz-Status'],
+            rows.map(r => [
+              r.scriptNumber, r.scriptName, r.isMaster ? 'Master (Main)' : 'Teil-Skript', r.prio, r.stepName,
+              r.conditionAndSchedule, r.announcement, r.queueTarget, r.targetsAndChoices, r.targetStatus
+            ])
+          );
+        });
+
+        if (!an || !rows.length) {
+          const empty = document.createElement('div');
+          empty.className = 'card muted-note';
+          empty.textContent = an ? 'Keine Routing-Regeln vorhanden.' : 'Routing-Matrix ist für Multi-Skript Callflows verfügbar.';
+          body.appendChild(empty);
+          return;
+        }
+
+        const q = anMatrixSearch.trim().toLowerCase();
+        const filtered = rows.filter(r => !q || (r.scriptNumber + ' ' + r.scriptName + ' ' + r.stepName + ' ' + r.conditionAndSchedule + ' ' + r.queueTarget + ' ' + r.targetsAndChoices).toLowerCase().includes(q));
+        const tw = document.createElement('div');
+        tw.className = 'an-table-wrap';
+        tw.innerHTML =
+          '<table class="an-table"><thead><tr><th>Skript</th><th>Prio</th><th>Schritt / Bedingung</th><th>Ansage / Queue</th><th>Ziele</th></tr></thead><tbody>' +
+          filtered.slice(0, 180).map((r, i) =>
+            '<tr class="clickable" data-midx="' + i + '"><td><strong>' + esc(r.scriptNumber) + '</strong></td><td>' + esc(r.prio) + '</td><td>' + esc(r.stepName + (r.conditionAndSchedule ? ' · ' + r.conditionAndSchedule : '')) + '</td><td>' + esc([r.announcement, r.queueTarget].filter(Boolean).join(' / ') || '—') + '</td><td>' + esc(r.targetsAndChoices || '—') + '</td></tr>'
+          ).join('') +
+          '</tbody></table>';
+        body.appendChild(tw);
+        tw.querySelectorAll('tbody tr.clickable').forEach((tr, i) => {
+          tr.addEventListener('click', () => {
+            const row = filtered[i];
+            if (row) jumpToScriptOrNode(row.scriptNumber, row.stepName || row.scriptNumber);
+          });
+        });
+      }
+    }
+
+    document.querySelectorAll('#aside-tabs .aside-tab').forEach(btn => {
+      btn.addEventListener('click', () => switchAsideTab(btn.getAttribute('data-tab')));
+    });
+
+    document.querySelectorAll('#an-subtabs .an-subtab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        activeAnalysisSubtab = btn.getAttribute('data-subtab');
+        document.querySelectorAll('#an-subtabs .an-subtab').forEach(b => b.classList.toggle('active', b === btn));
+        renderAnalysisTab();
+      });
+    });
+
+    document.getElementById('btn-clear-edge').addEventListener('click', () => {
+      activeEdge = null;
+      applyCombinedCanvasState(false);
+    });
+
+    if (isolateBtn) {
+      isolateBtn.addEventListener('click', () => {
+        isolateSubgraph = !isolateSubgraph;
+        syncIsolateUi();
+        applyCombinedCanvasState(false);
+      });
+    }
+    if (isolateChk) {
+      isolateChk.addEventListener('change', e => {
+        isolateSubgraph = Boolean(e.target.checked);
+        syncIsolateUi();
+        applyCombinedCanvasState(false);
+      });
+    }
+
+    document.getElementById('btn-show-all-types').addEventListener('click', () => {
+      hiddenNodeTypes.clear();
+      syncFilterBadge();
+      renderNodeTypeFilters();
+      applyCombinedCanvasState(false);
+    });
+
     if (viewSelectEl) {
       viewSelectEl.addEventListener('change', e => switchView(e.target.value));
     }
@@ -3676,12 +5428,22 @@ export function generateInteractiveCallflowHtml(
       masterBackBtn.addEventListener('click', () => switchView('master'));
     }
 
+    document.querySelectorAll('#pathmode-group .seg-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('#pathmode-group .seg-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        pathColorMode = btn.getAttribute('data-pathmode') || 'semantic';
+        recolorExportEdges();
+        if (activeNodeId || activeEdge) applyCombinedCanvasState(false);
+      });
+    });
+
     document.querySelectorAll('#dir-group .seg-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('#dir-group .seg-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         directionFilter = btn.getAttribute('data-dir');
-        selectNode(activeNodeId, false);
+        applyCombinedCanvasState(false);
       });
     });
 
@@ -3690,7 +5452,7 @@ export function generateInteractiveCallflowHtml(
         document.querySelectorAll('#hop-group .seg-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         hopDepth = btn.getAttribute('data-hop');
-        selectNode(activeNodeId, false);
+        applyCombinedCanvasState(false);
       });
     });
 
@@ -3700,18 +5462,18 @@ export function generateInteractiveCallflowHtml(
         chip.classList.add('active');
         roleFilter = chip.getAttribute('data-role');
         populateSelect();
-        selectNode(activeNodeId, false);
+        applyCombinedCanvasState(false);
       });
     });
 
     searchEl.addEventListener('input', () => {
       populateSelect();
-      if (!activeNodeId) selectNode('', false);
+      if (!activeNodeId && !activeEdge) applyCombinedCanvasState(false);
     });
 
     dimSelectEl.addEventListener('change', e => {
       dimOpacity = e.target.value;
-      selectNode(activeNodeId, false);
+      applyCombinedCanvasState(false);
     });
 
     selectEl.addEventListener('change', e => selectNode(e.target.value, true));
@@ -3722,19 +5484,31 @@ export function generateInteractiveCallflowHtml(
       hopDepth = 'all';
       dimOpacity = '0.12';
       dimSelectEl.value = '0.12';
+      isolateSubgraph = false;
+      hiddenNodeTypes.clear();
+      activeNodeId = '';
+      activeEdge = null;
+      selectEl.value = '';
       document.querySelectorAll('#dir-group .seg-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
       document.querySelectorAll('#hop-group .seg-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
       document.querySelectorAll('#role-chips .chip').forEach((c, i) => c.classList.toggle('active', i === 0));
+      syncIsolateUi();
+      renderNodeTypeFilters();
       populateSelect();
-      selectNode('', false);
+      applyCombinedCanvasState(false);
+      fitToWindow();
     });
 
     normalizeSvgElement();
     populateViewSelect();
     populateSelect();
-    selectNode('', false);
+    syncIsolateUi();
+    renderAnalysisTab();
+    applyCombinedCanvasState(false);
+    fitToWindow();
   </script>
 </body>
 </html>`;
 }
+
 
