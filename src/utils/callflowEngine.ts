@@ -5627,11 +5627,24 @@ export function generateInteractiveCallflowHtml(
         });
 
         const tw = document.createElement('div');
+        const formatHoursCell = (val) => {
+          const m = val ? String(val).match(/^(.*?)\s*(\([A-Za-z0-9_.-]+\))$/) : null;
+          return m
+            ? '<span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;color:var(--accent,#38bdf8);">' +
+                esc(m[1]) +
+                '</span> <span style="font-size:11px;opacity:0.75;">' +
+                esc(m[2]) +
+                '</span>'
+            : '<span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">' +
+                esc(val || '—') +
+                '</span>';
+        };
+
         tw.className = 'an-table-wrap';
         tw.innerHTML =
           '<table class="an-table"><thead><tr><th>Skript</th><th>Schritt</th><th>Zeiten</th><th>Feiertag</th><th>Überlauf</th></tr></thead><tbody>' +
           filtered.slice(0, 150).map((r, i) =>
-            '<tr class="clickable" data-ridx="' + i + '"><td><strong>' + esc(r.scriptNumber) + '</strong></td><td>' + esc(r.stepName) + '</td><td>' + esc(r.openingHours || '—') + '</td><td>' + esc(r.holidayAndSpecial || '—') + '</td><td>' + esc(r.closedOrOverflowAction || '—') + '</td></tr>'
+            '<tr class="clickable" data-ridx="' + i + '"><td><strong>' + esc(r.scriptNumber) + '</strong></td><td>' + esc(r.stepName) + '</td><td>' + formatHoursCell(r.openingHours) + '</td><td>' + esc(r.holidayAndSpecial || '—') + '</td><td>' + esc(r.closedOrOverflowAction || '—') + '</td></tr>'
           ).join('') +
           '</tbody></table>';
         body.appendChild(tw);

@@ -2268,13 +2268,26 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
 
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                           <span className="text-slate-400">Öffnungszeiten:</span>
-                          <span
-                            className={`font-mono font-medium ${
-                              row.hasSchedule ? 'text-sky-300' : 'text-slate-400'
-                            }`}
-                          >
-                            {row.openingHours}
-                          </span>
+                          {(() => {
+                            const match = row.openingHours.match(/^(.*?)\s*(\([A-Za-z0-9_.-]+\))$/);
+                            if (match) {
+                              return (
+                                <span className="font-mono tabular-nums">
+                                  <span className="text-sky-300 font-semibold">{match[1]}</span>
+                                  <span className="text-slate-400 text-xs font-normal ml-1.5">{match[2]}</span>
+                                </span>
+                              );
+                            }
+                            return (
+                              <span
+                                className={`font-mono tabular-nums font-medium ${
+                                  row.hasSchedule ? 'text-sky-300' : 'text-slate-400'
+                                }`}
+                              >
+                                {row.openingHours}
+                              </span>
+                            );
+                          })()}
                         </div>
 
                         {row.holidayAndSpecial !== '—' && (

@@ -1207,16 +1207,300 @@ export function extractReadableScheduleAndHolidayFromText(rawText: string): {
     const notHol = /\b(?:not\s+holiday|kein\s+feiertag)\b/i.test(text);
     holidayParts.push(notHol ? 'Kein Feiertag (Regulär)' : 'Feiertags-Prüfung aktiv');
   }
-  const sondMatch = text.match(/\b(Sys_Sond(?:Zeit|Stat|Routing))\s*(?:[:=]\s*([^\s·,;]+))?/i);
+  const sondMatch = text.match(/\b(Sys_Sond(?:Stat|Routing))\s*(?:[:=]\s*([^\s·,;]+))?/i);
   if (sondMatch) {
     holidayParts.push(
       sondMatch[2] ? `${sondMatch[1]}=${sondMatch[2]}` : sondMatch[1]
     );
   }
 
+  if (scheduleParts.length === 0) {
+    const sondZeitMatch = text.match(
+      /\bSys_SondZeit\s*(?:[:=]|to)\s*["']?([A-Za-z0-9_.-]+)["']?/i
+    );
+    if (sondZeitMatch) {
+      const rawVal = sondZeitMatch[1];
+      const fromName = extractScheduleFromSondZeitName(rawVal);
+      if (fromName) {
+        scheduleParts.push(`${fromName} (${rawVal})`);
+      } else {
+        scheduleParts.push(rawVal);
+      }
+    }
+  }
+
   return {
     schedule: scheduleParts.length > 0 ? scheduleParts.join(' ') : undefined,
     holiday: holidayParts.length > 0 ? holidayParts.join(' · ') : undefined,
+  };
+}
+
+/**
+ * Extracts opening days and clock times from a script or variable name
+ * (e.g., `SondZeit_08_17`, `SondZeit_MoFr_0800_1630`, `SondZeit_0730_1800`, `SondZeit_Mo_Fr_8bis18`, `SondZeit_24_7`).
+ */
+export function extractScheduleFromSondZeitName(rawName: string): string | null {
+  if (!rawName) return null;
+  const clean = rawName.trim().replace(/^['"]|['"]$/g, '');
+  if (!clean) return null;
+
+  // 1. 24/7 or round-the-clock indications
+  if (/(?:^|[^a-zA-Z0-9])(?:24h|24[_\-.]?7|24std|rund[_\-.]?um[_\-.]?die[_\-.]?uhr)(?:[^a-zA-Z0-9]|$)/i.test(clean)) {
+    return '24/7 (Rund um die Uhr)';
+  }
+
+  // 2. Multi-block detection, e.g., `Mo_Do_08_17_Fr_08_15`
+  const multiBlockSplit = clean.split(/(?=[_.-](?:Fr|Sa|So)[_.-])/i);
+  if (multiBlockSplit.length > 1) {
+    const parsedSub = multiBlockSplit
+      .map((sub) => extractScheduleFromSondZeitName(sub))
+      .filter(Boolean);
+    if (parsedSub.length > 1) {
+      return parsedSub.join(', ');
+    }
+  }
+
+  // Day prefix check
+  let dayPrefix = '';
+  if (/(?:^|[_\-.])(?:werktags?|wt)(?:[_\-.]|$)/i.test(clean)) {
+    dayPrefix = 'Mo–Fr ';
+  } else if (/(?:^|[_\-.])wochenende(?:[_\-.]|$)/i.test(clean)) {
+    dayPrefix = 'Sa–So ';
+  } else {
+    const dayTokensRegex =
+      /(?:^|[_\-.])(Mo(?:ntag)?|Di(?:enstag)?|Mi(?:ttwoch)?|Do(?:nnerstag)?|Fr(?:eitag)?|Sa(?:mstag)?|So(?:nntag)?)[_\-.]*(?:bis|to|[_\-.])?[_\-.]*(Mo(?:ntag)?|Di(?:enstag)?|Mi(?:ttwoch)?|Do(?:nnerstag)?|Fr(?:eitag)?|Sa(?:mstag)?|So(?:nntag)?)(?:[_\-.]|$)/i;
+    const singleDayRegex =
+      /(?:^|[_\-.])(Mo(?:ntag)?|Di(?:enstag)?|Mi(?:ttwoch)?|Do(?:nnerstag)?|Fr(?:eitag)?|Sa(?:mstag)?|So(?:nntag)?)(?:[_\-.]|$)/i;
+
+    const rangeMatch = clean.match(dayTokensRegex);
+    if (rangeMatch) {
+      dayPrefix = `${normalizeDayToken(rangeMatch[1])}–${normalizeDayToken(rangeMatch[2])} `;
+    } else {
+      const singleMatch = clean.match(singleDayRegex);
+      if (singleMatch) {
+        dayPrefix = `${normalizeDayToken(singleMatch[1])} `;
+      }
+    }
+  }
+
+  // 3. 4-digit time pairs, e.g. 0800_1700 or 0730_1830 or 0800-1630 or 0800bis1700
+  const fourDigitMatch = clean.match(
+    /(?:^|[_\-.a-zA-Z])([0-2]\d[0-5]\d)[_\-.]*(?:bis|to|[_\-.])+[_\-.]*([0-2]\d[0-5]\d)(?:[_\-.a-zA-Z]|$)/i
+  );
+  if (fourDigitMatch) {
+    const sH = fourDigitMatch[1].slice(0, 2);
+    const sM = fourDigitMatch[1].slice(2);
+    const eH = fourDigitMatch[2].slice(0, 2);
+    const eM = fourDigitMatch[2].slice(2);
+    return `${dayPrefix}${sH}:${sM}–${eH}:${eM}`.trim();
+  }
+
+  // 4. 1-2 digit hour pairs, e.g. 08_17, 8_18, 08-18, 8bis17, 0800_17
+  const hourMatch = clean.match(
+    /(?:^|[_\-.a-zA-Z])([0-2]?\d)(?:[:.]?([0-5]\d))?[_\-.]*(?:bis|to|[_\-.])+[_\-.]*([0-2]?\d)(?:[:.]?([0-5]\d))?(?:[_\-.a-zA-Z]|$)/i
+  );
+  if (hourMatch) {
+    const h1 = parseInt(hourMatch[1], 10);
+    const m1 = hourMatch[2] || '00';
+    const h2 = parseInt(hourMatch[3], 10);
+    const m2 = hourMatch[4] || '00';
+    if (
+      !isNaN(h1) &&
+      !isNaN(h2) &&
+      h1 >= 0 &&
+      h1 <= 24 &&
+      h2 >= 0 &&
+      h2 <= 24 &&
+      (h1 < h2 || (h1 === h2 && m1 < m2))
+    ) {
+      const sH = String(h1).padStart(2, '0');
+      const eH = String(h2).padStart(2, '0');
+      return `${dayPrefix}${sH}:${m1}–${eH}:${m2}`.trim();
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Resolves a schedule string or SondZeit script reference to concrete human-readable clock times.
+ * Follows the 3-step hierarchy confirmed by user:
+ * 1. Current script's internal TIME OF DAY / DAY OF WEEK rules or prose.
+ * 2. Lookup of the referenced SondZeit module within the workspace.
+ * 3. Pattern extraction from the SondZeit script/variable name (e.g. `_08_17` -> `08:00–17:00`).
+ * 4. Fallback to clean script reference if no times can be derived.
+ *
+ * Formats result as: `[Wochentage] [Uhrzeiten] ([SondZeit-Referenz])`
+ */
+export function resolveScheduleWithSondZeit(
+  rawSchedule: string | undefined,
+  currentMod?: ScriptModule,
+  workspace?: ScriptWorkspace
+): {
+  displayText: string;
+  hasSchedule: boolean;
+  hasConcreteTimes: boolean;
+  scriptReference?: string;
+  pureTimes?: string;
+} {
+  const schedStr = (rawSchedule || '').trim().replace(/^['"]|['"]$/g, '');
+
+  // Guard: if already resolved and formatted like `Mo–Fr 08:00–17:00 (SondZeit_...)`, return directly
+  const alreadyResolvedMatch = schedStr.match(/^(.*?)\s*\(([A-Za-z0-9_.-]+)\)$/);
+  if (alreadyResolvedMatch && /\b(?:\d{1,2}[:.]\d{2}|24\/7)\b/i.test(alreadyResolvedMatch[1])) {
+    return {
+      displayText: schedStr,
+      hasSchedule: true,
+      hasConcreteTimes: true,
+      scriptReference: alreadyResolvedMatch[2],
+      pureTimes: alreadyResolvedMatch[1].trim(),
+    };
+  }
+
+  const hasClockTime = /\b(?:\d{1,2}[:.]\d{2}|vor\s+\d{1,2}|ab\s+\d{1,2}|24\/7)\b/i.test(schedStr);
+  const isSondZeitRef =
+    /\b(?:sondzeit|sondstat|sondrouting|zeitplan|sonderzeit)\b/i.test(schedStr) ||
+    (!hasClockTime &&
+      schedStr.length > 0 &&
+      !/\b(?:wochenende|nachtschaltung|feiertag|keine\s+zeit)\b/i.test(schedStr));
+
+  // If it already has clock times and does NOT mention a raw SondZeit placeholder, return as-is
+  if (hasClockTime && !isSondZeitRef) {
+    return {
+      displayText: schedStr,
+      hasSchedule: true,
+      hasConcreteTimes: true,
+      pureTimes: schedStr,
+    };
+  }
+
+  // Identify candidate SondZeit reference
+  let sondRef = schedStr;
+  if (!sondRef && currentMod) {
+    const ruleSond = currentMod.rules.find(
+      (r) => r.schedule && !/\b\d{1,2}[:.]\d{2}\b/.test(r.schedule)
+    )?.schedule;
+    if (ruleSond) {
+      sondRef = ruleSond.trim().replace(/^['"]|['"]$/g, '');
+    } else if (currentMod.rawText) {
+      const matchAssign = currentMod.rawText.match(
+        /\bassign\s+["']?([A-Za-z0-9_.-]+)["']?\s+to\s+Sys_SondZeit\b/i
+      );
+      const matchDirect = currentMod.rawText.match(
+        /\bSys_SondZeit\s*[:=]\s*["']?([A-Za-z0-9_.-]+)["']?/i
+      );
+      const matchExec = currentMod.rawText.match(
+        /\bexecute(?:\s+script)?\s+["']?(SondZeit[A-Za-z0-9_.-]*)["']?/i
+      );
+      sondRef = matchAssign?.[1] || matchDirect?.[1] || matchExec?.[1] || '';
+    }
+  }
+
+  // 1. Current Script Direct Check: Check if currentMod contains concrete times in any of its rules or in rawText
+  let directTimes: string | null = null;
+  if (currentMod) {
+    for (const r of currentMod.rules) {
+      if (r.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(r.schedule)) {
+        directTimes = r.schedule.trim();
+        break;
+      }
+      const det = extractReadableScheduleAndHolidayFromText(r.condition || '');
+      if (det.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(det.schedule)) {
+        directTimes = det.schedule.trim();
+        break;
+      }
+    }
+    if (!directTimes && currentMod.rawText) {
+      const fromText = extractReadableScheduleAndHolidayFromText(currentMod.rawText);
+      if (fromText.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(fromText.schedule)) {
+        directTimes = fromText.schedule.trim();
+      }
+    }
+  }
+
+  // 2. Referenced SondZeit Module Lookup in Workspace
+  let targetModTimes: string | null = null;
+  let targetModFound: ScriptModule | null = null;
+
+  if (workspace && sondRef) {
+    const cleanRef = sondRef.replace(/^['"]|['"]$/g, '').trim();
+    const targetKey = canonicalScriptMatchKey(cleanRef);
+
+    targetModFound =
+      workspace.modules.find((m) => {
+        if (m === currentMod) return false;
+        const mNumKey = canonicalScriptMatchKey(m.scriptNumber);
+        const mNameKey = canonicalScriptMatchKey(m.scriptName);
+        if (mNumKey === targetKey || mNameKey === targetKey) return true;
+        if (cleanRef.length >= 3) {
+          if (m.scriptNumber.toLowerCase() === cleanRef.toLowerCase()) return true;
+          if (m.scriptName.toLowerCase().includes(cleanRef.toLowerCase())) return true;
+          if (cleanRef.toLowerCase().includes(m.scriptNumber.toLowerCase())) return true;
+        }
+        return false;
+      }) || null;
+
+    if (targetModFound) {
+      for (const r of targetModFound.rules) {
+        if (r.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(r.schedule)) {
+          targetModTimes = r.schedule.trim();
+          break;
+        }
+        const det = extractReadableScheduleAndHolidayFromText(r.condition || '');
+        if (det.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(det.schedule)) {
+          targetModTimes = det.schedule.trim();
+          break;
+        }
+      }
+      if (!targetModTimes && targetModFound.rawText) {
+        const fromText = extractReadableScheduleAndHolidayFromText(targetModFound.rawText);
+        if (fromText.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(fromText.schedule)) {
+          targetModTimes = fromText.schedule.trim();
+        }
+      }
+    }
+  }
+
+  // 3. Smart Name Pattern Heuristic (from sondRef or targetMod name/number)
+  const nameTimes =
+    extractScheduleFromSondZeitName(sondRef) ||
+    (targetModFound ? extractScheduleFromSondZeitName(targetModFound.scriptName) : null) ||
+    (targetModFound ? extractScheduleFromSondZeitName(targetModFound.scriptNumber) : null);
+
+  // Precedence: Direct Script Times > Target Module Times > Name Pattern Times
+  const resolvedTimes = directTimes || targetModTimes || nameTimes;
+
+  if (resolvedTimes) {
+    const refLabel =
+      sondRef ||
+      (targetModFound ? targetModFound.scriptName || targetModFound.scriptNumber : '');
+    const refTag = refLabel ? ` (${refLabel})` : '';
+    const formatted = resolvedTimes.includes(refLabel)
+      ? resolvedTimes
+      : `${resolvedTimes}${refTag}`;
+    return {
+      displayText: formatted,
+      hasSchedule: true,
+      hasConcreteTimes: true,
+      scriptReference: refLabel || undefined,
+      pureTimes: resolvedTimes,
+    };
+  }
+
+  // 4. Pure Name Fallback if no times could be determined anywhere
+  if (sondRef) {
+    return {
+      displayText: sondRef,
+      hasSchedule: true,
+      hasConcreteTimes: false,
+      scriptReference: sondRef,
+    };
+  }
+
+  return {
+    displayText: schedStr,
+    hasSchedule: Boolean(schedStr),
+    hasConcreteTimes: hasClockTime,
   };
 }
 
@@ -4279,7 +4563,10 @@ export function extractScriptNumberFromNodeId(
   return suffix;
 }
 
-export function getModuleOpeningHoursSummary(mod: ScriptModule): {
+export function getModuleOpeningHoursSummary(
+  mod: ScriptModule,
+  workspace?: ScriptWorkspace
+): {
   scheduleText: string;
   holidayText: string;
   combinedBadge: string;
@@ -4290,7 +4577,8 @@ export function getModuleOpeningHoursSummary(mod: ScriptModule): {
   for (const r of mod.rules) {
     if (r.schedule && r.schedule.trim()) {
       const s = r.schedule.trim();
-      if (!schedules.includes(s)) schedules.push(s);
+      const resolved = resolveScheduleWithSondZeit(s, mod, workspace).displayText;
+      if (resolved && !schedules.includes(resolved)) schedules.push(resolved);
     }
     if (r.holiday && r.holiday.trim()) {
       const h = r.holiday.trim();
@@ -4298,12 +4586,21 @@ export function getModuleOpeningHoursSummary(mod: ScriptModule): {
     }
     if ((!r.schedule || !r.holiday) && r.condition) {
       const det = extractReadableScheduleAndHolidayFromText(r.condition);
-      if (det.schedule && !schedules.includes(det.schedule)) {
-        schedules.push(det.schedule);
+      if (det.schedule) {
+        const resolved = resolveScheduleWithSondZeit(det.schedule, mod, workspace).displayText;
+        if (resolved && !schedules.includes(resolved)) schedules.push(resolved);
       }
       if (det.holiday && !holidays.includes(det.holiday)) {
         holidays.push(det.holiday);
       }
+    }
+  }
+
+  // Fallback: If no rule had a schedule, check module rawText or referenced SondZeit
+  if (schedules.length === 0) {
+    const fallback = resolveScheduleWithSondZeit('', mod, workspace);
+    if (fallback.displayText && (fallback.hasConcreteTimes || fallback.scriptReference)) {
+      schedules.push(fallback.displayText);
     }
   }
 
@@ -4316,7 +4613,7 @@ export function getModuleOpeningHoursSummary(mod: ScriptModule): {
   return {
     scheduleText,
     holidayText,
-    combinedBadge: badgeParts.join(' | '),
+    combinedBadge: badgeParts.join(' · '),
   };
 }
 
@@ -4610,7 +4907,7 @@ export function buildMasterOverviewMermaid(
     ].filter(Boolean);
     const dnisBadge = orgaAndDnisParts.length > 0 ? `<br/>${orgaAndDnisParts.join(' · ')}` : '';
 
-    const hoursSummary = getModuleOpeningHoursSummary(mod);
+    const hoursSummary = getModuleOpeningHoursSummary(mod, workspace);
     const hoursBadge = hoursSummary.combinedBadge
       ? `<br/>🕒 ${sanitizeMermaidText(hoursSummary.combinedBadge)}`
       : '';
@@ -4772,11 +5069,14 @@ export function buildMasterOverviewMermaid(
       const waitBit = rule.waitSeconds !== undefined ? `WAIT ${rule.waitSeconds}s` : '';
 
       if (rule.targetNumber) {
+        const schedDisplay = rule.schedule
+          ? resolveScheduleWithSondZeit(rule.schedule, mod, workspace).displayText
+          : '';
         const baseTag =
           rule.valueNumbers && rule.valueNumbers.length > 0
             ? `VALUE ${rule.valueNumbers.join(', ')}`
-            : rule.schedule
-            ? `🕒 ${rule.schedule}`
+            : schedDisplay
+            ? `🕒 ${schedDisplay}`
             : rule.holiday
             ? `📅 ${rule.holiday}`
             : rule.isExternalRouteCall
@@ -5192,7 +5492,8 @@ export function buildScriptDetailMermaid(
       metaParts.push('Typ: Fax-Routing (4-stellig)');
     }
     if (rule.schedule) {
-      metaParts.push(`🕒 Öffnungszeiten: ${sanitizeMermaidText(rule.schedule)}`);
+      const resolved = resolveScheduleWithSondZeit(rule.schedule, mod, workspace).displayText;
+      metaParts.push(`🕒 Öffnungszeiten: ${sanitizeMermaidText(resolved)}`);
     }
     if (rule.holiday) {
       metaParts.push(`📅 Feiertag: ${sanitizeMermaidText(rule.holiday)}`);
@@ -5843,7 +6144,13 @@ export function buildWorkspaceRoutingMatrix(
     const sortedRules = [...mod.rules].sort((a, b) => a.prio - b.prio);
     for (const rule of sortedRules) {
       const condParts: string[] = [];
-      if (rule.schedule) condParts.push(`Zeitplan: ${rule.schedule}`);
+      const rawSched =
+        rule.schedule ||
+        extractReadableScheduleAndHolidayFromText(rule.condition || '').schedule;
+      if (rawSched) {
+        const resolved = resolveScheduleWithSondZeit(rawSched, mod, workspace).displayText;
+        condParts.push(`Zeitplan: ${resolved}`);
+      }
       if (rule.holiday) condParts.push(`Feiertag: ${rule.holiday}`);
       if (rule.condition) condParts.push(rule.condition);
 
@@ -6143,8 +6450,10 @@ export function buildWorkspaceScheduleOverview(
 
     for (const r of sortedRules) {
       const det = extractReadableScheduleAndHolidayFromText(r.condition || '');
-      const sched = (r.schedule || det.schedule || '').trim();
+      const rawSched = (r.schedule || det.schedule || '').trim();
       const hol = (r.holiday || det.holiday || '').trim();
+      const resolved = resolveScheduleWithSondZeit(rawSched, mod, workspace);
+      const sched = resolved.displayText || rawSched;
       if (sched || hol) {
         matchingRules.push({
           rule: r,
@@ -6188,6 +6497,7 @@ export function buildWorkspaceScheduleOverview(
         });
       }
     } else {
+      const fallbackResolved = resolveScheduleWithSondZeit('', mod, workspace);
       const firstRule = sortedRules[0];
       const targets = [...mod.outgoingNumbers];
       const actionBits: string[] = [];
@@ -6197,6 +6507,11 @@ export function buildWorkspaceScheduleOverview(
       if (firstAnn) actionBits.push(`Ansage: ${firstAnn}`);
       if (targets.length > 0) actionBits.push(`Ziele: ${targets.slice(0, 4).join(', ')}`);
 
+      const hasFallbackSched = Boolean(
+        fallbackResolved.displayText &&
+          (fallbackResolved.hasConcreteTimes || fallbackResolved.scriptReference)
+      );
+
       rows.push({
         id: `${mod.scriptNumber}:module`,
         scriptNumber: mod.scriptNumber,
@@ -6205,11 +6520,13 @@ export function buildWorkspaceScheduleOverview(
         prio: firstRule?.prio,
         ruleId: firstRule?.id,
         stepName: firstRule?.stepName || mod.scriptName,
-        openingHours: 'Keine Zeitbeschränkung (24/7)',
+        openingHours: hasFallbackSched
+          ? fallbackResolved.displayText
+          : 'Keine Zeitbeschränkung (24/7)',
         holidayAndSpecial: '—',
         closedOrOverflowAction: actionBits.join(' · ') || '—',
         targetNumbers: targets,
-        hasSchedule: false,
+        hasSchedule: hasFallbackSched,
         hasHoliday: false,
       });
     }
@@ -6399,7 +6716,9 @@ export function inspectWorkspaceNodeForEdit(
         ruleId: rule.id,
         announcement: rule.announcement || '',
         queueTarget: rule.queueTarget || '',
-        schedule: rule.schedule || '',
+        schedule: rule.schedule
+          ? resolveScheduleWithSondZeit(rule.schedule, mod, workspace).displayText
+          : '',
         condition: rule.condition || '',
         outgoingConnections: outgoing,
       };
@@ -6453,7 +6772,10 @@ export function inspectWorkspaceNodeForEdit(
     const hasChoices = mod.rules.some((r) => r.choices.length > 0);
     const firstAnn = mod.rules.find((r) => Boolean(r.announcement))?.announcement || '';
     const firstQueue = mod.rules.find((r) => Boolean(r.queueTarget))?.queueTarget || '';
-    const firstSched = mod.rules.find((r) => Boolean(r.schedule))?.schedule || '';
+    const rawSched = mod.rules.find((r) => Boolean(r.schedule))?.schedule || '';
+    const firstSched = rawSched
+      ? resolveScheduleWithSondZeit(rawSched, mod, workspace).displayText
+      : resolveScheduleWithSondZeit('', mod, workspace).displayText;
     const firstCond = mod.rules.find((r) => Boolean(r.condition))?.condition || '';
 
     const blockType: CallflowBuildingBlockType = hasChoices
