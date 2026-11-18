@@ -3664,40 +3664,88 @@ export function generateInteractiveCallflowHtml(
       padding-right: 6px;
       border-right: 1px solid var(--border-strong);
     }
-    .view-search-box {
+    .script-dropdown-wrap {
+      position: relative;
+      display: inline-block;
+    }
+    .script-dropdown-btn {
       display: inline-flex;
       align-items: center;
-      gap: 4px;
+      justify-content: space-between;
+      gap: 6px;
       background: var(--bg-input);
       border: 1px solid var(--border);
+      color: var(--text-main);
+      padding: 3px 8px;
       border-radius: 6px;
-      padding: 2px 6px;
-      height: 26px;
+      font-size: 11.5px;
+      font-family: inherit;
+      cursor: pointer;
+      max-width: 250px;
       box-sizing: border-box;
     }
-    .view-search-box:focus-within {
+    .script-dropdown-btn:hover {
       border-color: var(--accent);
     }
-    .view-search-box input {
-      border: none;
-      background: transparent;
+    .script-dropdown-popover {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      width: 310px;
+      max-height: 380px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .script-dropdown-search-bar {
+      padding: 8px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-header);
+    }
+    .script-dropdown-search-bar input {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
       color: var(--text-main);
+      padding: 5px 8px;
+      border-radius: 6px;
       font-size: 11px;
       font-family: inherit;
       outline: none;
-      width: 110px;
+      box-sizing: border-box;
     }
-    .view-search-box button {
-      border: none;
-      background: transparent;
-      color: var(--text-muted);
+    .script-dropdown-search-bar input:focus {
+      border-color: var(--accent);
+    }
+    .script-dropdown-list {
+      overflow-y: auto;
+      max-height: 280px;
+      padding: 4px;
+    }
+    .script-dropdown-item {
+      padding: 6px 8px;
+      border-radius: 6px;
       cursor: pointer;
-      font-size: 10px;
-      padding: 0 2px;
-      line-height: 1;
-    }
-    .view-search-box button:hover {
+      font-size: 11.5px;
       color: var(--text-main);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .script-dropdown-item:hover, .script-dropdown-item.highlighted {
+      background: var(--bg-hover);
+      color: var(--accent-text);
+    }
+    .script-dropdown-item.selected {
+      background: var(--accent);
+      color: #ffffff;
+      font-weight: 600;
     }
     .edge-detail-box {
       border-color: var(--amber-border);
@@ -3833,12 +3881,18 @@ export function generateInteractiveCallflowHtml(
     <div class="brand">${safeTitle} · Interaktiver Callflow</div>
     <div class="controls">
       <div class="view-bar" id="view-bar">
-        <div class="view-search-box" id="view-search-box" title="Skripte nach Nummer oder Name durchsuchen">
-          <span style="font-size:11px;opacity:0.6;user-select:none;">🔍</span>
-          <input type="text" id="view-filter-input" placeholder="Skript suchen..." aria-label="Skripte durchsuchen" />
-          <button type="button" id="btn-clear-view-filter" style="display:none;" title="Suche leeren">✕</button>
+        <div class="script-dropdown-wrap" id="script-dropdown-wrap">
+          <button type="button" class="script-dropdown-btn" id="script-dropdown-btn" title="Skript oder Ebene wählen">
+            <span id="script-dropdown-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Master-Gesamtkarte</span>
+            <span style="opacity:0.6;font-size:10px;">▼</span>
+          </button>
+          <div class="script-dropdown-popover" id="script-dropdown-popover" style="display:none;">
+            <div class="script-dropdown-search-bar">
+              <input type="text" id="script-dropdown-search" placeholder="Skript suchen (Nr., Name)..." />
+            </div>
+            <div class="script-dropdown-list" id="script-dropdown-items"></div>
+          </div>
         </div>
-        <select id="view-select" title="Zwischen Ebene 1 (Master-Gesamtkarte) und Ebene 2 (Einzel-Skripte inkl. Main) wechseln"></select>
         <button type="button" id="btn-open-schedules" title="Alle Öffnungszeiten & SondZeit-Pläne in der Analyse-Seitenleiste anzeigen" style="padding:2px 7px;font-size:11px;font-weight:600;border-radius:4px;border:1px solid var(--amber-border);background:var(--amber-bg);color:var(--amber-text);cursor:pointer;display:inline-flex;align-items:center;gap:4px;">🕒 Öffnungszeiten</button>
         <button id="btn-master-back" style="display:none;" title="Zurück zur Master-Gesamtkarte (Ebene 1)">← Master-Karte</button>
       </div>
@@ -4013,9 +4067,12 @@ export function generateInteractiveCallflowHtml(
     let GRAPH = viewsByKey.get(activeViewKey).graph;
     let nodeMap = new Map(GRAPH.nodes.map(n => [n.id, n]));
 
-    const viewSelectEl = document.getElementById('view-select');
-    const viewFilterInput = document.getElementById('view-filter-input');
-    const clearViewFilterBtn = document.getElementById('btn-clear-view-filter');
+    const scriptDropdownWrap = document.getElementById('script-dropdown-wrap');
+    const scriptDropdownBtn = document.getElementById('script-dropdown-btn');
+    const scriptDropdownLabel = document.getElementById('script-dropdown-label');
+    const scriptDropdownPopover = document.getElementById('script-dropdown-popover');
+    const scriptDropdownSearch = document.getElementById('script-dropdown-search');
+    const scriptDropdownItems = document.getElementById('script-dropdown-items');
     const masterBackBtn = document.getElementById('btn-master-back');
     const selectEl = document.getElementById('node-select');
     const searchEl = document.getElementById('node-search');
@@ -4423,9 +4480,9 @@ export function generateInteractiveCallflowHtml(
     }
 
     function populateViewSelect(filterQuery) {
-      if (!viewSelectEl) return;
-      const q = (filterQuery !== undefined ? filterQuery : (viewFilterInput ? viewFilterInput.value : '')).trim().toLowerCase();
-      viewSelectEl.innerHTML = '';
+      if (!scriptDropdownItems) return;
+      const q = (filterQuery !== undefined ? filterQuery : (scriptDropdownSearch ? scriptDropdownSearch.value : '')).trim().toLowerCase();
+      scriptDropdownItems.innerHTML = '';
 
       const views = PAYLOAD.views || [];
       const filtered = q
@@ -4439,37 +4496,29 @@ export function generateInteractiveCallflowHtml(
           })
         : views;
 
+      const activeView = viewsByKey.get(activeViewKey);
+      if (scriptDropdownLabel && activeView) {
+        scriptDropdownLabel.textContent = activeView.label;
+      }
+
       if (filtered.length === 0) {
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = 'Kein Treffer („' + q + '“)';
-        opt.disabled = true;
-        viewSelectEl.appendChild(opt);
+        const emptyEl = document.createElement('div');
+        emptyEl.style.cssText = 'padding:10px;text-align:center;color:var(--text-muted);font-size:11px;';
+        emptyEl.textContent = 'Kein Skript gefunden für „' + q + '“';
+        scriptDropdownItems.appendChild(emptyEl);
       } else {
         filtered.forEach(v => {
-          const opt = document.createElement('option');
-          opt.value = v.key;
-          opt.textContent = v.label;
-          viewSelectEl.appendChild(opt);
+          const itemEl = document.createElement('div');
+          itemEl.className = 'script-dropdown-item' + (v.key === activeViewKey ? ' selected' : '');
+          itemEl.textContent = v.label;
+          itemEl.addEventListener('click', () => {
+            switchView(v.key);
+            if (scriptDropdownPopover) scriptDropdownPopover.style.display = 'none';
+          });
+          scriptDropdownItems.appendChild(itemEl);
         });
       }
 
-      if (filtered.some(v => v.key === activeViewKey)) {
-        viewSelectEl.value = activeViewKey;
-      } else if (activeViewKey && viewsByKey.has(activeViewKey)) {
-        const activeV = viewsByKey.get(activeViewKey);
-        const opt = document.createElement('option');
-        opt.value = activeV.key;
-        opt.textContent = activeV.label + ' (Aktiv)';
-        viewSelectEl.prepend(opt);
-        viewSelectEl.value = activeViewKey;
-      } else if (filtered.length > 0) {
-        viewSelectEl.value = filtered[0].key;
-      }
-
-      if (clearViewFilterBtn) {
-        clearViewFilterBtn.style.display = q ? 'inline-block' : 'none';
-      }
       if (masterBackBtn) {
         masterBackBtn.style.display = (PAYLOAD.views.length > 1 && activeViewKey !== 'master') ? 'inline-block' : 'none';
       }
@@ -6062,36 +6111,36 @@ export function generateInteractiveCallflowHtml(
       applyCombinedCanvasState(false);
     });
 
-    if (viewFilterInput) {
-      viewFilterInput.addEventListener('input', () => {
-        populateViewSelect();
-      });
-      viewFilterInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          if (viewSelectEl && viewSelectEl.value) {
-            switchView(viewSelectEl.value);
-            viewFilterInput.blur();
-          }
-        } else if (e.key === 'Escape') {
-          e.preventDefault();
-          viewFilterInput.value = '';
-          populateViewSelect();
-          viewFilterInput.blur();
+    if (scriptDropdownBtn && scriptDropdownPopover) {
+      scriptDropdownBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const isOpen = scriptDropdownPopover.style.display === 'flex';
+        scriptDropdownPopover.style.display = isOpen ? 'none' : 'flex';
+        if (!isOpen && scriptDropdownSearch) {
+          scriptDropdownSearch.value = '';
+          populateViewSelect('');
+          setTimeout(() => scriptDropdownSearch.focus(), 50);
         }
       });
     }
-    if (clearViewFilterBtn) {
-      clearViewFilterBtn.addEventListener('click', () => {
-        if (viewFilterInput) viewFilterInput.value = '';
+
+    if (scriptDropdownSearch) {
+      scriptDropdownSearch.addEventListener('input', () => {
         populateViewSelect();
-        if (viewFilterInput) viewFilterInput.focus();
+      });
+      scriptDropdownSearch.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          scriptDropdownPopover.style.display = 'none';
+        }
       });
     }
 
-    if (viewSelectEl) {
-      viewSelectEl.addEventListener('change', e => switchView(e.target.value));
-    }
+    document.addEventListener('click', (e) => {
+      if (scriptDropdownWrap && !scriptDropdownWrap.contains(e.target)) {
+        if (scriptDropdownPopover) scriptDropdownPopover.style.display = 'none';
+      }
+    });
+
     if (masterBackBtn) {
       masterBackBtn.addEventListener('click', () => switchView('master'));
     }
