@@ -20,7 +20,7 @@ const svgRenderCache = new Map<
   { svg: string; diagramType: string }
 >();
 
-function computeFastCacheHash(input: string): string {
+export function computeFastCacheHash(input: string): string {
   let hash = 2166136261;
   for (let i = 0; i < input.length; i++) {
     hash ^= input.charCodeAt(i);
@@ -1019,6 +1019,166 @@ export async function exportSvgToPngBlob(
       }
     }
     throw firstErr;
+  }
+}
+
+export interface SvgGpuProxyResult {
+  objectUrl: string;
+  width: number;
+  height: number;
+  pixelWidth: number;
+  pixelHeight: number;
+}
+
+function rasterizeSingleSvgProxy(
+  svgString: string,
+  signal?: AbortSignal
+): Promise<SvgGpuProxyResult> {
+  const { serializedSvg, width, height } = prepareStandaloneSvg(svgString, 'transparent', 0);
+  const dpr = typeof window !== 'undefined' ? Math.min(2, window.devicePixelRatio || 1) : 1;
+  const desiredScale = Math.max(1.25, dpr);
+  const maxDim = 4096;
+  const scale = Math.max(
+    0.25,
+    Math.min(desiredScale, maxDim / Math.max(1, width), maxDim / Math.max(1, height))
+  );
+  const targetWidth = Math.max(1, Math.round(width * scale));
+  const targetHeight = Math.max(1, Math.round(height * scale));
+
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+
+    const utf8Bytes = new TextEncoder().encode(serializedSvg);
+    let binary = '';
+    for (let i = 0; i < utf8Bytes.length; i++) {
+      binary += String.fromCharCode(utf8Bytes[i]);
+    }
+    const base64Svg = `data:image/svg+xml;base64,${window.btoa(binary)}`;
+
+    img.onload = () => {
+      if (signal?.aborted) {
+        reject(new DOMException('Aborted', 'AbortError'));
+        return;
+      }
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('2D-Canvas-Kontext nicht verfügbar.'));
+          return;
+        }
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+
+        const finishBlob = (blob: Blob | null) => {
+          if (!blob) {
+            reject(new Error('GPU-Proxy-Rasterisierung fehlgeschlagen.'));
+            return;
+          }
+          if (signal?.aborted) {
+            reject(new DOMException('Aborted', 'AbortError'));
+            return;
+          }
+          const objectUrl = URL.createObjectURL(blob);
+          const preDecode = new Image();
+          preDecode.src = objectUrl;
+          const done = () => {
+            if (signal?.aborted) {
+              URL.revokeObjectURL(objectUrl);
+              reject(new DOMException('Aborted', 'AbortError'));
+              return;
+            }
+            resolve({
+              objectUrl,
+              width,
+              height,
+              pixelWidth: targetWidth,
+              pixelHeight: targetHeight,
+            });
+          };
+          if (typeof preDecode.decode === 'function') {
+            preDecode.decode().then(done).catch(done);
+          } else {
+            done();
+          }
+        };
+
+        canvas.toBlob(
+          (webpBlob) => {
+            if (webpBlob) {
+              finishBlob(webpBlob);
+            } else {
+              canvas.toBlob(finishBlob, 'image/png', 0.92);
+            }
+          },
+          'image/webp',
+          0.92
+        );
+      } catch (err) {
+        reject(err);
+      }
+    };
+
+    img.onerror = () => {
+      reject(new Error('SVG-Grafik konnte nicht als GPU-Proxy geladen werden.'));
+    };
+
+    img.src = base64Svg;
+  });
+}
+
+/**
+ * Rasterizes an already-colored SVG (zero padding) into a pre-decoded WebP/PNG ObjectURL
+ * sized safely within GPU texture bounds (<= 4096px) for 60fps zoom/pan compositing.
+ */
+export async function rasterizeSvgToGpuProxy(
+  svgString: string,
+  fallbackOptions?: {
+    code: string;
+    themeConfig: ThemeConfiguration;
+    smartColorMode: SmartColorMode;
+    hiddenNodeTypes?: SmartColorNodeType[];
+    canvasSurface: 'dark' | 'light';
+    pathColorMode?: PathColorMode;
+  },
+  signal?: AbortSignal
+): Promise<SvgGpuProxyResult | null> {
+  try {
+    return await rasterizeSingleSvgProxy(svgString, signal);
+  } catch (firstErr) {
+    if (signal?.aborted) return null;
+    if (fallbackOptions?.code) {
+      try {
+        const nativeRender = await renderLocalMermaidDiagram(
+          fallbackOptions.code,
+          fallbackOptions.themeConfig,
+          true
+        );
+        if (signal?.aborted || !nativeRender.svg) return null;
+        const colored = applySmartLogicColoring(
+          nativeRender.svg,
+          fallbackOptions.code,
+          fallbackOptions.smartColorMode,
+          fallbackOptions.canvasSurface,
+          fallbackOptions.themeConfig.lineColor,
+          fallbackOptions.hiddenNodeTypes,
+          fallbackOptions.pathColorMode || 'semantic'
+        );
+        return await rasterizeSingleSvgProxy(colored.svg, signal);
+      } catch {
+        return null;
+      }
+    }
+    void firstErr;
+    return null;
   }
 }
 

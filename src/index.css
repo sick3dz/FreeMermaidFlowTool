@@ -37,11 +37,31 @@
   backface-visibility: hidden;
 }
 
-.mermaid-canvas-stage > svg {
+/* Dual-layer stage: crisp vector SVG in idle state, pre-decoded GPU bitmap proxy during 60fps pan/zoom */
+.mermaid-svg-layer {
+  visibility: visible;
+}
+
+.mermaid-svg-layer > svg {
   max-width: none !important;
   max-height: none !important;
   flex-shrink: 0;
   display: block;
+}
+
+.mermaid-gpu-proxy {
+  visibility: hidden;
+  will-change: opacity;
+  backface-visibility: hidden;
+}
+
+[data-transforming="true"][data-has-proxy="true"] .mermaid-svg-layer {
+  visibility: hidden;
+  pointer-events: none !important;
+}
+
+[data-transforming="true"][data-has-proxy="true"] .mermaid-gpu-proxy {
+  visibility: visible;
 }
 
 /* Zero-re-render cursor & gesture isolation during canvas pan/wheel/pinch */
@@ -49,7 +69,7 @@
   cursor: grabbing !important;
 }
 
-[data-transforming="true"] .mermaid-canvas-stage svg {
+[data-transforming="true"]:not([data-has-proxy="true"]) .mermaid-canvas-stage svg {
   shape-rendering: optimizeSpeed;
 }
 
