@@ -1003,7 +1003,13 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
           <span className="truncate">Mermaid &amp; Callflow Local Builder</span>
         </a>
 
-        <nav className="hidden lg:flex items-center gap-6 text-sm font-medium text-slate-400">
+        <nav className="hidden lg:flex items-center gap-5 text-sm font-medium text-slate-400">
+          <a
+            href="#compliance-freigabe"
+            className="text-emerald-300 hover:text-emerald-200 transition-colors whitespace-nowrap shrink-0"
+          >
+            DSGVO · ISO · NIS2
+          </a>
           <a
             href="#builder"
             className="hover:text-slate-100 transition-colors whitespace-nowrap shrink-0"
@@ -1055,6 +1061,10 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
       {/* Mobile Quick-Jump Sub-Bar (non-sticky so mobile sticky cap stays strictly < 15%) */}
       <div className="lg:hidden border-b border-slate-800/80 bg-slate-900/60 px-4 py-2 overflow-x-auto">
         <div className="flex items-center gap-4 text-xs font-medium text-slate-300 whitespace-nowrap">
+          <a href="#compliance-freigabe" className="py-1 text-emerald-300 hover:text-emerald-200">
+            DSGVO · ISO · NIS2
+          </a>
+          <span aria-hidden="true" className="text-slate-600">·</span>
           <a href="#builder" className="py-1 hover:text-emerald-300">
             1. HTML-Builder
           </a>
@@ -1074,11 +1084,248 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
       </div>
 
       {/* Main Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-10 py-6 sm:py-10 lg:py-14 space-y-12 sm:space-y-16">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-10 py-5 sm:py-8 lg:py-10 space-y-10 sm:space-y-14">
+        {/* Top Compliance & IT-Security-Freigabe Strip (Directly Above the Fold: 3 Expandable Inline-Detail Cards for DSGVO, ISO/IEC 27001 & NIS2) */}
+        <section
+          id="compliance-freigabe"
+          aria-labelledby="compliance-freigabe-heading"
+          className="scroll-mt-20 space-y-4 pb-6 sm:pb-8 border-b border-slate-800/90"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+            <div className="space-y-1 max-w-3xl">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-mono text-emerald-400">
+                <ShieldCheck className="w-4 h-4 shrink-0" />
+                <span>Compliance &amp; IT-Security-Freigabe</span>
+                <span aria-hidden="true">·</span>
+                <span className="text-slate-400">0-Byte-Offline-Nachweis</span>
+              </div>
+              <h2
+                id="compliance-freigabe-heading"
+                className="text-base sm:text-lg font-bold text-slate-100"
+              >
+                Technisch geeignet für DSGVO-, ISO/IEC-27001- und NIS2-Umgebungen
+              </h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Klappen Sie eine oder alle drei Boxen direkt auf, um die vollständige
+                Artikel-/Control-Prüfmatrix, Risiko-Abgrenzung, Prüfbefehle und eine fertige
+                Freigabe-Kurzstellungnahme für Datenschutz &amp; IT-Security einzusehen.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={toggleAllCompliance}
+              className="self-start sm:self-end min-h-[38px] px-3 py-1.5 text-xs font-mono text-emerald-300 hover:text-emerald-200 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+            >
+              {areAllComplianceExpanded ? (
+                <>
+                  <ChevronUp className="w-3.5 h-3.5 shrink-0" />
+                  <span>Alle 3 Nachweise einklappen</span>
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+                  <span>Alle 3 Nachweise ausklappen</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+            {COMPLIANCE_SPECS.map((item) => {
+              const isExpanded = Boolean(expandedComplianceIds[item.id]);
+              const isCopied = copiedComplianceId === item.id;
+              return (
+                <div
+                  key={item.id}
+                  className={`rounded-xl p-4 sm:p-5 border transition-colors flex flex-col justify-between space-y-3.5 ${
+                    isExpanded
+                      ? item.activeBorderClass
+                      : 'bg-slate-900/60 border-slate-800/90 hover:border-slate-700'
+                  }`}
+                >
+                  {/* Card Header & Summary */}
+                  <div className="space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="space-y-0.5 min-w-0">
+                        <div className={`text-sm sm:text-base font-semibold ${item.accentTextClass}`}>
+                          {item.standardCode}
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-400 tabular-nums">
+                          {item.normSubtitle}
+                        </div>
+                      </div>
+                      <span className="text-[10.5px] font-mono text-slate-300 text-right shrink-0">
+                        {item.statusLabel.split(' · ')[0]}
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      {item.shortStatement}
+                    </p>
+                  </div>
+
+                  {/* Direct Inline Expand / Collapse Button */}
+                  <button
+                    type="button"
+                    aria-expanded={isExpanded}
+                    onClick={() =>
+                      setExpandedComplianceIds((prev) => ({
+                        ...prev,
+                        [item.id]: !prev[item.id],
+                      }))
+                    }
+                    className="w-full min-h-[38px] px-3 py-2 rounded-lg bg-slate-950 hover:bg-slate-950/80 border border-slate-800 hover:border-emerald-500/40 text-xs font-mono text-emerald-300 flex items-center justify-between gap-2 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+                  >
+                    <span className="truncate">
+                      {isExpanded
+                        ? 'Prüfmatrix & Nachweis einklappen'
+                        : 'Prüfmatrix, Risiken & Nachweis ausklappen'}
+                    </span>
+                    {isExpanded ? (
+                      <ChevronUp className="w-4 h-4 shrink-0" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 shrink-0" />
+                    )}
+                  </button>
+
+                  {/* Deep Inline Expansion Directly Inside the Card */}
+                  {isExpanded && (
+                    <div className="pt-3 border-t border-slate-800 space-y-4">
+                      <div className="space-y-1.5">
+                        <h3 className="text-xs sm:text-sm font-semibold text-slate-100 leading-snug">
+                          {item.deepDiveTitle}
+                        </h3>
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          {item.summary}
+                        </p>
+                      </div>
+
+                      {/* 4 Structured Audit Facts */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono tabular-nums">
+                        {item.auditFacts.map((fact, fIdx) => (
+                          <div
+                            key={fIdx}
+                            className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 space-y-0.5"
+                          >
+                            <div className="text-[10px] text-slate-400">{fact.label}</div>
+                            <div className="text-[11px] font-semibold text-slate-100 break-words">
+                              {fact.value}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Concrete Article / Control Matrix */}
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-mono text-slate-400">
+                          Norm- &amp; Kontroll-Nachweis (Artikel / Annex)
+                        </div>
+                        <div className="space-y-2">
+                          {item.controlMatrix.map((row, rIdx) => (
+                            <div
+                              key={rIdx}
+                              className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 space-y-1"
+                            >
+                              <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                                <span className={`font-semibold ${item.accentTextClass}`}>
+                                  {row.reference}
+                                </span>
+                                <span className="text-emerald-400 shrink-0">✓ {row.verdict}</span>
+                              </div>
+                              <div className="text-[11px] font-medium text-slate-200 leading-snug">
+                                {row.auditQuestion}
+                              </div>
+                              <p className="text-[11px] text-slate-400 leading-relaxed">
+                                {row.technicalProof}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Clear Separation: Excluded by Architecture vs. Operator Duties */}
+                      <div className="space-y-2.5 pt-2 border-t border-slate-800/80">
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] font-mono text-emerald-400">
+                            Technisch ausgeschlossen (Architektur)
+                          </div>
+                          <ul className="space-y-1 text-[11px] text-slate-300 leading-relaxed">
+                            {item.excludedRisks.map((risk, idx) => (
+                              <li key={idx} className="flex items-start gap-1.5">
+                                <span className="text-emerald-400 font-mono shrink-0">✓</span>
+                                <span>{risk}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] font-mono text-amber-300">
+                            Organisatorische Verantwortung (Betreiber)
+                          </div>
+                          <ul className="space-y-1 text-[11px] text-slate-400 leading-relaxed">
+                            {item.operatorResponsibilities.map((duty, idx) => (
+                              <li key={idx} className="flex items-start gap-1.5">
+                                <span className="text-amber-300 font-mono shrink-0">•</span>
+                                <span>{duty}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+
+                      {/* Executable 60-Second Verification Block */}
+                      <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2 font-mono text-xs">
+                        <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400 border-b border-slate-800 pb-1.5">
+                          <span>{item.verificationBlock.title}</span>
+                          <span className={item.accentTextClass}>
+                            {item.verificationBlock.methodHint}
+                          </span>
+                        </div>
+                        <pre className="text-[10.5px] leading-relaxed text-slate-200 overflow-x-auto whitespace-pre">
+                          {item.verificationBlock.steps}
+                        </pre>
+                      </div>
+
+                      {/* 1-Click Copy Approval Statement for Internal IT-Security / DSB Ticket */}
+                      <div className="flex flex-col gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyComplianceApproval(item)}
+                          className="w-full min-h-[38px] px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-100 flex items-center justify-center gap-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+                        >
+                          {isCopied ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              <span className="text-emerald-300">
+                                Freigabetext in Zwischenablage kopiert
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5 text-slate-300 shrink-0" />
+                              <span>Freigabetext für IT-Security / DSB kopieren</span>
+                            </>
+                          )}
+                        </button>
+
+                        <p className="text-[11px] text-slate-400 leading-relaxed">
+                          {item.legalNote}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
         {/* Hero & Interactive Local HTML Builder Split */}
         <section
           id="builder"
-          className="grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8 lg:gap-10 items-stretch"
+          className="scroll-mt-20 grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8 lg:gap-10 items-stretch"
         >
           {/* Left Column: Explanation & Technical Local Guarantee */}
           <div className="lg:col-span-7 flex flex-col justify-between space-y-6">
@@ -1453,243 +1700,6 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                 )}
               </button>
             </div>
-          </div>
-        </section>
-
-        {/* Compliance & IT-Security-Freigabe Strip (Upper Area: 3 Expandable Inline-Detail Cards for DSGVO, ISO/IEC 27001 & NIS2) */}
-        <section
-          id="compliance-freigabe"
-          aria-labelledby="compliance-freigabe-heading"
-          className="border-t border-slate-800/90 pt-8 sm:pt-10 space-y-5"
-        >
-          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
-            <div className="space-y-1 max-w-3xl">
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-mono text-emerald-400">
-                <ShieldCheck className="w-4 h-4 shrink-0" />
-                <span>Compliance &amp; IT-Security-Freigabe</span>
-                <span aria-hidden="true">·</span>
-                <span className="text-slate-400">0-Byte-Offline-Nachweis</span>
-              </div>
-              <h2
-                id="compliance-freigabe-heading"
-                className="text-lg sm:text-xl font-bold text-slate-100"
-              >
-                Technisch geeignet für DSGVO-, ISO/IEC-27001- und NIS2-Umgebungen
-              </h2>
-              <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
-                Klappen Sie eine oder alle drei Boxen direkt auf, um die vollständige
-                Artikel-/Control-Prüfmatrix, Risiko-Abgrenzung, Prüfbefehle und eine fertige
-                Freigabe-Kurzstellungnahme für Datenschutz &amp; IT-Security einzusehen.
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={toggleAllCompliance}
-              className="self-start sm:self-end min-h-[38px] px-3 py-1.5 text-xs font-mono text-emerald-300 hover:text-emerald-200 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
-            >
-              {areAllComplianceExpanded ? (
-                <>
-                  <ChevronUp className="w-3.5 h-3.5 shrink-0" />
-                  <span>Alle 3 Nachweise einklappen</span>
-                </>
-              ) : (
-                <>
-                  <ChevronDown className="w-3.5 h-3.5 shrink-0" />
-                  <span>Alle 3 Nachweise ausklappen</span>
-                </>
-              )}
-            </button>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
-            {COMPLIANCE_SPECS.map((item) => {
-              const isExpanded = Boolean(expandedComplianceIds[item.id]);
-              const isCopied = copiedComplianceId === item.id;
-              return (
-                <div
-                  key={item.id}
-                  className={`rounded-xl p-4 sm:p-5 border transition-colors flex flex-col justify-between space-y-3.5 ${
-                    isExpanded
-                      ? item.activeBorderClass
-                      : 'bg-slate-900/60 border-slate-800/90 hover:border-slate-700'
-                  }`}
-                >
-                  {/* Card Header & Summary */}
-                  <div className="space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="space-y-0.5 min-w-0">
-                        <div className={`text-sm sm:text-base font-semibold ${item.accentTextClass}`}>
-                          {item.standardCode}
-                        </div>
-                        <div className="text-[11px] font-mono text-slate-400 tabular-nums">
-                          {item.normSubtitle}
-                        </div>
-                      </div>
-                      <span className="text-[10.5px] font-mono text-slate-300 text-right shrink-0">
-                        {item.statusLabel.split(' · ')[0]}
-                      </span>
-                    </div>
-
-                    <p className="text-xs text-slate-300 leading-relaxed">
-                      {item.shortStatement}
-                    </p>
-                  </div>
-
-                  {/* Direct Inline Expand / Collapse Button */}
-                  <button
-                    type="button"
-                    aria-expanded={isExpanded}
-                    onClick={() =>
-                      setExpandedComplianceIds((prev) => ({
-                        ...prev,
-                        [item.id]: !prev[item.id],
-                      }))
-                    }
-                    className="w-full min-h-[38px] px-3 py-2 rounded-lg bg-slate-950 hover:bg-slate-950/80 border border-slate-800 hover:border-emerald-500/40 text-xs font-mono text-emerald-300 flex items-center justify-between gap-2 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
-                  >
-                    <span className="truncate">
-                      {isExpanded
-                        ? 'Prüfmatrix & Nachweis einklappen'
-                        : 'Prüfmatrix, Risiken & Nachweis ausklappen'}
-                    </span>
-                    {isExpanded ? (
-                      <ChevronUp className="w-4 h-4 shrink-0" />
-                    ) : (
-                      <ChevronDown className="w-4 h-4 shrink-0" />
-                    )}
-                  </button>
-
-                  {/* Deep Inline Expansion Directly Inside the Card */}
-                  {isExpanded && (
-                    <div className="pt-3 border-t border-slate-800 space-y-4">
-                      <div className="space-y-1.5">
-                        <h3 className="text-xs sm:text-sm font-semibold text-slate-100 leading-snug">
-                          {item.deepDiveTitle}
-                        </h3>
-                        <p className="text-xs text-slate-300 leading-relaxed">
-                          {item.summary}
-                        </p>
-                      </div>
-
-                      {/* 4 Structured Audit Facts */}
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono tabular-nums">
-                        {item.auditFacts.map((fact, fIdx) => (
-                          <div
-                            key={fIdx}
-                            className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 space-y-0.5"
-                          >
-                            <div className="text-[10px] text-slate-400">{fact.label}</div>
-                            <div className="text-[11px] font-semibold text-slate-100 break-words">
-                              {fact.value}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-
-                      {/* Concrete Article / Control Matrix */}
-                      <div className="space-y-2">
-                        <div className="text-[11px] font-mono text-slate-400">
-                          Norm- &amp; Kontroll-Nachweis (Artikel / Annex)
-                        </div>
-                        <div className="space-y-2">
-                          {item.controlMatrix.map((row, rIdx) => (
-                            <div
-                              key={rIdx}
-                              className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 space-y-1"
-                            >
-                              <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
-                                <span className={`font-semibold ${item.accentTextClass}`}>
-                                  {row.reference}
-                                </span>
-                                <span className="text-emerald-400 shrink-0">✓ {row.verdict}</span>
-                              </div>
-                              <div className="text-[11px] font-medium text-slate-200 leading-snug">
-                                {row.auditQuestion}
-                              </div>
-                              <p className="text-[11px] text-slate-400 leading-relaxed">
-                                {row.technicalProof}
-                              </p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Clear Separation: Excluded by Architecture vs. Operator Duties */}
-                      <div className="space-y-2.5 pt-2 border-t border-slate-800/80">
-                        <div className="space-y-1.5">
-                          <div className="text-[11px] font-mono text-emerald-400">
-                            Technisch ausgeschlossen (Architektur)
-                          </div>
-                          <ul className="space-y-1 text-[11px] text-slate-300 leading-relaxed">
-                            {item.excludedRisks.map((risk, idx) => (
-                              <li key={idx} className="flex items-start gap-1.5">
-                                <span className="text-emerald-400 font-mono shrink-0">✓</span>
-                                <span>{risk}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-
-                        <div className="space-y-1.5">
-                          <div className="text-[11px] font-mono text-amber-300">
-                            Organisatorische Verantwortung (Betreiber)
-                          </div>
-                          <ul className="space-y-1 text-[11px] text-slate-400 leading-relaxed">
-                            {item.operatorResponsibilities.map((duty, idx) => (
-                              <li key={idx} className="flex items-start gap-1.5">
-                                <span className="text-amber-300 font-mono shrink-0">•</span>
-                                <span>{duty}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      </div>
-
-                      {/* Executable 60-Second Verification Block */}
-                      <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2 font-mono text-xs">
-                        <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400 border-b border-slate-800 pb-1.5">
-                          <span>{item.verificationBlock.title}</span>
-                          <span className={item.accentTextClass}>
-                            {item.verificationBlock.methodHint}
-                          </span>
-                        </div>
-                        <pre className="text-[10.5px] leading-relaxed text-slate-200 overflow-x-auto whitespace-pre">
-                          {item.verificationBlock.steps}
-                        </pre>
-                      </div>
-
-                      {/* 1-Click Copy Approval Statement for Internal IT-Security / DSB Ticket */}
-                      <div className="flex flex-col gap-2 pt-1">
-                        <button
-                          type="button"
-                          onClick={() => void handleCopyComplianceApproval(item)}
-                          className="w-full min-h-[38px] px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-100 flex items-center justify-center gap-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
-                        >
-                          {isCopied ? (
-                            <>
-                              <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                              <span className="text-emerald-300">
-                                Freigabetext in Zwischenablage kopiert
-                              </span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3.5 h-3.5 text-slate-300 shrink-0" />
-                              <span>Freigabetext für IT-Security / DSB kopieren</span>
-                            </>
-                          )}
-                        </button>
-
-                        <p className="text-[11px] text-slate-400 leading-relaxed">
-                          {item.legalNote}
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
           </div>
         </section>
 
