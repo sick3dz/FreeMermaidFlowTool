@@ -24,6 +24,10 @@ import {
   SEMANTIC_PALETTES,
   SMART_COLOR_NODE_TYPE_OPTIONS,
 } from './smartColorEngine';
+import {
+  CallflowSimulationModel,
+  GlobalSearchEntry,
+} from './callflowSimulator';
 
 const RESERVED_KEYWORDS = new Set([
   'flowchart',
@@ -3324,6 +3328,8 @@ export function generateInteractiveCallflowHtml(
     initialHiddenNodeTypes?: SmartColorNodeType[];
     initialIsolateSubgraph?: boolean;
     analysis?: InteractiveCallflowHtmlAnalysisPayload | null;
+    globalSearchIndex?: GlobalSearchEntry[] | null;
+    simulationModel?: CallflowSimulationModel | null;
   }
 ): string {
   const effectiveViews: InteractiveCallflowHtmlView[] =
@@ -3394,6 +3400,8 @@ export function generateInteractiveCallflowHtml(
     nodeTypeOptions: SMART_COLOR_NODE_TYPE_OPTIONS,
     semanticPalettes: SEMANTIC_PALETTES,
     analysis: options?.analysis || null,
+    globalSearchIndex: options?.globalSearchIndex || [],
+    simulationModel: options?.simulationModel || { scripts: [], dnisEntries: [] },
   }).replace(/<\/script>/gi, '<\\/script>');
 
   const initialSvg =
@@ -4165,6 +4173,201 @@ export function generateInteractiveCallflowHtml(
       white-space: pre-wrap;
       word-break: break-word;
     }
+    main.sidebar-collapsed aside {
+      display: none;
+    }
+    #minimap-box {
+      position: absolute;
+      right: 14px;
+      bottom: 14px;
+      z-index: 25;
+      display: none;
+      flex-direction: column;
+      background: var(--bg-header);
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+      overflow: hidden;
+      user-select: none;
+    }
+    #minimap-box.open {
+      display: flex;
+    }
+    .minimap-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 4px 8px;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      font-variant-numeric: tabular-nums;
+    }
+    #minimap-area {
+      position: relative;
+      margin: 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: var(--bg-canvas);
+      overflow: hidden;
+      cursor: crosshair;
+    }
+    #minimap-img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      pointer-events: none;
+      opacity: 0.88;
+    }
+    #minimap-viewport {
+      position: absolute;
+      top: 0;
+      left: 0;
+      border: 2px solid var(--accent-border);
+      background: rgba(99, 102, 241, 0.18);
+      border-radius: 2px;
+      pointer-events: none;
+      will-change: transform;
+    }
+    .gsearch-row {
+      width: 100%;
+      padding: 9px 14px;
+      text-align: left;
+      border: none;
+      border-bottom: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      cursor: pointer;
+    }
+    .gsearch-row:hover, .gsearch-row.active {
+      background: var(--bg-hover);
+    }
+    #call-sim-hud {
+      position: absolute;
+      bottom: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(780px, calc(100% - 24px));
+      z-index: 35;
+      display: none;
+      flex-direction: column;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+      overflow: hidden;
+      backdrop-filter: blur(8px);
+    }
+    #call-sim-hud.open { display: flex; }
+    .sim-hud-head {
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .sim-hud-setup {
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-input);
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .sim-hud-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .sim-hud-body {
+      padding: 9px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .sim-hud-timeline {
+      padding-top: 7px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow-x: auto;
+    }
+    .sim-step-seg {
+      padding: 3px 7px;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      color: var(--text-muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10.5px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      flex-shrink: 0;
+      cursor: pointer;
+    }
+    .sim-step-seg:hover { background: var(--bg-hover); color: var(--text-main); }
+    .sim-step-seg.past {
+      border-color: rgba(16, 185, 129, 0.35);
+      background: rgba(16, 185, 129, 0.1);
+      color: var(--text-main);
+    }
+    .sim-step-seg.current {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .sim-speed-group {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      padding: 1px;
+      background: var(--bg-input);
+    }
+    .sim-speed-btn {
+      padding: 2px 5px;
+      font-size: 10px;
+      font-family: ui-monospace, monospace;
+      font-variant-numeric: tabular-nums;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .sim-speed-btn.active {
+      background: var(--accent);
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .sim-status-tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border-strong);
+      font-size: 10.5px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .sim-status-tag.ok { border-color: rgba(16, 185, 129, 0.45); background: rgba(16, 185, 129, 0.14); color: #34d399; }
+    .sim-status-tag.jump { border-color: rgba(99, 102, 241, 0.45); background: rgba(99, 102, 241, 0.14); color: var(--accent-text); }
+    .sim-status-tag.warn { border-color: var(--amber-border); background: var(--amber-bg); color: var(--amber-text); }
+    .sim-status-tag.err { border-color: var(--err-border); background: var(--err-bg); color: var(--err-text); }
+    .sim-status-tag.muted { border-color: var(--border); background: var(--bg-input); color: var(--text-muted); }
+    body.light .sim-status-tag.ok { color: #047857; }
     @media (max-width: 960px) {
       main { flex-direction: column; }
       aside { width: 100%; height: 46vh; border-left: none; border-top: 1px solid var(--border); }
@@ -4194,6 +4397,8 @@ export function generateInteractiveCallflowHtml(
           <button type="button" class="seg-btn" data-density="detailed">Voll-Detail</button>
         </div>
         <button type="button" id="btn-open-schedules" title="Extra Fenster: Übersicht aller Öffnungszeiten, Zeitprofile &amp; SondZeit-Pläne öffnen" style="padding:3px 9px;font-size:11px;font-weight:600;border-radius:6px;border:1px solid var(--amber-border);background:var(--amber-bg);color:var(--amber-text);cursor:pointer;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;flex-shrink:0;">Öffnungszeiten <span id="btn-open-schedules-count" style="font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;"></span></button>
+        <button type="button" id="btn-call-simulator" style="display:none;padding:3px 9px;font-size:11px;font-weight:600;border-radius:6px;border:1px solid rgba(16,185,129,0.45);background:rgba(16,185,129,0.14);color:#34d399;cursor:pointer;align-items:center;gap:5px;white-space:nowrap;flex-shrink:0;" title="Interaktiver Anruf-Simulator live auf dem Callflow (Play/Pause, Vor &amp; Zurück)">Anruf-Simulator</button>
+        <button type="button" id="btn-global-search" title="Globale Suche über alle Skripte, DNIS, Queues &amp; Ansagen (Strg+K)" style="white-space:nowrap;">Suche <span style="opacity:0.65;font-family:ui-monospace,monospace;font-size:10px;">Strg+K</span></button>
         <button id="btn-master-back" style="display:none;" title="Zurück zur Master-Gesamtkarte (Ebene 1)">← Master-Karte</button>
       </div>
       <div class="seg-group" id="pathmode-group" title="Pfad-Färbung umschalten: Modus A (Semantik) vs. Modus B (Verzweigungen)">
@@ -4218,11 +4423,14 @@ export function generateInteractiveCallflowHtml(
       </div>
       <button id="btn-fit" title="Gesamtes Diagramm einpassen">Fit</button>
       <button id="btn-100" class="primary" title="Echte 1:1 Originalgröße">1:1</button>
+      <button id="btn-minimap" title="Übersichts-Minimap ein-/ausblenden (M)">Minimap</button>
+      <button id="btn-toggle-sidebar" title="Rechte Seitenleiste ein-/ausklappen (B)">Leiste</button>
+      <button id="btn-fullscreen" title="Vollbild umschalten (F)">Vollbild</button>
       <button id="btn-theme" title="Hell/Dunkel-Darstellung umschalten">${isDarkSurface ? '☀ Hell' : '☾ Dunkel'}</button>
       <button id="btn-reset" title="Alle Filter, Auswahl &amp; Zoom zurücksetzen">Reset</button>
     </div>
   </header>
-  <main>
+  <main id="main-layout">
     <div class="canvas-col">
       <div id="canvas-wrap">
         <div id="svg-stage">
@@ -4231,6 +4439,17 @@ export function generateInteractiveCallflowHtml(
             <img id="gpu-proxy-layer" alt="" draggable="false" />
           </div>
         </div>
+        <div id="minimap-box" aria-label="Diagramm-Minimap">
+          <div class="minimap-head">
+            <span id="minimap-zoom-label">Minimap</span>
+            <button type="button" id="btn-close-minimap" style="padding:1px 5px;font-size:10px;border:none;background:transparent;color:var(--text-muted);cursor:pointer;" title="Schließen (M)">✕</button>
+          </div>
+          <div id="minimap-area">
+            <img id="minimap-img" alt="Übersicht" draggable="false" />
+            <div id="minimap-viewport"></div>
+          </div>
+        </div>
+        <div id="call-sim-hud" aria-label="Interaktiver Anruf-Simulator"></div>
       </div>
       <div id="legend-bar"></div>
     </div>
@@ -4393,6 +4612,23 @@ export function generateInteractiveCallflowHtml(
         <button type="button" class="chip" data-cat="always-open">24/7 <span class="cat-cnt"></span></button>
       </div>
       <div id="modal-sched-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Global Search Modal (Strg+K) -->
+  <div id="global-search-modal-overlay" class="modal-backdrop">
+    <div class="modal-shell" style="max-width:700px;max-height:78vh;">
+      <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;background:var(--bg-header);flex-shrink:0;">
+        <input type="text" id="gsearch-input" placeholder="Skript, DNIS/Rufnummer, Queue, Ansage, CDN oder Uhrzeit suchen..." style="flex:1;background:var(--bg-card);border:1px solid var(--border-strong);color:var(--text-main);padding:8px 11px;border-radius:6px;font-size:13px;font-family:inherit;outline:none;" />
+        <span id="gsearch-count" style="font-size:11px;color:var(--text-muted);font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;white-space:nowrap;">0 Treffer</span>
+        <button type="button" id="btn-close-gsearch" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:4px 8px;" title="Schließen (Esc)">✕</button>
+      </div>
+      <div id="gsearch-cats" style="padding:8px 16px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:6px;background:var(--bg-input);flex-shrink:0;"></div>
+      <div id="gsearch-results" class="modal-body" style="padding:0;"></div>
+      <div class="modal-footer" style="padding:8px 16px;font-size:11px;color:var(--text-muted);">
+        <span>↑ ↓ Navigieren · Enter Öffnen · Esc Schließen</span>
+        <span style="font-family:ui-monospace,monospace;">Strg+K</span>
+      </div>
     </div>
   </div>
 
@@ -5135,6 +5371,12 @@ export function generateInteractiveCallflowHtml(
     }
 
     function syncGpuProxyState(forceGesture) {
+      const activeViewObj = viewsByKey.get(activeViewKey);
+      const activeSvgEl = svgLayer ? svgLayer.querySelector('svg') : null;
+      if (!activeViewObj || !activeSvgEl || !isLargeViewSvg(activeSvgEl, activeViewObj.graph)) {
+        delete wrap.dataset.gpuProxy;
+        return;
+      }
       const cacheKey = activeViewKey + '|' + getCurrentThemeSig();
       const entry = gpuProxyCache.get(cacheKey);
       if (!entry) {
@@ -5159,10 +5401,10 @@ export function generateInteractiveCallflowHtml(
       }
     }
 
-    function ensureGpuProxyForView(viewKey, svgEl) {
+    function ensureGpuProxyForView(viewKey, svgEl, forceForMinimap) {
       const viewObj = viewsByKey.get(viewKey);
       if (!svgEl || !viewObj) return;
-      if (!isLargeViewSvg(svgEl, viewObj.graph)) {
+      if (!forceForMinimap && !isLargeViewSvg(svgEl, viewObj.graph) && !minimapOpen) {
         if (viewKey === activeViewKey) applyProxyImgElement(null);
         return;
       }
@@ -5170,8 +5412,13 @@ export function generateInteractiveCallflowHtml(
       const existing = gpuProxyCache.get(cacheKey);
       if (existing) {
         if (viewKey === activeViewKey) {
-          applyProxyImgElement(existing);
-          syncGpuProxyState(false);
+          if (isLargeViewSvg(svgEl, viewObj.graph)) {
+            applyProxyImgElement(existing);
+            syncGpuProxyState(false);
+          } else {
+            applyProxyImgElement(null);
+          }
+          syncMinimapImage(existing);
         }
         return;
       }
@@ -5210,8 +5457,11 @@ export function generateInteractiveCallflowHtml(
                 const entry = { url, width: w, height: h };
                 gpuProxyCache.set(cacheKey, entry);
                 if (viewKey === activeViewKey && cacheKey === activeViewKey + '|' + getCurrentThemeSig()) {
-                  applyProxyImgElement(entry);
-                  syncGpuProxyState(false);
+                  if (isLargeViewSvg(svgEl, viewObj.graph)) {
+                    applyProxyImgElement(entry);
+                    syncGpuProxyState(false);
+                  }
+                  syncMinimapImage(entry);
                 }
               }, 'image/png');
               return;
@@ -5300,6 +5550,7 @@ export function generateInteractiveCallflowHtml(
 
     function applyTransformImmediate() {
       stage.style.transform = 'translate3d(' + panX + 'px,' + panY + 'px,0) scale(' + zoom + ')';
+      updateMinimapViewport();
     }
 
     function updateTransform(activeGesture) {
@@ -7227,6 +7478,1117 @@ export function generateInteractiveCallflowHtml(
       fitToWindow();
     });
 
+    // =========================================================================
+    // MINIMAP, COLLAPSIBLE SIDEBAR & FULLSCREEN
+    // =========================================================================
+    const mainLayoutEl = document.getElementById('main-layout');
+    const minimapBoxEl = document.getElementById('minimap-box');
+    const minimapAreaEl = document.getElementById('minimap-area');
+    const minimapImgEl = document.getElementById('minimap-img');
+    const minimapVpEl = document.getElementById('minimap-viewport');
+    const minimapZoomLabelEl = document.getElementById('minimap-zoom-label');
+    const btnMinimap = document.getElementById('btn-minimap');
+    const btnCloseMinimap = document.getElementById('btn-close-minimap');
+    const btnToggleSidebar = document.getElementById('btn-toggle-sidebar');
+    const btnFullscreen = document.getElementById('btn-fullscreen');
+
+    let minimapOpen = false;
+    let minimapDragging = false;
+    let minimapDims = { mapW: 196, mapH: 120, scale: 0.1, svgW: 1200, svgH: 800 };
+
+    function syncMinimapImage(proxyEntry) {
+      if (!minimapImgEl) return;
+      if (proxyEntry && proxyEntry.url) {
+        minimapImgEl.src = proxyEntry.url;
+        minimapImgEl.style.visibility = 'visible';
+      } else {
+        minimapImgEl.removeAttribute('src');
+        minimapImgEl.style.visibility = 'hidden';
+      }
+      updateMinimapViewport();
+    }
+
+    function updateMinimapViewport() {
+      if (!minimapOpen || !minimapAreaEl || !minimapVpEl) return;
+      const svgEl = svgLayer.querySelector('svg');
+      const svgW = Math.max(100, parseFloat((svgEl && svgEl.getAttribute('width')) || '1200'));
+      const svgH = Math.max(100, parseFloat((svgEl && svgEl.getAttribute('height')) || '800'));
+      const scale = Math.min(216 / svgW, 144 / svgH);
+      const mapW = Math.max(88, Math.round(svgW * scale));
+      const mapH = Math.max(58, Math.round(svgH * scale));
+      minimapDims = { mapW, mapH, scale, svgW, svgH };
+      minimapAreaEl.style.width = mapW + 'px';
+      minimapAreaEl.style.height = mapH + 'px';
+
+      const rect = wrap.getBoundingClientRect();
+      const safeZoom = Math.max(0.05, zoom);
+      const visW = Math.max(100, rect.width) / safeZoom;
+      const visH = Math.max(100, rect.height) / safeZoom;
+      const worldCx = svgW / 2 - panX / safeZoom;
+      const worldCy = svgH / 2 - panY / safeZoom;
+
+      const boxW = Math.min(mapW, Math.max(14, visW * scale));
+      const boxH = Math.min(mapH, Math.max(10, visH * scale));
+      const boxL = Math.max(0, Math.min(mapW - boxW, (worldCx - visW / 2) * scale));
+      const boxT = Math.max(0, Math.min(mapH - boxH, (worldCy - visH / 2) * scale));
+
+      minimapVpEl.style.width = boxW + 'px';
+      minimapVpEl.style.height = boxH + 'px';
+      minimapVpEl.style.transform = 'translate3d(' + boxL + 'px,' + boxT + 'px,0)';
+      if (minimapZoomLabelEl) minimapZoomLabelEl.textContent = 'Minimap · ' + Math.round(safeZoom * 100) + '%';
+    }
+
+    function panFromMinimapPoint(clientX, clientY) {
+      if (!minimapAreaEl) return;
+      const r = minimapAreaEl.getBoundingClientRect();
+      const relX = Math.max(0, Math.min(r.width, clientX - r.left));
+      const relY = Math.max(0, Math.min(r.height, clientY - r.top));
+      const targetWorldX = relX / minimapDims.scale;
+      const targetWorldY = relY / minimapDims.scale;
+      const safeZoom = Math.max(0.05, zoom);
+      panX = (minimapDims.svgW / 2 - targetWorldX) * safeZoom;
+      panY = (minimapDims.svgH / 2 - targetWorldY) * safeZoom;
+      updateTransform(true);
+    }
+
+    function setMinimapOpen(nextOpen) {
+      minimapOpen = Boolean(nextOpen);
+      if (minimapBoxEl) minimapBoxEl.classList.toggle('open', minimapOpen);
+      if (btnMinimap) btnMinimap.classList.toggle('btn-active', minimapOpen);
+      if (minimapOpen) {
+        const activeSvg = svgLayer.querySelector('svg');
+        ensureGpuProxyForView(activeViewKey, activeSvg, true);
+        updateMinimapViewport();
+      }
+    }
+
+    if (btnMinimap) btnMinimap.addEventListener('click', () => setMinimapOpen(!minimapOpen));
+    if (btnCloseMinimap) btnCloseMinimap.addEventListener('click', () => setMinimapOpen(false));
+    if (minimapAreaEl) {
+      minimapAreaEl.addEventListener('mousedown', e => {
+        e.stopPropagation();
+        e.preventDefault();
+        minimapDragging = true;
+        panFromMinimapPoint(e.clientX, e.clientY);
+      });
+    }
+    window.addEventListener('mousemove', e => {
+      if (!minimapDragging) return;
+      panFromMinimapPoint(e.clientX, e.clientY);
+    });
+    window.addEventListener('mouseup', () => {
+      if (minimapDragging) {
+        minimapDragging = false;
+        updateTransform(false);
+      }
+    });
+    window.addEventListener('resize', () => updateMinimapViewport());
+
+    function toggleSidebar() {
+      if (!mainLayoutEl) return;
+      const collapsed = mainLayoutEl.classList.toggle('sidebar-collapsed');
+      if (btnToggleSidebar) {
+        btnToggleSidebar.classList.toggle('btn-active', collapsed);
+        btnToggleSidebar.textContent = collapsed ? 'Leiste ein' : 'Leiste';
+      }
+      setTimeout(() => updateMinimapViewport(), 40);
+    }
+    if (btnToggleSidebar) btnToggleSidebar.addEventListener('click', toggleSidebar);
+
+    function syncFullscreenBtn() {
+      if (!btnFullscreen) return;
+      const isFs = Boolean(document.fullscreenElement);
+      btnFullscreen.classList.toggle('btn-active', isFs);
+      btnFullscreen.textContent = isFs ? 'Vollbild aus' : 'Vollbild';
+    }
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        if (document.documentElement.requestFullscreen) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        }
+      } else if (document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+    if (btnFullscreen) btnFullscreen.addEventListener('click', toggleFullscreen);
+    document.addEventListener('fullscreenchange', syncFullscreenBtn);
+
+    // =========================================================================
+    // GLOBAL SEARCH ACROSS ALL SCRIPTS (Strg+K)
+    // =========================================================================
+    const gsearchOverlay = document.getElementById('global-search-modal-overlay');
+    const gsearchInput = document.getElementById('gsearch-input');
+    const gsearchCatsEl = document.getElementById('gsearch-cats');
+    const gsearchResultsEl = document.getElementById('gsearch-results');
+    const gsearchCountEl = document.getElementById('gsearch-count');
+    const btnGlobalSearch = document.getElementById('btn-global-search');
+    const btnCloseGsearch = document.getElementById('btn-close-gsearch');
+
+    const GSEARCH_CAT_LABELS = {
+      all: 'Alle',
+      script: 'Skripte',
+      dnis: 'DNIS',
+      queue: 'Queues',
+      announcement: 'Ansagen',
+      schedule: 'Zeiten',
+      cdn: 'CDN',
+      node: 'Elemente',
+    };
+
+    const GLOBAL_SEARCH_ENTRIES = (() => {
+      if (Array.isArray(PAYLOAD.globalSearchIndex) && PAYLOAD.globalSearchIndex.length > 0) {
+        return PAYLOAD.globalSearchIndex;
+      }
+      const fallback = [];
+      PAYLOAD.views.forEach(v => {
+        if (v.masterViewVariant === 'detailed') return;
+        (v.graph && v.graph.nodes ? v.graph.nodes : []).forEach(n => {
+          fallback.push({
+            id: v.key + ':' + n.id,
+            category: 'node',
+            title: n.label,
+            subtitle: v.label + ' · ' + n.id,
+            searchText: (n.label + ' ' + n.id + ' ' + v.label).toLowerCase(),
+            viewKey: v.key,
+            scriptNumber: v.scriptNumber || undefined,
+            nodeId: n.id,
+          });
+        });
+      });
+      return fallback;
+    })();
+
+    let gsearchActiveCat = 'all';
+    let gsearchSelectedIdx = 0;
+    let gsearchCurrentList = [];
+
+    function renderGlobalSearchCats() {
+      if (!gsearchCatsEl) return;
+      const counts = { all: GLOBAL_SEARCH_ENTRIES.length };
+      GLOBAL_SEARCH_ENTRIES.forEach(e => {
+        counts[e.category] = (counts[e.category] || 0) + 1;
+      });
+      const order = ['all', 'script', 'dnis', 'queue', 'announcement', 'schedule', 'cdn', 'node'];
+      gsearchCatsEl.innerHTML = '';
+      order.forEach(cat => {
+        if (cat !== 'all' && !counts[cat]) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'chip' + (gsearchActiveCat === cat ? ' active' : '');
+        btn.innerHTML = escapeHtml(GSEARCH_CAT_LABELS[cat] || cat) + ' <span style="font-family:ui-monospace,monospace;opacity:0.8;">' + (counts[cat] || 0) + '</span>';
+        btn.addEventListener('click', () => {
+          gsearchActiveCat = cat;
+          gsearchSelectedIdx = 0;
+          renderGlobalSearchCats();
+          renderGlobalSearchResults();
+        });
+        gsearchCatsEl.appendChild(btn);
+      });
+    }
+
+    function jumpToGlobalSearchEntry(entry) {
+      if (!entry) return;
+      closeGlobalSearchModal();
+      const targetViewKey =
+        (entry.viewKey && viewsByKey.has(entry.viewKey) ? entry.viewKey : null) ||
+        (entry.scriptNumber && PAYLOAD.viewKeyByScriptNumber[entry.scriptNumber]) ||
+        activeViewKey;
+      if (targetViewKey && targetViewKey !== activeViewKey) {
+        switchView(targetViewKey);
+      }
+      // Resolve exact nodeId or best matching label in target graph
+      let focusId = entry.nodeId && nodeMap.has(entry.nodeId) ? entry.nodeId : null;
+      if (!focusId && entry.title) {
+        const needle = entry.title.toLowerCase();
+        const matched = GRAPH.nodes.find(n => (n.label || '').toLowerCase().includes(needle));
+        if (matched) focusId = matched.id;
+      }
+      if (focusId) {
+        selectNode(focusId, true);
+      }
+    }
+
+    function renderGlobalSearchResults() {
+      if (!gsearchResultsEl) return;
+      const rawQ = (gsearchInput ? gsearchInput.value : '').trim().toLowerCase();
+      const tokens = rawQ ? rawQ.split(/\s+/).filter(Boolean) : [];
+      let list = GLOBAL_SEARCH_ENTRIES.filter(e => {
+        if (gsearchActiveCat !== 'all' && e.category !== gsearchActiveCat) return false;
+        if (tokens.length === 0) return true;
+        return tokens.every(t => (e.searchText || '').includes(t));
+      });
+      if (rawQ) {
+        list = list.slice().sort((a, b) => {
+          const at = (a.title || '').toLowerCase();
+          const bt = (b.title || '').toLowerCase();
+          const ar = at === rawQ ? 0 : at.startsWith(rawQ) ? 1 : at.includes(rawQ) ? 2 : 3;
+          const br = bt === rawQ ? 0 : bt.startsWith(rawQ) ? 1 : bt.includes(rawQ) ? 2 : 3;
+          if (ar !== br) return ar - br;
+          return at.localeCompare(bt, 'de', { numeric: true });
+        });
+      }
+      gsearchCurrentList = list.slice(0, 120);
+      if (gsearchSelectedIdx >= gsearchCurrentList.length) gsearchSelectedIdx = 0;
+      if (gsearchCountEl) gsearchCountEl.textContent = gsearchCurrentList.length + ' Treffer';
+
+      gsearchResultsEl.innerHTML = '';
+      if (gsearchCurrentList.length === 0) {
+        gsearchResultsEl.innerHTML = '<div style="padding:28px;text-align:center;color:var(--text-muted);font-size:12.5px;">Keine Treffer gefunden.</div>';
+        return;
+      }
+      gsearchCurrentList.forEach((item, idx) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'gsearch-row' + (idx === gsearchSelectedIdx ? ' active' : '');
+        const catTxt = GSEARCH_CAT_LABELS[item.category] || item.category;
+        btn.innerHTML =
+          '<div style="min-width:0;flex:1;">' +
+            '<div style="display:flex;align-items:center;gap:6px;font-size:12px;">' +
+              '<span style="color:var(--accent-text);font-weight:600;white-space:nowrap;">' + escapeHtml(catTxt) + '</span>' +
+              '<span style="color:var(--text-muted);">·</span>' +
+              '<span style="font-family:ui-monospace,monospace;font-weight:600;color:var(--text-main);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(item.title) + '</span>' +
+            '</div>' +
+            '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+              escapeHtml(item.subtitle + (item.meta ? ' · ' + item.meta : '')) +
+            '</div>' +
+          '</div>' +
+          '<span style="color:var(--text-muted);font-size:12px;flex-shrink:0;">→</span>';
+        btn.addEventListener('mouseenter', () => {
+          gsearchSelectedIdx = idx;
+          gsearchResultsEl.querySelectorAll('.gsearch-row').forEach((el, i) => el.classList.toggle('active', i === idx));
+        });
+        btn.addEventListener('click', () => jumpToGlobalSearchEntry(item));
+        gsearchResultsEl.appendChild(btn);
+      });
+    }
+
+    function openGlobalSearchModal() {
+      if (!gsearchOverlay) return;
+      gsearchOverlay.classList.add('open');
+      gsearchSelectedIdx = 0;
+      renderGlobalSearchCats();
+      renderGlobalSearchResults();
+      if (gsearchInput) {
+        gsearchInput.value = '';
+        setTimeout(() => gsearchInput.focus(), 20);
+      }
+    }
+
+    function closeGlobalSearchModal() {
+      if (gsearchOverlay) gsearchOverlay.classList.remove('open');
+    }
+
+    if (btnGlobalSearch) btnGlobalSearch.addEventListener('click', openGlobalSearchModal);
+    if (btnCloseGsearch) btnCloseGsearch.addEventListener('click', closeGlobalSearchModal);
+    if (gsearchOverlay) {
+      gsearchOverlay.addEventListener('click', e => {
+        if (e.target === gsearchOverlay) closeGlobalSearchModal();
+      });
+    }
+    if (gsearchInput) {
+      gsearchInput.addEventListener('input', () => {
+        gsearchSelectedIdx = 0;
+        renderGlobalSearchResults();
+      });
+      gsearchInput.addEventListener('keydown', e => {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          gsearchSelectedIdx = Math.min(Math.max(0, gsearchCurrentList.length - 1), gsearchSelectedIdx + 1);
+          renderGlobalSearchResults();
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          gsearchSelectedIdx = Math.max(0, gsearchSelectedIdx - 1);
+          renderGlobalSearchResults();
+        } else if (e.key === 'Enter' && gsearchCurrentList[gsearchSelectedIdx]) {
+          e.preventDefault();
+          jumpToGlobalSearchEntry(gsearchCurrentList[gsearchSelectedIdx]);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          closeGlobalSearchModal();
+        }
+      });
+    }
+
+    // =========================================================================
+    // LIVE INTERACTIVE CALL SIMULATOR HUD IN CALLFLOW.HTML
+    // =========================================================================
+    const SIM_MODEL = PAYLOAD.simulationModel || { scripts: [], dnisEntries: [] };
+    const btnCallSim = document.getElementById('btn-call-simulator');
+    const callSimHud = document.getElementById('call-sim-hud');
+
+    if (btnCallSim && SIM_MODEL.scripts && SIM_MODEL.scripts.length > 0) {
+      btnCallSim.style.display = 'inline-flex';
+    }
+
+    const simNow = new Date();
+    const simDayOrder = ['so', 'mo', 'di', 'mi', 'do', 'fr', 'sa'];
+    const SIM_SPEED_MS = { 0.5: 2800, 1: 1500, 1.5: 1000, 2: 680 };
+    const simState = {
+      active: false,
+      setupOpen: true,
+      isPlaying: false,
+      stepIndex: 0,
+      speed: 1,
+      startScriptNumber: (SIM_MODEL.scripts.find(s => s.isMaster) || SIM_MODEL.scripts[0] || {}).scriptNumber || '',
+      dialedDnis: '',
+      weekday: simDayOrder[simNow.getDay()] || 'mo',
+      timeHHMM: String(simNow.getHours()).padStart(2, '0') + ':' + String(simNow.getMinutes()).padStart(2, '0'),
+      isHoliday: false,
+      isSondZeit: false,
+      showSkipped: false,
+      dtmfChoices: {},
+      dynamicOverrides: {},
+      lastFocusedKey: '',
+    };
+    let simTimerId = null;
+
+    if (callSimHud) {
+      callSimHud.addEventListener('mousedown', e => e.stopPropagation());
+      callSimHud.addEventListener('wheel', e => e.stopPropagation());
+      callSimHud.addEventListener('touchstart', e => e.stopPropagation());
+    }
+
+    function simParseClockMin(raw) {
+      const m = String(raw || '').trim().match(/^(\d{1,2})[:.](\d{2})$/);
+      if (!m) return 600;
+      return Math.min(1440, Number(m[1]) * 60 + Number(m[2]));
+    }
+    function simTimeMatches(tMin, r) {
+      if (r.startMin <= r.endMin) return tMin >= r.startMin && tMin < r.endMin;
+      return tMin >= r.startMin || tMin < r.endMin;
+    }
+    function simNormDnis(v) { return String(v || '').replace(/[^0-9+*#]/g, ''); }
+    function simDnisMatches(dialed, pat) {
+      const d = simNormDnis(dialed);
+      const p = simNormDnis(pat);
+      if (!d || !p) return false;
+      if (d === p) return true;
+      if (p.endsWith('*') || String(pat).toLowerCase().includes('x')) {
+        const pref = p.replace(/\*+$/, '');
+        if (pref && d.startsWith(pref)) return true;
+      }
+      return d.endsWith(p) || p.endsWith(d);
+    }
+    function simCanonicalKey(ref) {
+      return String(ref || '').trim().toLowerCase().replace(/^0+(?=\d)/, '');
+    }
+    function simNodeSuffix(ref) {
+      return String(ref || '').replace(/[^A-Za-z0-9_]/g, '_');
+    }
+
+    function runHtmlCallSimulation() {
+      const byKey = new Map();
+      (SIM_MODEL.scripts || []).forEach(s => {
+        byKey.set(s.scriptNumber, s);
+        byKey.set(simCanonicalKey(s.scriptNumber), s);
+        if (s.cdnAlias) {
+          byKey.set(s.cdnAlias, s);
+          byKey.set(simCanonicalKey(s.cdnAlias), s);
+        }
+      });
+      const resolveS = ref => (!ref ? null : byKey.get(ref) || byKey.get(simCanonicalKey(ref)) || null);
+      const startScript = resolveS(simState.startScriptNumber) || SIM_MODEL.scripts[0];
+      if (!startScript) {
+        return { outcomeType: 'script-end', outcomeTitle: 'Kein Skript geladen', outcomeDetail: '', finalScriptNumber: '', visitedScripts: [], totalWaitSeconds: 0, steps: [], dynamicPrompts: [] };
+      }
+
+      const dayLabels = { mo: 'Mo', di: 'Di', mi: 'Mi', do: 'Do', fr: 'Fr', sa: 'Sa', so: 'So' };
+      const tMin = simParseClockMin(simState.timeHHMM);
+      const steps = [];
+      const visitedScripts = [];
+      const dynamicPrompts = [];
+      let totalWaitSeconds = 0;
+      let current = startScript;
+      let lastAnnouncement = '';
+      let hop = 0;
+
+      steps.push({
+        index: 1,
+        scriptNumber: startScript.scriptNumber,
+        scriptName: startScript.scriptName,
+        kind: 'entry',
+        statusLabel: 'Start',
+        title: 'Anruf-Eingang: ' + startScript.scriptNumber + ' · ' + startScript.scriptName,
+        detail: [
+          simState.dialedDnis ? 'DNIS ' + simState.dialedDnis : null,
+          dayLabels[simState.weekday] + ' ' + simState.timeHHMM,
+          simState.isHoliday ? 'Feiertag aktiv' : null,
+          simState.isSondZeit ? 'SondZeit aktiv' : null,
+        ].filter(Boolean).join(' · '),
+        reason: 'Startpunkt der Simulation',
+        targetNodeId: startScript.entryNodeId || ('SELF_' + simNodeSuffix(startScript.scriptNumber)),
+        fallbackNodeId: 'S_' + simNodeSuffix(startScript.scriptNumber),
+      });
+
+      while (current && hop < 24) {
+        hop++;
+        if (visitedScripts.includes(current.scriptNumber)) {
+          steps.push({
+            index: steps.length + 1,
+            scriptNumber: current.scriptNumber,
+            scriptName: current.scriptName,
+            kind: 'cycle-guard',
+            statusLabel: 'Zyklus',
+            title: 'Rücksprung / Zyklus erkannt (' + current.scriptNumber + ')',
+            detail: 'Skript wurde bereits durchlaufen.',
+            reason: 'Zyklus-Schutz',
+            targetNodeId: current.entryNodeId || ('SELF_' + simNodeSuffix(current.scriptNumber)),
+            fallbackNodeId: 'S_' + simNodeSuffix(current.scriptNumber),
+          });
+          return { outcomeType: 'cycle', outcomeTitle: 'Zyklus bei Skript ' + current.scriptNumber, outcomeDetail: 'Routing kehrt zu ' + current.scriptNumber + ' zurück.', finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+        }
+        if (visitedScripts.length > 0) {
+          steps.push({
+            index: steps.length + 1,
+            scriptNumber: current.scriptNumber,
+            scriptName: current.scriptName,
+            kind: 'entry',
+            statusLabel: 'Skript-Wechsel',
+            title: 'Eintritt in Zielskript ' + current.scriptNumber + ' · ' + current.scriptName,
+            detail: (current.rules || []).length + ' Routing-Regeln werden nach Priorität geprüft.',
+            reason: 'Automatischer Wechsel in das aufgerufene Zielskript',
+            targetNodeId: current.entryNodeId || ('SELF_' + simNodeSuffix(current.scriptNumber)),
+            fallbackNodeId: 'S_' + simNodeSuffix(current.scriptNumber),
+          });
+        }
+        visitedScripts.push(current.scriptNumber);
+        let jumped = null;
+
+        for (let rIdx = 0; rIdx < (current.rules || []).length; rIdx++) {
+          const rule = current.rules[rIdx];
+          const ruleNodeId = rule.stepNodeId || ('STEP_' + simNodeSuffix(current.scriptNumber) + '_' + (rIdx + 1));
+          const entryFallback = current.entryNodeId || ('SELF_' + simNodeSuffix(current.scriptNumber));
+          let matched = true;
+          let reason = 'Standard-Regel';
+
+          if (rule.dnisMatchValues && rule.dnisMatchValues.length > 0) {
+            if (simState.dialedDnis.trim()) {
+              const hit = rule.dnisMatchValues.some(v => simDnisMatches(simState.dialedDnis, v));
+              if (!hit) {
+                matched = false;
+                reason = 'DNIS ' + simState.dialedDnis + ' passt nicht zu ' + rule.dnisMatchValues.slice(0, 3).join(', ');
+              } else {
+                reason = 'DNIS ' + simState.dialedDnis + ' trifft Regel';
+              }
+            } else if (current.isMaster) {
+              matched = false;
+              reason = 'Wartet auf passende DNIS (' + rule.dnisMatchValues.slice(0, 2).join(', ') + ')';
+            }
+          }
+
+          if (matched && rule.isHolidayRule) {
+            if (simState.isHoliday) reason = 'Feiertag aktiv — Feiertagsregel greift';
+            else { matched = false; reason = 'Kein Feiertag aktiv'; }
+          }
+
+          if (matched && rule.isSondZeitRule) {
+            if (simState.isSondZeit) reason = 'SondZeit aktiv — Sonderregel greift';
+            else { matched = false; reason = 'SondZeit inaktiv'; }
+          }
+
+          if (matched && !rule.isAlwaysOpen) {
+            const hasDays = Array.isArray(rule.weekdays) && rule.weekdays.length > 0;
+            const hasTimes = Array.isArray(rule.timeRanges) && rule.timeRanges.length > 0;
+            if (hasDays || hasTimes) {
+              const dayOk = !hasDays || rule.weekdays.includes(simState.weekday);
+              const timeOk = !hasTimes || rule.timeRanges.some(r => simTimeMatches(tMin, r));
+              const isNeg = /\b(nicht|not|außerhalb|ausserhalb|closed|geschlossen|else|sonst)\b/i.test((rule.conditionRaw || '') + ' ' + (rule.stepName || ''));
+              const finalHit = isNeg ? !(dayOk && timeOk) : (dayOk && timeOk);
+              const desc = [
+                hasDays ? rule.weekdays.map(d => dayLabels[d]).join(',') : null,
+                hasTimes ? rule.timeRanges.map(r => r.raw).join(' / ') : null,
+              ].filter(Boolean).join(' ');
+              if (!finalHit) {
+                matched = false;
+                reason = isNeg ? 'Innerhalb ' + desc + ' — nicht erfüllt' : 'Außerhalb Zeitfenster (' + desc + ')';
+              } else {
+                reason = isNeg ? 'Außerhalb ' + desc + ' — erfüllt' : 'Zeitfenster erfüllt (' + desc + ')';
+              }
+            }
+          } else if (matched && rule.isAlwaysOpen) {
+            reason = '24/7 Regel (immer aktiv)';
+          }
+
+          if (matched && rule.isDynamicCondition) {
+            const dynKey = current.scriptNumber + ':' + rule.id;
+            const isAct = simState.dynamicOverrides[dynKey] === true;
+            dynamicPrompts.push({ key: dynKey, scriptNumber: current.scriptNumber, prio: rule.prio, label: rule.conditionRaw || rule.stepName, active: isAct });
+            if (!isAct) {
+              matched = false;
+              reason = 'Laufzeit-Bedingung inaktiv (umschaltbar)';
+            } else {
+              reason = 'Laufzeit-Bedingung manuell aktiviert';
+            }
+          }
+
+          if (!matched) {
+            steps.push({
+              index: steps.length + 1,
+              scriptNumber: current.scriptNumber,
+              scriptName: current.scriptName,
+              prio: rule.prio,
+              kind: 'rule-skipped',
+              statusLabel: 'Übersprungen',
+              title: 'Prio ' + rule.prio + ' · ' + rule.stepName,
+              detail: rule.conditionRaw || rule.scheduleRaw || 'Bedingung nicht erfüllt',
+              reason,
+              targetNodeId: ruleNodeId,
+              fallbackNodeId: entryFallback,
+            });
+            continue;
+          }
+
+          if (typeof rule.waitSeconds === 'number' && rule.waitSeconds > 0) totalWaitSeconds += rule.waitSeconds;
+          if (rule.announcement) lastAnnouncement = rule.announcement;
+
+          if (Array.isArray(rule.choices) && rule.choices.length > 0) {
+            const dtmfKey = current.scriptNumber + ':' + rule.id;
+            const chosenDigit = simState.dtmfChoices[dtmfKey];
+            const chosen = chosenDigit ? rule.choices.find(c => c.choice === chosenDigit) : null;
+            if (!chosen) {
+              steps.push({
+                index: steps.length + 1,
+                scriptNumber: current.scriptNumber,
+                scriptName: current.scriptName,
+                prio: rule.prio,
+                kind: 'dtmf-prompt',
+                statusLabel: 'Wahl nötig',
+                title: 'Prio ' + rule.prio + ' · Auswahlmenü (DTMF)',
+                detail: rule.choices.length + ' Tasten verfügbar — Taste wählen, um fortzufahren.',
+                reason,
+                targetNodeId: ruleNodeId,
+                fallbackNodeId: entryFallback,
+              });
+              return {
+                outcomeType: 'dtmf-wait',
+                outcomeTitle: 'DTMF-Menü in ' + current.scriptNumber + ' (' + current.scriptName + ')',
+                outcomeDetail: 'Wählen Sie eine Ziffer aus, um den weiteren Callflow zu prüfen.',
+                finalScriptNumber: current.scriptNumber,
+                visitedScripts,
+                totalWaitSeconds,
+                steps,
+                pendingDtmf: { key: dtmfKey, scriptNumber: current.scriptNumber, scriptName: current.scriptName, choices: rule.choices },
+                dynamicPrompts,
+              };
+            }
+            steps.push({
+              index: steps.length + 1,
+              scriptNumber: current.scriptNumber,
+              scriptName: current.scriptName,
+              prio: rule.prio,
+              kind: 'jump',
+              statusLabel: 'Erfüllt',
+              title: 'Prio ' + rule.prio + ' · Taste ' + chosen.choice + ' gewählt',
+              detail: 'Weiterleitung zu ' + chosen.targetNumber + (chosen.label ? ' (' + chosen.label + ')' : ''),
+              reason: 'DTMF Taste ' + chosen.choice,
+              targetScriptNumber: chosen.targetNumber,
+              targetNodeId: chosen.choiceNodeId || ruleNodeId,
+              fallbackNodeId: ruleNodeId,
+            });
+            const nextS = resolveS(chosen.targetNumber);
+            if (nextS) { jumped = nextS; break; }
+            return { outcomeType: 'external', outcomeTitle: 'Weiterleitung: ' + chosen.targetNumber, outcomeDetail: 'Taste ' + chosen.choice + ' routet an ' + chosen.targetNumber, finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+          }
+
+          if (rule.queueTarget) {
+            steps.push({
+              index: steps.length + 1,
+              scriptNumber: current.scriptNumber,
+              scriptName: current.scriptName,
+              prio: rule.prio,
+              kind: 'outcome',
+              statusLabel: 'Ziel erreicht',
+              title: 'Prio ' + rule.prio + ' · Queue ' + rule.queueTarget,
+              detail: rule.announcement ? 'Ansage: ' + rule.announcement : 'Zustellung in Warteschlange',
+              reason,
+              queueTarget: rule.queueTarget,
+              focusHint: rule.queueTarget,
+              targetNodeId: ruleNodeId,
+              fallbackNodeId: entryFallback,
+            });
+            return { outcomeType: 'queue', outcomeTitle: 'Queue: ' + rule.queueTarget, outcomeDetail: 'Zugestellt in Skript ' + current.scriptNumber + ' (' + current.scriptName + ') über Prio ' + rule.prio + '.', finalScriptNumber: current.scriptNumber, focusHint: rule.queueTarget, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+          }
+
+          if (rule.isDisconnect) {
+            steps.push({
+              index: steps.length + 1,
+              scriptNumber: current.scriptNumber,
+              scriptName: current.scriptName,
+              prio: rule.prio,
+              kind: 'outcome',
+              statusLabel: 'Beendet',
+              title: 'Prio ' + rule.prio + ' · Verbindung trennen',
+              detail: rule.announcement ? 'Nach Ansage: ' + rule.announcement : 'Anruf wird beendet',
+              reason,
+              targetNodeId: ruleNodeId,
+              fallbackNodeId: entryFallback,
+            });
+            return { outcomeType: 'disconnect', outcomeTitle: 'Verbindung getrennt (Disconnect)', outcomeDetail: 'Beendet in Skript ' + current.scriptNumber + ' (' + current.scriptName + ').', finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+          }
+
+          if (rule.targetNumber) {
+            const nextS = resolveS(rule.targetNumber);
+            if (nextS && !rule.isExternalRoute) {
+              steps.push({
+                index: steps.length + 1,
+                scriptNumber: current.scriptNumber,
+                scriptName: current.scriptName,
+                prio: rule.prio,
+                kind: 'jump',
+                statusLabel: 'Sprung',
+                title: 'Prio ' + rule.prio + ' · Sprung zu ' + nextS.scriptNumber + ' (' + nextS.scriptName + ')',
+                detail: rule.announcement ? 'Ansage: ' + rule.announcement : 'Übergabe an Zielskript',
+                reason,
+                targetScriptNumber: nextS.scriptNumber,
+                targetNodeId: ruleNodeId,
+                fallbackNodeId: 'JUMP_' + simNodeSuffix(nextS.scriptNumber),
+              });
+              jumped = nextS;
+              break;
+            }
+            steps.push({
+              index: steps.length + 1,
+              scriptNumber: current.scriptNumber,
+              scriptName: current.scriptName,
+              prio: rule.prio,
+              kind: 'outcome',
+              statusLabel: 'Weitergeleitet',
+              title: 'Prio ' + rule.prio + ' · Externe Weiterleitung ' + rule.targetNumber,
+              detail: rule.organizationName ? 'Organisation: ' + rule.organizationName : 'Externes Ziel',
+              reason,
+              targetScriptNumber: rule.targetNumber,
+              targetNodeId: ruleNodeId,
+              fallbackNodeId: entryFallback,
+            });
+            return { outcomeType: 'external', outcomeTitle: 'Weiterleitung: ' + rule.targetNumber, outcomeDetail: 'Externes Ziel aus Skript ' + current.scriptNumber + ' (' + current.scriptName + ').', finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+          }
+
+          steps.push({
+            index: steps.length + 1,
+            scriptNumber: current.scriptNumber,
+            scriptName: current.scriptName,
+            prio: rule.prio,
+            kind: 'rule-matched',
+            statusLabel: 'Erfüllt',
+            title: 'Prio ' + rule.prio + ' · ' + rule.stepName,
+            detail: [rule.announcement ? 'Ansage: ' + rule.announcement : null, rule.waitSeconds ? 'Warten: ' + rule.waitSeconds + ' s' : null].filter(Boolean).join(' · ') || 'Schritt ausgeführt',
+            reason,
+            focusHint: rule.announcement || undefined,
+            targetNodeId: ruleNodeId,
+            fallbackNodeId: entryFallback,
+          });
+        }
+
+        if (jumped) { current = jumped; continue; }
+        return {
+          outcomeType: lastAnnouncement ? 'announcement' : 'script-end',
+          outcomeTitle: lastAnnouncement ? 'Ansage-Ende: ' + lastAnnouncement : 'Skript-Ende: ' + current.scriptNumber,
+          outcomeDetail: 'Durchlauf in Skript ' + current.scriptNumber + ' (' + current.scriptName + ') abgeschlossen.',
+          finalScriptNumber: current.scriptNumber,
+          focusHint: lastAnnouncement || undefined,
+          visitedScripts,
+          totalWaitSeconds,
+          steps,
+          dynamicPrompts,
+        };
+      }
+
+      return { outcomeType: 'cycle', outcomeTitle: 'Maximale Sprungtiefe erreicht', outcomeDetail: 'Nach 24 Sprüngen gestoppt.', finalScriptNumber: startScript.scriptNumber, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+    }
+
+    function stopSimTimer() {
+      if (simTimerId !== null) {
+        clearTimeout(simTimerId);
+        simTimerId = null;
+      }
+    }
+
+    function focusSimStepOnCanvas(step) {
+      if (!step) return;
+      const focusKey = step.scriptNumber + '|' + step.index + '|' + (step.targetNodeId || '') + '|' + step.title;
+      if (simState.lastFocusedKey === focusKey) return;
+      simState.lastFocusedKey = focusKey;
+
+      const targetVk = PAYLOAD.viewKeyByScriptNumber[step.scriptNumber] || PAYLOAD.viewKeyByScriptNumber[String(step.scriptNumber).toLowerCase()];
+      if (targetVk && viewsByKey.has(targetVk) && activeViewKey !== targetVk) {
+        switchView(targetVk);
+      }
+
+      let foundId = null;
+      if (step.targetNodeId && nodeMap.has(step.targetNodeId)) {
+        foundId = step.targetNodeId;
+      } else if (step.fallbackNodeId && nodeMap.has(step.fallbackNodeId)) {
+        foundId = step.fallbackNodeId;
+      } else if (step.focusHint || step.title) {
+        const needle = String(step.focusHint || step.title).replace(/^(Queue|Ansage-Ende|Weiterleitung|Prio\s+\d+\s*·\s*):\s*/i, '').trim().toLowerCase();
+        const found = GRAPH.nodes.find(n => needle && (n.label || '').toLowerCase().includes(needle));
+        if (found) foundId = found.id;
+      }
+      if (!foundId && GRAPH.entryNodes && GRAPH.entryNodes.length > 0) {
+        foundId = GRAPH.entryNodes[0].id;
+      }
+      if (foundId) {
+        selectNode(foundId, true);
+      }
+    }
+
+    function simGetVisibleSteps(res) {
+      return simState.showSkipped ? res.steps : res.steps.filter(s => s.kind !== 'rule-skipped');
+    }
+
+    function scheduleSimNextStep() {
+      stopSimTimer();
+      if (!simState.active || !simState.isPlaying) return;
+      const res = runHtmlCallSimulation();
+      const visibleSteps = simGetVisibleSteps(res);
+      if (visibleSteps.length === 0) { simState.isPlaying = false; renderCallSimHud(); return; }
+      const cur = visibleSteps[simState.stepIndex];
+      if (!cur || cur.kind === 'dtmf-prompt' || simState.stepIndex >= visibleSteps.length - 1) {
+        simState.isPlaying = false;
+        renderCallSimHud();
+        return;
+      }
+      const delay = SIM_SPEED_MS[simState.speed] || 1500;
+      simTimerId = setTimeout(() => {
+        simTimerId = null;
+        if (!simState.active || !simState.isPlaying) return;
+        const latestRes = runHtmlCallSimulation();
+        const latestSteps = simGetVisibleSteps(latestRes);
+        simState.stepIndex = Math.min(simState.stepIndex + 1, Math.max(0, latestSteps.length - 1));
+        const nextSt = latestSteps[simState.stepIndex];
+        if (!nextSt || nextSt.kind === 'dtmf-prompt' || simState.stepIndex >= latestSteps.length - 1) {
+          simState.isPlaying = false;
+        }
+        renderCallSimHud();
+        if (simState.isPlaying) scheduleSimNextStep();
+      }, delay);
+    }
+
+    function simTogglePlay() {
+      const res = runHtmlCallSimulation();
+      const visibleSteps = simGetVisibleSteps(res);
+      if (visibleSteps.length === 0) return;
+      if (simState.isPlaying) {
+        simState.isPlaying = false;
+        stopSimTimer();
+        renderCallSimHud();
+        return;
+      }
+      if (simState.stepIndex >= visibleSteps.length - 1) {
+        simState.stepIndex = 0;
+        simState.lastFocusedKey = '';
+      }
+      simState.setupOpen = false;
+      simState.isPlaying = true;
+      renderCallSimHud();
+      scheduleSimNextStep();
+    }
+
+    function simStepBack() {
+      simState.isPlaying = false;
+      stopSimTimer();
+      simState.stepIndex = Math.max(0, simState.stepIndex - 1);
+      renderCallSimHud();
+    }
+
+    function simStepForward() {
+      const res = runHtmlCallSimulation();
+      const visibleSteps = simGetVisibleSteps(res);
+      simState.isPlaying = false;
+      stopSimTimer();
+      simState.stepIndex = Math.min(Math.max(0, visibleSteps.length - 1), simState.stepIndex + 1);
+      renderCallSimHud();
+    }
+
+    function simRestart() {
+      simState.isPlaying = false;
+      stopSimTimer();
+      simState.lastFocusedKey = '';
+      simState.stepIndex = 0;
+      renderCallSimHud();
+    }
+
+    function renderCallSimHud() {
+      if (!callSimHud) return;
+      callSimHud.classList.toggle('open', simState.active);
+      if (btnCallSim) btnCallSim.classList.toggle('btn-active', simState.active);
+      if (!simState.active) return;
+
+      const res = runHtmlCallSimulation();
+      const visibleSteps = simGetVisibleSteps(res);
+      if (simState.stepIndex >= visibleSteps.length) {
+        simState.stepIndex = Math.max(0, visibleSteps.length - 1);
+      }
+      const activeStep = visibleSteps[simState.stepIndex] || null;
+      const isAtEnd = visibleSteps.length > 0 && simState.stepIndex >= visibleSteps.length - 1;
+
+      if (activeStep) {
+        focusSimStepOnCanvas(activeStep);
+      }
+
+      const weekdays = [
+        { id: 'mo', label: 'Mo' }, { id: 'di', label: 'Di' }, { id: 'mi', label: 'Mi' },
+        { id: 'do', label: 'Do' }, { id: 'fr', label: 'Fr' }, { id: 'sa', label: 'Sa' }, { id: 'so', label: 'So' }
+      ];
+      const speeds = [0.5, 1, 1.5, 2];
+
+      let statusTone = 'jump';
+      if (activeStep) {
+        if (activeStep.kind === 'outcome') statusTone = res.outcomeType === 'disconnect' ? 'err' : 'ok';
+        else if (activeStep.kind === 'jump') statusTone = 'jump';
+        else if (activeStep.kind === 'dtmf-prompt') statusTone = 'warn';
+        else if (activeStep.kind === 'rule-skipped') statusTone = 'muted';
+      }
+
+      let html = '';
+      // Header bar with transport controls
+      html += '<div class="sim-hud-head">' +
+        '<div style="display:flex;align-items:center;gap:8px;min-width:0;">' +
+          '<span style="font-size:12px;font-weight:700;color:var(--text-main);white-space:nowrap;">Anruf-Simulator</span>' +
+          '<span style="font-size:11px;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;color:var(--text-muted);white-space:nowrap;">' +
+            (visibleSteps.length > 0 ? 'Schritt ' + (simState.stepIndex + 1) + ' / ' + visibleSteps.length : '0 Schritte') +
+          '</span>' +
+          '<button type="button" id="sim-btn-toggle-setup" style="padding:3px 7px;font-size:11px;">Szenario ' + (simState.setupOpen ? '▲' : '▼') + '</button>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">' +
+          '<button type="button" id="sim-btn-restart" title="Von vorn beginnen" style="padding:3px 7px;"' + (visibleSteps.length === 0 ? ' disabled' : '') + '>↺</button>' +
+          '<button type="button" id="sim-btn-back" title="Zurück (←)" style="padding:3px 8px;"' + (simState.stepIndex <= 0 ? ' disabled' : '') + '>◀ Zurück</button>' +
+          '<button type="button" id="sim-btn-play" title="' + (simState.isPlaying ? 'Pause (Leertaste)' : 'Abspielen (Leertaste)') + '" class="primary" style="padding:3px 10px;' + (simState.isPlaying ? 'background:#d97706;border-color:#f59e0b;' : 'background:#059669;border-color:#10b981;') + '"' + (visibleSteps.length === 0 ? ' disabled' : '') + '>' + (simState.isPlaying ? '⏸ Pause' : isAtEnd ? '▶ Nochmal' : '▶ Abspielen') + '</button>' +
+          '<button type="button" id="sim-btn-next" title="Vor (→)" style="padding:3px 8px;"' + (simState.stepIndex >= visibleSteps.length - 1 ? ' disabled' : '') + '>Vor ▶</button>' +
+          '<div class="sim-speed-group" title="Tempo">' +
+            speeds.map(sp => '<button type="button" class="sim-speed-btn' + (simState.speed === sp ? ' active' : '') + '" data-speed="' + sp + '">' + sp + 'x</button>').join('') +
+          '</div>' +
+          '<button type="button" id="sim-btn-close-hud" title="Schließen (Esc)" style="padding:3px 7px;">✕</button>' +
+        '</div>' +
+      '</div>';
+
+      // Collapsible scenario setup strip
+      if (simState.setupOpen) {
+        html += '<div class="sim-hud-setup">' +
+          '<div class="sim-hud-row">' +
+            '<select id="sim-start-select" style="flex:1;min-width:170px;font-family:ui-monospace,monospace;">' +
+              (SIM_MODEL.scripts || []).map(s => '<option value="' + escapeHtml(s.scriptNumber) + '"' + (s.scriptNumber === simState.startScriptNumber ? ' selected' : '') + '>' + escapeHtml(s.scriptNumber + ' · ' + s.scriptName + (s.isMaster ? ' [Master]' : '')) + '</option>').join('') +
+            '</select>' +
+            '<input type="text" id="sim-dnis-input" list="sim-html-dnis-list" value="' + escapeHtml(simState.dialedDnis) + '" placeholder="DNIS (optional)..." style="width:130px;font-family:ui-monospace,monospace;" />' +
+            '<datalist id="sim-html-dnis-list">' + (SIM_MODEL.dnisEntries || []).slice(0, 100).map(d => '<option value="' + escapeHtml(d.dnis) + '">' + escapeHtml(d.scriptNumber + ' · ' + d.scriptName) + '</option>').join('') + '</datalist>' +
+            '<div style="display:inline-flex;gap:2px;">' +
+              weekdays.map(w => '<button type="button" class="sim-day-btn' + (simState.weekday === w.id ? ' primary' : '') + '" data-day="' + w.id + '" style="padding:3px 6px;font-size:10.5px;">' + w.label + '</button>').join('') +
+            '</div>' +
+            '<input type="time" id="sim-time-input" value="' + escapeHtml(simState.timeHHMM) + '" style="font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;" />' +
+          '</div>' +
+          '<div class="sim-hud-row" style="justify-content:space-between;">' +
+            '<div class="sim-hud-row" style="gap:10px;font-size:11px;">' +
+              '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="sim-chk-holiday"' + (simState.isHoliday ? ' checked' : '') + ' /> Feiertag</label>' +
+              '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="sim-chk-sondzeit"' + (simState.isSondZeit ? ' checked' : '') + ' /> SondZeit</label>' +
+              '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="sim-chk-skipped"' + (simState.showSkipped ? ' checked' : '') + ' /> Alle Prüfungen</label>' +
+            '</div>' +
+            '<div class="sim-hud-row" style="gap:4px;">' +
+              '<button type="button" class="sim-preset-btn" data-d="mo" data-t="10:00" data-h="0" data-s="0" style="padding:2px 6px;font-size:10.5px;">Werktag 10:00</button>' +
+              '<button type="button" class="sim-preset-btn" data-d="di" data-t="20:00" data-h="0" data-s="0" style="padding:2px 6px;font-size:10.5px;">Abend 20:00</button>' +
+              '<button type="button" class="sim-preset-btn" data-d="sa" data-t="11:00" data-h="0" data-s="0" style="padding:2px 6px;font-size:10.5px;">Sa 11:00</button>' +
+              '<button type="button" class="sim-preset-btn" data-d="mo" data-t="10:00" data-h="1" data-s="0" style="padding:2px 6px;font-size:10.5px;color:var(--amber-text);">Feiertag</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      }
+
+      // Live step explanation body + timeline
+      html += '<div class="sim-hud-body">';
+      if (activeStep) {
+        html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">' +
+          '<div style="min-width:0;flex:1;">' +
+            '<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:11px;">' +
+              '<span class="sim-status-tag ' + statusTone + '">' + escapeHtml(activeStep.statusLabel) + '</span>' +
+              '<span style="font-family:ui-monospace,monospace;font-weight:600;color:var(--text-muted);font-variant-numeric:tabular-nums;">Skript ' + escapeHtml(activeStep.scriptNumber) + '</span>' +
+              '<span style="color:var(--text-muted);">· ' + escapeHtml(activeStep.scriptName || '') + '</span>' +
+            '</div>' +
+            '<div style="font-size:12.5px;font-weight:700;color:var(--text-main);margin-top:4px;">' + escapeHtml(activeStep.title) + '</div>' +
+            '<div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;">' + escapeHtml(activeStep.detail + (activeStep.reason ? ' — ' + activeStep.reason : '')) + '</div>' +
+          '</div>' +
+          (isAtEnd && res.outcomeTitle ? '<div style="text-align:right;flex-shrink:0;"><div style="font-size:10px;color:var(--text-muted);">Endergebnis</div><div style="font-size:11.5px;font-weight:700;font-family:ui-monospace,monospace;color:var(--text-main);">' + escapeHtml(res.outcomeTitle) + '</div></div>' : '') +
+        '</div>';
+
+        // Inline DTMF digit choice
+        if (activeStep.kind === 'dtmf-prompt' && res.pendingDtmf) {
+          html += '<div class="sim-hud-row" style="padding-top:2px;">' +
+            '<span style="font-size:11px;font-weight:600;color:var(--amber-text);">Taste wählen:</span>' +
+            res.pendingDtmf.choices.map(c => '<button type="button" class="sim-dtmf-btn" data-key="' + escapeHtml(res.pendingDtmf.key) + '" data-choice="' + escapeHtml(c.choice) + '" style="border-color:var(--amber-border);background:var(--amber-bg);color:var(--amber-text);font-size:11px;">[' + escapeHtml(c.choice) + '] ' + escapeHtml(c.label || c.targetNumber) + '</button>').join('') +
+          '</div>';
+        }
+
+        // Inline dynamic runtime toggles
+        if (res.dynamicPrompts && res.dynamicPrompts.length > 0) {
+          html += '<div class="sim-hud-row" style="padding-top:2px;">' +
+            '<span style="font-size:10.5px;color:var(--text-muted);">Laufzeit:</span>' +
+            res.dynamicPrompts.map(dp => '<button type="button" class="sim-dyn-btn' + (dp.active ? ' btn-active' : '') + '" data-key="' + escapeHtml(dp.key) + '" style="font-size:10.5px;padding:2px 6px;">' + (dp.active ? 'Aktiv: ' : 'Inaktiv: ') + escapeHtml(dp.label) + '</button>').join('') +
+          '</div>';
+        }
+      } else {
+        html += '<div style="font-size:12px;color:var(--text-muted);">Kein ausführbarer Callflow für diese Auswahl gefunden.</div>';
+      }
+
+      // Clickable Step Timeline (Schritt-Leiste)
+      if (visibleSteps.length > 0) {
+        html += '<div class="sim-hud-timeline" role="tablist" aria-label="Simulationsschritte">' +
+          visibleSteps.map((st, idx) => {
+            const cls = idx === simState.stepIndex ? 'current' : idx < simState.stepIndex ? 'past' : '';
+            const shortLbl = st.kind === 'entry' ? 'Skript ' + st.scriptNumber : st.kind === 'jump' ? '→ ' + (st.targetScriptNumber || st.scriptNumber) : st.kind === 'dtmf-prompt' ? 'DTMF' : st.kind === 'outcome' ? (st.queueTarget || st.statusLabel) : (st.prio !== undefined ? 'P' + st.prio : '#' + (idx + 1));
+            return '<button type="button" class="sim-step-seg ' + cls + '" data-step-idx="' + idx + '" title="' + escapeHtml('Schritt ' + (idx + 1) + ': ' + st.title) + '">' + (idx + 1) + '. ' + escapeHtml(shortLbl) + '</button>';
+          }).join('') +
+        '</div>';
+      }
+      html += '</div>';
+
+      callSimHud.innerHTML = html;
+
+      // Bind HUD controls
+      const onScenarioReset = fn => {
+        simState.isPlaying = false;
+        stopSimTimer();
+        simState.lastFocusedKey = '';
+        simState.stepIndex = 0;
+        fn();
+        renderCallSimHud();
+      };
+
+      const btnToggleSetup = document.getElementById('sim-btn-toggle-setup');
+      if (btnToggleSetup) btnToggleSetup.addEventListener('click', () => { simState.setupOpen = !simState.setupOpen; renderCallSimHud(); });
+      const btnRestart = document.getElementById('sim-btn-restart');
+      if (btnRestart) btnRestart.addEventListener('click', simRestart);
+      const btnBack = document.getElementById('sim-btn-back');
+      if (btnBack) btnBack.addEventListener('click', simStepBack);
+      const btnPlay = document.getElementById('sim-btn-play');
+      if (btnPlay) btnPlay.addEventListener('click', simTogglePlay);
+      const btnNext = document.getElementById('sim-btn-next');
+      if (btnNext) btnNext.addEventListener('click', simStepForward);
+      const btnCloseHud = document.getElementById('sim-btn-close-hud');
+      if (btnCloseHud) btnCloseHud.addEventListener('click', closeCallSimHud);
+
+      callSimHud.querySelectorAll('.sim-speed-btn').forEach(b => {
+        b.addEventListener('click', () => {
+          simState.speed = Number(b.getAttribute('data-speed') || '1');
+          renderCallSimHud();
+          if (simState.isPlaying) scheduleSimNextStep();
+        });
+      });
+
+      const selEl = document.getElementById('sim-start-select');
+      if (selEl) selEl.addEventListener('change', e => onScenarioReset(() => { simState.startScriptNumber = e.target.value; simState.dtmfChoices = {}; }));
+      const dnisEl = document.getElementById('sim-dnis-input');
+      if (dnisEl) dnisEl.addEventListener('change', e => onScenarioReset(() => {
+        simState.dialedDnis = e.target.value;
+        const hit = (SIM_MODEL.dnisEntries || []).find(d => d.dnis === String(e.target.value || '').trim());
+        if (hit) simState.startScriptNumber = hit.scriptNumber;
+      }));
+      const timeEl = document.getElementById('sim-time-input');
+      if (timeEl) timeEl.addEventListener('change', e => onScenarioReset(() => { simState.timeHHMM = e.target.value || '10:00'; }));
+      const chkHol = document.getElementById('sim-chk-holiday');
+      if (chkHol) chkHol.addEventListener('change', e => onScenarioReset(() => { simState.isHoliday = Boolean(e.target.checked); }));
+      const chkSond = document.getElementById('sim-chk-sondzeit');
+      if (chkSond) chkSond.addEventListener('change', e => onScenarioReset(() => { simState.isSondZeit = Boolean(e.target.checked); }));
+      const chkSkip = document.getElementById('sim-chk-skipped');
+      if (chkSkip) chkSkip.addEventListener('change', e => onScenarioReset(() => { simState.showSkipped = Boolean(e.target.checked); }));
+
+      callSimHud.querySelectorAll('.sim-day-btn').forEach(b => {
+        b.addEventListener('click', () => onScenarioReset(() => { simState.weekday = b.getAttribute('data-day') || 'mo'; }));
+      });
+      callSimHud.querySelectorAll('.sim-preset-btn').forEach(b => {
+        b.addEventListener('click', () => onScenarioReset(() => {
+          simState.weekday = b.getAttribute('data-d') || 'mo';
+          simState.timeHHMM = b.getAttribute('data-t') || '10:00';
+          simState.isHoliday = b.getAttribute('data-h') === '1';
+          simState.isSondZeit = b.getAttribute('data-s') === '1';
+        }));
+      });
+      callSimHud.querySelectorAll('.sim-dtmf-btn').forEach(b => {
+        b.addEventListener('click', () => {
+          const k = b.getAttribute('data-key');
+          const c = b.getAttribute('data-choice');
+          if (k && c) {
+            simState.dtmfChoices[k] = c;
+            simState.lastFocusedKey = '';
+            simState.isPlaying = true;
+            renderCallSimHud();
+            scheduleSimNextStep();
+          }
+        });
+      });
+      callSimHud.querySelectorAll('.sim-dyn-btn').forEach(b => {
+        b.addEventListener('click', () => {
+          const k = b.getAttribute('data-key');
+          if (k) onScenarioReset(() => { simState.dynamicOverrides[k] = !simState.dynamicOverrides[k]; });
+        });
+      });
+      callSimHud.querySelectorAll('.sim-step-seg').forEach(b => {
+        b.addEventListener('click', () => {
+          const idx = Number(b.getAttribute('data-step-idx') || '0');
+          simState.isPlaying = false;
+          stopSimTimer();
+          simState.stepIndex = idx;
+          renderCallSimHud();
+        });
+      });
+    }
+
+    function openCallSimHud() {
+      const curView = viewsByKey.get(activeViewKey);
+      if (curView && curView.scriptNumber && SIM_MODEL.scripts.some(s => s.scriptNumber === curView.scriptNumber)) {
+        simState.startScriptNumber = curView.scriptNumber;
+      }
+      simState.active = true;
+      simState.setupOpen = true;
+      simState.isPlaying = false;
+      simState.stepIndex = 0;
+      simState.lastFocusedKey = '';
+      stopSimTimer();
+      renderCallSimHud();
+    }
+
+    function closeCallSimHud() {
+      simState.active = false;
+      simState.isPlaying = false;
+      simState.lastFocusedKey = '';
+      stopSimTimer();
+      renderCallSimHud();
+    }
+
+    if (btnCallSim) btnCallSim.addEventListener('click', () => {
+      if (simState.active) closeCallSimHud();
+      else openCallSimHud();
+    });
+
+    // Global Keyboard Shortcuts in Callflow.html
+    document.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        if (gsearchOverlay && gsearchOverlay.classList.contains('open')) closeGlobalSearchModal();
+        else openGlobalSearchModal();
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (gsearchOverlay && gsearchOverlay.classList.contains('open')) { closeGlobalSearchModal(); return; }
+        if (simState.active) { closeCallSimHud(); return; }
+      }
+      const tag = (e.target && e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (simState.active) {
+        if (e.key === ' ') { e.preventDefault(); simTogglePlay(); return; }
+        if (e.key === 'ArrowLeft') { e.preventDefault(); simStepBack(); return; }
+        if (e.key === 'ArrowRight') { e.preventDefault(); simStepForward(); return; }
+      }
+      const key = e.key.toLowerCase();
+      if (key === 'm') {
+        e.preventDefault();
+        setMinimapOpen(!minimapOpen);
+      } else if (key === 'b') {
+        e.preventDefault();
+        toggleSidebar();
+      } else if (key === 'f') {
+        e.preventDefault();
+        toggleFullscreen();
+      }
+    });
+
     function bootActiveViewOnDemand() {
       normalizeSvgElement(svgLayer.querySelector('svg'), viewsByKey.get(activeViewKey), true);
       populateViewSelect();
@@ -7235,6 +8597,7 @@ export function generateInteractiveCallflowHtml(
       renderAnalysisTab();
       applyCombinedCanvasStateInner(false);
       fitToWindow();
+      updateMinimapViewport();
     }
 
     bootActiveViewOnDemand();

@@ -20,6 +20,7 @@ import {
   Grid,
   HardDriveDownload,
   Layers,
+  Map as MapIcon,
   Maximize2,
   Minimize2,
   Moon,
@@ -29,9 +30,11 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  PhoneCall,
   Plus,
   RotateCcw,
   Scan,
+  Search,
   Sun,
   Trash2,
   Unlink,
@@ -127,6 +130,9 @@ import {
   disconnectEdgeInWorkspace,
   EditableCallflowNodeSnapshot,
   EditableNodeConnectionItem,
+  exportMigrationDocumentationMarkdown,
+  exportOpeningHoursCsv,
+  exportRoutingMatrixCsv,
   extractScriptNumberFromNodeId,
   extractWorkspaceResourceRegistry,
   formatScriptDisplayLabel,
@@ -144,6 +150,12 @@ import {
   updateWorkspaceNodeFromEdit,
 } from './utils/scriptCallflowParser';
 import {
+  buildCallflowSimulationModel,
+  buildWorkspaceGlobalSearchIndex,
+  CallSimulationStep,
+  GlobalSearchEntry,
+} from './utils/callflowSimulator';
+import {
   FolderAutoResolveSummary,
   FolderScriptFileEntry,
   FolderScriptPool,
@@ -157,12 +169,15 @@ import { ThemeConfigurator } from './components/ThemeConfigurator';
 import { CallflowInspector } from './components/CallflowInspector';
 import { SearchableScriptDropdown } from './components/SearchableScriptDropdown';
 import { TemplateGalleryModal } from './components/TemplateGalleryModal';
-import { ExportModal } from './components/ExportModal';
+import { ExportModal, PreferredInitialHtmlView } from './components/ExportModal';
 import { MultiScriptModal } from './components/MultiScriptModal';
 import { NewCallflowModal } from './components/NewCallflowModal';
 import { NodeInlineEditorModal } from './components/NodeInlineEditorModal';
 import { OfflineDownloadModal } from './components/OfflineDownloadModal';
 import { OpeningHoursModal } from './components/OpeningHoursModal';
+import { GlobalSearchModal } from './components/GlobalSearchModal';
+import { CallSimulatorHud } from './components/CallSimulatorHud';
+import { CanvasMinimap } from './components/CanvasMinimap';
 import { LocalHtmlBuilderLanding } from './components/LocalHtmlBuilderLanding';
 import {
   isRunningAsOfflineSingleFile,
@@ -430,6 +445,14 @@ function OfflineStudioApp() {
   const [isMultiScriptModalOpen, setIsMultiScriptModalOpen] = useState<boolean>(false);
   const [isOpeningHoursModalOpen, setIsOpeningHoursModalOpen] = useState<boolean>(false);
   const [openingHoursInitialSearch, setOpeningHoursInitialSearch] = useState<string>('');
+  const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState<boolean>(false);
+  const [isCallSimulatorOpen, setIsCallSimulatorOpen] = useState<boolean>(false);
+  const [showMinimap, setShowMinimap] = useState<boolean>(false);
+  const pendingNodeFocusHintRef = useRef<{
+    nodeId?: string;
+    fallbackNodeId?: string;
+    labelHint?: string;
+  } | null>(null);
   const [multiScriptPrefillNumber, setMultiScriptPrefillNumber] = useState<string | null>(null);
   const [isDraggingCanvasFile, setIsDraggingCanvasFile] = useState<boolean>(false);
   const [canvasFileDropNotice, setCanvasFileDropNotice] = useState<{
@@ -1307,14 +1330,16 @@ function OfflineStudioApp() {
     return Math.max(dims.width, dims.height) > 2200 || dims.width * dims.height > 2_200_000;
   }, [coloredSvg, callflowGraph.nodes.size, callflowGraph.edges.length]);
 
+  const isLargeCanvasDiagramRef = useRef<boolean>(false);
+  isLargeCanvasDiagramRef.current = isLargeCanvasDiagram;
   gpuProxyRef.current = gpuProxy;
   hasInteractiveOverlayStateRef.current = Boolean(
     callflowTrace || selectedCallflowNodeId || selectedCallflowEdge
   );
 
-  // GPU-Safe Hybrid Proxy Rasterizer for large Master & multi-script diagrams (<= 4096px GPU texture)
+  // GPU-Safe Hybrid Proxy Rasterizer for large Master & multi-script diagrams (<= 4096px GPU texture) and Minimap thumbnail
   useEffect(() => {
-    if (!coloredSvg || !isLargeCanvasDiagram || preloadProgress?.active) {
+    if (!coloredSvg || (!isLargeCanvasDiagram && !showMinimap) || preloadProgress?.active) {
       setGpuProxy((prev) => {
         if (prev?.objectUrl) URL.revokeObjectURL(prev.objectUrl);
         return null;
@@ -1361,6 +1386,7 @@ function OfflineStudioApp() {
   }, [
     coloredSvg,
     isLargeCanvasDiagram,
+    showMinimap,
     preloadProgress?.active,
     hasCustomNodeOffsets,
     activeNodeOffsets,
@@ -1689,7 +1715,7 @@ function OfflineStudioApp() {
   const syncGpuProxyDomAttr = useCallback((forceTransforming?: boolean) => {
     const vp = canvasViewportRef.current;
     if (!vp) return;
-    const hasProxy = Boolean(gpuProxyRef.current);
+    const hasProxy = Boolean(gpuProxyRef.current) && isLargeCanvasDiagramRef.current;
     const isGesture = Boolean(forceTransforming || isTransformingRef.current);
     const isZoomedOutOverview =
       cameraRef.current.zoom < 0.85 && !hasInteractiveOverlayStateRef.current;
@@ -1706,6 +1732,7 @@ function OfflineStudioApp() {
     syncGpuProxyDomAttr(false);
   }, [
     gpuProxy,
+    isLargeCanvasDiagram,
     zoom,
     callflowTrace,
     selectedCallflowNodeId,
@@ -1847,6 +1874,202 @@ function OfflineStudioApp() {
     },
     [callflowGraph, applyCameraToDom]
   );
+
+  const globalSearchEntries = useMemo(
+    () =>
+      buildWorkspaceGlobalSearchIndex(
+        scriptWorkspace.modules.length > 0 ? scriptWorkspace : null,
+        callflowGraph,
+        callflowViewLevel.level === 'detail'
+          ? `script:${callflowViewLevel.scriptNumber}`
+          : 'master'
+      ),
+    [scriptWorkspace, callflowGraph, callflowViewLevel]
+  );
+
+  const callflowSimulationModel = useMemo(
+    () =>
+      buildCallflowSimulationModel(
+        scriptWorkspace.modules.length > 0 ? scriptWorkspace : null
+      ),
+    [scriptWorkspace]
+  );
+
+  // Resolve deferred node focus after Global Search or Call Simulator switches script views
+  useEffect(() => {
+    const pending = pendingNodeFocusHintRef.current;
+    if (!pending || !coloredSvg || callflowGraph.nodes.size === 0) return;
+    pendingNodeFocusHintRef.current = null;
+    let targetId: string | null =
+      pending.nodeId && callflowGraph.nodes.has(pending.nodeId)
+        ? pending.nodeId
+        : pending.fallbackNodeId && callflowGraph.nodes.has(pending.fallbackNodeId)
+          ? pending.fallbackNodeId
+          : null;
+    if (!targetId && pending.labelHint) {
+      const needle = pending.labelHint
+        .replace(/^(Queue|Ansage-Ende|Weiterleitung):\s*/i, '')
+        .trim()
+        .toLowerCase();
+      if (needle) {
+        for (const node of callflowGraph.nodes.values()) {
+          if (node.label.toLowerCase().includes(needle)) {
+            targetId = node.id;
+            break;
+          }
+        }
+      }
+    }
+    if (!targetId && callflowGraph.entryNodes.length > 0) {
+      targetId = callflowGraph.entryNodes[0].id;
+    }
+    if (targetId) {
+      setSelectedCallflowNodeId(targetId);
+      setTimeout(() => handleFocusNodeOnCanvas(targetId!, 1.15), 90);
+    }
+  }, [coloredSvg, callflowGraph, handleFocusNodeOnCanvas]);
+
+  // Global Studio Keyboard Shortcuts (Ctrl+K search, M minimap, B sidebar, F fullscreen)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsGlobalSearchOpen((prev) => !prev);
+        return;
+      }
+      const target = e.target as HTMLElement | null;
+      const tag = (target?.tagName || '').toLowerCase();
+      if (
+        tag === 'input' ||
+        tag === 'textarea' ||
+        tag === 'select' ||
+        target?.isContentEditable ||
+        e.ctrlKey ||
+        e.metaKey ||
+        e.altKey
+      ) {
+        return;
+      }
+      const key = e.key.toLowerCase();
+      if (key === 'm') {
+        e.preventDefault();
+        setShowMinimap((prev) => !prev);
+      } else if (key === 'b') {
+        e.preventDefault();
+        setIsRightPanelOpen((prev) => !prev);
+      } else if (key === 'f') {
+        e.preventDefault();
+        setIsFullscreenPreview((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const handleGlobalSearchSelect = useCallback(
+    (entry: GlobalSearchEntry) => {
+      const targetIsDetail = Boolean(entry.scriptNumber);
+      const alreadyOnTarget =
+        (targetIsDetail &&
+          callflowViewLevel.level === 'detail' &&
+          canonicalScriptMatchKey(callflowViewLevel.scriptNumber) ===
+            canonicalScriptMatchKey(entry.scriptNumber!)) ||
+        (!targetIsDetail && callflowViewLevel.level === 'master');
+
+      if (!alreadyOnTarget && targetIsDetail && entry.scriptNumber) {
+        pendingNodeFocusHintRef.current = {
+          nodeId: entry.nodeId,
+          labelHint: entry.title,
+        };
+        handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber: entry.scriptNumber });
+        return;
+      }
+
+      let focusId: string | null =
+        entry.nodeId && callflowGraph.nodes.has(entry.nodeId) ? entry.nodeId : null;
+      if (!focusId && entry.title) {
+        const needle = entry.title.toLowerCase();
+        for (const node of callflowGraph.nodes.values()) {
+          if (node.label.toLowerCase().includes(needle)) {
+            focusId = node.id;
+            break;
+          }
+        }
+      }
+      if (focusId) {
+        setSelectedCallflowNodeId(focusId);
+        handleFocusNodeOnCanvas(focusId, 1.15);
+      }
+    },
+    [callflowViewLevel, callflowGraph, handleFocusNodeOnCanvas]
+  );
+
+  const handleSimulatorFocusStep = useCallback(
+    (step: CallSimulationStep) => {
+      const scriptNumber = step.scriptNumber;
+      const labelHint = step.queueTarget || step.announcement || step.title;
+      const alreadyOnTarget =
+        callflowViewLevel.level === 'detail' &&
+        canonicalScriptMatchKey(callflowViewLevel.scriptNumber) ===
+          canonicalScriptMatchKey(scriptNumber);
+      if (!alreadyOnTarget) {
+        pendingNodeFocusHintRef.current = {
+          nodeId: step.targetNodeId,
+          fallbackNodeId: step.fallbackNodeId,
+          labelHint,
+        };
+        handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber });
+        return;
+      }
+      let focusId: string | null =
+        step.targetNodeId && callflowGraph.nodes.has(step.targetNodeId)
+          ? step.targetNodeId
+          : step.fallbackNodeId && callflowGraph.nodes.has(step.fallbackNodeId)
+            ? step.fallbackNodeId
+            : null;
+      if (!focusId && labelHint) {
+        const needle = labelHint
+          .replace(/^(Queue|Ansage-Ende|Weiterleitung|Prio\s+\d+\s*·\s*):\s*/i, '')
+          .trim()
+          .toLowerCase();
+        for (const node of callflowGraph.nodes.values()) {
+          if (needle && node.label.toLowerCase().includes(needle)) {
+            focusId = node.id;
+            break;
+          }
+        }
+      }
+      if (!focusId && callflowGraph.entryNodes.length > 0) {
+        focusId = callflowGraph.entryNodes[0].id;
+      }
+      if (focusId) {
+        setSelectedCallflowNodeId(focusId);
+        handleFocusNodeOnCanvas(focusId, 1.15);
+      }
+    },
+    [callflowViewLevel, callflowGraph, handleFocusNodeOnCanvas]
+  );
+
+  const handleExportOpeningHoursCsv = useCallback(() => {
+    if (scriptWorkspace.modules.length === 0) return;
+    const csv = exportOpeningHoursCsv(scriptWorkspace);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    triggerLocalDownload(blob, 'Callflow-Oeffnungszeiten.csv');
+  }, [scriptWorkspace]);
+
+  const handleExportRoutingMatrixCsv = useCallback(() => {
+    if (scriptWorkspace.modules.length === 0) return;
+    const csv = exportRoutingMatrixCsv(scriptWorkspace);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    triggerLocalDownload(blob, 'Callflow-Routing-Matrix.csv');
+  }, [scriptWorkspace]);
+
+  const handleExportMarkdownDoc = useCallback(() => {
+    if (scriptWorkspace.modules.length === 0) return;
+    const md = exportMigrationDocumentationMarkdown(scriptWorkspace);
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    triggerLocalDownload(blob, 'Callflow-Dokumentation.md');
+  }, [scriptWorkspace]);
 
   // Cursor-centered Canvas Wheel Zoom (5% up to 2000%) — 60fps direct transform, debounced UI sync
   const handleCanvasWheel = (e: React.WheelEvent<HTMLDivElement>) => {
@@ -3696,7 +3919,8 @@ function OfflineStudioApp() {
 
   const buildInteractiveHtmlForSurface = useCallback(
     async (
-      targetSurface: 'dark' | 'light'
+      targetSurface: 'dark' | 'light',
+      preferredInitialView?: PreferredInitialHtmlView
     ): Promise<{ html: string | null; aborted?: boolean }> => {
       const currentExportSvg = buildExportSvgSnapshot(false);
       if (!currentExportSvg) return { html: null };
@@ -3754,6 +3978,8 @@ function OfflineStudioApp() {
               initialHiddenNodeTypes: hiddenSmartNodeTypes,
               initialIsolateSubgraph: isolateSubgraphMode,
               analysis: null,
+              globalSearchIndex: globalSearchEntries,
+              simulationModel: null,
             }
           ),
         };
@@ -4015,12 +4241,26 @@ function OfflineStudioApp() {
           };
         }
 
-        const initialMasterDensity: 'compact' | 'detailed' = isMasterCompact
-          ? 'compact'
-          : 'detailed';
-        const preferredMasterKey = isMasterCompact ? 'master' : 'master:detailed';
+        const initialMasterDensity: 'compact' | 'detailed' =
+          preferredInitialView === 'master-detailed'
+            ? 'detailed'
+            : preferredInitialView === 'master-compact'
+            ? 'compact'
+            : isMasterCompact
+            ? 'compact'
+            : 'detailed';
+        const preferredMasterKey =
+          initialMasterDensity === 'compact' ? 'master' : 'master:detailed';
         const activeKey =
-          callflowViewLevel.level === 'detail'
+          preferredInitialView === 'master-compact'
+            ? views.some((v) => v.key === 'master')
+              ? 'master'
+              : views[0].key
+            : preferredInitialView === 'master-detailed'
+            ? views.some((v) => v.key === 'master:detailed')
+              ? 'master:detailed'
+              : views[0].key
+            : callflowViewLevel.level === 'detail'
             ? `script:${callflowViewLevel.scriptNumber}`
             : views.some((v) => v.key === preferredMasterKey)
             ? preferredMasterKey
@@ -4040,6 +4280,8 @@ function OfflineStudioApp() {
               initialHiddenNodeTypes: hiddenSmartNodeTypes,
               initialIsolateSubgraph: isolateSubgraphMode,
               analysis: analysisPayload,
+              globalSearchIndex: globalSearchEntries,
+              simulationModel: callflowSimulationModel,
             }
           ),
         };
@@ -4068,6 +4310,8 @@ function OfflineStudioApp() {
       isolateSubgraphMode,
       activeNodeOffsets,
       isMasterCompact,
+      globalSearchEntries,
+      callflowSimulationModel,
     ]
   );
 
@@ -4937,6 +5181,20 @@ function OfflineStudioApp() {
               >
                 <Grid className="w-3.5 h-3.5" />
               </button>
+
+              <button
+                type="button"
+                onClick={() => setShowMinimap((prev) => !prev)}
+                title="Übersichts-Minimap ein-/ausblenden (M)"
+                className={`hidden md:flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  showMinimap
+                    ? 'text-indigo-200 bg-indigo-600/25 border border-indigo-500/50'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+              >
+                <MapIcon className="w-3.5 h-3.5" />
+                <span className="hidden xl:inline text-[11px]">Minimap</span>
+              </button>
             </div>
 
             {/* Right: PC Drag & Drop Toggle + Prominent 1-Click PNG Download + Interactive HTML Download + Right Panel Switch */}
@@ -4991,34 +5249,32 @@ function OfflineStudioApp() {
                 </span>
               </button>
 
-              {workspaceMode === 'free' && (
-                <button
-                  type="button"
-                  onClick={() => setIsRightPanelOpen((prev) => !prev)}
-                  title="Rechtes Inspektor-Panel ein-/ausblenden"
-                  className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 ${
-                    isRightPanelOpen
-                      ? 'bg-indigo-600/20 border-indigo-500/60 text-indigo-300'
-                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  {isRightPanelOpen ? (
-                    <PanelRightClose className="w-3.5 h-3.5" />
-                  ) : (
-                    <PanelRightOpen className="w-3.5 h-3.5" />
-                  )}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => setIsRightPanelOpen((prev) => !prev)}
+                title="Rechtes Inspektor-Panel ein-/ausblenden (B)"
+                className={`hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  isRightPanelOpen
+                    ? 'bg-indigo-600/20 border-indigo-500/60 text-indigo-300'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {isRightPanelOpen ? (
+                  <PanelRightClose className="w-3.5 h-3.5" />
+                ) : (
+                  <PanelRightOpen className="w-3.5 h-3.5" />
+                )}
+              </button>
 
               <button
                 type="button"
                 onClick={() => setIsFullscreenPreview((prev) => !prev)}
                 title={
                   isFullscreenPreview
-                    ? 'Assistent / Editor wieder einblenden'
-                    : 'Diagramm-Vorschau maximieren (Vollbild)'
+                    ? 'Assistent / Editor wieder einblenden (F)'
+                    : 'Diagramm-Vorschau maximieren (Vollbild, F)'
                 }
-                className="hidden lg:flex p-1.5 bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-100 rounded-lg transition-colors"
+                className="hidden lg:flex p-1.5 bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-100 rounded-lg transition-colors cursor-pointer"
               >
                 {isFullscreenPreview ? (
                   <Minimize2 className="w-4 h-4" />
@@ -5166,6 +5422,35 @@ function OfflineStudioApp() {
                       </span>
                     ) : null;
                   })()}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsCallSimulatorOpen((prev) => !prev)}
+                  title="Interaktiver Anruf-Simulator live auf dem Callflow (Play/Pause, Vor & Zurück)"
+                  className={`px-2.5 py-1 border rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                    isCallSimulatorOpen
+                      ? 'bg-emerald-600 hover:bg-emerald-500 border-emerald-400 text-white'
+                      : 'bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/40 text-emerald-200'
+                  }`}
+                >
+                  <PhoneCall
+                    className={`w-3.5 h-3.5 shrink-0 ${
+                      isCallSimulatorOpen ? 'text-white' : 'text-emerald-400'
+                    }`}
+                  />
+                  <span>Anruf-Simulator</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsGlobalSearchOpen(true)}
+                  title="Globale Suche über alle Skripte, DNIS, Queues, Ansagen & Zeiten (Strg+K)"
+                  className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Search className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span>Suche</span>
+                  <span className="hidden xl:inline text-[10px] font-mono text-slate-400">Strg+K</span>
                 </button>
 
                 <button
@@ -6035,22 +6320,61 @@ function OfflineStudioApp() {
               </div>
             )}
 
-            {/* Floating Bottom-Right Viewport Reset Button */}
-            {coloredSvg && (zoom !== 1 || pan.x !== 0 || pan.y !== 0) && (
-              <button
-                type="button"
-                data-canvas-ui="true"
-                onMouseDown={(e) => e.stopPropagation()}
-                onTouchStart={(e) => e.stopPropagation()}
-                onClick={() => {
-                  setZoom(1);
-                  setPan({ x: 0, y: 0 });
-                }}
-                className="absolute bottom-12 right-3 px-3 py-1.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700 text-xs text-slate-200 flex items-center gap-1.5 shadow-lg transition-colors whitespace-nowrap shrink-0 z-20 cursor-pointer"
-              >
-                <RotateCcw className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Ansicht zentrieren</span>
-              </button>
+            {/* Floating Bottom-Right Minimap & Viewport Reset Controls */}
+            <div className="absolute bottom-3 right-3 z-20 flex flex-col items-end gap-2 pointer-events-none">
+              {coloredSvg && (zoom !== 1 || pan.x !== 0 || pan.y !== 0) && (
+                <button
+                  type="button"
+                  data-canvas-ui="true"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onTouchStart={(e) => e.stopPropagation()}
+                  onClick={() => {
+                    setZoom(1);
+                    setPan({ x: 0, y: 0 });
+                  }}
+                  className="pointer-events-auto px-3 py-1.5 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-slate-700 text-xs text-slate-200 flex items-center gap-1.5 shadow-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Ansicht zentrieren</span>
+                </button>
+              )}
+              {coloredSvg && showMinimap && (
+                <div className="pointer-events-auto" data-canvas-ui="true">
+                  <CanvasMinimap
+                    visible={showMinimap}
+                    thumbnailUrl={gpuProxy?.objectUrl || null}
+                    svgWidth={gpuProxy?.width || getSvgDimensions(coloredSvg).width}
+                    svgHeight={gpuProxy?.height || getSvgDimensions(coloredSvg).height}
+                    viewportWidth={canvasViewportRef.current?.clientWidth || 960}
+                    viewportHeight={canvasViewportRef.current?.clientHeight || 640}
+                    zoom={zoom}
+                    panX={pan.x}
+                    panY={pan.y}
+                    isDarkSurface={canvasSurface === 'dark'}
+                    onPanTo={(nextPanX, nextPanY) => {
+                      applyCameraToDom(nextPanX, nextPanY, cameraRef.current.zoom, false);
+                      setPan({ x: Math.round(nextPanX), y: Math.round(nextPanY) });
+                    }}
+                    onClose={() => setShowMinimap(false)}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Live Floating Call Simulator HUD (Play/Pause, Back/Forward, Speed, Step Timeline) */}
+            {isCallSimulatorOpen && callflowSimulationModel.scripts.length > 0 && (
+              <div className="absolute bottom-3 left-3 right-3 z-30 pointer-events-none flex justify-center">
+                <CallSimulatorHud
+                  isOpen={isCallSimulatorOpen}
+                  onClose={() => setIsCallSimulatorOpen(false)}
+                  model={callflowSimulationModel}
+                  activeScriptNumber={
+                    callflowViewLevel.level === 'detail' ? callflowViewLevel.scriptNumber : null
+                  }
+                  isDarkSurface={canvasSurface === 'dark'}
+                  onFocusStep={handleSimulatorFocusStep}
+                />
+              </div>
             )}
           </div>
 
@@ -6502,9 +6826,19 @@ function OfflineStudioApp() {
         hiddenNodeTypes={hiddenSmartNodeTypes}
         callflowGraph={callflowGraph}
         scriptCount={scriptWorkspace.modules.length}
+        defaultMasterCompact={isMasterCompact}
         buildInteractiveHtml={buildInteractiveHtmlForSurface}
         htmlExportProgress={htmlExportProgress}
         onCancelInteractiveHtml={cancelInteractiveHtmlExport}
+        onExportOpeningHoursCsv={
+          scriptWorkspace.modules.length > 0 ? handleExportOpeningHoursCsv : undefined
+        }
+        onExportRoutingMatrixCsv={
+          scriptWorkspace.modules.length > 0 ? handleExportRoutingMatrixCsv : undefined
+        }
+        onExportMarkdownDoc={
+          scriptWorkspace.modules.length > 0 ? handleExportMarkdownDoc : undefined
+        }
       />
 
       {/* Dedicated Full-Screen Opaque Pre-Render Cover: hides all background UI completely until ready */}
@@ -6696,6 +7030,13 @@ function OfflineStudioApp() {
         onJumpToScript={(scriptNumber) => {
           handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber });
         }}
+      />
+
+      <GlobalSearchModal
+        isOpen={isGlobalSearchOpen}
+        onClose={() => setIsGlobalSearchOpen(false)}
+        entries={globalSearchEntries}
+        onSelectEntry={handleGlobalSearchSelect}
       />
 
       <NewCallflowModal

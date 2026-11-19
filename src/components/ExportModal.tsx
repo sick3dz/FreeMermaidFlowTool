@@ -1,10 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import {
   Check,
+  Clock,
   Copy,
   Download,
   FileCode,
   FileImage,
+  FileSpreadsheet,
+  FileText,
   Globe,
   Image as ImageIcon,
   X,
@@ -26,6 +29,8 @@ import {
 import { generateInteractiveCallflowHtml } from '../utils/callflowEngine';
 import { applySmartLogicColoring } from '../utils/smartColorEngine';
 
+export type PreferredInitialHtmlView = 'master-compact' | 'master-detailed' | 'current';
+
 interface ExportModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -40,11 +45,16 @@ interface ExportModalProps {
   hiddenNodeTypes?: SmartColorNodeType[];
   callflowGraph: CallflowGraph;
   scriptCount?: number;
+  defaultMasterCompact?: boolean;
   buildInteractiveHtml?: (
-    targetSurface: 'dark' | 'light'
+    targetSurface: 'dark' | 'light',
+    preferredInitialView?: PreferredInitialHtmlView
   ) => Promise<{ html: string | null; aborted?: boolean }>;
   htmlExportProgress?: HtmlExportProgress | null;
   onCancelInteractiveHtml?: () => void;
+  onExportOpeningHoursCsv?: () => void;
+  onExportRoutingMatrixCsv?: () => void;
+  onExportMarkdownDoc?: () => void;
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({
@@ -61,12 +71,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   hiddenNodeTypes = [],
   callflowGraph,
   scriptCount = 0,
+  defaultMasterCompact = true,
   buildInteractiveHtml,
   htmlExportProgress = null,
   onCancelInteractiveHtml,
+  onExportOpeningHoursCsv,
+  onExportRoutingMatrixCsv,
+  onExportMarkdownDoc,
 }) => {
   const [pngScale, setPngScale] = useState<1 | 2 | 4>(2);
   const [bgMode, setBgMode] = useState<'transparent' | 'dark' | 'light'>(defaultBackground);
+  const [preferredHtmlView, setPreferredHtmlView] = useState<PreferredInitialHtmlView>(
+    defaultMasterCompact ? 'master-compact' : 'master-detailed'
+  );
   const [isExportingPng, setIsExportingPng] = useState(false);
   const [isExportingHtml, setIsExportingHtml] = useState(false);
   const [copiedType, setCopiedType] = useState<'svg' | 'mmd' | 'md' | null>(null);
@@ -74,7 +91,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   React.useEffect(() => {
     setBgMode(defaultBackground);
-  }, [defaultBackground, isOpen]);
+    setPreferredHtmlView(defaultMasterCompact ? 'master-compact' : 'master-detailed');
+  }, [defaultBackground, defaultMasterCompact, isOpen]);
 
   const baseDimensions = useMemo(() => {
     if (!svgContent) return { width: 1200, height: 800 };
@@ -153,7 +171,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       let htmlContent: string | null = null;
       let wasAborted = false;
       if (buildInteractiveHtml) {
-        const res = await buildInteractiveHtml(targetSurface);
+        const res = await buildInteractiveHtml(targetSurface, preferredHtmlView);
         htmlContent = res.html;
         wasAborted = Boolean(res.aborted);
       }
@@ -306,6 +324,35 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </div>
           </div>
 
+          {/* HTML Initial View Selection when Multi-Script Workspace is active */}
+          {scriptCount > 0 && (
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-slate-300 block">
+                Start-Ansicht beim Öffnen der Callflow.html
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {[
+                  { id: 'master-compact' as const, label: 'Master Kompakt (Schnell)' },
+                  { id: 'master-detailed' as const, label: 'Master Voll-Detail' },
+                  { id: 'current' as const, label: 'Aktuelle Studio-Ansicht' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setPreferredHtmlView(opt.id)}
+                    className={`min-h-[40px] sm:min-h-0 py-2 px-3 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      preferredHtmlView === opt.id
+                        ? 'bg-emerald-600/20 border-emerald-500 text-emerald-200'
+                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Primary Download Cards (4 Formats: PNG, Interactive HTML, SVG, .mmd) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
             <button
@@ -397,6 +444,80 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               </div>
             </button>
           </div>
+
+          {/* Workspace Documentation & Tables Export */}
+          {(onExportOpeningHoursCsv || onExportRoutingMatrixCsv || onExportMarkdownDoc) && (
+            <div className="pt-4 border-t border-slate-800 space-y-2.5">
+              <div className="text-xs font-medium text-slate-300">
+                Dokumentation &amp; Tabellen (direkter Download)
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {onExportOpeningHoursCsv && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onExportOpeningHoursCsv();
+                      setExportStatus('Öffnungszeiten-CSV (Callflow-Oeffnungszeiten.csv) heruntergeladen.');
+                      setTimeout(() => setExportStatus(null), 3000);
+                    }}
+                    className="px-3 py-2.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-amber-500/60 text-left transition-colors flex items-center gap-2.5 cursor-pointer"
+                  >
+                    <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-slate-100 truncate">
+                        Öffnungszeiten (CSV)
+                      </div>
+                      <div className="text-[11px] text-slate-400 truncate">
+                        Excel-Tabelle aller Zeiten
+                      </div>
+                    </div>
+                  </button>
+                )}
+                {onExportRoutingMatrixCsv && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onExportRoutingMatrixCsv();
+                      setExportStatus('Routing-Matrix (Callflow-Routing-Matrix.csv) heruntergeladen.');
+                      setTimeout(() => setExportStatus(null), 3000);
+                    }}
+                    className="px-3 py-2.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-indigo-500/60 text-left transition-colors flex items-center gap-2.5 cursor-pointer"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-indigo-400 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-slate-100 truncate">
+                        Routing-Matrix (CSV)
+                      </div>
+                      <div className="text-[11px] text-slate-400 truncate">
+                        Alle Skripte, DNIS &amp; Ziele
+                      </div>
+                    </div>
+                  </button>
+                )}
+                {onExportMarkdownDoc && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onExportMarkdownDoc();
+                      setExportStatus('Migrations-Dokumentation (Callflow-Dokumentation.md) heruntergeladen.');
+                      setTimeout(() => setExportStatus(null), 3000);
+                    }}
+                    className="px-3 py-2.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-emerald-500/60 text-left transition-colors flex items-center gap-2.5 cursor-pointer"
+                  >
+                    <FileText className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-slate-100 truncate">
+                        Gesamt-Doku (Markdown)
+                      </div>
+                      <div className="text-[11px] text-slate-400 truncate">
+                        Strukturierter Abnahme-Bericht
+                      </div>
+                    </div>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Clipboard Quick Actions */}
           <div className="pt-4 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
