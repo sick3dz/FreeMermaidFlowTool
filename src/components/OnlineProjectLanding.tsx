@@ -193,20 +193,25 @@ export default function OnlineProjectLanding() {
             </a>
           </nav>
 
-          {/* Zone 3: Direct Project Offline Download */}
-          <button
-            type="button"
-            disabled={isDownloading}
-            onClick={handleDownloadProjectOffline}
-            className="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            {isDownloading ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <HardDriveDownload className="w-3.5 h-3.5" />
-            )}
-            <span>Projekt offline laden</span>
-          </button>
+          {/* Zone 3: Version & Direct Project Offline Download */}
+          <div className="flex items-center gap-3 shrink-0">
+            <span className="text-[11px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
+              Version 1.0
+            </span>
+            <button
+              type="button"
+              disabled={isDownloading}
+              onClick={handleDownloadProjectOffline}
+              className="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {isDownloading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <HardDriveDownload className="w-3.5 h-3.5" />
+              )}
+              <span>Projekt offline laden</span>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -216,8 +221,8 @@ export default function OnlineProjectLanding() {
           {/* Left: Proposition & Primary Action */}
           <div className="lg:col-span-7 space-y-6">
             <div className="space-y-3">
-              <p className="text-xs font-mono uppercase tracking-wider text-emerald-400">
-                Offline-First Bereitstellung · Lokale Einzeldatei
+              <p className="text-xs font-mono uppercase tracking-wider text-emerald-400 tabular-nums">
+                Version 1.0 · Offline-First Bereitstellung · Lokale Einzeldatei
               </p>
               <h1 className="text-3xl sm:text-4xl lg:text-[42px] font-semibold tracking-tight text-slate-50 leading-[1.12]">
                 Projekt offline laden und lokal mit dem Builder starten

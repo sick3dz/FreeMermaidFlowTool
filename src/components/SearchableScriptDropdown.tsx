@@ -1,4 +1,5 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Search,
   ChevronDown,
@@ -41,8 +42,16 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
   const [highlightedIndex, setHighlightedIndex] = useState(0);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const [popoverCoords, setPopoverCoords] = useState<{
+    left: number;
+    top?: number;
+    bottom?: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
 
   // Identify currently active module (if in detail mode)
   const activeModule = useMemo(() => {
@@ -149,12 +158,68 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
     }
   }, [isOpen]);
 
-  // Close when clicking outside
+  const updatePopoverPosition = useCallback(() => {
+    const triggerEl = containerRef.current;
+    if (!triggerEl || typeof window === 'undefined') return;
+    const rect = triggerEl.getBoundingClientRect();
+    const viewportW = window.innerWidth;
+    const viewportH = window.innerHeight;
+    const gutter = 8;
+
+    const desiredWidth =
+      variant === 'full'
+        ? Math.max(rect.width, 280)
+        : Math.min(368, Math.max(280, rect.width));
+    const width = Math.min(desiredWidth, Math.max(240, viewportW - gutter * 2));
+
+    const rawLeft = align === 'right' ? rect.right - width : rect.left;
+    const left = Math.max(gutter, Math.min(rawLeft, viewportW - width - gutter));
+
+    const spaceBelow = viewportH - rect.bottom - gutter;
+    const spaceAbove = rect.top - gutter;
+    const openUpward = spaceBelow < 260 && spaceAbove > spaceBelow;
+
+    if (openUpward) {
+      setPopoverCoords({
+        left,
+        bottom: viewportH - rect.top + 6,
+        width,
+        maxHeight: Math.min(420, Math.max(200, spaceAbove - 6)),
+      });
+    } else {
+      setPopoverCoords({
+        left,
+        top: rect.bottom + 6,
+        width,
+        maxHeight: Math.min(420, Math.max(200, spaceBelow - 6)),
+      });
+    }
+  }, [align, variant]);
+
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      setPopoverCoords(null);
+      return;
+    }
+    updatePopoverPosition();
+    window.addEventListener('resize', updatePopoverPosition);
+    window.addEventListener('scroll', updatePopoverPosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePopoverPosition);
+      window.removeEventListener('scroll', updatePopoverPosition, true);
+    };
+  }, [isOpen, updatePopoverPosition]);
+
+  // Close when clicking outside both trigger container and portaled popover
   useEffect(() => {
     if (!isOpen) return;
 
     function handleClickOutside(event: MouseEvent | TouchEvent) {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+      const target = event.target as Node | null;
+      if (!target) return;
+      const insideTrigger = Boolean(containerRef.current?.contains(target));
+      const insidePopover = Boolean(popoverRef.current?.contains(target));
+      if (!insideTrigger && !insidePopover) {
         setIsOpen(false);
       }
     }
@@ -226,59 +291,27 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
     }
   }, [highlightedIndex, isOpen]);
 
-  return (
-    <div
-      ref={containerRef}
-      className={`relative inline-block text-left ${
-        variant === 'full' ? 'w-full' : 'max-w-[280px] sm:max-w-[320px]'
-      } ${className}`}
-      onKeyDown={handleKeyDown}
-    >
-      {/* Trigger Button */}
-      <button
-        type="button"
-        aria-haspopup="listbox"
-        aria-expanded={isOpen}
-        onClick={() => setIsOpen((prev) => !prev)}
-        title="Skript oder Ebene wählen (mit Suche)"
-        className={`flex items-center justify-between gap-1.5 transition-colors cursor-pointer select-none font-mono ${
-          variant === 'full'
-            ? 'w-full px-2.5 py-1.5 text-xs bg-slate-900 hover:bg-slate-850 border border-slate-700 hover:border-slate-600 rounded-lg text-slate-100 shadow-sm'
-            : 'w-full px-2 py-1 text-[11px] bg-slate-900 hover:bg-slate-850 border border-slate-800 hover:border-slate-700 rounded-md text-slate-200 shadow-xs'
-        } ${isOpen ? 'border-indigo-500 ring-1 ring-indigo-500/50' : ''}`}
+  const popoverNode =
+    isOpen && popoverCoords ? (
+      <div
+        ref={popoverRef}
+        role="listbox"
+        data-canvas-ui="true"
+        onMouseDown={(e) => e.stopPropagation()}
+        onTouchStart={(e) => e.stopPropagation()}
+        style={{
+          position: 'fixed',
+          left: `${popoverCoords.left}px`,
+          ...(popoverCoords.top !== undefined ? { top: `${popoverCoords.top}px` } : {}),
+          ...(popoverCoords.bottom !== undefined ? { bottom: `${popoverCoords.bottom}px` } : {}),
+          width: `${popoverCoords.width}px`,
+          maxHeight: `${popoverCoords.maxHeight}px`,
+          zIndex: 9999,
+        }}
+        className="rounded-xl bg-slate-900 border border-slate-700 shadow-2xl backdrop-blur-md overflow-hidden flex flex-col"
       >
-        <div className="flex items-center gap-1.5 min-w-0 truncate">
-          {viewLevel.level === 'welcome' ? (
-            <Sparkles className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-          ) : viewLevel.level === 'master' ? (
-            <Layers className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-          ) : (
-            <FileCode2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-          )}
-          <span className="truncate font-medium">{currentSelectionLabel}</span>
-        </div>
-        <ChevronDown
-          className={`w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform duration-150 ${
-            isOpen ? 'rotate-180 text-indigo-400' : ''
-          }`}
-        />
-      </button>
-
-      {/* Dropdown Menu Popover */}
-      {isOpen && (
-        <div
-          role="listbox"
-          className={`absolute mt-1.5 z-50 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl backdrop-blur-md overflow-hidden flex flex-col ${
-            align === 'right' ? 'right-0' : 'left-0'
-          } ${
-            variant === 'full'
-              ? 'w-full min-w-[280px]'
-              : 'w-80 sm:w-96 min-w-[280px] max-w-[calc(100vw-32px)]'
-          }`}
-          style={{ maxHeight: '420px' }}
-        >
-          {/* Search Header */}
-          <div className="p-2 border-b border-slate-800 bg-slate-950/70">
+        {/* Search Header */}
+        <div className="p-2 border-b border-slate-800 bg-slate-950/70 shrink-0">
             <div className="relative flex items-center">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 pointer-events-none" />
               <input
@@ -316,7 +349,7 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
           </div>
 
           {/* List Options */}
-          <div ref={listRef} className="overflow-y-auto max-h-[300px] p-1.5 space-y-1">
+          <div ref={listRef} className="flex-1 min-h-0 overflow-y-auto p-1.5 space-y-1">
             {/* Option: Master Gesamtkarte (Ebene 1) */}
             {showMasterOption && (
               <div
@@ -526,7 +559,7 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
 
           {/* Quick Back to Master footer if currently in detail mode */}
           {viewLevel.level === 'detail' && (
-            <div className="p-2 border-t border-slate-800 bg-slate-950/60">
+            <div className="p-2 border-t border-slate-800 bg-slate-950/60 shrink-0">
               <button
                 type="button"
                 onClick={() => {
@@ -540,8 +573,50 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
               </button>
             </div>
           )}
+      </div>
+    ) : null;
+
+  return (
+    <div
+      ref={containerRef}
+      className={`relative inline-block text-left min-w-0 ${
+        variant === 'full' ? 'w-full' : 'max-w-[230px] sm:max-w-[260px]'
+      } ${className}`}
+      onKeyDown={handleKeyDown}
+    >
+      {/* Trigger Button */}
+      <button
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
+        onClick={() => setIsOpen((prev) => !prev)}
+        title="Skript oder Ebene wählen (mit Suche)"
+        className={`flex items-center justify-between gap-1.5 transition-colors cursor-pointer select-none font-mono ${
+          variant === 'full'
+            ? 'w-full px-2.5 py-1.5 text-xs bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-slate-600 rounded-lg text-slate-100 shadow-sm'
+            : 'w-full px-2 py-1 text-[11px] bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 rounded-md text-slate-200 shadow-xs'
+        } ${isOpen ? 'border-indigo-500 ring-1 ring-indigo-500/50' : ''}`}
+      >
+        <div className="flex items-center gap-1.5 min-w-0 truncate">
+          {viewLevel.level === 'welcome' ? (
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          ) : viewLevel.level === 'master' ? (
+            <Layers className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+          ) : (
+            <FileCode2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          )}
+          <span className="truncate font-medium">{currentSelectionLabel}</span>
         </div>
-      )}
+        <ChevronDown
+          className={`w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform duration-150 ${
+            isOpen ? 'rotate-180 text-indigo-400' : ''
+          }`}
+        />
+      </button>
+
+      {popoverNode && typeof document !== 'undefined'
+        ? createPortal(popoverNode, document.body)
+        : null}
     </div>
   );
 };

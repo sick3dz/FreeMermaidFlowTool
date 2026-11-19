@@ -5162,7 +5162,7 @@ function OfflineStudioApp() {
 
           {/* Two-Level Breadcrumb Bar when Multi-Script Workspace has modules or Welcome Screen is active */}
           {(scriptWorkspace.modules.length > 0 || callflowViewLevel.level === 'welcome') && (
-            <div className="px-3 sm:px-4 py-1.5 border-b border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 z-10">
+            <div className="px-3 sm:px-4 py-1.5 border-b border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 z-20 relative">
               <div className="flex items-center gap-2 min-w-0">
                 <button
                   type="button"
@@ -5258,7 +5258,7 @@ function OfflineStudioApp() {
                 )}
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex flex-wrap items-center justify-end gap-1.5 max-w-full">
                 {callflowViewLevel.level === 'master' && (
                   <div
                     className="inline-flex items-center p-0.5 bg-slate-900 border border-slate-800 rounded-md shrink-0"
