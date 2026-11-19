@@ -23,14 +23,14 @@ function getOrCreateMermaidOffscreenSandbox(): HTMLDivElement | undefined {
     sandbox.id = 'mermaid-offscreen-sandbox';
     sandbox.setAttribute('aria-hidden', 'true');
     sandbox.style.position = 'fixed';
-    sandbox.style.left = '-99999px';
-    sandbox.style.top = '-99999px';
-    sandbox.style.width = '0px';
-    sandbox.style.height = '0px';
+    sandbox.style.left = '-100000px';
+    sandbox.style.top = '0px';
+    sandbox.style.width = '2400px';
+    sandbox.style.height = '1600px';
     sandbox.style.overflow = 'hidden';
-    sandbox.style.visibility = 'hidden';
+    sandbox.style.opacity = '0';
     sandbox.style.pointerEvents = 'none';
-    sandbox.style.contain = 'strict';
+    sandbox.style.zIndex = '-1';
     document.body.appendChild(sandbox);
   }
   return sandbox;
@@ -45,7 +45,7 @@ function enqueueMermaidRender<T>(task: () => Promise<T>): Promise<T> {
   return next;
 }
 
-const MAX_SVG_RENDER_CACHE = 160;
+const MAX_SVG_RENDER_CACHE = 320;
 const svgRenderCache = new Map<
   string,
   { svg: string; diagramType: string }

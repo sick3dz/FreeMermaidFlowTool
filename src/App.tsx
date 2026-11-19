@@ -212,7 +212,7 @@ const CLARITY_MODE_OPTIONS: Array<{
 ];
 
 const DRAG_THRESHOLD_PX = 7;
-const MAX_CACHED_RENDERED_VIEWS = 40;
+const MAX_CACHED_RENDERED_VIEWS = 300;
 
 interface PreloadedViewCacheEntry {
   viewKey: string;
@@ -223,6 +223,14 @@ interface PreloadedViewCacheEntry {
   coloredSvg: string;
   logicSummary: LogicAnalysisSummary;
   lastUsedAt: number;
+}
+
+interface WorkspacePreloadProgress {
+  active: boolean;
+  completed: number;
+  total: number;
+  currentLabel: string;
+  minimized: boolean;
 }
 
 const SvgHtmlLayer = React.memo(
@@ -556,9 +564,11 @@ function OfflineStudioApp() {
   const [isDownloadingHtml, setIsDownloadingHtml] = useState<boolean>(false);
   const [htmlExportProgress, setHtmlExportProgress] = useState<HtmlExportProgress | null>(null);
   const [htmlExportNotice, setHtmlExportNotice] = useState<string | null>(null);
+  const [preloadProgress, setPreloadProgress] = useState<WorkspacePreloadProgress | null>(null);
 
   // Refs
   const exportAbortControllerRef = useRef<AbortController | null>(null);
+  const preloadAbortControllerRef = useRef<AbortController | null>(null);
   const preloadedViewsRef = useRef<Map<string, PreloadedViewCacheEntry>>(new Map());
   const activeViewKeyRef = useRef<string>('master');
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -724,7 +734,7 @@ function OfflineStudioApp() {
   const scriptWorkspaceFallbackRef = useRef<ScriptWorkspace>(scriptWorkspace);
   scriptWorkspaceFallbackRef.current = scriptWorkspace;
 
-  const currentStyleSignature = useMemo(
+  const currentBaseStyleSignature = useMemo(
     () =>
       JSON.stringify({
         themeConfig,
@@ -733,7 +743,6 @@ function OfflineStudioApp() {
         hiddenSmartNodeTypes,
         canvasSurface,
         direction: currentDirection || 'LR',
-        isolateSubgraphMode,
       }),
     [
       themeConfig,
@@ -742,9 +751,44 @@ function OfflineStudioApp() {
       hiddenSmartNodeTypes,
       canvasSurface,
       currentDirection,
-      isolateSubgraphMode,
     ]
   );
+
+  const currentStyleSignature = useMemo(
+    () =>
+      JSON.stringify({
+        base: currentBaseStyleSignature,
+        isolateSubgraphMode,
+      }),
+    [currentBaseStyleSignature, isolateSubgraphMode]
+  );
+
+  const workspaceModulesPreloadKey = useMemo(() => {
+    if (scriptWorkspace.modules.length === 0) return '';
+    const entry = scriptWorkspace.masterScriptNumber || '';
+    const dir = currentDirection || 'LR';
+    const moduleFingerprint = scriptWorkspace.modules
+      .map(
+        (m) =>
+          `${m.scriptNumber}:${m.isMaster ? '1' : '0'}:${m.rules.length}:${computeFastCacheHash(
+            m.rawText || ''
+          )}:${m.scriptName || ''}`
+      )
+      .join('|');
+    const linksSig = (scriptWorkspace.manualLinks || [])
+      .map((l) => `${l.fromScriptNumber}->${l.toTargetNumber}:${l.label || ''}`)
+      .join(',');
+    const extSig = (scriptWorkspace.externalEndpoints || []).join(',');
+    return `${dir}::${entry}::${computeFastCacheHash(
+      `${moduleFingerprint}||${linksSig}||${extSig}`
+    )}`;
+  }, [
+    scriptWorkspace.modules,
+    scriptWorkspace.masterScriptNumber,
+    scriptWorkspace.manualLinks,
+    scriptWorkspace.externalEndpoints,
+    currentDirection,
+  ]);
 
   const activeWorkspaceViewKey = useMemo(() => {
     if (scriptWorkspace.modules.length === 0) return 'standalone';
@@ -942,13 +986,17 @@ function OfflineStudioApp() {
     currentStyleSignature,
   ]);
 
-  // On-Demand View Cache: cache only visited views (no eager background preloading, no blocking overlay, no black-flash proxy swap)
+  // Upfront Multi-Script Pre-Rendering (Active view first, then all scripts into memory cache for 0ms instant switching)
   useEffect(() => {
     const cache = preloadedViewsRef.current;
     if (scriptWorkspace.modules.length === 0) {
+      preloadAbortControllerRef.current?.abort();
+      preloadAbortControllerRef.current = null;
+      setPreloadProgress(null);
       cache.clear();
       return;
     }
+
     const validKeys = new Set<string>([
       'master',
       'standalone',
@@ -959,7 +1007,210 @@ function OfflineStudioApp() {
         cache.delete(k);
       }
     }
-  }, [scriptWorkspace.modules]);
+
+    preloadAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    preloadAbortControllerRef.current = controller;
+
+    const wsSnapshot = scriptWorkspaceFallbackRef.current;
+    const dir = currentDirection || 'LR';
+    const targetStyleSig = JSON.stringify({
+      base: currentBaseStyleSignature,
+      isolateSubgraphMode: false,
+    });
+
+    interface PreloadTaskItem {
+      viewKey: string;
+      label: string;
+      mermaidCode: string;
+      isMaster: boolean;
+    }
+
+    const allTasks: PreloadTaskItem[] = [
+      {
+        viewKey: 'master',
+        label: `Master-Gesamtkarte (${wsSnapshot.modules.length} Skripte)`,
+        mermaidCode: buildMasterOverviewMermaid(wsSnapshot, dir),
+        isMaster: true,
+      },
+      ...wsSnapshot.modules.map((mod) => ({
+        viewKey: `script:${mod.scriptNumber}`,
+        label: formatScriptDisplayLabel(mod),
+        mermaidCode: buildScriptDetailMermaid(wsSnapshot, mod.scriptNumber, dir),
+        isMaster: false,
+      })),
+    ];
+
+    // Prioritize whichever view is currently open so the canvas becomes visible first
+    const currentKey = activeViewKeyRef.current;
+    allTasks.sort((a, b) => {
+      if (a.viewKey === currentKey) return -1;
+      if (b.viewKey === currentKey) return 1;
+      return 0;
+    });
+
+    const pendingTasks = allTasks.filter((task) => {
+      const hit = cache.get(task.viewKey);
+      return !(
+        hit &&
+        hit.mermaidCode.trim() === task.mermaidCode.trim() &&
+        hit.styleSignature === targetStyleSig
+      );
+    });
+
+    if (pendingTasks.length === 0) {
+      setPreloadProgress(null);
+      return;
+    }
+
+    const alreadyDoneCount = allTasks.length - pendingTasks.length;
+    const yieldSmoothFrame = () =>
+      new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => {
+          window.setTimeout(resolve, 12);
+        });
+      });
+
+    let cancelled = false;
+    setPreloadProgress({
+      active: true,
+      completed: alreadyDoneCount,
+      total: allTasks.length,
+      currentLabel: pendingTasks[0].label,
+      minimized: false,
+    });
+
+    (async () => {
+      let completedCount = alreadyDoneCount;
+      // Short initial yield so popup mounts smoothly once without competing with workspace state commit
+      await yieldSmoothFrame();
+
+      for (let i = 0; i < pendingTasks.length; i++) {
+        if (cancelled || controller.signal.aborted) return;
+        const task = pendingTasks[i];
+        const trimmedCode = task.mermaidCode.trim();
+        if (!trimmedCode) {
+          completedCount += 1;
+          continue;
+        }
+
+        // Skip if active-view effect already populated this exact view in the meantime
+        const existingHit = cache.get(task.viewKey);
+        if (
+          existingHit &&
+          existingHit.mermaidCode.trim() === trimmedCode &&
+          existingHit.styleSignature === targetStyleSig
+        ) {
+          completedCount += 1;
+          setPreloadProgress((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  completed: completedCount,
+                  currentLabel: task.label,
+                }
+              : null
+          );
+          continue;
+        }
+
+        setPreloadProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                completed: completedCount,
+                currentLabel: task.label,
+              }
+            : null
+        );
+
+        let renderedResult = await renderLocalMermaidDiagram(
+          task.mermaidCode,
+          themeConfig,
+          shouldUseNativeSvgLabels(task.mermaidCode)
+        );
+        if (cancelled || controller.signal.aborted) return;
+
+        let effectiveCodeForCache = task.mermaidCode;
+        if (renderedResult.svg === null && task.isMaster) {
+          const fallbackCode = buildSafeFallbackMasterMermaid(wsSnapshot, dir);
+          const fallbackRes = await renderLocalMermaidDiagram(
+            fallbackCode,
+            themeConfig,
+            shouldUseNativeSvgLabels(fallbackCode)
+          );
+          if (cancelled || controller.signal.aborted) return;
+          if (fallbackRes.svg !== null) {
+            renderedResult = fallbackRes;
+            effectiveCodeForCache = fallbackCode;
+          }
+        }
+
+        if (renderedResult.svg !== null) {
+          const colored = applySmartLogicColoring(
+            renderedResult.svg,
+            effectiveCodeForCache,
+            smartColorMode,
+            canvasSurface,
+            themeConfig.lineColor,
+            hiddenSmartNodeTypes,
+            pathColorMode
+          );
+
+          cache.set(task.viewKey, {
+            viewKey: task.viewKey,
+            mermaidCode: task.mermaidCode,
+            codeHash: computeFastCacheHash(trimmedCode),
+            styleSignature: targetStyleSig,
+            rawSvg: renderedResult.svg,
+            coloredSvg: colored.svg,
+            logicSummary: colored.summary,
+            lastUsedAt: Date.now(),
+          });
+
+          // Immediately display active view as soon as it finishes
+          if (task.viewKey === activeViewKeyRef.current) {
+            hasBaseRenderedSvgRef.current = true;
+            setValidation(renderedResult.validation);
+            setMasterRenderError(null);
+            setBaseRenderedSvg(renderedResult.svg);
+          }
+        }
+
+        completedCount += 1;
+        setPreloadProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                completed: completedCount,
+                currentLabel:
+                  i + 1 < pendingTasks.length ? pendingTasks[i + 1].label : 'Fertig',
+              }
+            : null
+        );
+
+        await yieldSmoothFrame();
+      }
+
+      if (!cancelled && !controller.signal.aborted) {
+        setPreloadProgress(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [
+    workspaceModulesPreloadKey,
+    currentBaseStyleSignature,
+    themeConfig,
+    smartColorMode,
+    pathColorMode,
+    hiddenSmartNodeTypes,
+    canvasSurface,
+    currentDirection,
+  ]);
 
   useEffect(() => {
     if (!baseRenderedSvg || !baseColoredSvg || isolateSubgraphMode) return;
@@ -976,11 +1227,15 @@ function OfflineStudioApp() {
       logicSummary,
       lastUsedAt: Date.now(),
     });
-    if (cache.size > MAX_CACHED_RENDERED_VIEWS) {
+    const maxCapacity = Math.max(
+      MAX_CACHED_RENDERED_VIEWS,
+      scriptWorkspace.modules.length + 20
+    );
+    if (cache.size > maxCapacity) {
       const oldest = Array.from(cache.entries())
         .filter(([k]) => k !== activeWorkspaceViewKey && k !== 'master')
         .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
-      while (cache.size > MAX_CACHED_RENDERED_VIEWS && oldest.length > 0) {
+      while (cache.size > maxCapacity && oldest.length > 0) {
         const victim = oldest.shift();
         if (victim) cache.delete(victim[0]);
       }
@@ -993,6 +1248,7 @@ function OfflineStudioApp() {
     activeWorkspaceViewKey,
     currentStyleSignature,
     isolateSubgraphMode,
+    scriptWorkspace.modules.length,
   ]);
 
   // Alias for canvas presence checks & intrinsic dimensions (without re-serializing on drag/select)
@@ -5262,27 +5518,30 @@ function OfflineStudioApp() {
                 svgHtml={coloredSvg}
               />
             ) : scriptWorkspace.modules.length > 0 || code.trim().length > 0 ? (
-              <div
-                data-canvas-ui="true"
-                onMouseDown={(e) => e.stopPropagation()}
-                onTouchStart={(e) => e.stopPropagation()}
-                className="max-w-lg w-full mx-auto my-auto p-6 rounded-2xl bg-slate-900/95 border border-slate-800 text-slate-200 space-y-4 shadow-2xl text-center"
-              >
-                {(validation.isValid || !effectiveMermaidCode.trim()) && !masterRenderError ? (
-                  <>
-                    <div className="w-8 h-8 mx-auto rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
-                    <div className="space-y-1">
-                      <p className="text-sm font-semibold text-slate-100">
-                        Master-Gesamtkarte wird aufgebaut …
-                      </p>
-                      <p className="text-xs text-slate-400">
-                        {scriptWorkspace.modules.length > 0
-                          ? `${scriptWorkspace.modules.length} Skript-Modul(e) werden lokal gerendert und eingepasst.`
-                          : 'Mermaid-Grafik wird lokal gerendert.'}
-                      </p>
-                    </div>
-                  </>
-                ) : (
+              preloadProgress?.active && !preloadProgress.minimized && !masterRenderError ? (
+                <div className="w-full h-full" aria-hidden="true" />
+              ) : (
+                <div
+                  data-canvas-ui="true"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onTouchStart={(e) => e.stopPropagation()}
+                  className="max-w-lg w-full mx-auto my-auto p-6 rounded-2xl bg-slate-900/95 border border-slate-800 text-slate-200 space-y-4 shadow-2xl text-center"
+                >
+                  {(validation.isValid || !effectiveMermaidCode.trim()) && !masterRenderError ? (
+                    <>
+                      <div className="w-8 h-8 mx-auto rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold text-slate-100">
+                          Master-Gesamtkarte wird aufgebaut …
+                        </p>
+                        <p className="text-xs text-slate-400">
+                          {scriptWorkspace.modules.length > 0
+                            ? `${scriptWorkspace.modules.length} Skript-Modul(e) werden lokal gerendert und eingepasst.`
+                            : 'Mermaid-Grafik wird lokal gerendert.'}
+                        </p>
+                      </div>
+                    </>
+                  ) : (
                   <>
                     <AlertTriangle className="w-8 h-8 mx-auto text-rose-400" />
                     <div className="space-y-1">
@@ -5324,6 +5583,7 @@ function OfflineStudioApp() {
                   </>
                 )}
               </div>
+              )
             ) : workspaceMode === 'guided' ? (
               <div
                 data-canvas-ui="true"
@@ -5923,6 +6183,102 @@ function OfflineStudioApp() {
         htmlExportProgress={htmlExportProgress}
         onCancelInteractiveHtml={cancelInteractiveHtmlExport}
       />
+
+      {/* Calm, Backdrop-Free Floating Pre-Render Popup (No full-screen dimmer, no flickering window) */}
+      {preloadProgress?.active && !htmlExportProgress?.active && !isExportModalOpen && (
+        preloadProgress.minimized ? (
+          <div
+            role="status"
+            aria-live="polite"
+            className="fixed bottom-5 right-5 z-50 flex items-center gap-3 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl text-xs text-slate-200 tabular-nums"
+          >
+            <div className="w-3.5 h-3.5 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin shrink-0" />
+            <span className="font-medium whitespace-nowrap">
+              Vorab-Rendering {preloadProgress.completed} / {preloadProgress.total}
+            </span>
+            <button
+              type="button"
+              onClick={() =>
+                setPreloadProgress((prev) => (prev ? { ...prev, minimized: false } : null))
+              }
+              className="px-2 py-1 text-[11px] font-medium text-emerald-300 hover:text-emerald-200 bg-slate-800 hover:bg-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Details
+            </button>
+          </div>
+        ) : (
+          <div
+            role="status"
+            aria-live="polite"
+            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[calc(100%-2rem)] max-w-md bg-slate-900 border border-slate-700 rounded-xl p-4 sm:p-5 shadow-2xl space-y-3.5"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 space-y-0.5">
+                <div className="text-xs sm:text-sm font-semibold text-slate-100">
+                  Ansichten werden vorab gerendert
+                </div>
+                <div className="text-xs text-slate-400 truncate">
+                  {preloadProgress.currentLabel}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPreloadProgress((prev) => (prev ? { ...prev, minimized: true } : null))
+                  }
+                  className="px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Minimieren
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    preloadAbortControllerRef.current?.abort();
+                    setPreloadProgress(null);
+                  }}
+                  className="px-2.5 py-1.5 text-xs font-medium text-rose-200 bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Stoppen
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="h-2 w-full rounded-full bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full bg-emerald-500 transition-[width] duration-150 ease-out"
+                  style={{
+                    width: `${
+                      preloadProgress.total > 0
+                        ? Math.min(
+                            100,
+                            Math.max(
+                              4,
+                              Math.round(
+                                (preloadProgress.completed / preloadProgress.total) * 100
+                              )
+                            )
+                          )
+                        : 100
+                    }%`,
+                  }}
+                />
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-slate-400 tabular-nums">
+                <span>Danach 0 ms Sofort-Wechsel zwischen allen Skripten</span>
+                <span className="font-mono text-emerald-300 font-semibold whitespace-nowrap shrink-0 ml-2">
+                  {preloadProgress.completed} / {preloadProgress.total} ·{' '}
+                  {preloadProgress.total > 0
+                    ? Math.round((preloadProgress.completed / preloadProgress.total) * 100)
+                    : 0}
+                  %
+                </span>
+              </div>
+            </div>
+          </div>
+        )
+      )}
 
       {/* Quick Interactive HTML Export Progress Modal HUD */}
       {htmlExportProgress?.active && !isExportModalOpen && (
