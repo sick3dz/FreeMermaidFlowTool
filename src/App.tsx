@@ -45,6 +45,7 @@ import {
 import {
   CallflowBuildingBlockType,
   CallflowDirectionFilter,
+  CallflowGraph,
   CallflowHopDepth,
   CallflowIssueResolution,
   CallflowOpenIssue,
@@ -3770,27 +3771,7 @@ function OfflineStudioApp() {
     async (
       targetSurface: 'dark' | 'light',
       preferredInitialView?: PreferredInitialHtmlView
-    ): Promise<{ html: string | null; aborted?: boolean }> => {
-      let currentExportSvg = buildExportSvgSnapshot(false);
-      if (!currentExportSvg && scriptWorkspace.modules.length === 0) {
-        if (!code.trim()) return { html: null };
-        const rendered = await renderLocalMermaidDiagram(
-          code,
-          themeConfig,
-          shouldUseNativeSvgLabels(code)
-        );
-        if (!rendered.svg) return { html: null };
-        currentExportSvg = applySmartLogicColoring(
-          rendered.svg,
-          code,
-          smartColorMode,
-          targetSurface,
-          themeConfig.lineColor,
-          [],
-          pathColorMode
-        ).svg;
-      }
-
+    ): Promise<{ html: string | null; aborted?: boolean; fallbackCount?: number; errorMessage?: string }> => {
       const exportThemeConfig: ThemeConfiguration =
         targetSurface === 'dark'
           ? {
@@ -3806,7 +3787,35 @@ function OfflineStudioApp() {
               lineColor: !isColorDark(themeConfig.lineColor) ? '#475569' : themeConfig.lineColor,
             };
 
-      if (scriptWorkspace.modules.length === 0 && currentExportSvg) {
+      // Single-diagram fallback mode (when no multi-script workspace is loaded)
+      if (scriptWorkspace.modules.length === 0) {
+        let currentExportSvg = buildExportSvgSnapshot(false);
+        if (!currentExportSvg) {
+          if (!code.trim()) return { html: null };
+          const rendered = await renderLocalMermaidDiagram(
+            code,
+            themeConfig,
+            shouldUseNativeSvgLabels(code),
+            { timeoutMs: 10000 }
+          );
+          if (!rendered.svg) {
+            return {
+              html: null,
+              errorMessage:
+                rendered.validation.errorMessage ||
+                'Das aktive Diagramm konnte nicht für den HTML-Export gerendert werden.',
+            };
+          }
+          currentExportSvg = applySmartLogicColoring(
+            rendered.svg,
+            code,
+            smartColorMode,
+            targetSurface,
+            themeConfig.lineColor,
+            [],
+            pathColorMode
+          ).svg;
+        }
         const rawUnfilteredSvg = baseRenderedSvg
           ? applyNodeOffsetsToSvg(
               applySmartLogicColoring(
@@ -3851,20 +3860,17 @@ function OfflineStudioApp() {
         };
       }
 
-      const registry = extractWorkspaceResourceRegistry(scriptWorkspace);
-      const analysisPayload: InteractiveCallflowHtmlAnalysisPayload = {
-        openIssues: scriptWorkspace.issues || [],
-        healthFindings: analyzeWorkspaceLogicHealth(scriptWorkspace),
-        scheduleRows: buildWorkspaceScheduleOverview(scriptWorkspace),
-        registry,
-        routingMatrixRows: buildWorkspaceRoutingMatrix(scriptWorkspace),
-        masterScriptNumber: scriptWorkspace.masterScriptNumber,
-        parametersByScript: registry.parametersByScript,
-      };
+      // Pause any background workspace preloader immediately so the render mutex is free
+      if (preloadAbortControllerRef.current) {
+        preloadAbortControllerRef.current.abort();
+        preloadAbortControllerRef.current = null;
+      }
+      setPreloadProgress(null);
 
       const abortController = new AbortController();
       exportAbortControllerRef.current = abortController;
       const { signal } = abortController;
+      let keepErrorModalOpen = false;
 
       const yieldFrame = () =>
         new Promise<void>((resolve) => {
@@ -3879,8 +3885,84 @@ function OfflineStudioApp() {
           window.setTimeout(resolve, 0);
         });
 
+      const buildFallbackViewSvg = (label: string, reason: string): string => {
+        const bg = targetSurface === 'dark' ? '#0f172a' : '#ffffff';
+        const border = targetSurface === 'dark' ? '#334155' : '#cbd5e1';
+        const titleFill = targetSurface === 'dark' ? '#f1f5f9' : '#0f172a';
+        const subFill = targetSurface === 'dark' ? '#94a3b8' : '#475569';
+        const badgeFill = targetSurface === 'dark' ? '#f59e0b' : '#b45309';
+        const esc = (s: string) =>
+          s
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+        return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" width="760" height="220"><rect x="16" y="16" width="728" height="188" rx="14" fill="${bg}" stroke="${border}" stroke-width="1.5"/><text x="40" y="62" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="${badgeFill}">Fallback-Ansicht (Zeitlimit / Render-Schutz)</text><text x="40" y="96" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="600" fill="${titleFill}">${esc(label.slice(0, 72))}</text><text x="40" y="132" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="${subFill}">${esc(reason.slice(0, 96))}</text><text x="40" y="164" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="${subFill}">Alle Skriptdaten, Parameter und Verknüpfungen bleiben in der HTML-Analyse vollständig verfügbar.</text></svg>`;
+      };
+
+      const totalEstimatedViews = scriptWorkspace.modules.length + 2;
+      const VIEW_TIMEOUT_MS = 10000;
+
       try {
+        // 1. Open Status Popup immediately BEFORE any heavy workspace computation
+        setHtmlExportNotice(null);
+        setHtmlExportProgress({
+          active: true,
+          phase: 'preparing',
+          current: 0,
+          total: totalEstimatedViews,
+          currentLabel: `Analyse-Index für ${scriptWorkspace.modules.length} Skripte wird erstellt…`,
+          cacheHits: 0,
+          fallbackCount: 0,
+          lastWarning: null,
+          errorMessage: null,
+          timeoutSecondsPerView: Math.round(VIEW_TIMEOUT_MS / 1000),
+        });
+        await yieldFrame();
+        if (signal.aborted) return { html: null, aborted: true };
+
+        const registry = extractWorkspaceResourceRegistry(scriptWorkspace);
+        await yieldMicroTick();
+        if (signal.aborted) return { html: null, aborted: true };
+
+        setHtmlExportProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                currentLabel: 'Logik-Prüfung, Öffnungszeiten & Routing-Matrix werden berechnet…',
+              }
+            : prev
+        );
+        await yieldFrame();
+        if (signal.aborted) return { html: null, aborted: true };
+
+        const healthFindings = analyzeWorkspaceLogicHealth(scriptWorkspace);
+        const scheduleRows = buildWorkspaceScheduleOverview(scriptWorkspace);
+        const routingMatrixRows = buildWorkspaceRoutingMatrix(scriptWorkspace);
+        const analysisPayload: InteractiveCallflowHtmlAnalysisPayload = {
+          openIssues: scriptWorkspace.issues || [],
+          healthFindings,
+          scheduleRows,
+          registry,
+          routingMatrixRows,
+          masterScriptNumber: scriptWorkspace.masterScriptNumber,
+          parametersByScript: registry.parametersByScript,
+        };
+        await yieldMicroTick();
+        if (signal.aborted) return { html: null, aborted: true };
+
         const dir = currentDirection || 'LR';
+        setHtmlExportProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                currentLabel: 'Master-Gesamtkarten werden aufgebaut…',
+              }
+            : prev
+        );
+        await yieldFrame();
+        if (signal.aborted) return { html: null, aborted: true };
+
         const viewSpecs: Array<{
           key: string;
           label: string;
@@ -3907,19 +3989,25 @@ function OfflineStudioApp() {
               compact: false,
             }),
           },
-          ...scriptWorkspace.modules.map((mod) => {
-            const isMainMod =
-              canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
-              (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(mod.scriptNumber));
-            return {
-              key: `script:${mod.scriptNumber}`,
-              label: `Ebene 2: ${isMainMod ? 'Main (Einstiegsskript)' : formatScriptDisplayLabel(mod)}`,
-              scriptNumber: mod.scriptNumber,
-              viewLevel: { level: 'detail', scriptNumber: mod.scriptNumber } as CallflowViewLevel,
-              mermaidCode: buildScriptDetailMermaid(scriptWorkspace, mod.scriptNumber, dir),
-            };
-          }),
         ];
+
+        for (let mIdx = 0; mIdx < scriptWorkspace.modules.length; mIdx++) {
+          if (signal.aborted) return { html: null, aborted: true };
+          const mod = scriptWorkspace.modules[mIdx];
+          const isMainMod =
+            canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
+            (mod.isMaster && /^(?:main|start|master(?:script)?)$/i.test(mod.scriptNumber));
+          viewSpecs.push({
+            key: `script:${mod.scriptNumber}`,
+            label: `Ebene 2: ${isMainMod ? 'Main (Einstiegsskript)' : formatScriptDisplayLabel(mod)}`,
+            scriptNumber: mod.scriptNumber,
+            viewLevel: { level: 'detail', scriptNumber: mod.scriptNumber } as CallflowViewLevel,
+            mermaidCode: buildScriptDetailMermaid(scriptWorkspace, mod.scriptNumber, dir),
+          });
+          if ((mIdx + 1) % 10 === 0) {
+            await yieldMicroTick();
+          }
+        }
 
         const canReuseActiveCanvasSvg =
           Boolean(baseRenderedSvg) &&
@@ -3929,17 +4017,13 @@ function OfflineStudioApp() {
           exportThemeConfig.lineColor === themeConfig.lineColor;
 
         let cacheHits = 0;
-        setHtmlExportNotice(null);
-        setHtmlExportProgress({
-          active: true,
-          phase: 'preparing',
-          current: 0,
-          total: viewSpecs.length,
-          currentLabel: `${viewSpecs.length} Ansichten werden vorbereitet…`,
-          cacheHits: 0,
-        });
-        await yieldFrame();
-        if (signal.aborted) return { html: null, aborted: true };
+        let fallbackCount = 0;
+        let lastWarning: string | null = null;
+        const dagreFallbackTheme: ThemeConfiguration = {
+          ...exportThemeConfig,
+          layoutEngine: 'dagre',
+          look: 'classic',
+        };
 
         const views: InteractiveCallflowHtmlView[] = [];
         for (let idx = 0; idx < viewSpecs.length; idx++) {
@@ -3955,10 +4039,15 @@ function OfflineStudioApp() {
             total: viewSpecs.length,
             currentLabel: spec.label,
             cacheHits,
+            fallbackCount,
+            lastWarning,
+            errorMessage: null,
+            timeoutSecondsPerView: Math.round(VIEW_TIMEOUT_MS / 1000),
           });
 
           let rawSvg: string | null = null;
           let wasCacheHit = false;
+          let usedFallback = false;
           const trimmedSpecCode = spec.mermaidCode.trim();
           const preloadLookupKey = spec.key === 'master:detailed' ? 'master' : spec.key;
           const preloadedHit = canReuseActiveCanvasSvg
@@ -3980,13 +4069,64 @@ function OfflineStudioApp() {
             rawSvg = preloadedHit.rawSvg;
             wasCacheHit = true;
           } else {
+            // Yield a frame BEFORE starting heavy Mermaid rendering so the UI updates immediately
+            await yieldFrame();
+            if (signal.aborted) return { html: null, aborted: true };
+
             const res = await renderLocalMermaidDiagram(
               spec.mermaidCode,
               exportThemeConfig,
-              shouldUseNativeSvgLabels(spec.mermaidCode)
+              shouldUseNativeSvgLabels(spec.mermaidCode),
+              { timeoutMs: VIEW_TIMEOUT_MS }
             );
             rawSvg = res.svg;
             wasCacheHit = Boolean(res.fromCache);
+
+            if (!rawSvg && !signal.aborted) {
+              if (
+                exportThemeConfig.layoutEngine !== 'dagre' ||
+                exportThemeConfig.look !== 'classic'
+              ) {
+                setHtmlExportProgress((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        lastWarning: `${spec.label}: Dagre-Fallback wird versucht…`,
+                      }
+                    : prev
+                );
+                await yieldFrame();
+                const fallbackRes = await renderLocalMermaidDiagram(
+                  spec.mermaidCode,
+                  dagreFallbackTheme,
+                  shouldUseNativeSvgLabels(spec.mermaidCode),
+                  { timeoutMs: 6500 }
+                );
+                rawSvg = fallbackRes.svg;
+                if (rawSvg) {
+                  usedFallback = true;
+                  lastWarning = `${spec.label} im Dagre-Fallback gerendert`;
+                }
+              }
+
+              if (!rawSvg && spec.key === 'master:detailed') {
+                const compactView = views.find((v) => v.key === 'master');
+                if (compactView) {
+                  rawSvg = compactView.svg;
+                  usedFallback = true;
+                  lastWarning = 'Voll-Detail-Karte übersprungen (Kompakt-Master übernommen)';
+                }
+              }
+
+              if (!rawSvg) {
+                rawSvg = buildFallbackViewSvg(
+                  spec.label,
+                  res.validation.errorMessage || 'Zeitlimit überschritten'
+                );
+                usedFallback = true;
+                lastWarning = `${spec.label}: Platzhalter-Ansicht wegen Zeitlimit erzeugt`;
+              }
+            }
           }
 
           if (signal.aborted) {
@@ -3996,79 +4136,101 @@ function OfflineStudioApp() {
           if (wasCacheHit) {
             cacheHits += 1;
           }
+          if (usedFallback) {
+            fallbackCount += 1;
+          }
 
           if (rawSvg) {
-            const parsedGraph = parseCallflowGraph(spec.mermaidCode);
-            const colored = applySmartLogicColoring(
-              rawSvg,
-              spec.mermaidCode,
-              smartColorMode,
-              targetSurface,
-              exportThemeConfig.lineColor,
-              [],
-              pathColorMode
-            ).svg;
-            const withOffsets = applyNodeOffsetsToSvg(
-              colored,
-              scriptWorkspace.nodeOffsets,
-              parsedGraph,
-              false
-            );
+            let parsedGraph: CallflowGraph;
+            try {
+              parsedGraph = parseCallflowGraph(spec.mermaidCode);
+            } catch {
+              parsedGraph = {
+                nodes: new Map(),
+                edges: [],
+                entryNodes: [],
+                hubNodes: [],
+                terminalNodes: [],
+              };
+            }
+
+            let finalSvg = rawSvg;
+            try {
+              const colored = applySmartLogicColoring(
+                rawSvg,
+                spec.mermaidCode,
+                smartColorMode,
+                targetSurface,
+                exportThemeConfig.lineColor,
+                [],
+                pathColorMode
+              ).svg;
+              finalSvg = applyNodeOffsetsToSvg(
+                colored,
+                scriptWorkspace.nodeOffsets,
+                parsedGraph,
+                false
+              );
+            } catch {
+              fallbackCount += 1;
+              lastWarning = `${spec.label}: SVG-Nachbearbeitung vereinfacht`;
+            }
 
             // Precompute structured Element Info snapshots for instant 0ms Double-Click Info Box in Callflow.html
             const nodeDetails: Record<string, InteractiveCallflowHtmlNodeDetail> = {};
-            parsedGraph.nodes.forEach((node) => {
-              const snap = inspectWorkspaceNodeForEdit(
-                scriptWorkspace,
-                spec.viewLevel,
-                node.id,
-                parsedGraph
-              );
-              nodeDetails[node.id] = {
-                nodeId: snap.nodeId,
-                mode: snap.mode,
-                scriptNumber: snap.scriptNumber,
-                title: snap.title,
-                blockType: snap.blockType,
-                prio: snap.prio,
-                announcement: snap.announcement || undefined,
-                queueTarget: snap.queueTarget || undefined,
-                schedule: snap.schedule || undefined,
-                condition: snap.condition || undefined,
-                canJumpToDetailScript: snap.canJumpToDetailScript,
-                detailTargetScriptNumber: snap.detailTargetScriptNumber,
-                entryDnisNumbers: snap.entryDnisNumbers,
-                organizationName: snap.organizationName,
-                cdnAlias: snap.cdnAlias,
-                resolvedScheduleDisplay: snap.resolvedScheduleDisplay,
-                hasHolidayCheck: snap.hasHolidayCheck,
-                waitSeconds: snap.waitSeconds,
-                treatmentInfo: snap.treatmentInfo,
-                hdxAction: snap.hdxAction,
-                incomingConnections: snap.incomingConnections,
-                outgoingConnections: snap.outgoingConnections,
-                moduleRulesPreview: snap.moduleRulesPreview,
-                specialParameters: snap.specialParameters,
-                relatedFindings: snap.relatedFindings,
-                rawLineSnippet: snap.rawLineSnippet,
-              };
-            });
+            try {
+              parsedGraph.nodes.forEach((node) => {
+                const snap = inspectWorkspaceNodeForEdit(
+                  scriptWorkspace,
+                  spec.viewLevel,
+                  node.id,
+                  parsedGraph
+                );
+                nodeDetails[node.id] = {
+                  nodeId: snap.nodeId,
+                  mode: snap.mode,
+                  scriptNumber: snap.scriptNumber,
+                  title: snap.title,
+                  blockType: snap.blockType,
+                  prio: snap.prio,
+                  announcement: snap.announcement || undefined,
+                  queueTarget: snap.queueTarget || undefined,
+                  schedule: snap.schedule || undefined,
+                  condition: snap.condition || undefined,
+                  canJumpToDetailScript: snap.canJumpToDetailScript,
+                  detailTargetScriptNumber: snap.detailTargetScriptNumber,
+                  entryDnisNumbers: snap.entryDnisNumbers,
+                  organizationName: snap.organizationName,
+                  cdnAlias: snap.cdnAlias,
+                  resolvedScheduleDisplay: snap.resolvedScheduleDisplay,
+                  hasHolidayCheck: snap.hasHolidayCheck,
+                  waitSeconds: snap.waitSeconds,
+                  treatmentInfo: snap.treatmentInfo,
+                  hdxAction: snap.hdxAction,
+                  incomingConnections: snap.incomingConnections,
+                  outgoingConnections: snap.outgoingConnections,
+                  moduleRulesPreview: snap.moduleRulesPreview,
+                  specialParameters: snap.specialParameters,
+                  relatedFindings: snap.relatedFindings,
+                  rawLineSnippet: snap.rawLineSnippet,
+                };
+              });
+            } catch {
+              // Keep rendered SVG even if optional node detail precomputation hits an unexpected edge case
+            }
 
             views.push({
               key: spec.key,
               label: spec.label,
               scriptNumber: spec.scriptNumber,
               masterViewVariant: spec.masterViewVariant,
-              svg: withOffsets,
+              svg: finalSvg,
               graph: parsedGraph,
               nodeDetails,
             });
           }
 
-          // Yield cleanly so progress bar & Cancel button stay responsive at 60fps
-          if (!wasCacheHit) {
-            await yieldFrame();
-          } else if ((idx + 1) % 8 === 0) {
+          if (wasCacheHit && (idx + 1) % 6 === 0) {
             await yieldMicroTick();
           }
         }
@@ -4082,8 +4244,12 @@ function OfflineStudioApp() {
           phase: 'packaging',
           current: viewSpecs.length,
           total: viewSpecs.length,
-          currentLabel: `${views.length} Ansichten werden in HTML-Datei verpackt…`,
+          currentLabel: `${views.length} Ansichten werden in Callflow.html verpackt…`,
           cacheHits,
+          fallbackCount,
+          lastWarning,
+          errorMessage: null,
+          timeoutSecondsPerView: Math.round(VIEW_TIMEOUT_MS / 1000),
         });
         await yieldFrame();
         if (signal.aborted) {
@@ -4091,7 +4257,10 @@ function OfflineStudioApp() {
         }
 
         if (views.length === 0) {
-          if (!currentExportSvg) return { html: null };
+          const currentExportSvg = buildExportSvgSnapshot(false);
+          if (!currentExportSvg) {
+            throw new Error('Es konnten keine renderbaren Ansichten für Callflow.html erzeugt werden.');
+          }
           return {
             html: generateInteractiveCallflowHtml(
               'Callflow',
@@ -4105,6 +4274,7 @@ function OfflineStudioApp() {
                 analysis: analysisPayload,
               }
             ),
+            fallbackCount,
           };
         }
 
@@ -4151,12 +4321,37 @@ function OfflineStudioApp() {
               simulationModel: callflowSimulationModel,
             }
           ),
+          fallbackCount,
         };
+      } catch (err) {
+        if (signal.aborted) {
+          return { html: null, aborted: true };
+        }
+        const msg =
+          err instanceof Error
+            ? err.message
+            : 'Unbekannter Fehler beim Erstellen der interaktiven Callflow-HTML.';
+        keepErrorModalOpen = true;
+        setHtmlExportProgress({
+          active: true,
+          phase: 'error',
+          current: 0,
+          total: totalEstimatedViews,
+          currentLabel: 'Export angehalten',
+          cacheHits: 0,
+          fallbackCount: 0,
+          lastWarning: null,
+          errorMessage: msg,
+          timeoutSecondsPerView: Math.round(VIEW_TIMEOUT_MS / 1000),
+        });
+        return { html: null, errorMessage: msg };
       } finally {
         if (exportAbortControllerRef.current === abortController) {
           exportAbortControllerRef.current = null;
         }
-        setHtmlExportProgress(null);
+        if (!keepErrorModalOpen) {
+          setHtmlExportProgress(null);
+        }
       }
     },
     [
@@ -4183,9 +4378,8 @@ function OfflineStudioApp() {
   );
 
   const handleQuickDownloadInteractiveHtml = useCallback(async () => {
-    const exportSvg = buildExportSvgSnapshot(false);
     if (
-      (!exportSvg && scriptWorkspace.modules.length === 0 && !code.trim()) ||
+      (scriptWorkspace.modules.length === 0 && !code.trim()) ||
       isDownloadingHtml ||
       htmlExportProgress?.active
     ) {
@@ -4193,17 +4387,41 @@ function OfflineStudioApp() {
     }
     setIsDownloadingHtml(true);
     try {
-      const { html: htmlContent, aborted } = await buildInteractiveHtmlForSurface(canvasSurface);
-      if (aborted || !htmlContent) return;
+      const { html: htmlContent, aborted, fallbackCount, errorMessage } =
+        await buildInteractiveHtmlForSurface(canvasSurface);
+      if (aborted) return;
+      if (!htmlContent) {
+        if (errorMessage) {
+          setHtmlExportNotice(errorMessage);
+        }
+        return;
+      }
       const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
       triggerLocalDownload(blob, 'Callflow.html');
       setQuickDownloadFeedback('html');
+      if (fallbackCount && fallbackCount > 0) {
+        setHtmlExportNotice(
+          `Callflow.html gespeichert (${fallbackCount} Ansicht(en) per Zeitlimit-Fallback erstellt).`
+        );
+        window.setTimeout(() => setHtmlExportNotice(null), 4500);
+      }
       setTimeout(() => setQuickDownloadFeedback(null), 2200);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Fehler beim Speichern der Callflow.html.';
+      setHtmlExportProgress({
+        active: true,
+        phase: 'error',
+        current: 0,
+        total: Math.max(1, scriptWorkspace.modules.length),
+        currentLabel: 'Download fehlgeschlagen',
+        cacheHits: 0,
+        errorMessage: msg,
+      });
     } finally {
       setIsDownloadingHtml(false);
     }
   }, [
-    buildExportSvgSnapshot,
     scriptWorkspace.modules.length,
     code,
     isDownloadingHtml,
@@ -6879,7 +7097,12 @@ function OfflineStudioApp() {
 
       <ExportModal
         isOpen={isExportModalOpen}
-        onClose={() => setIsExportModalOpen(false)}
+        onClose={() => {
+          if (htmlExportProgress?.phase === 'error') {
+            setHtmlExportProgress(null);
+          }
+          setIsExportModalOpen(false);
+        }}
         svgContent={isExportModalOpen ? buildExportSvgSnapshot(true) : coloredSvg}
         unfilteredSvgContent={isExportModalOpen ? buildExportSvgSnapshot(false) : coloredSvg}
         code={code}
@@ -6995,69 +7218,158 @@ function OfflineStudioApp() {
         </div>
       )}
 
-      {/* Quick Interactive HTML Export Progress Modal HUD */}
+      {/* Centered Interactive HTML Export Status Popup Modal */}
       {htmlExportProgress?.active && !isExportModalOpen && (
         <div
-          role="status"
+          role="dialog"
+          aria-modal="true"
           aria-live="polite"
-          className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-md bg-slate-900/98 border border-slate-700/80 rounded-xl p-4 shadow-2xl space-y-3"
+          aria-labelledby="html-export-dialog-title"
+          className="fixed inset-0 z-[105] bg-slate-950/85 backdrop-blur-xs flex items-center justify-center p-4"
         >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-xs font-semibold text-slate-100">
-                {htmlExportProgress.phase === 'packaging'
-                  ? 'HTML-Paket wird zusammengestellt'
-                  : htmlExportProgress.phase === 'preparing'
-                  ? 'HTML-Export wird vorbereitet'
-                  : 'Interaktive Callflow-HTML wird erstellt'}
-              </div>
-              <div className="text-xs text-slate-400 truncate mt-0.5">
-                {htmlExportProgress.currentLabel}
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={cancelInteractiveHtmlExport}
-              className="px-3 py-1.5 text-xs font-medium text-rose-200 bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              Abbrechen
-            </button>
-          </div>
-
-          <div className="space-y-1.5">
-            <div className="h-2 w-full rounded-full bg-slate-800 overflow-hidden">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-5">
+            <div className="flex items-start gap-3.5">
               <div
-                className="h-full bg-emerald-500 transition-all duration-150 ease-out"
-                style={{
-                  width: `${
-                    htmlExportProgress.total > 0
-                      ? Math.min(
-                          100,
-                          Math.max(
-                            3,
-                            Math.round(
-                              (htmlExportProgress.current / htmlExportProgress.total) * 100
-                            )
-                          )
-                        )
-                      : 100
-                  }%`,
-                }}
-              />
+                className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 mt-0.5 ${
+                  htmlExportProgress.phase === 'error'
+                    ? 'bg-rose-500/10 border-rose-500/30 text-rose-400'
+                    : 'bg-indigo-500/10 border-indigo-500/25'
+                }`}
+              >
+                {htmlExportProgress.phase === 'error' ? (
+                  <AlertTriangle className="w-4 h-4" />
+                ) : (
+                  <div className="w-4 h-4 rounded-full border-2 border-indigo-400 border-t-transparent animate-spin" />
+                )}
+              </div>
+              <div className="min-w-0 space-y-1">
+                <h2
+                  id="html-export-dialog-title"
+                  className="text-sm sm:text-base font-semibold text-slate-100 leading-snug"
+                >
+                  {htmlExportProgress.phase === 'error'
+                    ? 'HTML-Export unterbrochen'
+                    : htmlExportProgress.phase === 'packaging'
+                    ? 'HTML-Einzeldatei wird verpackt'
+                    : htmlExportProgress.phase === 'preparing'
+                    ? 'Callflow-Export wird vorbereitet'
+                    : 'Interaktive Callflow-HTML wird erstellt'}
+                </h2>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  {htmlExportProgress.phase === 'error'
+                    ? htmlExportProgress.errorMessage ||
+                      'Beim Erstellen der HTML-Datei ist ein unerwarteter Fehler aufgetreten.'
+                    : 'Alle Skript-Ebenen und Analyse-Daten werden schrittweise für die Offline-Einzeldatei gerendert.'}
+                </p>
+              </div>
             </div>
-            <div className="flex items-center justify-between text-[11px] text-slate-400 tabular-nums">
-              <span>
-                {htmlExportProgress.cacheHits > 0
-                  ? `${htmlExportProgress.cacheHits} aus Cache übernommen`
-                  : 'Lokales Browser-Rendering'}
-              </span>
-              <span className="font-mono text-indigo-300 font-semibold">
-                {htmlExportProgress.current} / {htmlExportProgress.total} ·{' '}
-                {htmlExportProgress.total > 0
-                  ? Math.round((htmlExportProgress.current / htmlExportProgress.total) * 100)
-                  : 0}
-                %
-              </span>
+
+            {htmlExportProgress.phase !== 'error' && (
+              <div className="bg-slate-950/90 border border-slate-800/90 rounded-xl px-3.5 py-3 space-y-2.5">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="text-slate-400 shrink-0">Aktiver Schritt</span>
+                  <span className="font-mono text-slate-200 truncate text-right">
+                    {htmlExportProgress.currentLabel}
+                  </span>
+                </div>
+
+                <div className="h-2.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full bg-emerald-500 transition-[width] duration-150 ease-out"
+                    style={{
+                      width: `${
+                        htmlExportProgress.total > 0
+                          ? Math.min(
+                              100,
+                              Math.max(
+                                4,
+                                Math.round(
+                                  (htmlExportProgress.current / htmlExportProgress.total) * 100
+                                )
+                              )
+                            )
+                          : 100
+                      }%`,
+                    }}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400 tabular-nums">
+                  <span>
+                    {htmlExportProgress.current} von {htmlExportProgress.total} Ansichten
+                  </span>
+                  <span className="font-mono text-emerald-400 font-semibold">
+                    {htmlExportProgress.total > 0
+                      ? Math.round((htmlExportProgress.current / htmlExportProgress.total) * 100)
+                      : 0}
+                    %
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400 tabular-nums pt-0.5 border-t border-slate-800/70">
+                  {htmlExportProgress.cacheHits > 0 && (
+                    <>
+                      <span>{htmlExportProgress.cacheHits} aus Cache</span>
+                      <span aria-hidden="true">·</span>
+                    </>
+                  )}
+                  {(htmlExportProgress.fallbackCount || 0) > 0 && (
+                    <>
+                      <span className="text-amber-300">
+                        {htmlExportProgress.fallbackCount} per Fallback
+                      </span>
+                      <span aria-hidden="true">·</span>
+                    </>
+                  )}
+                  <span>
+                    Zeitlimit {htmlExportProgress.timeoutSecondsPerView || 10} s / Ansicht
+                  </span>
+                </div>
+
+                {htmlExportProgress.lastWarning && (
+                  <div className="text-[11px] text-amber-300/90 truncate">
+                    Hinweis: {htmlExportProgress.lastWarning}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2.5 pt-1">
+              {htmlExportProgress.phase === 'error' ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHtmlExportProgress(null);
+                      setIsDownloadingHtml(false);
+                    }}
+                    className="px-3.5 py-2 text-xs font-medium text-slate-300 hover:text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Schließen
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHtmlExportProgress(null);
+                      window.setTimeout(() => {
+                        void handleQuickDownloadInteractiveHtml();
+                      }, 40);
+                    }}
+                    className="px-3.5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Erneut versuchen</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={cancelInteractiveHtmlExport}
+                  className="px-3.5 py-2 text-xs font-medium text-rose-200 bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Abbrechen
+                </button>
+              )}
             </div>
           </div>
         </div>

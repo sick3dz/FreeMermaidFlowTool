@@ -444,11 +444,15 @@ export interface OfflineWorkspaceSeed {
 
 export interface HtmlExportProgress {
   active: boolean;
-  phase: 'preparing' | 'rendering' | 'packaging';
+  phase: 'preparing' | 'rendering' | 'packaging' | 'error';
   current: number;
   total: number;
   currentLabel: string;
   cacheHits: number;
+  fallbackCount?: number;
+  lastWarning?: string | null;
+  errorMessage?: string | null;
+  timeoutSecondsPerView?: number;
 }
 
 

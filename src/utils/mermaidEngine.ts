@@ -485,14 +485,19 @@ function prepareCodeWithRuntimeLayout(
 export async function renderLocalMermaidDiagram(
   code: string,
   themeConfig: ThemeConfiguration,
-  forceNativeSvgLabels = false
+  forceNativeSvgLabels = false,
+  options?: {
+    timeoutMs?: number;
+  }
 ): Promise<{
   svg: string | null;
   validation: ValidationState;
   fromCache?: boolean;
+  timedOut?: boolean;
 }> {
   const trimmed = code.trim();
   const diagramType = detectDiagramTypeLabel(trimmed);
+  const timeoutMs = options?.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : 0;
 
   if (!trimmed) {
     return {
@@ -524,7 +529,7 @@ export async function renderLocalMermaidDiagram(
     };
   }
 
-  return enqueueMermaidRender(async () => {
+  const runRenderPromise = enqueueMermaidRender(async () => {
     const cacheHitInsideLock = getCachedSvgRender(cacheKey);
     if (cacheHitInsideLock) {
       return {
@@ -543,9 +548,28 @@ export async function renderLocalMermaidDiagram(
     const startTime = performance.now();
     const sandbox = getOrCreateMermaidOffscreenSandbox();
 
+    const runWithOptionalTimeout = async <T,>(work: Promise<T>): Promise<T> => {
+      if (!timeoutMs) return work;
+      let timerId: number | undefined;
+      try {
+        return await Promise.race([
+          work,
+          new Promise<T>((_resolve, reject) => {
+            timerId = window.setTimeout(() => {
+              reject(new Error(`RENDER_TIMEOUT_${timeoutMs}`));
+            }, timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timerId !== undefined) {
+          window.clearTimeout(timerId);
+        }
+      }
+    };
+
     try {
       if (themeConfig.layoutEngine === 'elk') {
-        await ensureElkLayoutRegistered();
+        await runWithOptionalTimeout(ensureElkLayoutRegistered());
       }
       configureMermaidEngine(themeConfig, forceNativeSvgLabels);
 
@@ -557,11 +581,18 @@ export async function renderLocalMermaidDiagram(
       const uniqueRenderId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
       let svgResult: string;
       try {
-        const rendered = await mermaid.render(uniqueRenderId, renderCode, sandbox);
+        const rendered = await runWithOptionalTimeout(
+          mermaid.render(uniqueRenderId, renderCode, sandbox)
+        );
         svgResult = rendered.svg;
       } catch (renderErr) {
         if (sandbox) sandbox.innerHTML = '';
-        if (themeConfig.layoutEngine === 'elk' || themeConfig.look === 'handDrawn') {
+        const isTimeoutErr =
+          renderErr instanceof Error && renderErr.message.startsWith('RENDER_TIMEOUT_');
+        if (
+          !isTimeoutErr &&
+          (themeConfig.layoutEngine === 'elk' || themeConfig.look === 'handDrawn')
+        ) {
           if (typeof document !== 'undefined') {
             document.querySelectorAll('[id^="dmermaid-local-svg-"]').forEach((n) => n.remove());
           }
@@ -578,7 +609,9 @@ export async function renderLocalMermaidDiagram(
           );
           renderCounter += 1;
           const fallbackId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
-          const fallbackRendered = await mermaid.render(fallbackId, fallbackRenderCode, sandbox);
+          const fallbackRendered = await runWithOptionalTimeout(
+            mermaid.render(fallbackId, fallbackRenderCode, sandbox)
+          );
           svgResult = fallbackRendered.svg;
           // Restore active engine signature on next call since fallback mutated Mermaid config
           lastEngineConfigSignature = null;
@@ -606,7 +639,32 @@ export async function renderLocalMermaidDiagram(
       };
     } catch (err: unknown) {
       if (sandbox) sandbox.innerHTML = '';
+      lastEngineConfigSignature = null;
       const elapsed = Math.max(1, Math.round(performance.now() - startTime));
+      const isTimeoutErr = err instanceof Error && err.message.startsWith('RENDER_TIMEOUT_');
+
+      if (typeof document !== 'undefined') {
+        const strayErrorNodes = document.querySelectorAll('[id^="dmermaid-local-svg-"]');
+        strayErrorNodes.forEach((node) => node.remove());
+      }
+
+      if (isTimeoutErr) {
+        return {
+          svg: null,
+          validation: {
+            isValid: false,
+            diagramType,
+            errorMessage: `Diagramm-Rendering hat das Zeitlimit (${Math.round(
+              timeoutMs / 1000
+            )}s) überschritten.`,
+            errorLine: null,
+            lastRenderMs: elapsed,
+          },
+          fromCache: false,
+          timedOut: true,
+        };
+      }
+
       let exactParseErr: unknown = null;
       try {
         await mermaid.parse(trimmed, { suppressErrors: false });
@@ -622,11 +680,6 @@ export async function renderLocalMermaidDiagram(
           ? String((errorSource as { str: unknown }).str)
           : String(errorSource);
 
-      if (typeof document !== 'undefined') {
-        const strayErrorNodes = document.querySelectorAll('[id^="dmermaid-local-svg-"]');
-        strayErrorNodes.forEach((node) => node.remove());
-      }
-
       return {
         svg: null,
         validation: {
@@ -640,6 +693,45 @@ export async function renderLocalMermaidDiagram(
       };
     }
   });
+
+  if (!timeoutMs) {
+    return runRenderPromise;
+  }
+
+  // Outer race ensures caller unblocks even if an upstream queued task inside the mutex is slow
+  let outerTimer: number | undefined;
+  try {
+    return await Promise.race([
+      runRenderPromise,
+      new Promise<{
+        svg: null;
+        validation: ValidationState;
+        fromCache: false;
+        timedOut: true;
+      }>((resolve) => {
+        outerTimer = window.setTimeout(() => {
+          resolve({
+            svg: null,
+            validation: {
+              isValid: false,
+              diagramType,
+              errorMessage: `Render-Warteschlange hat das Zeitlimit (${Math.round(
+                timeoutMs / 1000
+              )}s) überschritten.`,
+              errorLine: null,
+              lastRenderMs: timeoutMs,
+            },
+            fromCache: false,
+            timedOut: true,
+          });
+        }, timeoutMs + 1500);
+      }),
+    ]);
+  } finally {
+    if (outerTimer !== undefined) {
+      window.clearTimeout(outerTimer);
+    }
+  }
 }
 
 /**

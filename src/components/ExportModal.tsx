@@ -49,7 +49,12 @@ interface ExportModalProps {
   buildInteractiveHtml?: (
     targetSurface: 'dark' | 'light',
     preferredInitialView?: PreferredInitialHtmlView
-  ) => Promise<{ html: string | null; aborted?: boolean }>;
+  ) => Promise<{
+    html: string | null;
+    aborted?: boolean;
+    fallbackCount?: number;
+    errorMessage?: string;
+  }>;
   htmlExportProgress?: HtmlExportProgress | null;
   onCancelInteractiveHtml?: () => void;
   onExportOpeningHoursCsv?: () => void;
@@ -163,7 +168,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   const handleDownloadInteractiveHtml = async () => {
     const rawHtmlSvg = unfilteredSvgContent || svgContent;
-    if ((!rawHtmlSvg && scriptCount === 0 && !code.trim()) || isExportingHtml || htmlExportProgress?.active) {
+    if (
+      (!rawHtmlSvg && scriptCount === 0 && !code.trim()) ||
+      isExportingHtml ||
+      (htmlExportProgress?.active && htmlExportProgress.phase !== 'error')
+    ) {
       return;
     }
     setIsExportingHtml(true);
@@ -172,14 +181,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       const targetSurface = bgMode === 'light' ? 'light' : 'dark';
       let htmlContent: string | null = null;
       let wasAborted = false;
+      let fallbackCount = 0;
+      let buildErrorMessage: string | undefined;
       if (buildInteractiveHtml) {
         const res = await buildInteractiveHtml(targetSurface, preferredHtmlView);
         htmlContent = res.html;
         wasAborted = Boolean(res.aborted);
+        fallbackCount = res.fallbackCount ?? 0;
+        buildErrorMessage = res.errorMessage;
       }
       if (wasAborted) {
         setExportStatus('Interaktiver HTML-Export wurde abgebrochen.');
         setTimeout(() => setExportStatus(null), 3000);
+        return;
+      }
+      if (!htmlContent && buildErrorMessage) {
+        setExportStatus(buildErrorMessage);
         return;
       }
       if (!htmlContent && rawHtmlSvg) {
@@ -199,12 +216,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       }
       const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
       triggerLocalDownload(blob, 'Callflow.html');
-      setExportStatus(
-        scriptCount > 0
-          ? `Interaktive Zwei-Ebenen HTML (${scriptCount} Skripte + Master) gespeichert.`
-          : 'Interaktive Callflow-HTML wurde gespeichert (offline im Browser klickbar).'
-      );
-      setTimeout(() => setExportStatus(null), 3500);
+      if (fallbackCount > 0) {
+        setExportStatus(
+          `Callflow.html gespeichert (${fallbackCount} Ansicht(en) per Zeitlimit-Fallback erstellt).`
+        );
+      } else {
+        setExportStatus(
+          scriptCount > 0
+            ? `Interaktive Zwei-Ebenen HTML (${scriptCount} Skripte + Master) gespeichert.`
+            : 'Interaktive Callflow-HTML wurde gespeichert (offline im Browser klickbar).'
+        );
+      }
+      setTimeout(() => setExportStatus(null), 4000);
     } finally {
       setIsExportingHtml(false);
     }
@@ -587,63 +610,114 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           </div>
 
           {htmlExportProgress?.active && (
-            <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3">
+            <div
+              className={`p-4 rounded-xl bg-slate-950 border space-y-3 ${
+                htmlExportProgress.phase === 'error'
+                  ? 'border-rose-500/40'
+                  : 'border-slate-800'
+              }`}
+            >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="text-xs font-semibold text-slate-100">
-                    {htmlExportProgress.phase === 'packaging'
+                  <div
+                    className={`text-xs font-semibold ${
+                      htmlExportProgress.phase === 'error'
+                        ? 'text-rose-200'
+                        : 'text-slate-100'
+                    }`}
+                  >
+                    {htmlExportProgress.phase === 'error'
+                      ? 'HTML-Export unterbrochen'
+                      : htmlExportProgress.phase === 'packaging'
                       ? 'HTML-Paket wird zusammengestellt'
                       : htmlExportProgress.phase === 'preparing'
                       ? 'Export wird vorbereitet'
                       : 'Interaktive Callflow-HTML wird erstellt'}
                   </div>
                   <div className="text-xs text-slate-400 truncate mt-0.5">
-                    {htmlExportProgress.currentLabel}
+                    {htmlExportProgress.phase === 'error'
+                      ? htmlExportProgress.errorMessage || htmlExportProgress.currentLabel
+                      : htmlExportProgress.currentLabel}
                   </div>
                 </div>
                 <div className="flex items-center gap-3 shrink-0">
-                  <span className="text-xs font-mono text-indigo-300 tabular-nums whitespace-nowrap">
-                    {htmlExportProgress.current} / {htmlExportProgress.total} (
-                    {htmlExportProgress.total > 0
-                      ? Math.round((htmlExportProgress.current / htmlExportProgress.total) * 100)
-                      : 0}
-                    %)
-                  </span>
-                  {onCancelInteractiveHtml && (
+                  {htmlExportProgress.phase !== 'error' && (
+                    <span className="text-xs font-mono text-indigo-300 tabular-nums whitespace-nowrap">
+                      {htmlExportProgress.current} / {htmlExportProgress.total} (
+                      {htmlExportProgress.total > 0
+                        ? Math.round((htmlExportProgress.current / htmlExportProgress.total) * 100)
+                        : 0}
+                      %)
+                    </span>
+                  )}
+                  {htmlExportProgress.phase === 'error' ? (
                     <button
                       type="button"
-                      onClick={onCancelInteractiveHtml}
-                      className="px-3 py-1.5 text-xs font-medium text-rose-200 bg-rose-950/60 hover:bg-rose-900/70 border border-rose-500/40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      onClick={() => void handleDownloadInteractiveHtml()}
+                      className="px-3 py-1.5 text-xs font-medium text-indigo-100 bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     >
-                      Abbrechen
+                      Erneut versuchen
                     </button>
+                  ) : (
+                    onCancelInteractiveHtml && (
+                      <button
+                        type="button"
+                        onClick={onCancelInteractiveHtml}
+                        className="px-3 py-1.5 text-xs font-medium text-rose-200 bg-rose-950/60 hover:bg-rose-900/70 border border-rose-500/40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Abbrechen
+                      </button>
+                    )
                   )}
                 </div>
               </div>
-              <div className="h-2 w-full rounded-full bg-slate-800 overflow-hidden">
-                <div
-                  className="h-full bg-emerald-500 transition-all duration-150 ease-out"
-                  style={{
-                    width: `${
-                      htmlExportProgress.total > 0
-                        ? Math.min(
-                            100,
-                            Math.max(
-                              3,
-                              Math.round(
-                                (htmlExportProgress.current / htmlExportProgress.total) * 100
+              {htmlExportProgress.phase !== 'error' && (
+                <>
+                  <div className="h-2 w-full rounded-full bg-slate-800 overflow-hidden">
+                    <div
+                      className="h-full bg-emerald-500 transition-all duration-150 ease-out"
+                      style={{
+                        width: `${
+                          htmlExportProgress.total > 0
+                            ? Math.min(
+                                100,
+                                Math.max(
+                                  4,
+                                  Math.round(
+                                    (htmlExportProgress.current / htmlExportProgress.total) * 100
+                                  )
+                                )
                               )
-                            )
-                          )
-                        : 100
-                    }%`,
-                  }}
-                />
-              </div>
-              {htmlExportProgress.cacheHits > 0 && (
-                <div className="text-[11px] text-slate-400 tabular-nums">
-                  {htmlExportProgress.cacheHits} bereits gecachte Ansicht(en) direkt übernommen
-                </div>
+                            : 100
+                        }%`,
+                      }}
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400 tabular-nums">
+                    {htmlExportProgress.cacheHits > 0 && (
+                      <>
+                        <span>{htmlExportProgress.cacheHits} aus Cache</span>
+                        <span aria-hidden="true">·</span>
+                      </>
+                    )}
+                    {(htmlExportProgress.fallbackCount || 0) > 0 && (
+                      <>
+                        <span className="text-amber-300">
+                          {htmlExportProgress.fallbackCount} per Fallback
+                        </span>
+                        <span aria-hidden="true">·</span>
+                      </>
+                    )}
+                    <span>
+                      Zeitlimit {htmlExportProgress.timeoutSecondsPerView || 10} s / Ansicht
+                    </span>
+                  </div>
+                  {htmlExportProgress.lastWarning && (
+                    <div className="text-[11px] text-amber-300/90 truncate">
+                      Hinweis: {htmlExportProgress.lastWarning}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
