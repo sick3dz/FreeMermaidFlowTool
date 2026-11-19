@@ -166,7 +166,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         const htmlSvg =
           targetSurface === 'dark' ? getSurfaceAdjustedSvg(rawHtmlSvg, 'dark') : rawHtmlSvg;
         htmlContent = generateInteractiveCallflowHtml(
-          diagramTitle,
+          'Callflow',
           htmlSvg,
           callflowGraph,
           targetSurface,
@@ -174,7 +174,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         );
       }
       const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
-      triggerLocalDownload(blob, `${safeFilename}-interaktiv-callflow.html`);
+      triggerLocalDownload(blob, 'Callflow.html');
       setExportStatus(
         scriptCount > 0
           ? `Interaktive Zwei-Ebenen HTML (${scriptCount} Skripte + Master) gespeichert.`

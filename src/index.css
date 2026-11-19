@@ -28,13 +28,12 @@
   isolation: isolate;
 }
 
-/* Prevent flex containers or preflight rules from shrinking large Mermaid SVGs
-   and maintain a smooth GPU composite transform layer without hiding the vector SVG */
+/* Prevent flex containers or preflight rules from shrinking large Mermaid SVGs.
+   Never force permanent will-change: transform on giant inline SVGs (causes Blink/Skia GPU tile OOM & white flashes). */
 .mermaid-canvas-stage {
   flex: 0 0 auto;
   width: max-content;
   height: max-content;
-  will-change: transform;
 }
 
 .mermaid-svg-layer {
@@ -46,6 +45,27 @@
   max-height: none !important;
   flex-shrink: 0;
   display: block;
+}
+
+/* GPU-safe raster proxy layer (max 4096px texture, <16MB VRAM) for 60fps large-diagram navigation */
+.mermaid-gpu-proxy-layer {
+  display: none;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  image-rendering: auto;
+}
+
+[data-gpu-proxy="true"] .mermaid-canvas-stage {
+  will-change: transform;
+}
+
+[data-gpu-proxy="true"] .mermaid-svg-layer {
+  display: none !important;
+}
+
+[data-gpu-proxy="true"] .mermaid-gpu-proxy-layer {
+  display: block !important;
 }
 
 /* Zero-re-render cursor & gesture isolation during canvas pan/wheel/pinch */

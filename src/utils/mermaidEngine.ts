@@ -29,6 +29,8 @@ function getOrCreateMermaidOffscreenSandbox(): HTMLDivElement | undefined {
     sandbox.style.height = '1600px';
     sandbox.style.overflow = 'hidden';
     sandbox.style.opacity = '0';
+    sandbox.style.visibility = 'hidden';
+    sandbox.style.contain = 'style';
     sandbox.style.pointerEvents = 'none';
     sandbox.style.zIndex = '-1';
     document.body.appendChild(sandbox);
@@ -147,8 +149,8 @@ export function shouldUseNativeSvgLabels(
   code: string,
   thresholds: { maxHtmlNodes?: number; maxHtmlEdges?: number } = {}
 ): boolean {
-  const maxHtmlNodes = thresholds.maxHtmlNodes ?? 45;
-  const maxHtmlEdges = thresholds.maxHtmlEdges ?? 75;
+  const maxHtmlNodes = thresholds.maxHtmlNodes ?? 25;
+  const maxHtmlEdges = thresholds.maxHtmlEdges ?? 40;
   const trimmed = code.trim();
   if (!trimmed) return false;
 

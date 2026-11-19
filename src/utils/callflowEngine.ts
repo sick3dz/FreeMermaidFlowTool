@@ -1580,33 +1580,28 @@ function getNodeLocalBox(
   nodeGroup: SVGGElement,
   shapeEls: SVGElement[]
 ): NodeLocalBox {
-  for (const s of shapeEls) {
-    try {
-      const box = (s as SVGGraphicsElement).getBBox?.();
-      if (box && Number.isFinite(box.width) && Number.isFinite(box.height) && box.width > 4 && box.height > 4) {
-        const minX = box.x;
-        const maxX = box.x + box.width;
-        const minY = box.y;
-        const maxY = box.y + box.height;
-        return { minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
-      }
-    } catch {
-      // ignore unmounted / hidden SVG getBBox edge cases
-    }
-  }
-
-  const rectEl = nodeGroup.querySelector('rect');
+  // Fast zero-reflow attribute extraction first (avoids 200+ synchronous getBBox() layout reflows)
+  const rectEl = (shapeEls.find((s) => s.tagName.toLowerCase() === 'rect') ||
+    nodeGroup.querySelector('rect')) as SVGRectElement | null;
   if (rectEl) {
-    const rx = parseFloat(rectEl.getAttribute('x') || '-60');
-    const rw = parseFloat(rectEl.getAttribute('width') || '120');
-    const ry = parseFloat(rectEl.getAttribute('y') || '-22');
-    const rh = parseFloat(rectEl.getAttribute('height') || '44');
-    if (Number.isFinite(rx) && Number.isFinite(rw) && Number.isFinite(ry) && Number.isFinite(rh)) {
+    const rx = parseFloat(rectEl.getAttribute('x') || '');
+    const rw = parseFloat(rectEl.getAttribute('width') || '');
+    const ry = parseFloat(rectEl.getAttribute('y') || '');
+    const rh = parseFloat(rectEl.getAttribute('height') || '');
+    if (
+      Number.isFinite(rx) &&
+      Number.isFinite(rw) &&
+      rw > 4 &&
+      Number.isFinite(ry) &&
+      Number.isFinite(rh) &&
+      rh > 4
+    ) {
       return { minX: rx, maxX: rx + rw, minY: ry, maxY: ry + rh, cx: rx + rw / 2, cy: ry + rh / 2 };
     }
   }
 
-  const polyEl = nodeGroup.querySelector('polygon');
+  const polyEl = (shapeEls.find((s) => s.tagName.toLowerCase() === 'polygon') ||
+    nodeGroup.querySelector('polygon')) as SVGPolygonElement | null;
   if (polyEl) {
     const nums = (polyEl.getAttribute('points') || '')
       .trim()
@@ -1624,9 +1619,75 @@ function getNodeLocalBox(
         minY = Math.min(minY, nums[i + 1]);
         maxY = Math.max(maxY, nums[i + 1]);
       }
-      if (Number.isFinite(minX) && Number.isFinite(maxX) && Number.isFinite(minY) && Number.isFinite(maxY)) {
+      if (
+        Number.isFinite(minX) &&
+        Number.isFinite(maxX) &&
+        maxX - minX > 4 &&
+        Number.isFinite(minY) &&
+        Number.isFinite(maxY) &&
+        maxY - minY > 4
+      ) {
         return { minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
       }
+    }
+  }
+
+  const circleEl = (shapeEls.find((s) => s.tagName.toLowerCase() === 'circle') ||
+    nodeGroup.querySelector('circle')) as SVGCircleElement | null;
+  if (circleEl) {
+    const cx = parseFloat(circleEl.getAttribute('cx') || '0');
+    const cy = parseFloat(circleEl.getAttribute('cy') || '0');
+    const r = parseFloat(circleEl.getAttribute('r') || '');
+    if (Number.isFinite(cx) && Number.isFinite(cy) && Number.isFinite(r) && r > 4) {
+      return { minX: cx - r, maxX: cx + r, minY: cy - r, maxY: cy + r, cx, cy };
+    }
+  }
+
+  const pathEl = shapeEls.find((s) => s.tagName.toLowerCase() === 'path') as SVGPathElement | undefined;
+  if (pathEl) {
+    const dAttr = pathEl.getAttribute('d') || '';
+    const coords = dAttr.match(/[+-]?\d+(?:\.\d+)?/g);
+    if (coords && coords.length >= 4 && !/[a-z]/.test(dAttr.replace(/[MLHVCSQTAZ]/g, ''))) {
+      // Only use fast path bounds for absolute path commands; otherwise fall back to getBBox
+      const parsed = normalizeSvgPathToAbsolute(dAttr);
+      if (parsed.pairs.length >= 2) {
+        let minX = Infinity;
+        let maxX = -Infinity;
+        let minY = Infinity;
+        let maxY = -Infinity;
+        for (const p of parsed.pairs) {
+          minX = Math.min(minX, p.origX);
+          maxX = Math.max(maxX, p.origX);
+          minY = Math.min(minY, p.origY);
+          maxY = Math.max(maxY, p.origY);
+        }
+        if (
+          Number.isFinite(minX) &&
+          Number.isFinite(maxX) &&
+          maxX - minX > 12 &&
+          Number.isFinite(minY) &&
+          Number.isFinite(maxY) &&
+          maxY - minY > 12
+        ) {
+          return { minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+        }
+      }
+    }
+  }
+
+  // Fallback to browser getBBox() only when static attributes could not determine bounds
+  for (const s of shapeEls) {
+    try {
+      const box = (s as SVGGraphicsElement).getBBox?.();
+      if (box && Number.isFinite(box.width) && Number.isFinite(box.height) && box.width > 4 && box.height > 4) {
+        const minX = box.x;
+        const maxX = box.x + box.width;
+        const minY = box.y;
+        const maxY = box.y + box.height;
+        return { minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
+      }
+    } catch {
+      // ignore unmounted / hidden SVG getBBox edge cases
     }
   }
 
@@ -2057,12 +2118,31 @@ export function buildLiveSvgDomIndex(
     });
   });
 
-  // Pre-compile edge matchers once (longest node IDs first to prevent prefix collisions)
+  // Pre-compile edge matchers once + O(1) direct pair lookup map (eliminates O(E^3) freeze on large Master graphs)
   const compiledEdges = graph.edges
     .map((edge) => createEdgeMetaMatcher(edge))
     .sort((a, b) => b.score - a.score);
 
+  const edgeByPairKey = new Map<string, CallflowEdge>();
+  for (const edge of graph.edges) {
+    const k = `${edge.from.toLowerCase()}->${edge.to.toLowerCase()}`;
+    if (!edgeByPairKey.has(k)) {
+      edgeByPairKey.set(k, edge);
+    }
+  }
+
   const matchEdgeMeta = (el: Element): CallflowEdge | null => {
+    const rawId =
+      el.getAttribute('data-id') ||
+      el.getAttribute('id') ||
+      '';
+    if (rawId) {
+      const fastLMatch = rawId.match(/(?:^|-)L_([^_]+(?:_[^_]+)*?)_([^_]+(?:_[^_]+)*?)_\d+$/i);
+      if (fastLMatch) {
+        const direct = edgeByPairKey.get(`${fastLMatch[1].toLowerCase()}->${fastLMatch[2].toLowerCase()}`);
+        if (direct) return direct;
+      }
+    }
     const meta = getSvgEdgeElementMeta(el);
     for (const item of compiledEdges) {
       if (item.matches(meta)) {
@@ -2083,11 +2163,35 @@ export function buildLiveSvgDomIndex(
     svgEl.querySelectorAll('g.edgeLabels > *, g.edgeLabel')
   ) as SVGElement[];
 
+  // O(E) pre-indexing of edge labels by data-id and by (from->to) pair
+  const labelByDataId = new Map<string, SVGElement[]>();
+  const labelsByPairKey = new Map<string, SVGElement[]>();
+  for (const labelEl of edgeLabelElements) {
+    const lid =
+      labelEl.getAttribute('data-id') ||
+      labelEl.querySelector('[data-id]')?.getAttribute('data-id') ||
+      '';
+    if (lid) {
+      const arr = labelByDataId.get(lid) || [];
+      arr.push(labelEl);
+      labelByDataId.set(lid, arr);
+    } else {
+      const m = matchEdgeMeta(labelEl);
+      if (m) {
+        const pk = `${m.from}->${m.to}`;
+        const arr = labelsByPairKey.get(pk) || [];
+        arr.push(labelEl);
+        labelsByPairKey.set(pk, arr);
+      }
+    }
+  }
+
   const allEdges: LiveSvgEdgeHandle[] = [];
   const edgesByNode = new Map<string, LiveSvgEdgeHandle[]>();
   const svgNs = 'http://www.w3.org/2000/svg';
   const doc = svgEl.ownerDocument;
   const usedLabelEls = new Set<SVGElement>();
+  const skipExtraHitPaths = edgeElements.length > 80;
 
   edgeElements.forEach((edgeEl, idx) => {
     const matched = matchEdgeMeta(edgeEl);
@@ -2107,25 +2211,27 @@ export function buildLiveSvgDomIndex(
       edgeEl.getAttribute('id')?.replace(/^.*-(L[-_].+)$/i, '$1') ||
       '';
 
-    const matchedLabel =
-      (edgeOwnDataId
-        ? edgeLabelElements.find((l) => {
-            if (usedLabelEls.has(l)) return false;
-            const lid =
-              l.getAttribute('data-id') ||
-              l.querySelector('[data-id]')?.getAttribute('data-id') ||
-              '';
-            return lid === edgeOwnDataId;
-          })
-        : null) ||
-      edgeLabelElements.find((l) => {
-        if (usedLabelEls.has(l)) return false;
-        const m = matchEdgeMeta(l);
-        return m && m.from === matched.from && m.to === matched.to;
-      }) ||
-      (edgeLabelElements.length === edgeElements.length && !usedLabelEls.has(edgeLabelElements[idx])
-        ? edgeLabelElements[idx]
-        : null);
+    let matchedLabel: SVGElement | null = null;
+    if (edgeOwnDataId) {
+      const byId = labelByDataId.get(edgeOwnDataId);
+      if (byId) {
+        matchedLabel = byId.find((l) => !usedLabelEls.has(l)) || null;
+      }
+    }
+    if (!matchedLabel) {
+      const byPair = labelsByPairKey.get(`${matched.from}->${matched.to}`);
+      if (byPair) {
+        matchedLabel = byPair.find((l) => !usedLabelEls.has(l)) || null;
+      }
+    }
+    if (
+      !matchedLabel &&
+      edgeLabelElements.length === edgeElements.length &&
+      edgeLabelElements[idx] &&
+      !usedLabelEls.has(edgeLabelElements[idx])
+    ) {
+      matchedLabel = edgeLabelElements[idx];
+    }
 
     if (matchedLabel) {
       usedLabelEls.add(matchedLabel);
@@ -2135,6 +2241,10 @@ export function buildLiveSvgDomIndex(
       matched.label ||
       (matchedLabel?.textContent || '').replace(/\s+/g, ' ').trim();
 
+    edgeEl.setAttribute('data-callflow-edge-from', matched.from);
+    edgeEl.setAttribute('data-callflow-edge-to', matched.to);
+    edgeEl.setAttribute('data-callflow-edge-label', labelText);
+
     if (matchedLabel) {
       matchedLabel.setAttribute('data-callflow-edge-from', matched.from);
       matchedLabel.setAttribute('data-callflow-edge-to', matched.to);
@@ -2143,23 +2253,25 @@ export function buildLiveSvgDomIndex(
 
     const parsedPaths = pathNodes.map((p) => parseLivePathTokens(p));
     const hitPathEls: SVGPathElement[] = [];
-    pathNodes.forEach((p) => {
-      const dAttr = p.getAttribute('d');
-      if (!dAttr || !p.parentNode) return;
-      const hitEl = doc.createElementNS(svgNs, 'path');
-      hitEl.setAttribute('class', 'callflow-edge-hit');
-      hitEl.setAttribute('d', dAttr);
-      hitEl.setAttribute('data-callflow-edge-from', matched.from);
-      hitEl.setAttribute('data-callflow-edge-to', matched.to);
-      hitEl.setAttribute('data-callflow-edge-label', labelText);
-      const hitTitle = doc.createElementNS(svgNs, 'title');
-      hitTitle.textContent = labelText
-        ? `Verbindung "${labelText}" anklicken zum Bearbeiten oder per Schloss am Knoten lösen`
-        : `Verbindung ${matched.from} → ${matched.to} anklicken zum Bearbeiten oder per Schloss am Knoten lösen`;
-      hitEl.appendChild(hitTitle);
-      p.parentNode.insertBefore(hitEl, p.nextSibling);
-      hitPathEls.push(hitEl);
-    });
+    if (!skipExtraHitPaths) {
+      pathNodes.forEach((p) => {
+        const dAttr = p.getAttribute('d');
+        if (!dAttr || !p.parentNode) return;
+        const hitEl = doc.createElementNS(svgNs, 'path');
+        hitEl.setAttribute('class', 'callflow-edge-hit');
+        hitEl.setAttribute('d', dAttr);
+        hitEl.setAttribute('data-callflow-edge-from', matched.from);
+        hitEl.setAttribute('data-callflow-edge-to', matched.to);
+        hitEl.setAttribute('data-callflow-edge-label', labelText);
+        const hitTitle = doc.createElementNS(svgNs, 'title');
+        hitTitle.textContent = labelText
+          ? `Verbindung "${labelText}" anklicken zum Bearbeiten oder per Schloss am Knoten lösen`
+          : `Verbindung ${matched.from} → ${matched.to} anklicken zum Bearbeiten oder per Schloss am Knoten lösen`;
+        hitEl.appendChild(hitTitle);
+        p.parentNode.insertBefore(hitEl, p.nextSibling);
+        hitPathEls.push(hitEl);
+      });
+    }
 
     const mainPath = parsedPaths[0];
     const origStartPt = mainPath ? mainPath.startPt : { x: 0, y: 0 };
@@ -2246,6 +2358,71 @@ export function buildLiveSvgDomIndex(
     locksLayerEl: null,
     isVisualEditMode: false,
   };
+}
+
+/**
+ * Resolves a node ID from screen pointer coordinates using the cached SVG viewBox and node local boxes,
+ * enabling instant click & double-click interaction while the GPU raster proxy layer is active.
+ */
+export function hitTestLiveSvgNodeAtClientPoint(
+  index: LiveSvgDomIndex,
+  clientX: number,
+  clientY: number,
+  frameEl: HTMLElement | null
+): string | null {
+  if (!frameEl || !index.origVbParts) return null;
+  const rect = frameEl.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  if (
+    clientX < rect.left ||
+    clientX > rect.right ||
+    clientY < rect.top ||
+    clientY > rect.bottom
+  ) {
+    return null;
+  }
+
+  const [vbX, vbY, vbW, vbH] = index.origVbParts;
+  const svgX = vbX + ((clientX - rect.left) / rect.width) * vbW;
+  const svgY = vbY + ((clientY - rect.top) / rect.height) * vbH;
+  const pad = Math.max(4, Math.min(18, (vbW / Math.max(1, rect.width)) * 4));
+
+  let bestId: string | null = null;
+  let bestDist = Infinity;
+
+  for (const [nodeId, node] of index.nodes.entries()) {
+    let ancX = 0;
+    let ancY = 0;
+    let parent: Element | null = node.groupEl.parentElement;
+    while (parent && parent !== index.svgEl) {
+      const tr = parent.getAttribute('transform');
+      if (tr) {
+        const parsed = parseTranslateFromTransform(tr);
+        ancX += parsed.x;
+        ancY += parsed.y;
+      }
+      parent = parent.parentElement;
+    }
+
+    const tx = ancX + node.baseTx + node.currentDx;
+    const ty = ancY + node.baseTy + node.currentDy;
+    const minX = tx + node.box.minX - pad;
+    const maxX = tx + node.box.maxX + pad;
+    const minY = ty + node.box.minY - pad;
+    const maxY = ty + node.box.maxY + pad;
+
+    if (svgX >= minX && svgX <= maxX && svgY >= minY && svgY <= maxY) {
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const dist = Math.hypot(svgX - cx, svgY - cy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestId = nodeId;
+      }
+    }
+  }
+
+  return bestId;
 }
 
 function applyTangentialScreenOffset(
@@ -3042,12 +3219,67 @@ export function autoGroupCallflowByTopology(
   return `${cleaned.trimEnd()}\n${lines.join('\n')}\n`;
 }
 
+export interface InteractiveCallflowHtmlNodeDetail {
+  nodeId: string;
+  mode: 'workspace-module' | 'workspace-step' | 'workspace-external' | 'raw-mermaid';
+  scriptNumber: string;
+  title: string;
+  blockType: string;
+  prio?: number;
+  announcement?: string;
+  queueTarget?: string;
+  schedule?: string;
+  condition?: string;
+  canJumpToDetailScript?: boolean;
+  detailTargetScriptNumber?: string;
+  entryDnisNumbers?: string[];
+  organizationName?: string;
+  cdnAlias?: string;
+  resolvedScheduleDisplay?: string;
+  hasHolidayCheck?: boolean;
+  waitSeconds?: number;
+  treatmentInfo?: string;
+  hdxAction?: string;
+  incomingConnections?: Array<{
+    fromScriptNumber: string;
+    fromLabel: string;
+    edgeLabel: string;
+  }>;
+  outgoingConnections?: Array<{
+    id: string;
+    toTargetNumber: string;
+    label: string;
+    kind: string;
+  }>;
+  moduleRulesPreview?: Array<{
+    id: string;
+    prio: number;
+    stepName: string;
+    condition?: string;
+    schedule?: string;
+    holiday?: string;
+    targetNumber?: string;
+    queueTarget?: string;
+    announcement?: string;
+    choicesCount: number;
+  }>;
+  specialParameters?: CallflowScriptParameterItem[];
+  relatedFindings?: Array<{
+    severity: 'error' | 'warning' | 'info';
+    title: string;
+    recommendation: string;
+  }>;
+  rawLineSnippet?: string;
+}
+
 export interface InteractiveCallflowHtmlView {
   key: string;
   label: string;
   svg: string;
   graph: CallflowGraph;
   scriptNumber?: string;
+  masterViewVariant?: 'compact' | 'detailed';
+  nodeDetails?: Record<string, InteractiveCallflowHtmlNodeDetail>;
 }
 
 export interface InteractiveCallflowHtmlAnalysisPayload {
@@ -3072,11 +3304,12 @@ function escapeHtmlText(str: string): string {
 /**
  * Generates a 100% standalone, offline-capable interactive HTML file containing:
  * - True 1:1 SVG dimensions with Zoom +/-, Fit, 1:1, Zoom-to-Cursor & Auto-Focus
+ * - Automatic GPU-safe raster proxy (<=4096px) during pan/zoom/overview with O(1) hit-testing
+ * - Switchable Compact / Detailed Master Overview alongside all Detail Script views
  * - Dark/Light surface toggle with automatic SVG node/edge/cluster contrast adaptation
- * - Full Callflow filters: Direction, Hop-Depth, Node-Type Filter, Subgraph Isolation (display:none),
- *   Edge-Click Details (Von -> Nach & Bedingung), Cycle detection, Live Search & Two-Level Master/Script views
- * - Complete Read-Only Analysis Suite (Offene Punkte & Logik-Prüfung, Öffnungszeiten & Zeitpläne,
- *   durchsuchbares Inventar & Routing-Matrix) inkl. Excel-kompatiblem CSV-Export
+ * - Structured Double-Click Element Info Box (Übersicht, Zeiten & Regeln, Skript-Sprung)
+ * - Dedicated Opening Hours Overview window (Zeitprofile + Detail-Tabelle, Markdown copy, CSV export)
+ * - Full Callflow filters & Read-Only Analysis Suite
  */
 export function generateInteractiveCallflowHtml(
   diagramTitle: string,
@@ -3086,6 +3319,7 @@ export function generateInteractiveCallflowHtml(
   options?: {
     views?: InteractiveCallflowHtmlView[];
     activeViewKey?: string;
+    initialMasterDensity?: 'compact' | 'detailed';
     initialPathColorMode?: PathColorMode;
     initialHiddenNodeTypes?: SmartColorNodeType[];
     initialIsolateSubgraph?: boolean;
@@ -3098,7 +3332,7 @@ export function generateInteractiveCallflowHtml(
       : [
           {
             key: 'current',
-            label: diagramTitle || 'Diagramm',
+            label: diagramTitle || 'Callflow',
             svg: svgString,
             graph,
           },
@@ -3109,6 +3343,12 @@ export function generateInteractiveCallflowHtml(
       ? options.activeViewKey
       : effectiveViews[0].key;
 
+  const hasCompactMaster = effectiveViews.some((v) => v.key === 'master');
+  const hasDetailedMaster = effectiveViews.some((v) => v.key === 'master:detailed');
+  const initialMasterDensity: 'compact' | 'detailed' =
+    options?.initialMasterDensity ||
+    (initialViewKey === 'master:detailed' ? 'detailed' : 'compact');
+
   const initialPathColorMode: PathColorMode = options?.initialPathColorMode || 'semantic';
   const initialHiddenNodeTypes: SmartColorNodeType[] = options?.initialHiddenNodeTypes || [];
   const initialIsolateSubgraph = Boolean(options?.initialIsolateSubgraph);
@@ -3117,11 +3357,13 @@ export function generateInteractiveCallflowHtml(
     key: v.key,
     label: v.label,
     scriptNumber: v.scriptNumber || null,
+    masterViewVariant: v.masterViewVariant || null,
     svg: v.svg,
     graph: {
       nodes: Array.from(v.graph.nodes.values()),
       edges: v.graph.edges,
     },
+    nodeDetails: v.nodeDetails || null,
   }));
 
   const drillTargetsByNodeId: Record<string, { viewKey: string; scriptRef: string }> = {};
@@ -3141,6 +3383,8 @@ export function generateInteractiveCallflowHtml(
   const safePayloadJson = JSON.stringify({
     views: serializedViews,
     initialViewKey,
+    initialMasterDensity,
+    hasBothMasterVariants: hasCompactMaster && hasDetailedMaster,
     initialPathColorMode,
     initialSurface: canvasSurface,
     initialHiddenNodeTypes,
@@ -3155,7 +3399,7 @@ export function generateInteractiveCallflowHtml(
   const initialSvg =
     effectiveViews.find((v) => v.key === initialViewKey)?.svg || svgString;
   const hasMultiViews = effectiveViews.length > 1;
-  const safeTitle = escapeHtmlText(diagramTitle);
+  const safeTitle = escapeHtmlText(diagramTitle || 'Callflow');
   const isDarkSurface = canvasSurface === 'dark';
 
   return `<!doctype html>
@@ -3163,7 +3407,7 @@ export function generateInteractiveCallflowHtml(
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${safeTitle} — Interaktiver Callflow Explorer</title>
+  <title>${safeTitle}</title>
   <style>
     :root {
       --bg-app: #090d16;
@@ -3368,7 +3612,6 @@ export function generateInteractiveCallflowHtml(
       width: max-content;
       height: max-content;
       transform-origin: center center;
-      will-change: transform;
       padding: 32px;
     }
     #svg-stage-frame {
@@ -3378,6 +3621,22 @@ export function generateInteractiveCallflowHtml(
     }
     #svg-layer {
       visibility: visible;
+    }
+    #gpu-proxy-layer {
+      display: none;
+      pointer-events: none;
+      user-select: none;
+      max-width: none !important;
+      max-height: none !important;
+    }
+    #canvas-wrap[data-gpu-proxy="true"] #svg-stage {
+      will-change: transform;
+    }
+    #canvas-wrap[data-gpu-proxy="true"] #svg-layer {
+      display: none !important;
+    }
+    #canvas-wrap[data-gpu-proxy="true"] #gpu-proxy-layer {
+      display: block !important;
     }
     #svg-stage svg {
       max-width: none !important;
@@ -3742,15 +4001,180 @@ export function generateInteractiveCallflowHtml(
       flex-shrink: 0;
       border: 1px solid rgba(255,255,255,0.25);
     }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: rgba(2, 6, 23, 0.78);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-shell {
+      background: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      border-radius: 12px;
+      width: 100%;
+      max-height: 86vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+      overflow: hidden;
+    }
+    .modal-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-header);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    .modal-tabs {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 8px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-header);
+      flex-shrink: 0;
+    }
+    .modal-tab-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-muted);
+      padding: 5px 11px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .modal-tab-btn:hover { color: var(--text-main); background: var(--bg-hover); }
+    .modal-tab-btn.active {
+      background: var(--accent);
+      border-color: var(--accent-border);
+      color: #ffffff;
+    }
+    .modal-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .modal-footer {
+      padding: 12px 18px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-header);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    .facts-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .fact-cell {
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      min-width: 0;
+    }
+    .fact-label {
+      font-size: 10.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+    .fact-value {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-main);
+      word-break: break-word;
+      font-variant-numeric: tabular-nums;
+    }
+    .fact-value.mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--accent-text);
+    }
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .profile-card {
+      padding: 12px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .profile-scripts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .profile-script-btn {
+      padding: 4px 9px;
+      border-radius: 6px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-card);
+      color: var(--text-main);
+      font-size: 11.5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .profile-script-btn:hover {
+      border-color: var(--accent-border);
+      color: var(--accent-text);
+      background: var(--bg-hover);
+    }
+    .raw-snippet {
+      margin: 0;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-seg);
+      color: var(--text-main);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.45;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
     @media (max-width: 960px) {
       main { flex-direction: column; }
       aside { width: 100%; height: 46vh; border-left: none; border-top: 1px solid var(--border); }
+      .facts-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
   <header>
-    <div class="brand">${safeTitle} · Interaktiver Callflow</div>
+    <div class="brand">${safeTitle} · Interaktiver Explorer</div>
     <div class="controls">
       <div class="view-bar" id="view-bar">
         <div class="script-dropdown-wrap" id="script-dropdown-wrap">
@@ -3765,7 +4189,11 @@ export function generateInteractiveCallflowHtml(
             <div class="script-dropdown-list" id="script-dropdown-items"></div>
           </div>
         </div>
-        <button type="button" id="btn-open-schedules" title="Alle Öffnungszeiten & SondZeit-Pläne in der Analyse-Seitenleiste anzeigen" style="padding:2px 7px;font-size:11px;font-weight:600;border-radius:4px;border:1px solid var(--amber-border);background:var(--amber-bg);color:var(--amber-text);cursor:pointer;display:inline-flex;align-items:center;gap:4px;">🕒 Öffnungszeiten</button>
+        <div class="seg-group" id="master-density-group" style="display:none;" title="Kompakt-Modus für maximale Performance vs. Voll-Detail mit separaten Queue-/Endpunkt-Knoten">
+          <button type="button" class="seg-btn" data-density="compact">Kompakt</button>
+          <button type="button" class="seg-btn" data-density="detailed">Voll-Detail</button>
+        </div>
+        <button type="button" id="btn-open-schedules" title="Extra Fenster: Übersicht aller Öffnungszeiten, Zeitprofile &amp; SondZeit-Pläne öffnen" style="padding:3px 9px;font-size:11px;font-weight:600;border-radius:6px;border:1px solid var(--amber-border);background:var(--amber-bg);color:var(--amber-text);cursor:pointer;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;flex-shrink:0;">Öffnungszeiten <span id="btn-open-schedules-count" style="font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;"></span></button>
         <button id="btn-master-back" style="display:none;" title="Zurück zur Master-Gesamtkarte (Ebene 1)">← Master-Karte</button>
       </div>
       <div class="seg-group" id="pathmode-group" title="Pfad-Färbung umschalten: Modus A (Semantik) vs. Modus B (Verzweigungen)">
@@ -3800,6 +4228,7 @@ export function generateInteractiveCallflowHtml(
         <div id="svg-stage">
           <div id="svg-stage-frame">
             <div id="svg-layer">${initialSvg}</div>
+            <img id="gpu-proxy-layer" alt="" draggable="false" />
           </div>
         </div>
       </div>
@@ -3907,6 +4336,66 @@ export function generateInteractiveCallflowHtml(
       </div>
     </aside>
   </main>
+
+  <!-- Double-Click Element Info Box Modal -->
+  <div id="node-info-modal-overlay" class="modal-backdrop">
+    <div class="modal-shell" style="max-width:780px;">
+      <div class="modal-header">
+        <div style="min-width:0;">
+          <h2 id="node-info-title" style="margin:0;font-size:15px;color:var(--text-main);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Element-Details</h2>
+          <div id="node-info-subtitle" style="font-size:11.5px;color:var(--text-muted);margin-top:2px;font-family:ui-monospace,monospace;"></div>
+        </div>
+        <button type="button" id="btn-close-node-info" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:4px 8px;" title="Schließen (Esc)">✕</button>
+      </div>
+      <div class="modal-tabs" id="node-info-tabs">
+        <button type="button" class="modal-tab-btn active" data-ntab="overview">Übersicht</button>
+        <button type="button" class="modal-tab-btn" data-ntab="rules">Zeiten &amp; Regeln</button>
+      </div>
+      <div id="node-info-body" class="modal-body"></div>
+      <div class="modal-footer">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <button type="button" id="btn-node-info-jump" class="primary" style="display:none;white-space:nowrap;"></button>
+          <button type="button" id="btn-node-info-schedules" class="amber" style="display:none;white-space:nowrap;">Alle Öffnungszeiten</button>
+        </div>
+        <button type="button" id="btn-close-node-info-footer">Schließen</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Opening Hours Overview Modal (Zeitprofile + Detail-Tabelle) -->
+  <div id="schedules-modal-overlay" class="modal-backdrop">
+    <div class="modal-shell" style="max-width:1040px;">
+      <div class="modal-header">
+        <div>
+          <h2 style="margin:0;font-size:15px;color:var(--text-main);">Öffnungszeiten-Übersicht</h2>
+          <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;font-variant-numeric:tabular-nums;" id="schedules-modal-subtitle">Übersicht aller Zeitprofile &amp; Regeln</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+          <div class="seg-group" id="modal-sched-view-group">
+            <button type="button" class="seg-btn active" data-sview="profiles">Zeitprofile</button>
+            <button type="button" class="seg-btn" data-sview="table">Detail-Tabelle</button>
+          </div>
+          <button type="button" id="btn-close-schedules-modal" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:4px 8px;" title="Schließen (Esc)">✕</button>
+        </div>
+      </div>
+      <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--bg-input);flex-shrink:0;">
+        <input type="text" id="modal-sched-search" placeholder="Skript, Uhrzeit (08:00), Mo-Fr, SondZeit suchen..." style="flex:1;min-width:200px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-main);padding:6px 10px;border-radius:6px;font-size:11.5px;font-family:inherit;outline:none;" />
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+          <button type="button" id="btn-modal-md" style="padding:6px 10px;background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-strong);border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Markdown kopieren</button>
+          <button type="button" id="btn-modal-csv" style="padding:6px 11px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Excel CSV</button>
+        </div>
+      </div>
+      <div id="modal-sched-cats" style="padding:8px 18px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;gap:6px;background:var(--bg-header);flex-shrink:0;">
+        <button type="button" class="chip active" data-cat="all">Alle <span class="cat-cnt"></span></button>
+        <button type="button" class="chip" data-cat="hours">Mit Uhrzeiten <span class="cat-cnt"></span></button>
+        <button type="button" class="chip" data-cat="sondzeit">SondZeit <span class="cat-cnt"></span></button>
+        <button type="button" class="chip" data-cat="holiday">Feiertag <span class="cat-cnt"></span></button>
+        <button type="button" class="chip" data-cat="always-open">24/7 <span class="cat-cnt"></span></button>
+      </div>
+      <div id="modal-sched-body" class="modal-body"></div>
+    </div>
+  </div>
+
   <script>
     const PAYLOAD = ${safePayloadJson};
     const viewsByKey = new Map(PAYLOAD.views.map(v => [v.key, v]));
@@ -3922,6 +4411,7 @@ export function generateInteractiveCallflowHtml(
     const scriptDropdownSearch = document.getElementById('script-dropdown-search');
     const scriptDropdownItems = document.getElementById('script-dropdown-items');
     const masterBackBtn = document.getElementById('btn-master-back');
+    const masterDensityGroup = document.getElementById('master-density-group');
     const selectEl = document.getElementById('node-select');
     const searchEl = document.getElementById('node-search');
     const dimSelectEl = document.getElementById('dim-select');
@@ -3931,9 +4421,12 @@ export function generateInteractiveCallflowHtml(
     const themeBtn = document.getElementById('btn-theme');
     const zoomReadoutEl = document.getElementById('zoom-readout');
     const stage = document.getElementById('svg-stage');
+    const stageFrame = document.getElementById('svg-stage-frame');
     const svgLayer = document.getElementById('svg-layer');
+    const gpuProxyImg = document.getElementById('gpu-proxy-layer');
     const wrap = document.getElementById('canvas-wrap');
 
+    let masterDensity = PAYLOAD.initialMasterDensity || 'compact';
     let activeAsideTab = 'path';
     let activeAnalysisSubtab = 'issues';
     let anIssueFilter = 'all';
@@ -3960,6 +4453,23 @@ export function generateInteractiveCallflowHtml(
 
     const normalizedSvgCache = new Map(); // viewKey -> SVGElement
     const viewThemeSigCache = new Map(); // viewKey -> string ("dark|semantic")
+    const viewNodeBoxCache = new Map(); // viewKey -> { vbX, vbY, vbW, vbH, boxes: Array<{id, minX, maxX, minY, maxY}> }
+    const gpuProxyCache = new Map(); // (viewKey + '|' + themeSig) -> { url, width, height }
+    const gpuProxyPending = new Set();
+
+    function isMasterViewKey(vk) {
+      return vk === 'master' || vk === 'master:detailed';
+    }
+
+    function getActiveMasterViewKey() {
+      if (masterDensity === 'detailed' && viewsByKey.has('master:detailed')) return 'master:detailed';
+      if (viewsByKey.has('master')) return 'master';
+      return viewsByKey.has('master:detailed') ? 'master:detailed' : PAYLOAD.initialViewKey;
+    }
+
+    function getCurrentThemeSig() {
+      return (isDarkSurface ? 'dark' : 'light') + '|' + pathColorMode;
+    }
 
     function esc(s) {
       return String(s || '')
@@ -4295,7 +4805,8 @@ export function generateInteractiveCallflowHtml(
       if (themeBtn) themeBtn.textContent = isDarkSurface ? '☀ Hell' : '☾ Dunkel';
       const activeSvg = svgLayer.querySelector('svg');
       applySvgSurfaceTheme(activeSvg, GRAPH, true);
-      viewThemeSigCache.set(activeViewKey, (isDarkSurface ? 'dark' : 'light') + '|' + pathColorMode);
+      viewThemeSigCache.set(activeViewKey, getCurrentThemeSig());
+      ensureGpuProxyForView(activeViewKey, activeSvg);
       applyCombinedCanvasState(false);
     }
 
@@ -4311,15 +4822,28 @@ export function generateInteractiveCallflowHtml(
       ).join('');
     }
 
+    function syncMasterDensityUi() {
+      if (!masterDensityGroup) return;
+      const showToggle = Boolean(PAYLOAD.hasBothMasterVariants) && isMasterViewKey(activeViewKey);
+      masterDensityGroup.style.display = showToggle ? 'inline-flex' : 'none';
+      if (showToggle) {
+        masterDensityGroup.querySelectorAll('.seg-btn').forEach(btn => {
+          btn.classList.toggle('active', btn.getAttribute('data-density') === masterDensity);
+        });
+      }
+    }
+
     function populateViewSelect(filterQuery) {
       if (!scriptDropdownItems) return;
       const q = (filterQuery !== undefined ? filterQuery : (scriptDropdownSearch ? scriptDropdownSearch.value : '')).trim().toLowerCase();
       scriptDropdownItems.innerHTML = '';
 
-      const views = PAYLOAD.views || [];
+      // Show a single Master entry (mapping to active masterDensity) plus all Detail scripts
+      const rawViews = PAYLOAD.views || [];
+      const views = rawViews.filter(v => v.key !== 'master:detailed' || !viewsByKey.has('master'));
       const filtered = q
         ? views.filter(v => {
-            if (v.key === 'master') {
+            if (isMasterViewKey(v.key)) {
               return 'master'.includes(q) || 'gesamt'.includes(q) || 'karte'.includes(q) || 'ebene 1'.includes(q) || 'einstieg'.includes(q) || 'alle'.includes(q);
             }
             const labelLower = (v.label || '').toLowerCase();
@@ -4330,7 +4854,9 @@ export function generateInteractiveCallflowHtml(
 
       const activeView = viewsByKey.get(activeViewKey);
       if (scriptDropdownLabel && activeView) {
-        scriptDropdownLabel.textContent = activeView.label;
+        scriptDropdownLabel.textContent = isMasterViewKey(activeView.key)
+          ? activeView.label.replace(/\\s*\\((?:Kompakt|Voll-Detail)\\)$/i, '')
+          : activeView.label;
       }
 
       if (filtered.length === 0) {
@@ -4340,11 +4866,15 @@ export function generateInteractiveCallflowHtml(
         scriptDropdownItems.appendChild(emptyEl);
       } else {
         filtered.forEach(v => {
+          const isMasterItem = isMasterViewKey(v.key);
+          const isSelected = isMasterItem ? isMasterViewKey(activeViewKey) : v.key === activeViewKey;
           const itemEl = document.createElement('div');
-          itemEl.className = 'script-dropdown-item' + (v.key === activeViewKey ? ' selected' : '');
-          itemEl.textContent = v.label;
+          itemEl.className = 'script-dropdown-item' + (isSelected ? ' selected' : '');
+          itemEl.textContent = isMasterItem
+            ? v.label.replace(/\\s*\\((?:Kompakt|Voll-Detail)\\)$/i, '')
+            : v.label;
           itemEl.addEventListener('click', () => {
-            switchView(v.key);
+            switchView(isMasterItem ? getActiveMasterViewKey() : v.key);
             if (scriptDropdownPopover) scriptDropdownPopover.style.display = 'none';
           });
           scriptDropdownItems.appendChild(itemEl);
@@ -4352,8 +4882,9 @@ export function generateInteractiveCallflowHtml(
       }
 
       if (masterBackBtn) {
-        masterBackBtn.style.display = (PAYLOAD.views.length > 1 && activeViewKey !== 'master') ? 'inline-block' : 'none';
+        masterBackBtn.style.display = (PAYLOAD.views.length > 1 && !isMasterViewKey(activeViewKey)) ? 'inline-block' : 'none';
       }
+      syncMasterDensityUi();
     }
 
     function resolveNodeId(el, graphRef) {
@@ -4499,13 +5030,214 @@ export function generateInteractiveCallflowHtml(
       }
 
       normalizedSvgCache.set(viewObj.key, svgEl);
+      extractNodeBoxesForView(viewObj.key, svgEl, gObj);
+      ensureGpuProxyForView(viewObj.key, svgEl);
       if (syncUi) renderNodeTypeFilters();
       return svgEl;
+    }
+
+    function extractNodeBoxesForView(viewKey, svgEl, gObj) {
+      if (!svgEl || !gObj) return;
+      const vbParts = (svgEl.getAttribute('viewBox') || '').trim().split(/[\\s,]+/).map(Number);
+      const wAttr = parseFloat(svgEl.getAttribute('width') || '1200');
+      const hAttr = parseFloat(svgEl.getAttribute('height') || '800');
+      const vbX = vbParts.length === 4 && isFinite(vbParts[0]) ? vbParts[0] : 0;
+      const vbY = vbParts.length === 4 && isFinite(vbParts[1]) ? vbParts[1] : 0;
+      const vbW = vbParts.length === 4 && vbParts[2] > 0 ? vbParts[2] : wAttr;
+      const vbH = vbParts.length === 4 && vbParts[3] > 0 ? vbParts[3] : hAttr;
+      const boxes = [];
+
+      svgEl.querySelectorAll('g.node, g.actor, g.statediagram-state').forEach(g => {
+        const nid = resolveNodeId(g, gObj);
+        if (!nid) return;
+        let tx = 0, ty = 0;
+        let cur = g;
+        while (cur && cur !== svgEl) {
+          const tr = cur.getAttribute ? (cur.getAttribute('transform') || '') : '';
+          const m = tr.match(/translate\\(\\s*([+-]?\\d+(?:\\.\\d+)?)(?:[\\s,]+([+-]?\\d+(?:\\.\\d+)?))?\\s*\\)/i);
+          if (m) {
+            tx += parseFloat(m[1] || '0') || 0;
+            ty += parseFloat(m[2] || '0') || 0;
+          }
+          cur = cur.parentNode;
+        }
+        let minX = -60, maxX = 60, minY = -24, maxY = 24;
+        const rect = g.querySelector('rect');
+        const poly = g.querySelector('polygon');
+        const circ = g.querySelector('circle');
+        if (rect) {
+          const rx = parseFloat(rect.getAttribute('x') || '0');
+          const ry = parseFloat(rect.getAttribute('y') || '0');
+          const rw = parseFloat(rect.getAttribute('width') || '0');
+          const rh = parseFloat(rect.getAttribute('height') || '0');
+          if (rw > 4 && rh > 4) { minX = rx; maxX = rx + rw; minY = ry; maxY = ry + rh; }
+        } else if (poly) {
+          const nums = (poly.getAttribute('points') || '').match(/[+-]?\\d+(?:\\.\\d+)?/g);
+          if (nums && nums.length >= 6) {
+            let pMinX = Infinity, pMaxX = -Infinity, pMinY = Infinity, pMaxY = -Infinity;
+            for (let i = 0; i + 1 < nums.length; i += 2) {
+              const px = parseFloat(nums[i]); const py = parseFloat(nums[i + 1]);
+              if (px < pMinX) pMinX = px; if (px > pMaxX) pMaxX = px;
+              if (py < pMinY) pMinY = py; if (py > pMaxY) pMaxY = py;
+            }
+            if (isFinite(pMinX) && pMaxX - pMinX > 4) { minX = pMinX; maxX = pMaxX; minY = pMinY; maxY = pMaxY; }
+          }
+        } else if (circ) {
+          const cx = parseFloat(circ.getAttribute('cx') || '0');
+          const cy = parseFloat(circ.getAttribute('cy') || '0');
+          const r = parseFloat(circ.getAttribute('r') || '0');
+          if (r > 4) { minX = cx - r; maxX = cx + r; minY = cy - r; maxY = cy + r; }
+        }
+        boxes.push({ id: nid, minX: tx + minX, maxX: tx + maxX, minY: ty + minY, maxY: ty + maxY });
+      });
+
+      viewNodeBoxCache.set(viewKey, { vbX, vbY, vbW, vbH, boxes });
+    }
+
+    function hitTestNodeAtClientPoint(clientX, clientY) {
+      const idx = viewNodeBoxCache.get(activeViewKey);
+      if (!idx || !stageFrame) return null;
+      const rect = stageFrame.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return null;
+      const svgX = idx.vbX + ((clientX - rect.left) / rect.width) * idx.vbW;
+      const svgY = idx.vbY + ((clientY - rect.top) / rect.height) * idx.vbH;
+      const pad = 6;
+      for (let i = idx.boxes.length - 1; i >= 0; i--) {
+        const b = idx.boxes[i];
+        if (svgX >= b.minX - pad && svgX <= b.maxX + pad && svgY >= b.minY - pad && svgY <= b.maxY + pad) {
+          return b.id;
+        }
+      }
+      return null;
+    }
+
+    function isLargeViewSvg(svgEl, gObj) {
+      if (!svgEl || !gObj) return false;
+      if (gObj.nodes.length >= 28 || gObj.edges.length >= 48) return true;
+      const w = parseFloat(svgEl.getAttribute('width') || '0');
+      const h = parseFloat(svgEl.getAttribute('height') || '0');
+      return Math.max(w, h) > 2200 || w * h > 2200000;
+    }
+
+    function applyProxyImgElement(entry) {
+      if (!gpuProxyImg) return;
+      if (!entry) {
+        gpuProxyImg.removeAttribute('src');
+        delete wrap.dataset.gpuProxy;
+        return;
+      }
+      gpuProxyImg.src = entry.url;
+      gpuProxyImg.width = entry.width;
+      gpuProxyImg.height = entry.height;
+      gpuProxyImg.style.width = entry.width + 'px';
+      gpuProxyImg.style.height = entry.height + 'px';
+    }
+
+    function syncGpuProxyState(forceGesture) {
+      const cacheKey = activeViewKey + '|' + getCurrentThemeSig();
+      const entry = gpuProxyCache.get(cacheKey);
+      if (!entry) {
+        delete wrap.dataset.gpuProxy;
+        return;
+      }
+      if (gpuProxyImg && gpuProxyImg.src !== entry.url) {
+        applyProxyImgElement(entry);
+      }
+      const hasInteractiveFilter =
+        Boolean(activeNodeId) ||
+        Boolean(activeEdge) ||
+        hiddenNodeTypes.size > 0 ||
+        roleFilter !== 'all' ||
+        Boolean((searchEl && searchEl.value || '').trim());
+      const isGesture = Boolean(forceGesture || wrap.dataset.transforming === 'true');
+      const isOverview = zoom < 0.85 && !hasInteractiveFilter;
+      if (isGesture || isOverview) {
+        wrap.dataset.gpuProxy = 'true';
+      } else {
+        delete wrap.dataset.gpuProxy;
+      }
+    }
+
+    function ensureGpuProxyForView(viewKey, svgEl) {
+      const viewObj = viewsByKey.get(viewKey);
+      if (!svgEl || !viewObj) return;
+      if (!isLargeViewSvg(svgEl, viewObj.graph)) {
+        if (viewKey === activeViewKey) applyProxyImgElement(null);
+        return;
+      }
+      const cacheKey = viewKey + '|' + getCurrentThemeSig();
+      const existing = gpuProxyCache.get(cacheKey);
+      if (existing) {
+        if (viewKey === activeViewKey) {
+          applyProxyImgElement(existing);
+          syncGpuProxyState(false);
+        }
+        return;
+      }
+      if (gpuProxyPending.has(cacheKey)) return;
+      gpuProxyPending.add(cacheKey);
+
+      const w = Math.max(1, Math.ceil(parseFloat(svgEl.getAttribute('width') || '1200')));
+      const h = Math.max(1, Math.ceil(parseFloat(svgEl.getAttribute('height') || '800')));
+      const maxDim = 4096;
+      const scale = Math.min(1.5, maxDim / Math.max(w, h));
+      const pw = Math.max(1, Math.round(w * scale));
+      const ph = Math.max(1, Math.round(h * scale));
+
+      try {
+        const clone = svgEl.cloneNode(true);
+        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        clone.setAttribute('width', String(w));
+        clone.setAttribute('height', String(h));
+        const xml = new XMLSerializer().serializeToString(clone);
+        const svgBlob = new Blob([xml], { type: 'image/svg+xml;charset=utf-8' });
+        const svgUrl = URL.createObjectURL(svgBlob);
+        const img = new Image();
+        img.onload = () => {
+          URL.revokeObjectURL(svgUrl);
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = pw;
+            canvas.height = ph;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(img, 0, 0, pw, ph);
+              canvas.toBlob(blob => {
+                gpuProxyPending.delete(cacheKey);
+                if (!blob) return;
+                const url = URL.createObjectURL(blob);
+                const entry = { url, width: w, height: h };
+                gpuProxyCache.set(cacheKey, entry);
+                if (viewKey === activeViewKey && cacheKey === activeViewKey + '|' + getCurrentThemeSig()) {
+                  applyProxyImgElement(entry);
+                  syncGpuProxyState(false);
+                }
+              }, 'image/png');
+              return;
+            }
+          } catch {
+            // fallback to vector mode if browser taints foreignObject canvas
+          }
+          gpuProxyPending.delete(cacheKey);
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(svgUrl);
+          gpuProxyPending.delete(cacheKey);
+        };
+        img.src = svgUrl;
+      } catch {
+        gpuProxyPending.delete(cacheKey);
+      }
     }
 
     function switchView(nextKey) {
       const nextView = viewsByKey.get(nextKey);
       if (!nextView) return;
+      if (nextKey === 'master') masterDensity = 'compact';
+      else if (nextKey === 'master:detailed') masterDensity = 'detailed';
+
+      delete wrap.dataset.gpuProxy;
       activeViewKey = nextKey;
       GRAPH = nextView.graph;
       nodeMap = new Map(GRAPH.nodes.map(n => [n.id, n]));
@@ -4515,13 +5247,14 @@ export function generateInteractiveCallflowHtml(
       let cachedSvg = normalizedSvgCache.get(nextKey);
       if (cachedSvg) {
         svgLayer.replaceChildren(cachedSvg);
-        const curThemeSig = (isDarkSurface ? 'dark' : 'light') + '|' + pathColorMode;
+        const curThemeSig = getCurrentThemeSig();
         if (viewThemeSigCache.get(nextKey) !== curThemeSig) {
           applySvgSurfaceTheme(cachedSvg, GRAPH, true);
           viewThemeSigCache.set(nextKey, curThemeSig);
         } else {
           recolorExportEdges(cachedSvg, GRAPH, true);
         }
+        ensureGpuProxyForView(nextKey, cachedSvg);
         renderNodeTypeFilters();
       } else {
         svgLayer.innerHTML = nextView.svg;
@@ -4572,10 +5305,12 @@ export function generateInteractiveCallflowHtml(
     function updateTransform(activeGesture) {
       if (activeGesture) {
         wrap.dataset.transforming = 'true';
+        syncGpuProxyState(true);
         if (transformIdleTimer !== null) clearTimeout(transformIdleTimer);
         transformIdleTimer = setTimeout(() => {
           transformIdleTimer = null;
           delete wrap.dataset.transforming;
+          syncGpuProxyState(false);
         }, 120);
         if (transformRafId === null) {
           transformRafId = requestAnimationFrame(() => {
@@ -4597,6 +5332,7 @@ export function generateInteractiveCallflowHtml(
       delete wrap.dataset.transforming;
       applyTransformImmediate();
       updateZoomReadouts();
+      syncGpuProxyState(false);
     }
 
     function zoomBy(factor) {
@@ -4624,6 +5360,8 @@ export function generateInteractiveCallflowHtml(
 
     function focusNodeCamera(targetId) {
       if (!targetId) return;
+      // Reveal vector layer before measuring real SVG node bounds
+      delete wrap.dataset.gpuProxy;
       const allSvgNodes = Array.from(stage.querySelectorAll('g.node, g.actor, g.statediagram-state'));
       const targetEl = allSvgNodes.find(g => resolveNodeId(g) === targetId);
       if (!targetEl) return;
@@ -4680,6 +5418,13 @@ export function generateInteractiveCallflowHtml(
     });
     wrap.addEventListener('click', e => {
       if (didDrag) return;
+      const directNodeId = e.target && e.target.closest ? resolveNodeId(e.target) : null;
+      if (directNodeId) return; // handled by SVG node listener
+      const hitViaProxy = hitTestNodeAtClientPoint(e.clientX, e.clientY);
+      if (hitViaProxy) {
+        selectNode(hitViaProxy, false);
+        return;
+      }
       if (!e.target.closest('g.node, g.actor, g.statediagram-state, g.edgePaths > *, g.edgePath, path.flowchart-link, g.edgeLabels > *, g.edgeLabel')) {
         if (activeNodeId || activeEdge) {
           activeNodeId = '';
@@ -4688,6 +5433,20 @@ export function generateInteractiveCallflowHtml(
           applyCombinedCanvasState(false);
         }
       }
+    });
+    wrap.addEventListener('dblclick', e => {
+      const directNodeId = e.target && e.target.closest ? resolveNodeId(e.target) : null;
+      const targetNodeId = directNodeId || hitTestNodeAtClientPoint(e.clientX, e.clientY);
+      if (targetNodeId) {
+        e.preventDefault();
+        e.stopPropagation();
+        openNodeInfoModal(targetNodeId);
+        return;
+      }
+      zoom = 1;
+      panX = 0;
+      panY = 0;
+      updateTransform(false);
     });
 
     document.getElementById('btn-zoom-in').addEventListener('click', () => zoomBy(1.25));
@@ -4819,10 +5578,11 @@ export function generateInteractiveCallflowHtml(
     function renderNodeSpecialParameters(targetNodeId) {
       const drillSlot = document.getElementById('drilldown-slot');
       if (!drillSlot) return;
+      const existingParamWrap = drillSlot.querySelector('.param-card-slot');
+      if (existingParamWrap) existingParamWrap.remove();
       const nObj = nodeMap.get(targetNodeId);
-      if (!nObj) { drillSlot.innerHTML = ''; return; }
+      if (!nObj) return;
 
-      // Resolve script number for targetNodeId
       const dt = PAYLOAD.drillTargetsByNodeId ? PAYLOAD.drillTargetsByNodeId[targetNodeId] : null;
       const activeView = viewsByKey.get(activeViewKey);
       const scriptNum = dt
@@ -4835,40 +5595,37 @@ export function generateInteractiveCallflowHtml(
       const paramsMap = an ? (an.parametersByScript || (an.registry ? an.registry.parametersByScript : null)) : null;
       const paramsList = paramsMap ? (paramsMap[scriptNum] || paramsMap[String(scriptNum).toLowerCase()] || []) : [];
 
-      if (!paramsList || paramsList.length === 0) {
-        drillSlot.innerHTML = '';
-        return;
-      }
+      if (!paramsList || paramsList.length === 0) return;
 
       const categories = [
-        { key: 'overflow', title: 'Überlauf & Schwellenwerte', icon: '⏱️' },
-        { key: 'routing', title: 'Routing & Zentralen', icon: '📞' },
-        { key: 'schedule', title: 'Öffnungszeiten & Status', icon: '🕒' },
-        { key: 'media', title: 'Audio, Musik & Gründe', icon: '🎵' },
-        { key: 'custom', title: 'Skript-Variablen', icon: '⚙️' },
+        { key: 'overflow', title: 'Überlauf & Schwellenwerte' },
+        { key: 'routing', title: 'Routing & Zentralen' },
+        { key: 'schedule', title: 'Öffnungszeiten & Status' },
+        { key: 'media', title: 'Audio, Musik & Gründe' },
+        { key: 'custom', title: 'Skript-Variablen' },
       ];
 
-      let html = '<div class="card param-card" style="margin-top:10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--card-bg);">';
+      let html = '<div class="card param-card" style="margin-top:8px;padding:10px 12px;">';
       html += '<div class="row-between" style="margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border);">';
-      html += '<div style="font-size:12px;font-weight:700;color:var(--text);display:flex;align-items:center;gap:6px;">';
-      html += '<span>⚙️ Sonderparameter</span>';
+      html += '<div style="font-size:12px;font-weight:700;color:var(--text-main);display:flex;align-items:center;gap:6px;">';
+      html += '<span>Sonderparameter</span>';
       html += '<span style="font-size:11px;font-weight:400;color:var(--text-muted);font-family:monospace;">[' + esc(scriptNum) + ']</span>';
       html += '</div>';
-      html += '<span style="font-size:10px;color:var(--text-muted);">' + paramsList.length + ' Parameter</span>';
+      html += '<span style="font-size:10px;color:var(--text-muted);font-variant-numeric:tabular-nums;">' + paramsList.length + ' Parameter</span>';
       html += '</div>';
 
       categories.forEach(cat => {
         const inCat = paramsList.filter(p => p.category === cat.key);
         if (!inCat.length) return;
-        html += '<div style="margin-top:7px;margin-bottom:3px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-muted);">' + cat.icon + ' ' + esc(cat.title) + '</div>';
+        html += '<div style="margin-top:7px;margin-bottom:3px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-muted);">' + esc(cat.title) + '</div>';
         html += '<div style="display:flex;flex-direction:column;gap:4px;">';
         inCat.forEach(p => {
-          html += '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:4px 6px;border-radius:4px;background:var(--chip-bg);font-size:11px;gap:8px;">';
+          html += '<div style="display:flex;justify-content:space-between;align-items:baseline;padding:4px 6px;border-radius:4px;background:var(--bg-input);font-size:11px;gap:8px;">';
           html += '<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1;">';
-          html += '<span style="font-weight:500;color:var(--text);">' + esc(p.label) + '</span>';
+          html += '<span style="font-weight:500;color:var(--text-main);">' + esc(p.label) + '</span>';
           html += ' <span style="font-size:10px;color:var(--text-muted);font-family:monospace;">(' + esc(p.key) + ')</span>';
           html += '</div>';
-          html += '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;color:var(--accent,#38bdf8);white-space:nowrap;text-align:right;">';
+          html += '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;color:var(--accent-text);white-space:nowrap;text-align:right;font-variant-numeric:tabular-nums;">';
           html += esc(p.value);
           html += '</div>';
           html += '</div>';
@@ -4877,7 +5634,10 @@ export function generateInteractiveCallflowHtml(
       });
 
       html += '</div>';
-      drillSlot.innerHTML = html;
+      const wrapper = document.createElement('div');
+      wrapper.className = 'param-card-slot';
+      wrapper.innerHTML = html;
+      drillSlot.appendChild(wrapper);
     }
 
     function updateClusterVisibility(visibleSvgNodes) {
@@ -4933,6 +5693,7 @@ export function generateInteractiveCallflowHtml(
 
     function applyCombinedCanvasState(shouldFocusCamera = false) {
       applyCombinedCanvasStateInner(shouldFocusCamera);
+      syncGpuProxyState(false);
     }
 
     function applyCombinedCanvasStateInner(shouldFocusCamera = false) {
@@ -5267,15 +6028,27 @@ export function generateInteractiveCallflowHtml(
         '<span style="font-size:11px;color:var(--text-muted);">' + dirText + ' · ' + hopText + ' · ' + visibleSvgNodes.length + ' Knoten sichtbar</span>';
 
       drillSlot.innerHTML = '';
+      const actionsRow = document.createElement('div');
+      actionsRow.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:6px;';
+      const infoBtn = document.createElement('button');
+      infoBtn.type = 'button';
+      infoBtn.className = 'primary';
+      infoBtn.style.width = '100%';
+      infoBtn.textContent = 'Element-Info & Zeiten öffnen (Doppelklick)';
+      infoBtn.onclick = () => openNodeInfoModal(activeNodeId);
+      actionsRow.appendChild(infoBtn);
+
       const drillTarget = PAYLOAD.drillTargetsByNodeId && PAYLOAD.drillTargetsByNodeId[activeNodeId];
       if (drillTarget && viewsByKey.has(drillTarget.viewKey) && drillTarget.viewKey !== activeViewKey) {
         const drillBtn = document.createElement('button');
+        drillBtn.type = 'button';
         drillBtn.className = 'amber';
         drillBtn.style.width = '100%';
-        drillBtn.textContent = '→ In Detail-Skript [' + drillTarget.scriptRef + '] hineinzoomen';
+        drillBtn.textContent = 'Detail-Skript [' + drillTarget.scriptRef + '] öffnen →';
         drillBtn.onclick = () => switchView(drillTarget.viewKey);
-        drillSlot.appendChild(drillBtn);
+        actionsRow.appendChild(drillBtn);
       }
+      drillSlot.appendChild(actionsRow);
 
       const upNodesList = Array.from(upDepth.entries())
         .filter(([id, d]) => id !== activeNodeId && d <= maxHops)
@@ -5736,46 +6509,149 @@ export function generateInteractiveCallflowHtml(
       });
     });
 
+    // === EXTRA FENSTER: ÖFFNUNGSZEITEN-ÜBERSICHT (ZEITPROFILE & DETAIL-TABELLE) ===
+    let schedulesModalView = 'profiles'; // 'profiles' | 'table'
+    let schedulesModalCategory = 'all'; // 'all' | 'hours' | 'sondzeit' | 'holiday' | 'always-open'
+
+    function classifyScheduleRow(r) {
+      const hoursStr = String(r.openingHours || '').trim();
+      const hasClock = /\\d{1,2}[:.]\\d{2}/.test(hoursStr);
+      const isSond = /sondzeit/i.test(hoursStr) || /sondzeit/i.test(String(r.scriptName || '')) || /sondzeit/i.test(String(r.holidayAndSpecial || ''));
+      if (hasClock) return 'hours';
+      if (isSond) return 'sondzeit';
+      if (r.hasHoliday) return 'holiday';
+      return 'always-open';
+    }
+
+    function normalizeScheduleProfileTitle(r, cat) {
+      const cleanHours = String(r.openingHours || '').replace(/:\\s+/g, ':').replace(/\\s+/g, ' ').trim();
+      if (cat === 'hours') return cleanHours || 'Uhrzeiten hinterlegt';
+      if (cat === 'sondzeit') return cleanHours && cleanHours !== '—' ? 'SondZeit · ' + cleanHours : 'SondZeit-Zeitplan (CCMA)';
+      if (cat === 'holiday') return 'Feiertag / Sonderzeit · ' + (r.holidayAndSpecial || 'Prüfung aktiv');
+      return 'Ohne Zeitbeschränkung (24/7)';
+    }
+
+    function getFilteredScheduleRowsForModal() {
+      const an = PAYLOAD.analysis;
+      const rows = an ? (an.scheduleRows || []) : [];
+      const q = (document.getElementById('modal-sched-search') ? document.getElementById('modal-sched-search').value : '').trim().toLowerCase();
+      return rows.filter(r => {
+        const cat = classifyScheduleRow(r);
+        if (schedulesModalCategory !== 'all' && cat !== schedulesModalCategory) return false;
+        if (!q) return true;
+        const hay = (
+          String(r.scriptNumber || '') + ' ' +
+          String(r.scriptName || '') + ' ' +
+          String(r.stepName || '') + ' ' +
+          String(r.openingHours || '').replace(/:\\s+/g, ':') + ' ' +
+          String(r.holidayAndSpecial || '') + ' ' +
+          String(r.closedOrOverflowAction || '')
+        ).toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
     function renderSchedulesModalContent() {
       const body = document.getElementById('modal-sched-body');
       const subtitle = document.getElementById('schedules-modal-subtitle');
       if (!body) return;
       const an = PAYLOAD.analysis;
-      const rows = an ? (an.scheduleRows || []) : [];
-      if (subtitle) subtitle.textContent = rows.length + ' Zeitregeln im Callflow';
+      const allRows = an ? (an.scheduleRows || []) : [];
+      const filtered = getFilteredScheduleRowsForModal();
 
-      const q = (document.getElementById('modal-sched-search') ? document.getElementById('modal-sched-search').value : '').trim().toLowerCase();
-      const filtered = q
-        ? rows.filter(r => (r.scriptNumber + ' ' + r.scriptName + ' ' + r.stepName + ' ' + (r.openingHours || '').replace(/:\s+/g, ':') + ' ' + r.holidayAndSpecial + ' ' + r.closedOrOverflowAction).toLowerCase().includes(q))
-        : rows;
+      const catCounts = { all: allRows.length, hours: 0, sondzeit: 0, holiday: 0, 'always-open': 0 };
+      allRows.forEach(r => { catCounts[classifyScheduleRow(r)] += 1; });
+      document.querySelectorAll('#modal-sched-cats .chip').forEach(ch => {
+        const c = ch.getAttribute('data-cat');
+        ch.classList.toggle('active', c === schedulesModalCategory);
+        const cntEl = ch.querySelector('.cat-cnt');
+        if (cntEl && c && catCounts[c] !== undefined) cntEl.textContent = '(' + catCounts[c] + ')';
+      });
+      document.querySelectorAll('#modal-sched-view-group .seg-btn').forEach(b => {
+        b.classList.toggle('active', b.getAttribute('data-sview') === schedulesModalView);
+      });
 
-      if (!rows.length) {
+      const uniqueScriptCount = new Set(allRows.map(r => r.scriptNumber)).size;
+      if (subtitle) {
+        subtitle.textContent = filtered.length + ' von ' + allRows.length + ' Zeitregeln · ' + uniqueScriptCount + ' Skripte';
+      }
+
+      if (!allRows.length) {
         body.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;font-size:12px;">Keine Öffnungszeiten oder Zeitpläne im Callflow gefunden.</div>';
         return;
       }
+      if (!filtered.length) {
+        body.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;font-size:12px;">Keine passenden Öffnungszeiten für die aktuelle Filterung gefunden.</div>';
+        return;
+      }
 
-      body.innerHTML =
-        '<div class="an-table-wrap">' +
-          '<table class="an-table"><thead><tr><th>Skript</th><th>Regel / Schritt</th><th>Öffnungszeiten (SondZeit)</th><th>Feiertag</th><th>Überlauf / Aktion</th><th>Aktion</th></tr></thead><tbody>' +
-          (filtered.length ? filtered.map((r, i) =>
-            '<tr>' +
-              '<td><strong>[' + esc(r.scriptNumber) + ']</strong> ' + esc(r.scriptName) + '</td>' +
-              '<td>' + (r.prio ? 'Prio ' + r.prio + ' · ' : '') + esc(r.stepName) + '</td>' +
-              '<td><span style="font-family:monospace;font-weight:bold;color:var(--accent-text);font-size:12px;">' + esc((r.openingHours || '').replace(/:\s+/g, ':')) + '</span></td>' +
-              '<td>' + (r.hasHoliday ? esc(r.holidayAndSpecial) : '—') + '</td>' +
-              '<td>' + esc(r.closedOrOverflowAction || '—') + '</td>' +
-              '<td style="text-align:right;"><button type="button" class="sched-jump-btn" data-snum="' + esc(r.scriptNumber) + '" style="padding:3px 8px;font-size:10.5px;background:var(--bg-input);border:1px solid var(--border);color:var(--text-main);border-radius:4px;cursor:pointer;">Im Diagramm</button></td>' +
-            '</tr>'
-          ).join('') : '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:20px;">Keine Treffer für „' + q + '“</td></tr>') +
-          '</tbody></table>' +
-        '</div>';
+      if (schedulesModalView === 'profiles') {
+        const groupMap = new Map();
+        filtered.forEach(r => {
+          const cat = classifyScheduleRow(r);
+          const title = normalizeScheduleProfileTitle(r, cat);
+          const key = cat + '::' + title.toLowerCase();
+          let grp = groupMap.get(key);
+          if (!grp) {
+            grp = { key, title, cat, rows: [], scriptsMap: new Map(), overflows: new Set() };
+            groupMap.set(key, grp);
+          }
+          grp.rows.push(r);
+          if (!grp.scriptsMap.has(r.scriptNumber)) {
+            grp.scriptsMap.set(r.scriptNumber, { scriptNumber: r.scriptNumber, scriptName: r.scriptName });
+          }
+          if (r.closedOrOverflowAction && r.closedOrOverflowAction !== '—') {
+            grp.overflows.add(r.closedOrOverflowAction);
+          }
+        });
+        const catRank = { hours: 0, sondzeit: 1, holiday: 2, 'always-open': 3 };
+        const groups = Array.from(groupMap.values()).sort((a, b) => (catRank[a.cat] - catRank[b.cat]) || (b.rows.length - a.rows.length));
+        const catLabel = { hours: 'Uhrzeiten', sondzeit: 'SondZeit', holiday: 'Feiertag', 'always-open': '24/7' };
+        const catTagClass = { hours: 'ok', sondzeit: 'warn', holiday: 'warn', 'always-open': '' };
+
+        body.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px;">' + groups.map(grp => {
+          const scripts = Array.from(grp.scriptsMap.values());
+          const ovList = Array.from(grp.overflows).slice(0, 4);
+          return '<div class="profile-card">' +
+            '<div class="row-between" style="flex-wrap:wrap;gap:6px;">' +
+              '<div style="display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;">' +
+                '<span class="an-tag ' + (catTagClass[grp.cat] || '') + '">' + esc(catLabel[grp.cat] || grp.cat) + '</span>' +
+                '<strong style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:var(--text-main);">' + esc(grp.title) + '</strong>' +
+              '</div>' +
+              '<span style="font-size:11px;color:var(--text-muted);font-variant-numeric:tabular-nums;">' + scripts.length + ' Skript(e) · ' + grp.rows.length + ' Regel(n)</span>' +
+            '</div>' +
+            (ovList.length ? '<div style="font-size:11px;color:var(--text-muted);">Überlauf / Geschlossen: <span style="color:var(--text-main);">' + esc(ovList.join(' · ')) + '</span></div>' : '') +
+            '<div class="profile-scripts">' +
+              scripts.map(s =>
+                '<button type="button" class="profile-script-btn sched-jump-btn" data-snum="' + esc(s.scriptNumber) + '" title="Detail-Skript öffnen">[' + esc(s.scriptNumber) + '] ' + esc(s.scriptName || '') + ' →</button>'
+              ).join('') +
+            '</div>' +
+          '</div>';
+        }).join('') + '</div>';
+      } else {
+        body.innerHTML =
+          '<div class="an-table-wrap" style="max-height:none;">' +
+            '<table class="an-table"><thead><tr><th>Skript</th><th>Regel / Schritt</th><th>Öffnungszeiten (SondZeit)</th><th>Feiertag</th><th>Überlauf / Aktion</th><th style="text-align:right;">Aktion</th></tr></thead><tbody>' +
+            filtered.map(r =>
+              '<tr>' +
+                '<td><strong>[' + esc(r.scriptNumber) + ']</strong> ' + esc(r.scriptName) + '</td>' +
+                '<td>' + (r.prio ? 'Prio ' + r.prio + ' · ' : '') + esc(r.stepName) + '</td>' +
+                '<td><span style="font-family:ui-monospace,monospace;font-weight:600;color:var(--accent-text);font-size:11.5px;">' + esc((r.openingHours || '').replace(/:\\s+/g, ':')) + '</span></td>' +
+                '<td>' + (r.hasHoliday ? esc(r.holidayAndSpecial) : '—') + '</td>' +
+                '<td>' + esc(r.closedOrOverflowAction || '—') + '</td>' +
+                '<td style="text-align:right;"><button type="button" class="sched-jump-btn" data-snum="' + esc(r.scriptNumber) + '" style="padding:3px 8px;font-size:10.5px;background:var(--bg-input);border:1px solid var(--border);color:var(--text-main);border-radius:5px;cursor:pointer;white-space:nowrap;">Im Diagramm →</button></td>' +
+              '</tr>'
+            ).join('') +
+            '</tbody></table>' +
+          '</div>';
+      }
 
       body.querySelectorAll('.sched-jump-btn').forEach(btn => {
         btn.addEventListener('click', () => {
           const snum = btn.getAttribute('data-snum');
-          const viewKey = 'script:' + snum;
-          if (viewsByKey.has(viewKey)) {
-            switchView(viewKey);
+          const vk = (PAYLOAD.viewKeyByScriptNumber && (PAYLOAD.viewKeyByScriptNumber[snum] || PAYLOAD.viewKeyByScriptNumber[String(snum).toLowerCase()])) || ('script:' + snum);
+          if (viewsByKey.has(vk)) {
+            switchView(vk);
             const overlay = document.getElementById('schedules-modal-overlay');
             if (overlay) overlay.style.display = 'none';
           }
@@ -5783,19 +6659,308 @@ export function generateInteractiveCallflowHtml(
       });
     }
 
+    function openSchedulesModal(initialQuery) {
+      const overlay = document.getElementById('schedules-modal-overlay');
+      const searchInput = document.getElementById('modal-sched-search');
+      if (!overlay) return;
+      schedulesModalCategory = 'all';
+      if (searchInput) searchInput.value = initialQuery || '';
+      overlay.style.display = 'flex';
+      renderSchedulesModalContent();
+      if (searchInput) setTimeout(() => searchInput.focus(), 40);
+    }
+
+    // === DOPPELKLICK ELEMENT-INFO-BOX (ÜBERSICHT | ZEITEN & REGELN) ===
+    let activeInfoModalNodeId = '';
+    let activeInfoModalTab = 'overview'; // 'overview' | 'rules'
+
+    function resolveNodeInfoSnapshot(nodeId) {
+      const activeView = viewsByKey.get(activeViewKey);
+      if (activeView && activeView.nodeDetails && activeView.nodeDetails[nodeId]) {
+        return activeView.nodeDetails[nodeId];
+      }
+      const nObj = nodeMap.get(nodeId);
+      const dt = PAYLOAD.drillTargetsByNodeId ? PAYLOAD.drillTargetsByNodeId[nodeId] : null;
+      const incoming = GRAPH.edges.filter(e => e.to === nodeId).map(e => {
+        const src = nodeMap.get(e.from);
+        return { fromScriptNumber: e.from, fromLabel: src ? src.label : e.from, edgeLabel: e.label || '' };
+      });
+      const outgoing = GRAPH.edges.filter(e => e.from === nodeId).map((e, i) => {
+        const dst = nodeMap.get(e.to);
+        return { id: 'e-' + i, toTargetNumber: dst ? dst.label : e.to, label: e.label || '', kind: 'rule-target' };
+      });
+      return {
+        nodeId,
+        mode: 'raw-mermaid',
+        scriptNumber: dt ? dt.scriptRef : (activeView && activeView.scriptNumber ? activeView.scriptNumber : nodeId),
+        title: nObj ? nObj.label : nodeId,
+        blockType: 'script',
+        canJumpToDetailScript: Boolean(dt && viewsByKey.has(dt.viewKey)),
+        detailTargetScriptNumber: dt ? dt.scriptRef : undefined,
+        incomingConnections: incoming,
+        outgoingConnections: outgoing,
+        moduleRulesPreview: [],
+        specialParameters: [],
+        relatedFindings: [],
+      };
+    }
+
+    function openNodeInfoModal(nodeId) {
+      if (!nodeId) return;
+      activeInfoModalNodeId = nodeId;
+      activeInfoModalTab = 'overview';
+      const overlay = document.getElementById('node-info-modal-overlay');
+      if (!overlay) return;
+      overlay.style.display = 'flex';
+      renderNodeInfoModal();
+    }
+
+    function closeNodeInfoModal() {
+      const overlay = document.getElementById('node-info-modal-overlay');
+      if (overlay) overlay.style.display = 'none';
+      activeInfoModalNodeId = '';
+    }
+
+    function renderNodeInfoModal() {
+      const overlay = document.getElementById('node-info-modal-overlay');
+      if (!overlay || !activeInfoModalNodeId) return;
+      const snap = resolveNodeInfoSnapshot(activeInfoModalNodeId);
+      const titleEl = document.getElementById('node-info-title');
+      const subtitleEl = document.getElementById('node-info-subtitle');
+      const bodyEl = document.getElementById('node-info-body');
+      const jumpBtn = document.getElementById('btn-node-info-jump');
+      const schedBtn = document.getElementById('btn-node-info-schedules');
+
+      const blockLabels = {
+        script: 'Skript / Modul',
+        announcement: 'Ansage / Audio',
+        queue: 'Skillset / Queue',
+        condition: 'Zeit- / IF-Weiche',
+        dtmf: 'DTMF-Menü',
+        external: 'Externes Ziel',
+      };
+      const typeLabel = blockLabels[snap.blockType] || 'Element';
+      if (titleEl) titleEl.textContent = snap.title || snap.nodeId;
+      if (subtitleEl) {
+        const metaParts = [typeLabel];
+        if (snap.scriptNumber) metaParts.push('Skript [' + snap.scriptNumber + ']');
+        if (snap.prio) metaParts.push('Prio ' + snap.prio);
+        if (snap.organizationName) metaParts.push(snap.organizationName);
+        subtitleEl.textContent = metaParts.join(' · ');
+      }
+
+      const targetScriptRef = snap.detailTargetScriptNumber || (snap.canJumpToDetailScript ? snap.scriptNumber : '');
+      const targetViewKey = targetScriptRef && PAYLOAD.viewKeyByScriptNumber
+        ? (PAYLOAD.viewKeyByScriptNumber[targetScriptRef] || PAYLOAD.viewKeyByScriptNumber[String(targetScriptRef).toLowerCase()])
+        : '';
+      const canJump = Boolean(targetViewKey && viewsByKey.has(targetViewKey) && targetViewKey !== activeViewKey);
+      if (jumpBtn) {
+        jumpBtn.style.display = canJump ? 'inline-flex' : 'none';
+        jumpBtn.textContent = 'Detail-Skript [' + targetScriptRef + '] öffnen →';
+        jumpBtn.onclick = () => {
+          closeNodeInfoModal();
+          switchView(targetViewKey);
+        };
+      }
+      if (schedBtn) {
+        const hasSchedRows = Boolean(PAYLOAD.analysis && PAYLOAD.analysis.scheduleRows && PAYLOAD.analysis.scheduleRows.length > 0);
+        schedBtn.style.display = hasSchedRows ? 'inline-flex' : 'none';
+        schedBtn.onclick = () => {
+          const q = snap.scriptNumber || '';
+          closeNodeInfoModal();
+          openSchedulesModal(q);
+        };
+      }
+
+      document.querySelectorAll('#node-info-tabs .modal-tab-btn').forEach(btn => {
+        const tid = btn.getAttribute('data-ntab');
+        btn.classList.toggle('active', tid === activeInfoModalTab);
+        if (tid === 'rules') {
+          const ruleCnt = (snap.moduleRulesPreview || []).length;
+          btn.textContent = 'Zeiten & Regeln' + (ruleCnt ? ' (' + ruleCnt + ')' : '');
+        }
+      });
+
+      if (!bodyEl) return;
+
+      if (activeInfoModalTab === 'overview') {
+        const facts = [];
+        const schedText = snap.resolvedScheduleDisplay || snap.schedule || '';
+        if (schedText) {
+          facts.push({ label: 'Öffnungszeiten / Zeitplan', value: schedText + (snap.hasHolidayCheck ? ' · Feiertagsprüfung aktiv' : ''), mono: true });
+        } else if (snap.hasHolidayCheck) {
+          facts.push({ label: 'Feiertagsprüfung', value: 'Aktiv', mono: false });
+        }
+        if (snap.entryDnisNumbers && snap.entryDnisNumbers.length) {
+          facts.push({ label: 'DNIS / Direktruf', value: snap.entryDnisNumbers.join(', '), mono: true });
+        }
+        if (snap.queueTarget) {
+          facts.push({ label: 'Skillset / Queue', value: snap.queueTarget, mono: true });
+        }
+        if (snap.announcement) {
+          facts.push({ label: 'Ansage / Audio', value: snap.announcement, mono: false });
+        }
+        if (snap.condition) {
+          facts.push({ label: 'Bedingung / Weiche', value: snap.condition, mono: true });
+        }
+        if (snap.cdnAlias) {
+          facts.push({ label: 'CDN / Alias', value: snap.cdnAlias, mono: true });
+        }
+        if (snap.waitSeconds !== undefined && snap.waitSeconds !== null) {
+          facts.push({ label: 'Wartezeit', value: snap.waitSeconds + ' Sek.', mono: true });
+        }
+        if (snap.treatmentInfo) {
+          facts.push({ label: 'Treatment / Musik', value: snap.treatmentInfo, mono: false });
+        }
+        if (snap.hdxAction) {
+          facts.push({ label: 'HDX / CTI / DB', value: snap.hdxAction, mono: true });
+        }
+
+        let html = '';
+        if (facts.length) {
+          html += '<div><div class="section-title">Fakten &amp; Konfiguration</div><div class="facts-grid">' +
+            facts.map(f =>
+              '<div class="fact-cell"><div class="fact-label">' + esc(f.label) + '</div><div class="fact-value' + (f.mono ? ' mono' : '') + '">' + esc(f.value) + '</div></div>'
+            ).join('') +
+          '</div></div>';
+        }
+
+        const inc = snap.incomingConnections || [];
+        const out = snap.outgoingConnections || [];
+        html += '<div class="facts-grid">' +
+          '<div><div class="section-title">Eingehend (' + inc.length + ')</div>' +
+            (inc.length
+              ? inc.map(c =>
+                  '<button type="button" class="node-chip info-conn-btn" data-ref="' + esc(c.fromScriptNumber) + '" data-label="' + esc(c.fromLabel) + '">' +
+                    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">← ' + esc(c.fromLabel || c.fromScriptNumber) + '</span>' +
+                    '<span class="badge">' + esc(c.edgeLabel || 'Aufruf') + '</span>' +
+                  '</button>'
+                ).join('')
+              : '<div class="muted-note">Keine eingehenden Verbindungen erkannt.</div>') +
+          '</div>' +
+          '<div><div class="section-title">Ausgehend (' + out.length + ')</div>' +
+            (out.length
+              ? out.map(c =>
+                  '<button type="button" class="node-chip info-conn-btn" data-ref="' + esc(c.toTargetNumber) + '" data-label="' + esc(c.toTargetNumber) + '">' +
+                    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">→ ' + esc(c.toTargetNumber) + '</span>' +
+                    '<span class="badge">' + esc(c.label || 'Weiter') + '</span>' +
+                  '</button>'
+                ).join('')
+              : '<div class="muted-note">Keine ausgehenden Weiterleitungen.</div>') +
+          '</div>' +
+        '</div>';
+
+        const params = snap.specialParameters || [];
+        if (params.length) {
+          html += '<div><div class="section-title">Avaya-Parameter (' + params.length + ')</div><div style="display:flex;flex-direction:column;gap:5px;">' +
+            params.map(p =>
+              '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);font-size:11.5px;">' +
+                '<span><strong>' + esc(p.label) + '</strong> <span style="font-family:monospace;color:var(--text-muted);font-size:10.5px;">(' + esc(p.key) + ')</span></span>' +
+                '<span style="font-family:ui-monospace,monospace;font-weight:600;color:var(--accent-text);white-space:nowrap;font-variant-numeric:tabular-nums;">' + esc(p.value) + '</span>' +
+              '</div>'
+            ).join('') +
+          '</div></div>';
+        }
+
+        const findings = snap.relatedFindings || [];
+        if (findings.length) {
+          html += '<div><div class="section-title">Prüfhinweise (' + findings.length + ')</div><div style="display:flex;flex-direction:column;gap:6px;">' +
+            findings.map(f =>
+              '<div class="an-item ' + (f.severity === 'error' ? 'sev-error' : f.severity === 'warning' ? 'sev-warning' : '') + '">' +
+                '<div class="an-item-title">' + esc(f.title) + '</div>' +
+                (f.recommendation ? '<div class="an-item-desc">' + esc(f.recommendation) + '</div>' : '') +
+              '</div>'
+            ).join('') +
+          '</div></div>';
+        }
+
+        if (snap.rawLineSnippet) {
+          html += '<div><div class="section-title">Skript-Auszug</div><pre class="raw-snippet">' + esc(snap.rawLineSnippet) + '</pre></div>';
+        }
+
+        bodyEl.innerHTML = html || '<div class="muted-note">Für dieses Element liegen keine weiteren Detaildaten vor.</div>';
+        bodyEl.querySelectorAll('.info-conn-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const ref = btn.getAttribute('data-ref') || '';
+            const lbl = btn.getAttribute('data-label') || '';
+            closeNodeInfoModal();
+            if (nodeMap.has(ref)) {
+              selectNode(ref, true);
+              return;
+            }
+            const matchByLabel = GRAPH.nodes.find(n => n.label.toLowerCase().includes(ref.toLowerCase()) || n.id.toLowerCase().includes(ref.toLowerCase()));
+            if (matchByLabel) {
+              selectNode(matchByLabel.id, true);
+              return;
+            }
+            jumpToScriptOrNode(ref, lbl);
+          });
+        });
+      } else {
+        const rules = snap.moduleRulesPreview || [];
+        let html = '';
+        const schedText = snap.resolvedScheduleDisplay || snap.schedule || '';
+        html += '<div class="profile-card">' +
+          '<div class="row-between" style="flex-wrap:wrap;gap:8px;">' +
+            '<div>' +
+              '<div class="fact-label">Aktiver Zeitplan</div>' +
+              '<div class="fact-value mono">' + esc(schedText || 'Kein spezifischer Zeitplan im Knoten (ggf. 24/7 oder geerbt)') + '</div>' +
+            '</div>' +
+            '<button type="button" id="btn-inline-open-all-scheds" class="amber" style="white-space:nowrap;">Alle Öffnungszeiten öffnen</button>' +
+          '</div>' +
+        '</div>';
+
+        if (rules.length) {
+          html += '<div><div class="section-title">Regeln &amp; Schritte im Skript (' + rules.length + ')</div>' +
+            '<div class="an-table-wrap" style="max-height:360px;">' +
+              '<table class="an-table"><thead><tr><th>Prio</th><th>Schritt / Regel</th><th>Zeit / Feiertag</th><th>Bedingung</th><th>Ziel / Aktion</th></tr></thead><tbody>' +
+              rules.map(r => {
+                const actionParts = [];
+                if (r.targetNumber) actionParts.push('→ ' + r.targetNumber);
+                if (r.queueTarget) actionParts.push('Queue: ' + r.queueTarget);
+                if (r.announcement) actionParts.push('Ansage: ' + r.announcement);
+                if (r.choicesCount > 0) actionParts.push(r.choicesCount + ' Optionen');
+                return '<tr>' +
+                  '<td><strong>' + esc(r.prio) + '</strong></td>' +
+                  '<td>' + esc(r.stepName) + '</td>' +
+                  '<td style="font-family:ui-monospace,monospace;color:var(--accent-text);">' + esc([r.schedule, r.holiday].filter(Boolean).join(' · ') || '—') + '</td>' +
+                  '<td>' + esc(r.condition || '—') + '</td>' +
+                  '<td>' + esc(actionParts.join(' · ') || '—') + '</td>' +
+                '</tr>';
+              }).join('') +
+              '</tbody></table>' +
+            '</div></div>';
+        } else {
+          html += '<div class="muted-note">Keine weiteren Detail-Regeln für dieses Element hinterlegt.</div>';
+        }
+
+        bodyEl.innerHTML = html;
+        const openAllBtn = document.getElementById('btn-inline-open-all-scheds');
+        if (openAllBtn) {
+          openAllBtn.addEventListener('click', () => {
+            const q = snap.scriptNumber || '';
+            closeNodeInfoModal();
+            openSchedulesModal(q);
+          });
+        }
+      }
+    }
+
     const btnOpenSchedules = document.getElementById('btn-open-schedules');
+    const btnOpenSchedulesCount = document.getElementById('btn-open-schedules-count');
     const schedulesOverlay = document.getElementById('schedules-modal-overlay');
     const btnCloseSchedulesModal = document.getElementById('btn-close-schedules-modal');
     const modalSchedSearch = document.getElementById('modal-sched-search');
     const btnModalCsv = document.getElementById('btn-modal-csv');
+    const btnModalMd = document.getElementById('btn-modal-md');
+
+    if (btnOpenSchedulesCount && PAYLOAD.analysis && Array.isArray(PAYLOAD.analysis.scheduleRows)) {
+      const schedScriptCount = new Set(PAYLOAD.analysis.scheduleRows.map(r => r.scriptNumber)).size;
+      if (schedScriptCount > 0) btnOpenSchedulesCount.textContent = '(' + schedScriptCount + ')';
+    }
 
     if (btnOpenSchedules && schedulesOverlay) {
-      btnOpenSchedules.addEventListener('click', () => {
-        schedulesOverlay.style.display = 'flex';
-        if (modalSchedSearch) modalSchedSearch.value = '';
-        renderSchedulesModalContent();
-        if (modalSchedSearch) setTimeout(() => modalSchedSearch.focus(), 50);
-      });
+      btnOpenSchedules.addEventListener('click', () => openSchedulesModal(''));
     }
 
     if (btnCloseSchedulesModal && schedulesOverlay) {
@@ -5812,16 +6977,64 @@ export function generateInteractiveCallflowHtml(
       });
     }
 
+    document.querySelectorAll('#modal-sched-view-group .seg-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        schedulesModalView = btn.getAttribute('data-sview') || 'profiles';
+        renderSchedulesModalContent();
+      });
+    });
+
+    document.querySelectorAll('#modal-sched-cats .chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        schedulesModalCategory = chip.getAttribute('data-cat') || 'all';
+        renderSchedulesModalContent();
+      });
+    });
+
     if (modalSchedSearch) {
       modalSchedSearch.addEventListener('input', () => {
         renderSchedulesModalContent();
       });
     }
 
+    if (btnModalMd) {
+      btnModalMd.addEventListener('click', () => {
+        const rows = getFilteredScheduleRowsForModal();
+        const mdLines = [
+          '# Öffnungszeiten-Übersicht (Callflow)',
+          '',
+          '| Skript | Regel / Schritt | Öffnungszeiten | Feiertag / Sonderzeit | Überlauf / Aktion |',
+          '| --- | --- | --- | --- | --- |',
+          ...rows.map(r =>
+            '| [' + String(r.scriptNumber || '') + '] ' + String(r.scriptName || '').replace(/\\|/g, '/') +
+            ' | ' + (r.prio ? 'Prio ' + r.prio + ' · ' : '') + String(r.stepName || '').replace(/\\|/g, '/') +
+            ' | ' + String(r.openingHours || '—').replace(/:\\s+/g, ':').replace(/\\|/g, '/') +
+            ' | ' + String(r.hasHoliday ? r.holidayAndSpecial : '—').replace(/\\|/g, '/') +
+            ' | ' + String(r.closedOrOverflowAction || '—').replace(/\\|/g, '/') + ' |'
+          ),
+        ];
+        const mdText = mdLines.join('\\n');
+        const markCopied = () => {
+          const orig = btnModalMd.textContent;
+          btnModalMd.textContent = 'Kopiert ✓';
+          setTimeout(() => { btnModalMd.textContent = orig; }, 1800);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(mdText).then(markCopied).catch(() => {});
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = mdText;
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand('copy'); markCopied(); } catch {}
+          document.body.removeChild(ta);
+        }
+      });
+    }
+
     if (btnModalCsv) {
       btnModalCsv.addEventListener('click', () => {
-        const an = PAYLOAD.analysis;
-        const rows = an ? (an.scheduleRows || []) : [];
+        const rows = getFilteredScheduleRowsForModal();
         downloadUtf8Csv(
           'callflow-oeffnungszeiten.csv',
           ['Skript-Nr.', 'Skript-Name', 'Prio', 'Schritt / Regel', 'Öffnungszeiten', 'Feiertag / Sonderzeit', 'Aktion / Überlauf / Ziel', 'Status'],
@@ -5830,6 +7043,48 @@ export function generateInteractiveCallflowHtml(
             r.hasSchedule && r.hasHoliday ? 'Öffnungszeiten + Feiertag' : r.hasSchedule ? 'Öffnungszeiten hinterlegt' : r.hasHoliday ? 'Feiertag / Sonderzeit' : 'Ohne Zeitangabe (24/7)'
           ])
         );
+      });
+    }
+
+    const nodeInfoOverlay = document.getElementById('node-info-modal-overlay');
+    const btnCloseNodeInfo = document.getElementById('btn-close-node-info');
+    const btnCloseNodeInfoFooter = document.getElementById('btn-close-node-info-footer');
+    if (btnCloseNodeInfo) btnCloseNodeInfo.addEventListener('click', closeNodeInfoModal);
+    if (btnCloseNodeInfoFooter) btnCloseNodeInfoFooter.addEventListener('click', closeNodeInfoModal);
+    if (nodeInfoOverlay) {
+      nodeInfoOverlay.addEventListener('click', e => {
+        if (e.target === nodeInfoOverlay) closeNodeInfoModal();
+      });
+    }
+    document.querySelectorAll('#node-info-tabs .modal-tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        activeInfoModalTab = btn.getAttribute('data-ntab') || 'overview';
+        renderNodeInfoModal();
+      });
+    });
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        if (nodeInfoOverlay && nodeInfoOverlay.style.display === 'flex') {
+          closeNodeInfoModal();
+        } else if (schedulesOverlay && schedulesOverlay.style.display === 'flex') {
+          schedulesOverlay.style.display = 'none';
+        }
+      }
+    });
+
+    if (masterDensityGroup) {
+      masterDensityGroup.querySelectorAll('.seg-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const nextDensity = btn.getAttribute('data-density') === 'detailed' ? 'detailed' : 'compact';
+          masterDensity = nextDensity;
+          const targetKey = getActiveMasterViewKey();
+          if (targetKey !== activeViewKey) {
+            switchView(targetKey);
+          } else {
+            syncMasterDensityUi();
+          }
+        });
       });
     }
 
@@ -5891,7 +7146,7 @@ export function generateInteractiveCallflowHtml(
     });
 
     if (masterBackBtn) {
-      masterBackBtn.addEventListener('click', () => switchView('master'));
+      masterBackBtn.addEventListener('click', () => switchView(getActiveMasterViewKey()));
     }
 
     document.querySelectorAll('#pathmode-group .seg-btn').forEach(btn => {
@@ -5899,10 +7154,14 @@ export function generateInteractiveCallflowHtml(
         document.querySelectorAll('#pathmode-group .seg-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         pathColorMode = btn.getAttribute('data-pathmode') || 'semantic';
-        recolorExportEdges(svgLayer.querySelector('svg'), GRAPH, true);
-        viewThemeSigCache.set(activeViewKey, (isDarkSurface ? 'dark' : 'light') + '|' + pathColorMode);
+        const activeSvg = svgLayer.querySelector('svg');
+        recolorExportEdges(activeSvg, GRAPH, true);
+        viewThemeSigCache.set(activeViewKey, getCurrentThemeSig());
+        ensureGpuProxyForView(activeViewKey, activeSvg);
         if (activeNodeId || activeEdge) {
           applyCombinedCanvasState(false);
+        } else {
+          syncGpuProxyState(false);
         }
       });
     });
@@ -5980,27 +7239,6 @@ export function generateInteractiveCallflowHtml(
 
     bootActiveViewOnDemand();
   </script>
-
-  <!-- Opening Hours Modal Overlay -->
-  <div id="schedules-modal-overlay" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.8);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:20px;">
-    <div style="background:var(--bg-card);border:1px solid var(--border-strong);border-radius:12px;width:100%;max-width:960px;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 25px 50px rgba(0,0,0,0.5);overflow:hidden;">
-      <div style="padding:16px 20px;border-bottom:1px solid var(--border);background:var(--bg-header);display:flex;align-items:center;justify-content:space-between;">
-        <div style="display:flex;align-items:center;gap:10px;">
-          <div style="padding:8px;background:var(--amber-bg);color:var(--amber-text);border-radius:8px;font-weight:bold;">🕒</div>
-          <div>
-            <h2 style="margin:0;font-size:15px;color:var(--text-main);">Öffnungszeiten &amp; Zeitpläne (SondZeit)</h2>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:2px;" id="schedules-modal-subtitle">Übersicht aller Zeitregeln</div>
-          </div>
-        </div>
-        <button type="button" id="btn-close-schedules-modal" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:4px 8px;" title="Schließen">✕</button>
-      </div>
-      <div style="padding:12px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;background:var(--bg-input);">
-        <input type="text" id="modal-sched-search" placeholder="Skript, Uhrzeit (08:00), Mo-Fr suchen..." style="flex:1;background:var(--bg-card);border:1px solid var(--border);color:var(--text-main);padding:6px 10px;border-radius:6px;font-size:11.5px;font-family:inherit;outline:none;" />
-        <button type="button" id="btn-modal-csv" style="padding:6px 12px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;">CSV Exportieren</button>
-      </div>
-      <div id="modal-sched-body" style="flex:1;overflow-y:auto;padding:16px 20px;"></div>
-    </div>
-  </div>
 </body>
 </html>`;
 }

@@ -8,9 +8,9 @@ import {
   Check,
   Calendar,
   ExternalLink,
-  Layers,
-  ShieldAlert,
   FileSpreadsheet,
+  LayoutGrid,
+  Table2,
 } from 'lucide-react';
 import { CallflowScheduleSummaryRow, ScriptWorkspace } from '../types/mermaidStudio';
 import {
@@ -23,19 +23,38 @@ export interface OpeningHoursModalProps {
   isOpen: boolean;
   onClose: () => void;
   workspace: ScriptWorkspace;
+  initialSearchQuery?: string;
   onJumpToScript?: (scriptNumber: string) => void;
+}
+
+interface ScheduleProfileGroup {
+  key: string;
+  title: string;
+  category: 'hours' | 'sondzeit' | 'holiday' | 'always-open';
+  rows: CallflowScheduleSummaryRow[];
+  uniqueScripts: Array<{ scriptNumber: string; scriptName: string; isMaster: boolean }>;
+  overflowActions: string[];
 }
 
 export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
   isOpen,
   onClose,
   workspace,
+  initialSearchQuery = '',
   onJumpToScript,
 }) => {
+  const [viewMode, setViewMode] = useState<'overview' | 'table'>('overview');
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'with-hours' | 'holiday' | 'without-hours'>('all');
   const [copied, setCopied] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setSearchQuery(initialSearchQuery || '');
+    setFilter('all');
+    setViewMode(initialSearchQuery ? 'table' : 'overview');
+  }, [isOpen, initialSearchQuery]);
 
   // Close on Escape key & auto-focus search input
   useEffect(() => {
@@ -55,7 +74,6 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
     };
   }, [isOpen, onClose]);
 
-  // Compute schedule overview rows across all scripts
   const allRows = useMemo(() => {
     if (!workspace || !workspace.modules || workspace.modules.length === 0) {
       return [];
@@ -63,7 +81,6 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
     return buildWorkspaceScheduleOverview(workspace);
   }, [workspace]);
 
-  // KPI counts
   const totalCount = allRows.length;
   const withHoursCount = useMemo(() => allRows.filter((r) => r.hasSchedule).length, [allRows]);
   const holidayCount = useMemo(() => allRows.filter((r) => r.hasHoliday).length, [allRows]);
@@ -72,7 +89,6 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
     [allRows]
   );
 
-  // Filtered rows with robust search
   const filteredRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return allRows.filter((r) => {
@@ -93,7 +109,72 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
     });
   }, [allRows, filter, searchQuery]);
 
-  // Download CSV
+  // Group filtered schedule rows into clean time-profile buckets for the Overview tab
+  const profileGroups = useMemo<ScheduleProfileGroup[]>(() => {
+    const map = new Map<string, ScheduleProfileGroup>();
+
+    for (const row of filteredRows) {
+      const cleanHours = (row.openingHours || '').replace(/:\s+/g, ':').trim();
+      const isSondZeit =
+        /sondzeit/i.test(cleanHours) ||
+        /sondzeit/i.test(row.scriptName) ||
+        /sondzeit/i.test(row.scriptNumber);
+
+      let category: ScheduleProfileGroup['category'] = 'always-open';
+      let title = 'Ohne feste Zeitbegrenzung (24/7)';
+
+      if (row.hasSchedule && cleanHours) {
+        category = isSondZeit ? 'sondzeit' : 'hours';
+        title = cleanHours;
+      } else if (row.hasHoliday) {
+        category = 'holiday';
+        title = row.holidayAndSpecial || 'Feiertags- & Sonderstatusprüfung';
+      }
+
+      const key = `${category}::${title.toLowerCase()}`;
+      let group = map.get(key);
+      if (!group) {
+        group = {
+          key,
+          title,
+          category,
+          rows: [],
+          uniqueScripts: [],
+          overflowActions: [],
+        };
+        map.set(key, group);
+      }
+
+      group.rows.push(row);
+      const sKey = canonicalScriptMatchKey(row.scriptNumber);
+      if (!group.uniqueScripts.some((s) => canonicalScriptMatchKey(s.scriptNumber) === sKey)) {
+        group.uniqueScripts.push({
+          scriptNumber: row.scriptNumber,
+          scriptName: row.scriptName,
+          isMaster: Boolean(row.isMaster),
+        });
+      }
+      const actionText = (row.closedOrOverflowAction || '').trim();
+      if (actionText && actionText !== '—' && !group.overflowActions.includes(actionText)) {
+        group.overflowActions.push(actionText);
+      }
+    }
+
+    const order: Record<ScheduleProfileGroup['category'], number> = {
+      hours: 0,
+      sondzeit: 1,
+      holiday: 2,
+      'always-open': 3,
+    };
+
+    return Array.from(map.values()).sort((a, b) => {
+      if (order[a.category] !== order[b.category]) {
+        return order[a.category] - order[b.category];
+      }
+      return b.uniqueScripts.length - a.uniqueScripts.length;
+    });
+  }, [filteredRows]);
+
   const handleDownloadCsv = useCallback(() => {
     const csv = exportOpeningHoursCsv(workspace);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -107,10 +188,10 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
     URL.revokeObjectURL(url);
   }, [workspace]);
 
-  // Copy Markdown table
   const handleCopyMarkdown = useCallback(() => {
     if (allRows.length === 0) return;
-    const header = '| Skript | Name | Prio / Schritt | Öffnungszeiten (SondZeit) | Feiertag / Sonderstatus | Aktion / Überlauf |\n|---|---|---|---|---|---|';
+    const header =
+      '| Skript | Name | Prio / Schritt | Öffnungszeiten (SondZeit) | Feiertag / Sonderstatus | Aktion / Überlauf |\n|---|---|---|---|---|---|';
     const lines = allRows.map((r) => {
       const escCell = (s: string) => (s || '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
       const cleanHours = (r.openingHours || '').replace(/:\s+/g, ':');
@@ -130,150 +211,98 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="opening-hours-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/80 backdrop-blur-sm overflow-y-auto"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/80 backdrop-blur-xs overflow-y-auto"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl flex flex-col w-full max-w-5xl max-h-[80vh] my-auto overflow-hidden">
-        {/* Modal Header */}
-        <div className="px-5 py-4 border-b border-slate-800 bg-slate-950/90 flex items-center justify-between gap-3 shrink-0">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="p-2.5 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0">
-              <Clock className="w-5 h-5" />
-            </div>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h2
-                  id="opening-hours-modal-title"
-                  className="text-base font-bold text-slate-100 truncate"
-                >
-                  Öffnungszeiten &amp; Zeitpläne (SondZeit)
-                </h2>
-                <span className="px-2 py-0.5 rounded-md text-xs font-mono bg-amber-500/20 text-amber-200 border border-amber-500/40 tabular-nums">
-                  {totalCount} Regeln in {workspace.modules.length} Skripten
-                </span>
-              </div>
-              <p className="text-xs text-slate-400 mt-0.5 truncate">
-                Vollständige Übersicht aller Dienst-, Sonderzeit- und Feiertagsregelungen im Callflow
-              </p>
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl flex flex-col w-full max-w-6xl max-h-[86vh] my-auto overflow-hidden">
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-slate-800 bg-slate-950 flex items-center justify-between gap-4 shrink-0">
+          <div className="min-w-0 space-y-0.5">
+            <h2
+              id="opening-hours-modal-title"
+              className="text-base font-semibold text-slate-100 truncate"
+            >
+              Öffnungszeiten-Übersicht &amp; Zeitpläne
+            </h2>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400 font-mono tabular-nums">
+              <span>{workspace.modules.length} Skripte</span>
+              <span aria-hidden="true">·</span>
+              <span className="text-sky-300">{withHoursCount} mit Zeiten</span>
+              <span aria-hidden="true">·</span>
+              <span className="text-amber-300">{holidayCount} Feiertagsprüfungen</span>
+              <span aria-hidden="true">·</span>
+              <span className="text-emerald-300">{withoutHoursCount} 24/7</span>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Schließen"
-            className="p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer shrink-0"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Segmented Mode Switch: Overview vs Detailed Table */}
+            <div className="flex items-center gap-1 p-1 bg-slate-900 border border-slate-800 rounded-lg">
+              <button
+                type="button"
+                onClick={() => setViewMode('overview')}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  viewMode === 'overview'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                <span>Zeitprofile</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('table')}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  viewMode === 'table'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Table2 className="w-3.5 h-3.5" />
+                <span>Detail-Tabelle</span>
+              </button>
+            </div>
 
-        {/* Quick KPI Stat Bar */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 px-5 py-3 bg-slate-950/50 border-b border-slate-800 shrink-0">
-          <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
-            <div className="p-1.5 rounded-lg bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-              <Layers className="w-4 h-4" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[10px] text-slate-400 font-mono uppercase">Alle Skripte</div>
-              <div className="text-sm font-bold text-slate-100 font-mono tabular-nums">
-                {totalCount}
-              </div>
-            </div>
-          </div>
-
-          <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
-            <div className="p-1.5 rounded-lg bg-sky-500/20 text-sky-300 border border-sky-500/30">
-              <Clock className="w-4 h-4" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[10px] text-slate-400 font-mono uppercase">Mit Öffnungszeiten</div>
-              <div className="text-sm font-bold text-sky-200 font-mono tabular-nums">
-                {withHoursCount}
-              </div>
-            </div>
-          </div>
-
-          <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
-            <div className="p-1.5 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30">
-              <Calendar className="w-4 h-4" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[10px] text-slate-400 font-mono uppercase">Feiertagsprüfungen</div>
-              <div className="text-sm font-bold text-amber-200 font-mono tabular-nums">
-                {holidayCount}
-              </div>
-            </div>
-          </div>
-
-          <div className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 flex items-center gap-2.5">
-            <div className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-              <ShieldAlert className="w-4 h-4" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[10px] text-slate-400 font-mono uppercase">24/7 Ohne Begrenzung</div>
-              <div className="text-sm font-bold text-emerald-200 font-mono tabular-nums">
-                {withoutHoursCount}
-              </div>
-            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Fenster schließen"
+              className="p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-800 rounded-lg transition-colors cursor-pointer shrink-0"
+            >
+              <X className="w-5 h-5" />
+            </button>
           </div>
         </div>
 
-        {/* Toolbar: Filter Chips + Search + Export */}
+        {/* Toolbar: Segmented Filter + Search + Export */}
         <div className="px-5 py-3 border-b border-slate-800 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 shrink-0 bg-slate-900">
-          {/* Filter Chips */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
-            <button
-              type="button"
-              onClick={() => setFilter('all')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer tabular-nums ${
-                filter === 'all'
-                  ? 'bg-indigo-600/25 border-indigo-500 text-indigo-100 font-semibold shadow-xs'
-                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Alle ({totalCount})
-            </button>
-            <button
-              type="button"
-              onClick={() => setFilter('with-hours')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1.5 tabular-nums ${
-                filter === 'with-hours'
-                  ? 'bg-sky-600/25 border-sky-500 text-sky-100 font-semibold shadow-xs'
-                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Clock className="w-3 h-3 text-sky-400" />
-              <span>Mit Zeiten ({withHoursCount})</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setFilter('holiday')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1.5 tabular-nums ${
-                filter === 'holiday'
-                  ? 'bg-amber-600/25 border-amber-500 text-amber-100 font-semibold shadow-xs'
-                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Calendar className="w-3 h-3 text-amber-400" />
-              <span>Feiertag ({holidayCount})</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setFilter('without-hours')}
-              className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors whitespace-nowrap cursor-pointer tabular-nums ${
-                filter === 'without-hours'
-                  ? 'bg-slate-800 border-slate-600 text-slate-100 font-semibold shadow-xs'
-                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              24/7 ({withoutHoursCount})
-            </button>
+          <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg overflow-x-auto">
+            {(
+              [
+                { id: 'all', label: `Alle (${totalCount})` },
+                { id: 'with-hours', label: `Mit Zeiten (${withHoursCount})` },
+                { id: 'holiday', label: `Feiertag (${holidayCount})` },
+                { id: 'without-hours', label: `24/7 (${withoutHoursCount})` },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setFilter(tab.id)}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
+                  filter === tab.id
+                    ? 'bg-slate-800 text-slate-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
 
-          {/* Search + Action Buttons */}
           <div className="flex items-center gap-2">
             <div className="relative flex-1 md:w-72">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -282,9 +311,9 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Skript, Uhrzeit (08:00), Mo-Fr, Feiertag..."
+                placeholder="Skript, Uhrzeit (08:00), Mo-Fr, SondZeit..."
                 aria-label="Öffnungszeiten und Skripte durchsuchen"
-                className="w-full pl-9 pr-8 py-2 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none font-mono shadow-sm"
+                className="w-full pl-9 pr-8 py-1.5 bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-lg text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none font-mono"
               />
               {searchQuery && (
                 <button
@@ -305,7 +334,7 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
               type="button"
               onClick={handleCopyMarkdown}
               title="Tabelle als Markdown in Zwischenablage kopieren"
-              className="px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-xl text-xs font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-sm"
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
               {copied ? (
                 <>
@@ -315,7 +344,7 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
               ) : (
                 <>
                   <Copy className="w-3.5 h-3.5" />
-                  <span>Kopieren</span>
+                  <span>Markdown</span>
                 </>
               )}
             </button>
@@ -324,7 +353,7 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
               type="button"
               onClick={handleDownloadCsv}
               title="Öffnungszeiten als Excel CSV exportieren"
-              className="px-3 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-sm"
+              className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
               <span>Excel (.csv)</span>
@@ -332,55 +361,174 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
           </div>
         </div>
 
-        {/* Content Table Container (Scrollable with internal body) */}
+        {/* Main Content Body */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-5">
-          {filteredRows.length > 0 ? (
-            <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/70 shadow-inner">
-              <table className="w-full border-collapse text-left text-xs font-mono">
+          {filteredRows.length === 0 ? (
+            <div className="py-12 px-4 text-center border border-dashed border-slate-800 rounded-xl bg-slate-950/40 space-y-3">
+              <Clock className="w-8 h-8 text-slate-600 mx-auto" />
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-slate-300">
+                  {searchQuery
+                    ? `Keine Öffnungszeiten für „${searchQuery}“ gefunden`
+                    : 'Keine Öffnungszeiten für den ausgewählten Filter'}
+                </p>
+                <p className="text-xs text-slate-500">
+                  Passen Sie den Suchbegriff an oder setzen Sie den Filter zurück.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setFilter('all');
+                }}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-colors cursor-pointer"
+              >
+                Filter zurücksetzen
+              </button>
+            </div>
+          ) : viewMode === 'overview' ? (
+            /* VIEW 1: GROUPED TIME PROFILES OVERVIEW */
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {profileGroups.map((group) => {
+                const categoryLabel =
+                  group.category === 'sondzeit'
+                    ? 'SondZeit / CCMA-Tabelle'
+                    : group.category === 'hours'
+                    ? 'Feste Dienstzeit'
+                    : group.category === 'holiday'
+                    ? 'Feiertags- / Sonderprüfung'
+                    : 'Durchgehend aktiv';
+
+                const accentClass =
+                  group.category === 'hours'
+                    ? 'text-sky-300'
+                    : group.category === 'sondzeit' || group.category === 'holiday'
+                    ? 'text-amber-300'
+                    : 'text-emerald-300';
+
+                return (
+                  <section
+                    key={group.key}
+                    className="p-4 rounded-xl bg-slate-950/75 border border-slate-800 flex flex-col gap-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="flex items-center gap-2 text-xs text-slate-400">
+                          {group.category === 'holiday' ? (
+                            <Calendar className={`w-3.5 h-3.5 ${accentClass} shrink-0`} />
+                          ) : (
+                            <Clock className={`w-3.5 h-3.5 ${accentClass} shrink-0`} />
+                          )}
+                          <span>{categoryLabel}</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-mono tabular-nums">
+                            {group.uniqueScripts.length}{' '}
+                            {group.uniqueScripts.length === 1 ? 'Skript' : 'Skripte'}
+                          </span>
+                        </div>
+                        <h3 className={`text-sm font-semibold font-mono tabular-nums ${accentClass} break-words`}>
+                          {group.title}
+                        </h3>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery(
+                            group.category === 'always-open' ? '' : group.title.slice(0, 24)
+                          );
+                          if (group.category === 'always-open') setFilter('without-hours');
+                          setViewMode('table');
+                        }}
+                        className="text-[11px] text-slate-400 hover:text-indigo-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Als Tabelle →
+                      </button>
+                    </div>
+
+                    {group.overflowActions.length > 0 && (
+                      <div className="text-xs text-slate-400 leading-relaxed">
+                        <span className="text-slate-300 font-medium">Bei Schließung / Überlauf:</span>{' '}
+                        {group.overflowActions.slice(0, 2).join(' · ')}
+                        {group.overflowActions.length > 2
+                          ? ` (+${group.overflowActions.length - 2} weitere)`
+                          : ''}
+                      </div>
+                    )}
+
+                    <div className="pt-2 border-t border-slate-800/80 flex flex-wrap gap-1.5">
+                      {group.uniqueScripts.slice(0, 18).map((sc) => {
+                        const isMainMod =
+                          canonicalScriptMatchKey(sc.scriptNumber) === 'main' ||
+                          (sc.isMaster && /^(?:main|start|master(?:script)?)$/i.test(sc.scriptNumber));
+                        return (
+                          <button
+                            key={sc.scriptNumber}
+                            type="button"
+                            onClick={() => {
+                              if (onJumpToScript) {
+                                onJumpToScript(sc.scriptNumber);
+                                onClose();
+                              }
+                            }}
+                            title={`Skript [${sc.scriptNumber}] ${sc.scriptName} im Diagramm öffnen`}
+                            className="px-2 py-1 rounded-md bg-slate-900 hover:bg-indigo-600/25 border border-slate-800 hover:border-indigo-500/60 text-xs text-slate-200 hover:text-indigo-100 transition-colors flex items-center gap-1.5 max-w-full cursor-pointer"
+                          >
+                            <span className="font-mono text-indigo-300 tabular-nums shrink-0">
+                              [{sc.scriptNumber}]
+                            </span>
+                            <span className="truncate max-w-[160px]">
+                              {isMainMod ? 'Main' : sc.scriptName || sc.scriptNumber}
+                            </span>
+                          </button>
+                        );
+                      })}
+                      {group.uniqueScripts.length > 18 && (
+                        <button
+                          type="button"
+                          onClick={() => setViewMode('table')}
+                          className="px-2 py-1 text-xs text-slate-400 hover:text-slate-200 font-mono tabular-nums cursor-pointer"
+                        >
+                          +{group.uniqueScripts.length - 18} weitere
+                        </button>
+                      )}
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+          ) : (
+            /* VIEW 2: FULL FILTERABLE DETAIL TABLE */
+            <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/70">
+              <table className="w-full border-collapse text-left text-xs">
                 <thead>
-                  <tr className="border-b border-slate-800 bg-slate-950/95 text-slate-400 text-[11px] font-semibold select-none sticky top-0 z-10">
+                  <tr className="border-b border-slate-800 bg-slate-950 text-slate-400 font-medium select-none sticky top-0 z-10">
                     <th className="py-3 px-3.5 whitespace-nowrap">Skript</th>
                     <th className="py-3 px-3.5 whitespace-nowrap">Regel / Schritt</th>
-                    <th className="py-3 px-3.5 min-w-[240px]">Öffnungszeiten (SondZeit)</th>
-                    <th className="py-3 px-3.5 min-w-[150px]">Feiertag / Sonderstatus</th>
-                    <th className="py-3 px-3.5 min-w-[210px]">Aktion bei Schließung / Überlauf</th>
-                    <th className="py-3 px-3.5 text-right whitespace-nowrap">Aktion</th>
+                    <th className="py-3 px-3.5 min-w-[220px]">Öffnungszeiten (SondZeit)</th>
+                    <th className="py-3 px-3.5 min-w-[140px]">Feiertag / Sonderstatus</th>
+                    <th className="py-3 px-3.5 min-w-[200px]">Aktion bei Schließung / Überlauf</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap">Diagramm</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-850">
+                <tbody className="divide-y divide-slate-800/80">
                   {filteredRows.map((row) => {
                     const isMainMod =
                       canonicalScriptMatchKey(row.scriptNumber) === 'main' ||
                       (row.isMaster &&
                         /^(?:main|start|master(?:script)?)$/i.test(row.scriptNumber));
-
                     const hasTimes = row.hasSchedule;
                     const cleanHours = (row.openingHours || '').replace(/:\s+/g, ':');
-                    const isSondZeit =
-                      /sondzeit/i.test(cleanHours) ||
-                      /sondzeit/i.test(row.scriptName) ||
-                      /sondzeit/i.test(row.scriptNumber);
 
                     return (
-                      <tr
-                        key={row.id}
-                        className={`hover:bg-slate-800/40 transition-colors ${
-                          hasTimes ? 'bg-sky-950/15' : row.hasHoliday ? 'bg-amber-950/10' : ''
-                        }`}
-                      >
-                        {/* Script column */}
-                        <td className="py-3 px-3.5 align-top whitespace-nowrap">
-                          <div className="flex items-center gap-1.5">
-                            <span
-                              className={`px-2 py-0.5 rounded-md text-[10px] font-bold tabular-nums ${
-                                isMainMod
-                                  ? 'bg-indigo-500/25 text-indigo-200 border border-indigo-500/40'
-                                  : 'bg-slate-800 text-slate-200 border border-slate-700'
-                              }`}
-                            >
+                      <tr key={row.id} className="hover:bg-slate-800/35 transition-colors">
+                        <td className="py-2.5 px-3.5 align-top whitespace-nowrap">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-semibold text-indigo-300 tabular-nums">
                               [{row.scriptNumber}]
                             </span>
-                            <span className="font-sans font-medium text-slate-200">
+                            <span className="text-slate-200 font-medium">
                               {isMainMod
                                 ? 'Main (Einstieg)'
                                 : row.scriptName || `Skript ${row.scriptNumber}`}
@@ -388,64 +536,42 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                           </div>
                         </td>
 
-                        {/* Step / Prio column */}
-                        <td className="py-3 px-3.5 align-top whitespace-nowrap">
+                        <td className="py-2.5 px-3.5 align-top whitespace-nowrap">
                           <div className="flex items-center gap-1.5">
                             {row.prio !== undefined && (
-                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 border border-slate-700 tabular-nums">
-                                Prio {row.prio}
+                              <span className="font-mono text-slate-400 tabular-nums">
+                                P{row.prio}
                               </span>
                             )}
-                            <span className="text-slate-300 font-sans text-[11px] truncate max-w-[160px]">
+                            <span className="text-slate-300 truncate max-w-[170px]">
                               {row.stepName}
                             </span>
                           </div>
                         </td>
 
-                        {/* Opening hours column with prominent time display */}
-                        <td className="py-3 px-3.5 align-top">
-                          <div className="flex items-start gap-1.5">
-                            {hasTimes ? (
-                              <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg bg-sky-500/15 text-sky-100 border border-sky-500/40 font-bold text-xs shadow-xs">
-                                <Clock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                                <span className="tabular-nums font-mono text-[13px] tracking-tight text-sky-200">
-                                  {cleanHours}
-                                </span>
-                                {isSondZeit && (
-                                  <span className="px-1.5 py-0.2 rounded text-[9px] bg-amber-500/25 text-amber-200 border border-amber-500/35 uppercase font-medium">
-                                    SondZeit
-                                  </span>
-                                )}
-                              </div>
-                            ) : (
-                              <span className="text-slate-400 italic font-sans text-[11px]">
-                                {cleanHours}
-                              </span>
-                            )}
-                          </div>
+                        <td className="py-2.5 px-3.5 align-top">
+                          {hasTimes ? (
+                            <span className="font-mono font-semibold text-sky-300 tabular-nums">
+                              {cleanHours}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">{cleanHours}</span>
+                          )}
                         </td>
 
-                        {/* Holiday / Special status column */}
-                        <td className="py-3 px-3.5 align-top">
+                        <td className="py-2.5 px-3.5 align-top">
                           {row.hasHoliday ? (
-                            <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-500/15 text-amber-200 border border-amber-500/35 text-[11px]">
-                              <Calendar className="w-3 h-3 text-amber-400 shrink-0" />
-                              <span>{row.holidayAndSpecial}</span>
-                            </div>
+                            <span className="text-amber-300">{row.holidayAndSpecial}</span>
                           ) : (
                             <span className="text-slate-500">—</span>
                           )}
                         </td>
 
-                        {/* Overflow / action column */}
-                        <td className="py-3 px-3.5 align-top">
-                          <div className="text-slate-300 text-[11px] font-sans break-words leading-relaxed">
-                            {row.closedOrOverflowAction || '—'}
-                          </div>
+                        <td className="py-2.5 px-3.5 align-top text-slate-300 leading-relaxed">
+                          {row.closedOrOverflowAction || '—'}
                         </td>
 
-                        {/* Action jump button */}
-                        <td className="py-3 px-3.5 align-top text-right whitespace-nowrap">
+                        <td className="py-2.5 px-3.5 align-top text-right whitespace-nowrap">
                           {onJumpToScript && (
                             <button
                               type="button"
@@ -454,9 +580,9 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                                 onClose();
                               }}
                               title={`Skript [${row.scriptNumber}] im Callflow-Diagramm öffnen`}
-                              className="px-2.5 py-1.5 bg-slate-800 hover:bg-indigo-600 hover:text-white text-slate-300 border border-slate-700 hover:border-indigo-500 rounded-lg text-[11px] font-sans font-medium transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                              className="px-2.5 py-1 bg-slate-800 hover:bg-indigo-600 text-slate-200 hover:text-white border border-slate-700 hover:border-indigo-500 rounded-md text-xs font-medium transition-colors inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
                             >
-                              <span>Im Diagramm</span>
+                              <span>Öffnen</span>
                               <ExternalLink className="w-3 h-3" />
                             </button>
                           )}
@@ -467,52 +593,29 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
                 </tbody>
               </table>
             </div>
-          ) : (
-            <div className="py-12 px-4 text-center border border-dashed border-slate-800 rounded-xl bg-slate-950/40 space-y-3">
-              <Clock className="w-8 h-8 text-slate-600 mx-auto" />
-              <div className="space-y-1">
-                <p className="text-sm font-semibold text-slate-300">
-                  {searchQuery
-                    ? `Keine Öffnungszeiten für „${searchQuery}“ gefunden`
-                    : 'Keine Öffnungszeiten für den ausgewählten Filter'}
-                </p>
-                <p className="text-xs text-slate-500">
-                  Versuchen Sie eine andere Suche oder wählen Sie den Filter „Alle“.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchQuery('');
-                  setFilter('all');
-                }}
-                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-medium transition-colors cursor-pointer"
-              >
-                Filter zurücksetzen
-              </button>
-            </div>
           )}
         </div>
 
-        {/* Modal Footer */}
-        <div className="px-5 py-3 border-t border-slate-800 bg-slate-950/90 flex items-center justify-between gap-3 text-xs text-slate-400 font-mono shrink-0">
-          <div>
-            Zeige <span className="text-slate-200 font-bold tabular-nums">{filteredRows.length}</span> von{' '}
-            <span className="text-slate-200 font-bold tabular-nums">{totalCount}</span> Zeitregeln
+        {/* Footer */}
+        <div className="px-5 py-3 border-t border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400 shrink-0">
+          <div className="font-mono tabular-nums">
+            {viewMode === 'overview'
+              ? `${profileGroups.length} Zeitprofile · ${filteredRows.length} Regeln`
+              : `${filteredRows.length} von ${totalCount} Zeitregeln`}
           </div>
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={handleDownloadCsv}
-              className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-sans font-medium transition-colors flex items-center gap-1.5 cursor-pointer shadow-sm"
+              className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg font-medium transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-sky-400" />
-              <span>CSV Exportieren</span>
+              <span>CSV exportieren</span>
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-sans font-semibold transition-colors cursor-pointer shadow-sm"
+              className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Schließen
             </button>

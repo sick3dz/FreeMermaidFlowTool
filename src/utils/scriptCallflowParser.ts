@@ -4972,12 +4972,14 @@ export function getModuleOpeningHoursSummary(
  */
 export function buildMasterOverviewMermaid(
   workspace: ScriptWorkspace,
-  direction: DiagramDirection = 'LR'
+  direction: DiagramDirection = 'LR',
+  options?: { compact?: boolean }
 ): string {
   if (workspace.modules.length === 0) {
     return `flowchart ${direction}\n    Empty["Keine Skripte im Callflow geladen"]`;
   }
 
+  const isCompactMode = Boolean(options?.compact);
   const lines: string[] = [`flowchart ${direction}`];
   const incomingCounts = new Map<string, number>();
   const externalKeySet = new Set((workspace.externalEndpoints || []).map(canonicalScriptMatchKey));
@@ -5246,74 +5248,110 @@ export function buildMasterOverviewMermaid(
 
     const dnisPreview =
       mod.entryDnisNumbers && mod.entryDnisNumbers.length > 0
-        ? mod.entryDnisNumbers.slice(0, 3).join(', ') +
-          (mod.entryDnisNumbers.length > 3 ? ` (+${mod.entryDnisNumbers.length - 3})` : '')
+        ? mod.entryDnisNumbers.slice(0, isCompactMode ? 2 : 3).join(', ') +
+          (mod.entryDnisNumbers.length > (isCompactMode ? 2 : 3)
+            ? ` (+${mod.entryDnisNumbers.length - (isCompactMode ? 2 : 3)})`
+            : '')
         : '';
-    const orgaAndDnisParts = [
-      mod.entryOrganizationName ? `🏢 ${sanitizeMermaidText(mod.entryOrganizationName)}` : '',
-      dnisPreview ? `📞 ${sanitizeMermaidText(dnisPreview)}` : '',
-    ].filter(Boolean);
-    const dnisBadge = orgaAndDnisParts.length > 0 ? `<br/>${orgaAndDnisParts.join(' · ')}` : '';
-
     const hoursSummary = getModuleOpeningHoursSummary(mod, workspace);
-    const hoursBadge = hoursSummary.combinedBadge
-      ? `<br/>🕒 ${sanitizeMermaidText(hoursSummary.combinedBadge)}`
-      : '';
 
-    // Collect CCMA Intrinsics, Wait Cycles / Loop Sections, Broadcasts/Treatments, and HDX/CTI actions directly for Master display
-    const intrinsicList: string[] = [];
-    const loopTargets: string[] = [];
-    const waitList: number[] = [];
-    const mediaList: string[] = [];
-    const hdxList: string[] = [];
+    let label: string;
+    if (isCompactMode) {
+      // Compact high-performance Master mode: at most 1 concise secondary metadata line per script node
+      const modQueues = Array.from(
+        new Set(
+          mod.rules
+            .filter(
+              (r) =>
+                Boolean(r.queueTarget && r.queueTarget !== 'Default_Skillset') &&
+                !/\(deaktiviert\s*=\s*0\)/i.test(r.stepName)
+            )
+            .map((r) => r.queueTarget as string)
+        )
+      );
+      const compactBits: string[] = [];
+      if (dnisPreview) {
+        compactBits.push(`📞 ${sanitizeMermaidText(dnisPreview)}`);
+      }
+      if (hoursSummary.combinedBadge) {
+        compactBits.push(`🕒 ${sanitizeMermaidText(hoursSummary.combinedBadge.slice(0, 34))}`);
+      }
+      if (modQueues.length > 0) {
+        const qLabel =
+          modQueues.length === 1
+            ? modQueues[0].slice(0, 24)
+            : `${modQueues[0].slice(0, 18)} (+${modQueues.length - 1})`;
+        compactBits.push(`🎧 ${sanitizeMermaidText(qLabel)}`);
+      }
+      const compactLine =
+        compactBits.length > 0 ? `<br/>${compactBits.slice(0, 2).join(' · ')}` : '';
+      label = `${baseLabel}${compactLine}`;
+    } else {
+      const orgaAndDnisParts = [
+        mod.entryOrganizationName ? `🏢 ${sanitizeMermaidText(mod.entryOrganizationName)}` : '',
+        dnisPreview ? `📞 ${sanitizeMermaidText(dnisPreview)}` : '',
+      ].filter(Boolean);
+      const dnisBadge = orgaAndDnisParts.length > 0 ? `<br/>${orgaAndDnisParts.join(' · ')}` : '';
 
-    mod.rules.forEach((r) => {
-      (r.intrinsicMetrics || []).forEach((metric) => {
-        if (!intrinsicList.includes(metric)) intrinsicList.push(metric);
-      });
-      if (r.loopSectionTarget && !loopTargets.includes(r.loopSectionTarget)) {
-        loopTargets.push(r.loopSectionTarget);
-      }
-      if (r.waitSeconds !== undefined && !waitList.includes(r.waitSeconds)) {
-        waitList.push(r.waitSeconds);
-      }
-      if (r.treatmentInfo && !mediaList.includes(r.treatmentInfo)) {
-        mediaList.push(r.treatmentInfo);
-      } else if (r.announcement && !mediaList.includes(r.announcement)) {
-        mediaList.push(r.announcement);
-      }
-      if (r.hdxAction && !hdxList.includes(r.hdxAction)) {
-        hdxList.push(r.hdxAction);
-      }
-    });
-
-    const ccmaIntrinsicsBadge =
-      intrinsicList.length > 0
-        ? `<br/>📊 ${sanitizeMermaidText(intrinsicList.slice(0, 3).join(' · '))}${
-            intrinsicList.length > 3 ? ` (+${intrinsicList.length - 3})` : ''
-          }`
+      const hoursBadge = hoursSummary.combinedBadge
+        ? `<br/>🕒 ${sanitizeMermaidText(hoursSummary.combinedBadge)}`
         : '';
 
-    const cycleParts: string[] = [];
-    if (loopTargets.length > 0) {
-      cycleParts.push(`🔄 Zyklus (${loopTargets.slice(0, 2).join(', ')})`);
-    }
-    if (waitList.length > 0) {
-      cycleParts.push(`⏳ Wait ${waitList.slice(0, 2).map((s) => `${s}s`).join('/')}`);
-    }
-    if (mediaList.length > 0) {
-      const hasBroadcastOrTreat = mediaList.some((m) => /broadcast|treatment|ivr/i.test(m));
-      cycleParts.push(
-        `${hasBroadcastOrTreat ? '📢' : '🎵'} ${mediaList.slice(0, 2).join(' · ')}`
-      );
-    }
-    if (hdxList.length > 0) {
-      cycleParts.push(`🗄️ ${hdxList.slice(0, 2).join(' · ')}`);
-    }
-    const ccmaCycleBadge =
-      cycleParts.length > 0 ? `<br/>${sanitizeMermaidText(cycleParts.join(' · '))}` : '';
+      // Collect CCMA Intrinsics, Wait Cycles / Loop Sections, Broadcasts/Treatments, and HDX/CTI actions directly for Master display
+      const intrinsicList: string[] = [];
+      const loopTargets: string[] = [];
+      const waitList: number[] = [];
+      const mediaList: string[] = [];
+      const hdxList: string[] = [];
 
-    const label = `${baseLabel}${dnisBadge}${hoursBadge}${ccmaIntrinsicsBadge}${ccmaCycleBadge}`;
+      mod.rules.forEach((r) => {
+        (r.intrinsicMetrics || []).forEach((metric) => {
+          if (!intrinsicList.includes(metric)) intrinsicList.push(metric);
+        });
+        if (r.loopSectionTarget && !loopTargets.includes(r.loopSectionTarget)) {
+          loopTargets.push(r.loopSectionTarget);
+        }
+        if (r.waitSeconds !== undefined && !waitList.includes(r.waitSeconds)) {
+          waitList.push(r.waitSeconds);
+        }
+        if (r.treatmentInfo && !mediaList.includes(r.treatmentInfo)) {
+          mediaList.push(r.treatmentInfo);
+        } else if (r.announcement && !mediaList.includes(r.announcement)) {
+          mediaList.push(r.announcement);
+        }
+        if (r.hdxAction && !hdxList.includes(r.hdxAction)) {
+          hdxList.push(r.hdxAction);
+        }
+      });
+
+      const ccmaIntrinsicsBadge =
+        intrinsicList.length > 0
+          ? `<br/>📊 ${sanitizeMermaidText(intrinsicList.slice(0, 3).join(' · '))}${
+              intrinsicList.length > 3 ? ` (+${intrinsicList.length - 3})` : ''
+            }`
+          : '';
+
+      const cycleParts: string[] = [];
+      if (loopTargets.length > 0) {
+        cycleParts.push(`🔄 Zyklus (${loopTargets.slice(0, 2).join(', ')})`);
+      }
+      if (waitList.length > 0) {
+        cycleParts.push(`⏳ Wait ${waitList.slice(0, 2).map((s) => `${s}s`).join('/')}`);
+      }
+      if (mediaList.length > 0) {
+        const hasBroadcastOrTreat = mediaList.some((m) => /broadcast|treatment|ivr/i.test(m));
+        cycleParts.push(
+          `${hasBroadcastOrTreat ? '📢' : '🎵'} ${mediaList.slice(0, 2).join(' · ')}`
+        );
+      }
+      if (hdxList.length > 0) {
+        cycleParts.push(`🗄️ ${hdxList.slice(0, 2).join(' · ')}`);
+      }
+      const ccmaCycleBadge =
+        cycleParts.length > 0 ? `<br/>${sanitizeMermaidText(cycleParts.join(' · '))}` : '';
+
+      label = `${baseLabel}${dnisBadge}${hoursBadge}${ccmaIntrinsicsBadge}${ccmaCycleBadge}`;
+    }
 
     const isAnnEndpoint =
       Boolean(mod.isAnnouncementEndpoint) ||
@@ -5323,7 +5361,7 @@ export function buildMasterOverviewMermaid(
       lines.push(`    ${id}[("■ 🔊 ${label}")]${openClassSuffix}`);
     } else if (inCount === 0 && (outCount > 0 || hasQueue)) {
       lines.push(`    ${id}(["▶ ${label}"])${openClassSuffix}`);
-    } else if (hasChoices || outCount >= 2 || intrinsicList.length > 0) {
+    } else if (hasChoices || outCount >= 2) {
       lines.push(`    ${id}{{"◆ ${label}"}}${openClassSuffix}`);
     } else if (outCount === 0 && !hasQueue) {
       lines.push(`    ${id}[("■ ${label}")]${openClassSuffix}`);
@@ -5340,30 +5378,32 @@ export function buildMasterOverviewMermaid(
     lines.push(`    S_${suffix}["● OFFEN · ${safeRef} (Fehlendes Skript)"]:::missingScript`);
   });
 
-  referencedExternalTargets.forEach((targetRef) => {
-    const tKey = canonicalScriptMatchKey(targetRef);
-    const suffix = toMermaidNodeSuffix(targetRef);
-    const safeRef = sanitizeMermaidText(targetRef);
-    const isAnn = isAnnouncementOrEndpointTargetName(targetRef);
-    const isRouteCall = externalRouteTargetKeys.has(tKey);
-    const endLabel = isAnn
-      ? `■ 🔊 ${safeRef} · Sonderansage / Endpunkt`
-      : isRouteCall
-      ? `↗ Route Call: ${safeRef} (Extern)`
-      : `■ ${safeRef} · Endpunkt`;
-    lines.push(`    S_${suffix}[("${endLabel}")]`);
-  });
+  if (!isCompactMode) {
+    referencedExternalTargets.forEach((targetRef) => {
+      const tKey = canonicalScriptMatchKey(targetRef);
+      const suffix = toMermaidNodeSuffix(targetRef);
+      const safeRef = sanitizeMermaidText(targetRef);
+      const isAnn = isAnnouncementOrEndpointTargetName(targetRef);
+      const isRouteCall = externalRouteTargetKeys.has(tKey);
+      const endLabel = isAnn
+        ? `■ 🔊 ${safeRef} · Sonderansage / Endpunkt`
+        : isRouteCall
+        ? `↗ Route Call: ${safeRef} (Extern)`
+        : `■ ${safeRef} · Endpunkt`;
+      lines.push(`    S_${suffix}[("${endLabel}")]`);
+    });
 
-  skillsetsMap.forEach((sk) => {
-    const safeSkill = sanitizeMermaidText(sk.name);
-    if (sk.kind === 'network-skillset') {
-      lines.push(`    ${sk.nodeId}[("🌐 Network-Skillset: ${safeSkill}")]`);
-    } else if (sk.kind === 'agent') {
-      lines.push(`    ${sk.nodeId}(["👤 Agent-Queue: ${safeSkill}"])`);
-    } else {
-      lines.push(`    ${sk.nodeId}[("🎧 Skillset: ${safeSkill}")]`);
-    }
-  });
+    skillsetsMap.forEach((sk) => {
+      const safeSkill = sanitizeMermaidText(sk.name);
+      if (sk.kind === 'network-skillset') {
+        lines.push(`    ${sk.nodeId}[("🌐 Network-Skillset: ${safeSkill}")]`);
+      } else if (sk.kind === 'agent') {
+        lines.push(`    ${sk.nodeId}(["👤 Agent-Queue: ${safeSkill}"])`);
+      } else {
+        lines.push(`    ${sk.nodeId}[("🎧 Skillset: ${safeSkill}")]`);
+      }
+    });
+  }
 
   lines.push('');
 
@@ -5400,6 +5440,10 @@ export function buildMasterOverviewMermaid(
     const resolvedToRef = matchedMod ? matchedMod.scriptNumber : toRef;
     const toKey = canonicalScriptMatchKey(resolvedToRef);
     if (ignoredKeySet.has(toKey) && !knownKeyToMod.has(toKey)) return;
+    // In compact mode, omit external endpoint nodes (already summarized on script cards)
+    if (isCompactMode && !activeModuleKeySet.has(toKey) && !referencedMissingTargets.has(toKey)) {
+      return;
+    }
     const fromSuffix = toMermaidNodeSuffix(fromRef);
     const toSuffix = toMermaidNodeSuffix(resolvedToRef);
     addAggregatedRawEdge(`S_${fromSuffix}`, `S_${toSuffix}`, tag, isChoice);
@@ -5409,12 +5453,14 @@ export function buildMasterOverviewMermaid(
     const fromNodeId = `S_${toMermaidNodeSuffix(mod.scriptNumber)}`;
     mod.rules.forEach((rule) => {
       const condBit =
-        rule.intrinsicMetrics && rule.intrinsicMetrics.length > 0
+        isCompactMode
+          ? ''
+          : rule.intrinsicMetrics && rule.intrinsicMetrics.length > 0
           ? rule.intrinsicMetrics.slice(0, 2).join(', ')
           : rule.condition && !/^(?:Skillset aktiv|Sonst)/i.test(rule.condition)
           ? rule.condition
           : '';
-      const waitBit = rule.waitSeconds !== undefined ? `WAIT ${rule.waitSeconds}s` : '';
+      const waitBit = !isCompactMode && rule.waitSeconds !== undefined ? `WAIT ${rule.waitSeconds}s` : '';
 
       if (rule.targetNumber) {
         const schedDisplay = rule.schedule
@@ -5422,9 +5468,9 @@ export function buildMasterOverviewMermaid(
           : '';
         const baseTag =
           rule.valueNumbers && rule.valueNumbers.length > 0
-            ? `VALUE ${rule.valueNumbers.join(', ')}`
+            ? `VALUE ${rule.valueNumbers.slice(0, isCompactMode ? 2 : 5).join(', ')}`
             : schedDisplay
-            ? `🕒 ${schedDisplay}`
+            ? `🕒 ${isCompactMode ? schedDisplay.slice(0, 22) : schedDisplay}`
             : rule.holiday
             ? `📅 ${rule.holiday}`
             : rule.isExternalRouteCall
@@ -5444,6 +5490,7 @@ export function buildMasterOverviewMermaid(
         addAggregatedEdge(mod.scriptNumber, ch.targetNumber, tag, true);
       });
       if (
+        !isCompactMode &&
         rule.queueTarget &&
         rule.queueTarget !== 'Default_Skillset' &&
         !/\(deaktiviert\s*=\s*0\)/i.test(rule.stepName)
@@ -5485,10 +5532,11 @@ export function buildMasterOverviewMermaid(
   for (const edge of edgePairMap.values()) {
     const arrow = edge.isChoiceOnly ? '-.->' : '-->';
     const isNumberList = edge.tags.length > 0 && edge.tags.every((t) => /^\d{2,10}$/.test(t));
-    const maxShow = isNumberList ? 5 : 4;
+    const maxShow = isCompactMode ? 2 : isNumberList ? 5 : 4;
     const joined = edge.tags.slice(0, maxShow).join(isNumberList ? ', ' : ' · ');
     const suffixExtra = edge.tags.length > maxShow ? ` (+${edge.tags.length - maxShow})` : '';
-    const label = joined ? `${isNumberList ? 'VALUE ' : ''}${joined}${suffixExtra}` : '';
+    const rawLabel = joined ? `${isNumberList ? 'VALUE ' : ''}${joined}${suffixExtra}` : '';
+    const label = isCompactMode && rawLabel.length > 36 ? `${rawLabel.slice(0, 33)}…` : rawLabel;
     const labelPart = label ? sanitizeMermaidEdgeLabel(label) : '';
     lines.push(`    ${edge.fromNodeId} ${arrow}${labelPart} ${edge.toNodeId}`);
   }
@@ -6273,17 +6321,24 @@ export function analyzeWorkspaceLogicHealth(
     mod: ScriptModule,
     modKey: string,
     ruleIdx: number,
-    totalRules: number
+    totalRules: number,
+    modHasIncomingOrDirectCall: boolean
   ): boolean => {
+    const stepTrim = rule.stepName.trim();
     const combinedText = `${rule.stepName} ${rule.condition || ''} ${rule.rawLine || ''}`;
     const hasManualLinkForRule = manualLinks.some(
       (lnk) =>
-        canonicalScriptMatchKey(lnk.fromScriptNumber) === modKey &&
-        (!lnk.fromRuleId || lnk.fromRuleId === rule.id)
+        (canonicalScriptMatchKey(lnk.fromScriptNumber) === modKey &&
+          (!lnk.fromRuleId || lnk.fromRuleId === rule.id)) ||
+        canonicalScriptMatchKey(lnk.toTargetNumber) === modKey
     );
+    const hasValueOrDnisNumbers =
+      Boolean(rule.valueNumbers && rule.valueNumbers.length > 0) ||
+      Boolean(mod.entryDnisNumbers && mod.entryDnisNumbers.length > 0 && ruleIdx === 0 && stepTrim.length > 0);
     const hasConnectedFlowForward =
-      (ruleIdx < totalRules - 1 && rule.stepName.trim().length > 0) ||
-      (mod.outgoingNumbers.length > 0 && rule.stepName.trim().length > 0);
+      (ruleIdx < totalRules - 1 && stepTrim.length > 0) ||
+      (mod.outgoingNumbers.length > 0 && stepTrim.length > 0) ||
+      (modHasIncomingOrDirectCall && stepTrim.length > 0 && (ruleIdx === 0 || totalRules === 1));
 
     const isCommentOnlyRawLine = /^\s*(?:\/\*|\/\/|--|#|rem\b)/i.test(rule.rawLine || '');
 
@@ -6300,10 +6355,12 @@ export function analyzeWorkspaceLogicHealth(
       Boolean(rule.schedule) ||
       Boolean(rule.holiday) ||
       Boolean(rule.orgaCode || rule.organizationName || rule.brandName || rule.srcRouteNumber) ||
+      hasValueOrDnisNumbers ||
       hasManualLinkForRule ||
       isDecisionOrFlowRule(rule) ||
       hasConnectedFlowForward ||
       isCommentOnlyRawLine ||
+      Boolean(mod.isAnnouncementEndpoint && stepTrim.length > 0) ||
       /deaktiviert\s*=\s*0|0\s*=\s*aus/i.test(combinedText) ||
       /\b(?:inaktiv|reserve|dummy|platzhalter|notiz|kommentar|fallback|standard|sonstige|default_skillset|sys_ueberlauf_skillset|sys_team_skillset|sys_musik|sys_sondstat|sys_sondrouting|sys_besetztgrund|sys_retour_zentrale|sys_ws_[a-z0-9_]+|sys_[a-z0-9_]+|gv_[a-z0-9_]+|cv_[a-z0-9_]+|lv_[a-z0-9_]+|var_[a-z0-9_]+)\b/i.test(
         combinedText
@@ -6311,10 +6368,12 @@ export function analyzeWorkspaceLogicHealth(
       /\b(?:assign|give|queue|dequeue|route|transfer|execute|call|goto|subscript|disconnect|drop|stop|quit|exit|abort|continue|wait|return|send|readvar|set|open|close|log|syslog|print|write|get|put|clear|flush|hold|unhold|conference|consult|park|cancel|event|voice\s+session|play|prompt|collect|digits|speak|record|host|hdx|cti|section|end)\b/i.test(
         rule.rawLine || ''
       ) ||
-      /\b(?:call-men[uü]|men[uü]|menue|auswahl|abwurf|auflegen|mailbox|voicemail|anrufbeantworter|fax|ivr|ansage|musik|begrüßung|begruessung|willkommen|wartemusik|rücksprung|ruecksprung|routing|event\s+handler|voice\s+session|start|ende|stopp?|weiter)\b/i.test(
-        `${rule.stepName} ${rule.condition || ''}`
+      /\b(?:direktruf|durchwahl|dnis|hotline|zentrale|vermittlung|weiterleitung|rufannahme|rufnummer|einstieg|eingang|call-men[uü]|men[uü]|menue|auswahl|abwurf|auflegen|mailbox|voicemail|anrufbeantworter|fax|ivr|ansage|musik|begrüßung|begruessung|willkommen|wartemusik|rücksprung|ruecksprung|routing|event\s+handler|voice\s+session|start|ende|stopp?|weiter|skript|script|sub[_-]?|sc[_-]?)\b/i.test(
+        `${rule.stepName} ${rule.condition || ''} ${rule.rawLine || ''}`
       ) ||
-      /^(?:Init|DNIS-Range|Assign|Überlauf|Ueberlauf|Overflow|Section|Event)/i.test(rule.stepName)
+      /^(?:Init|DNIS-Range|Assign|Überlauf|Ueberlauf|Overflow|Section|Event|Direktruf|Durchwahl|Einstieg|Start)/i.test(
+        stepTrim
+      )
     );
   };
 
@@ -6324,27 +6383,38 @@ export function analyzeWorkspaceLogicHealth(
 
     // 2a. Genuine dead-end module check:
     // Announcement endpoints, Disconnect/Route-End scripts, Broadcast/Treatment/IVR endpoints,
-    // Entscheider/decision nodes, CTI/Wait steps, Queues, Voice Sessions, Event Handlers,
+    // Entscheider/decision nodes, Direktruf scripts, CTI/Wait steps, Queues, Voice Sessions, Event Handlers,
     // helper/config OCL scripts, manual links, outgoing targets, and linked graph nodes are all valid Callflow elements.
     const hasRawAvayaDirectives = Boolean(
       mod.rawText &&
-        /\b(?:assign|give|queue|dequeue|route|transfer|execute|call|goto|subscript|disconnect|drop|stop|quit|exit|abort|continue|wait|return|send|readvar|set|open|close|log|syslog|print|write|get|put|clear|flush|hold|unhold|conference|consult|park|cancel|event|voice\s+session|play|prompt|collect|digits|speak|record|host|hdx|cti|section|where|if|else|when|value|case|otherwise|default|end|sondzeit|sys_sondzeit|holiday|entscheider|entscheidung|decision)\b/i.test(
+        /\b(?:assign|give|queue|dequeue|route|transfer|execute|call|goto|subscript|disconnect|drop|stop|quit|exit|abort|continue|wait|return|send|readvar|set|open|close|log|syslog|print|write|get|put|clear|flush|hold|unhold|conference|consult|park|cancel|event|voice\s+session|play|prompt|collect|digits|speak|record|host|hdx|cti|section|where|if|else|when|value|case|otherwise|default|end|sondzeit|sys_sondzeit|holiday|entscheider|entscheidung|decision|direktruf|durchwahl)\b/i.test(
           mod.rawText
         )
     );
-    const hasOutgoingManualLink = manualLinks.some(
-      (l) => canonicalScriptMatchKey(l.fromScriptNumber) === modKey
+    const hasAnyManualLink = manualLinks.some(
+      (l) =>
+        canonicalScriptMatchKey(l.fromScriptNumber) === modKey ||
+        canonicalScriptMatchKey(l.toTargetNumber) === modKey
     );
+    const isDirektrufOrLinkedModule =
+      callersByTarget.has(modKey) ||
+      hasAnyManualLink ||
+      Boolean(mod.entryDnisNumbers && mod.entryDnisNumbers.length > 0) ||
+      Boolean(mod.cdnAlias) ||
+      /direktruf|durchwahl|hotline|dnis/i.test(`${mod.scriptNumber} ${mod.scriptName}`);
+
     const isLinkedTargetWithContent =
-      callersByTarget.has(modKey) &&
+      isDirektrufOrLinkedModule &&
       (sortedRules.some((r) => r.stepName.trim().length > 0) ||
         Boolean(mod.rawText && mod.rawText.trim().length > 0));
 
     const hasAnyActionableStep =
       Boolean(mod.isAnnouncementEndpoint) ||
       mod.outgoingNumbers.length > 0 ||
-      hasOutgoingManualLink ||
-      sortedRules.some((r, idx) => isRuleActionable(r, mod, modKey, idx, sortedRules.length)) ||
+      hasAnyManualLink ||
+      sortedRules.some((r, idx) =>
+        isRuleActionable(r, mod, modKey, idx, sortedRules.length, isDirektrufOrLinkedModule)
+      ) ||
       hasRawAvayaDirectives ||
       isLinkedTargetWithContent;
 
@@ -6362,10 +6432,10 @@ export function analyzeWorkspaceLogicHealth(
       });
     }
 
-    // 2b. Check individual rules strictly for truly empty/isolated steps without action, condition, decision role, or link
+    // 2b. Check individual rules strictly for truly empty/isolated steps without action, condition, decision role, Direktruf, or link
     for (let idx = 0; idx < sortedRules.length; idx++) {
       const rule = sortedRules[idx];
-      if (!isRuleActionable(rule, mod, modKey, idx, sortedRules.length)) {
+      if (!isRuleActionable(rule, mod, modKey, idx, sortedRules.length, isDirektrufOrLinkedModule)) {
         findings.push({
           id: `health:dead-end-rule:${modKey}:${rule.id}`,
           severity: 'error',
@@ -6375,7 +6445,7 @@ export function analyzeWorkspaceLogicHealth(
           ruleId: rule.id,
           prio: rule.prio,
           title: `Leere Regel ohne Aktion (Prio ${rule.prio}: ${rule.stepName})`,
-          description: `Schritt "${rule.stepName}" in [${mod.scriptNumber}] besitzt weder Ziel, Bedingung/Entscheider, Verknüpfung, DTMF-Auswahl, Ansage/Treatment noch Warteschlange.`,
+          description: `Schritt "${rule.stepName}" in [${mod.scriptNumber}] besitzt weder Ziel, Bedingung/Entscheider, Direktruf-Verknüpfung, DTMF-Auswahl, Ansage/Treatment noch Warteschlange.`,
           recommendation:
             'Definieren Sie eine Aktion, Bedingung oder Verknüpfung — oder entfernen Sie die leere Zeile.',
         });
@@ -7517,6 +7587,25 @@ export interface EditableNodeConnectionItem {
   choiceKey?: string;
 }
 
+export interface EditableNodeIncomingItem {
+  fromScriptNumber: string;
+  fromLabel: string;
+  edgeLabel: string;
+}
+
+export interface EditableNodeRulePreviewItem {
+  id: string;
+  prio: number;
+  stepName: string;
+  condition?: string;
+  schedule?: string;
+  holiday?: string;
+  targetNumber?: string;
+  queueTarget?: string;
+  announcement?: string;
+  choicesCount: number;
+}
+
 export interface EditableCallflowNodeSnapshot {
   nodeId: string;
   mode: 'workspace-module' | 'workspace-step' | 'workspace-external' | 'raw-mermaid';
@@ -7530,12 +7619,32 @@ export interface EditableCallflowNodeSnapshot {
   schedule: string;
   condition: string;
   outgoingConnections: EditableNodeConnectionItem[];
+  // Enriched inspection data for the refined double-click Info Box
+  canJumpToDetailScript?: boolean;
+  detailTargetScriptNumber?: string;
+  incomingConnections?: EditableNodeIncomingItem[];
+  entryDnisNumbers?: string[];
+  organizationName?: string;
+  cdnAlias?: string;
+  resolvedScheduleDisplay?: string;
+  hasHolidayCheck?: boolean;
+  waitSeconds?: number;
+  treatmentInfo?: string;
+  hdxAction?: string;
+  moduleRulesPreview?: EditableNodeRulePreviewItem[];
+  specialParameters?: CallflowScriptParameterItem[];
+  relatedFindings?: Array<{
+    severity: 'error' | 'warning' | 'info';
+    title: string;
+    recommendation: string;
+  }>;
+  rawLineSnippet?: string;
 }
 
 /**
- * Inspects a node from the current diagram so the Double-Click Node Editor modal can
- * pre-populate its title, number, building block type, announcement, skillset, schedule/condition,
- * and outgoing transitions.
+ * Inspects a node from the current diagram so the Double-Click Node Info & Editor modal can
+ * display structured overview facts (incoming callers, outgoing targets, schedules, DNIS,
+ * rules, parameters, findings, and script jump) alongside full inline editing.
  */
 export function inspectWorkspaceNodeForEdit(
   workspace: ScriptWorkspace,
@@ -7545,6 +7654,15 @@ export function inspectWorkspaceNodeForEdit(
 ): EditableCallflowNodeSnapshot {
   const graphNode = graph.nodes.get(nodeId);
   const fallbackLabel = graphNode?.label || nodeId;
+
+  const collectGraphIncoming = (): EditableNodeIncomingItem[] =>
+    graph.edges
+      .filter((e) => e.to === nodeId)
+      .map((e) => ({
+        fromScriptNumber: e.from,
+        fromLabel: graph.nodes.get(e.from)?.label || e.from,
+        edgeLabel: e.label || '',
+      }));
 
   if (workspace.modules.length === 0) {
     const rawOutgoing: EditableNodeConnectionItem[] = graph.edges
@@ -7566,8 +7684,81 @@ export function inspectWorkspaceNodeForEdit(
       schedule: '',
       condition: '',
       outgoingConnections: rawOutgoing,
+      incomingConnections: collectGraphIncoming(),
     };
   }
+
+  const collectWorkspaceIncomingForKey = (tKey: string): EditableNodeIncomingItem[] => {
+    const incoming: EditableNodeIncomingItem[] = [];
+    const seen = new Set<string>();
+    const pushItem = (fromScriptNumber: string, fromLabel: string, edgeLabel: string) => {
+      const k = `${canonicalScriptMatchKey(fromScriptNumber)}::${edgeLabel}`;
+      if (seen.has(k)) return;
+      seen.add(k);
+      incoming.push({ fromScriptNumber, fromLabel, edgeLabel });
+    };
+
+    for (const m of workspace.modules) {
+      const mLabel = formatScriptDisplayLabel(m);
+      for (const r of m.rules) {
+        if (r.targetNumber && canonicalScriptMatchKey(r.targetNumber) === tKey) {
+          pushItem(m.scriptNumber, mLabel, r.stepName || `Prio ${r.prio}`);
+        }
+        for (const ch of r.choices) {
+          if (canonicalScriptMatchKey(ch.targetNumber) === tKey) {
+            pushItem(m.scriptNumber, mLabel, `Taste ${ch.choice}`);
+          }
+        }
+      }
+    }
+    for (const lnk of workspace.manualLinks || []) {
+      if (canonicalScriptMatchKey(lnk.toTargetNumber) === tKey) {
+        const callerMod = workspace.modules.find(
+          (m) => canonicalScriptMatchKey(m.scriptNumber) === canonicalScriptMatchKey(lnk.fromScriptNumber)
+        );
+        pushItem(
+          lnk.fromScriptNumber,
+          callerMod ? formatScriptDisplayLabel(callerMod) : lnk.fromScriptNumber,
+          lnk.label || 'Manuelle Verknüpfung'
+        );
+      }
+    }
+    return incoming;
+  };
+
+  const buildModuleRulesPreview = (mod: ScriptModule): EditableNodeRulePreviewItem[] =>
+    [...mod.rules]
+      .sort((a, b) => a.prio - b.prio)
+      .map((r) => ({
+        id: r.id,
+        prio: r.prio,
+        stepName: r.stepName,
+        condition: r.condition,
+        schedule: r.schedule
+          ? resolveScheduleWithSondZeit(r.schedule, mod, workspace).displayText
+          : undefined,
+        holiday: r.holiday,
+        targetNumber: r.targetNumber,
+        queueTarget: r.queueTarget,
+        announcement: r.announcement || r.treatmentInfo,
+        choicesCount: r.choices.length,
+      }));
+
+  const collectFindingsForMod = (modKey: string, ruleId?: string) => {
+    const allFindings = analyzeWorkspaceLogicHealth(workspace);
+    return allFindings
+      .filter((f) => {
+        if (canonicalScriptMatchKey(f.scriptNumber) !== modKey) return false;
+        if (ruleId && f.ruleId && f.ruleId !== ruleId) return false;
+        return true;
+      })
+      .slice(0, 8)
+      .map((f) => ({
+        severity: f.severity,
+        title: f.title,
+        recommendation: f.recommendation,
+      }));
+  };
 
   // Detail View Step (`STEP_<modSuffix>_<idx>`)
   const stepMatch = nodeId.match(/^STEP_([A-Za-z0-9_]+)_(\d+)$/);
@@ -7581,6 +7772,7 @@ export function inspectWorkspaceNodeForEdit(
     const sortedRules = mod ? [...mod.rules].sort((a, b) => a.prio - b.prio) : [];
     const rule = sortedRules[stepIndex];
     if (mod && rule) {
+      const modKey = canonicalScriptMatchKey(mod.scriptNumber);
       const outgoing: EditableNodeConnectionItem[] = [];
       if (rule.targetNumber) {
         outgoing.push({
@@ -7604,8 +7796,7 @@ export function inspectWorkspaceNodeForEdit(
       (workspace.manualLinks || [])
         .filter(
           (lnk) =>
-            canonicalScriptMatchKey(lnk.fromScriptNumber) ===
-              canonicalScriptMatchKey(mod.scriptNumber) && lnk.fromRuleId === rule.id
+            canonicalScriptMatchKey(lnk.fromScriptNumber) === modKey && lnk.fromRuleId === rule.id
         )
         .forEach((lnk) => {
           outgoing.push({
@@ -7628,6 +7819,18 @@ export function inspectWorkspaceNodeForEdit(
           ? 'announcement'
           : 'script';
 
+      const resolvedSched = rule.schedule
+        ? resolveScheduleWithSondZeit(rule.schedule, mod, workspace).displayText
+        : '';
+
+      const firstTargetMod = rule.targetNumber
+        ? workspace.modules.find(
+            (m) =>
+              canonicalScriptMatchKey(m.scriptNumber) ===
+              canonicalScriptMatchKey(rule.targetNumber || '')
+          )
+        : undefined;
+
       return {
         nodeId,
         mode: 'workspace-step',
@@ -7638,11 +7841,27 @@ export function inspectWorkspaceNodeForEdit(
         ruleId: rule.id,
         announcement: rule.announcement || '',
         queueTarget: rule.queueTarget || '',
-        schedule: rule.schedule
-          ? resolveScheduleWithSondZeit(rule.schedule, mod, workspace).displayText
-          : '',
+        schedule: resolvedSched,
         condition: rule.condition || '',
         outgoingConnections: outgoing,
+        canJumpToDetailScript: Boolean(firstTargetMod),
+        detailTargetScriptNumber: firstTargetMod?.scriptNumber,
+        incomingConnections:
+          collectGraphIncoming().length > 0
+            ? collectGraphIncoming()
+            : collectWorkspaceIncomingForKey(modKey),
+        entryDnisNumbers: rule.valueNumbers && rule.valueNumbers.length > 0 ? rule.valueNumbers : mod.entryDnisNumbers,
+        organizationName: rule.organizationName || mod.entryOrganizationName,
+        cdnAlias: mod.cdnAlias,
+        resolvedScheduleDisplay: resolvedSched || getModuleOpeningHoursSummary(mod, workspace).combinedBadge || undefined,
+        hasHolidayCheck: Boolean(rule.holiday),
+        waitSeconds: rule.waitSeconds,
+        treatmentInfo: rule.treatmentInfo,
+        hdxAction: rule.hdxAction,
+        moduleRulesPreview: buildModuleRulesPreview(mod),
+        specialParameters: extractScriptSpecialParameters(mod, workspace).slice(0, 10),
+        relatedFindings: collectFindingsForMod(modKey, rule.id),
+        rawLineSnippet: rule.rawLine?.trim() || undefined,
       };
     }
   }
@@ -7710,6 +7929,11 @@ export function inspectWorkspaceNodeForEdit(
       ? 'announcement'
       : 'script';
 
+    const hoursSummary = getModuleOpeningHoursSummary(mod, workspace);
+    const isDifferentFromActiveDetail =
+      viewLevel.level === 'master' ||
+      canonicalScriptMatchKey(viewLevel.scriptNumber) !== targetKey;
+
     return {
       nodeId,
       mode: 'workspace-module',
@@ -7723,6 +7947,21 @@ export function inspectWorkspaceNodeForEdit(
       schedule: firstSched,
       condition: firstCond,
       outgoingConnections: outgoing,
+      canJumpToDetailScript: isDifferentFromActiveDetail,
+      detailTargetScriptNumber: mod.scriptNumber,
+      incomingConnections: collectWorkspaceIncomingForKey(targetKey),
+      entryDnisNumbers: mod.entryDnisNumbers,
+      organizationName: mod.entryOrganizationName,
+      cdnAlias: mod.cdnAlias,
+      resolvedScheduleDisplay: hoursSummary.combinedBadge || firstSched || undefined,
+      hasHolidayCheck: mod.rules.some((r) => Boolean(r.holiday)),
+      waitSeconds: mod.rules.find((r) => r.waitSeconds !== undefined)?.waitSeconds,
+      treatmentInfo: mod.rules.find((r) => Boolean(r.treatmentInfo))?.treatmentInfo,
+      hdxAction: mod.rules.find((r) => Boolean(r.hdxAction))?.hdxAction,
+      moduleRulesPreview: buildModuleRulesPreview(mod),
+      specialParameters: extractScriptSpecialParameters(mod, workspace).slice(0, 12),
+      relatedFindings: collectFindingsForMod(targetKey),
+      rawLineSnippet: mod.rawText ? mod.rawText.trim().split('\n').slice(0, 8).join('\n') : undefined,
     };
   }
 
@@ -7749,6 +7988,7 @@ export function inspectWorkspaceNodeForEdit(
     schedule: '',
     condition: '',
     outgoingConnections: outgoing,
+    incomingConnections: collectWorkspaceIncomingForKey(targetKey),
   };
 }
 

@@ -72,8 +72,10 @@ import {
   injectInitDirectiveIntoCode,
   isColorDark,
   prepareStandaloneSvg,
+  rasterizeSvgToGpuProxy,
   renderLocalMermaidDiagram,
   shouldUseNativeSvgLabels,
+  SvgGpuProxyResult,
   triggerLocalDownload,
   updateDiagramDirection,
 } from './utils/mermaidEngine';
@@ -91,7 +93,9 @@ import {
   disconnectEdgeInMermaidCode,
   findNearestMagneticPort,
   generateInteractiveCallflowHtml,
+  hitTestLiveSvgNodeAtClientPoint,
   InteractiveCallflowHtmlAnalysisPayload,
+  InteractiveCallflowHtmlNodeDetail,
   InteractiveCallflowHtmlView,
   LiveSvgDomIndex,
   materializeActiveNodePortsInDom,
@@ -230,7 +234,6 @@ interface WorkspacePreloadProgress {
   completed: number;
   total: number;
   currentLabel: string;
-  minimized: boolean;
 }
 
 const SvgHtmlLayer = React.memo(
@@ -245,8 +248,8 @@ const SvgHtmlLayer = React.memo(
 SvgHtmlLayer.displayName = 'SvgHtmlLayer';
 
 const MemoizedSvgStage = React.memo(
-  React.forwardRef<HTMLDivElement, { svgHtml: string }>(
-    ({ svgHtml }, ref) => (
+  React.forwardRef<HTMLDivElement, { svgHtml: string; gpuProxy: SvgGpuProxyResult | null }>(
+    ({ svgHtml, gpuProxy }, ref) => (
       <div
         ref={ref}
         style={{ transformOrigin: 'center center' }}
@@ -254,11 +257,27 @@ const MemoizedSvgStage = React.memo(
       >
         <div className="mermaid-stage-frame relative inline-block">
           <SvgHtmlLayer svgHtml={svgHtml} />
+          {gpuProxy && (
+            <img
+              src={gpuProxy.objectUrl}
+              width={gpuProxy.width}
+              height={gpuProxy.height}
+              alt=""
+              draggable={false}
+              className="mermaid-gpu-proxy-layer"
+              style={{
+                width: `${gpuProxy.width}px`,
+                height: `${gpuProxy.height}px`,
+              }}
+            />
+          )}
         </div>
       </div>
     )
   ),
-  (prev, next) => prev.svgHtml === next.svgHtml
+  (prev, next) =>
+    prev.svgHtml === next.svgHtml &&
+    (prev.gpuProxy?.objectUrl || '') === (next.gpuProxy?.objectUrl || '')
 );
 MemoizedSvgStage.displayName = 'MemoizedSvgStage';
 
@@ -312,7 +331,9 @@ function OfflineStudioApp() {
     const savedCode = readStudioStorage(STORAGE_KEYS.ACTIVE_CODE) ?? '';
     if (scriptWorkspace.modules.length > 0) {
       const dir = getDiagramDirection(savedCode) || 'LR';
-      return buildMasterOverviewMermaid(scriptWorkspace, dir);
+      return buildMasterOverviewMermaid(scriptWorkspace, dir, {
+        compact: scriptWorkspace.modules.length >= 16,
+      });
     }
     return savedCode;
   });
@@ -395,6 +416,12 @@ function OfflineStudioApp() {
   const [callflowViewLevel, setCallflowViewLevel] = useState<CallflowViewLevel>({
     level: 'master',
   });
+  const [masterDensityMode, setMasterDensityMode] = useState<'auto' | 'compact' | 'detailed'>(
+    'auto'
+  );
+  const isMasterCompact =
+    masterDensityMode === 'compact' ||
+    (masterDensityMode === 'auto' && scriptWorkspace.modules.length >= 16);
   const [checklistFocusTrigger, setChecklistFocusTrigger] = useState<{
     refKey: string;
     nonce: number;
@@ -402,6 +429,7 @@ function OfflineStudioApp() {
   const [isNewCallflowModalOpen, setIsNewCallflowModalOpen] = useState<boolean>(false);
   const [isMultiScriptModalOpen, setIsMultiScriptModalOpen] = useState<boolean>(false);
   const [isOpeningHoursModalOpen, setIsOpeningHoursModalOpen] = useState<boolean>(false);
+  const [openingHoursInitialSearch, setOpeningHoursInitialSearch] = useState<string>('');
   const [multiScriptPrefillNumber, setMultiScriptPrefillNumber] = useState<string | null>(null);
   const [isDraggingCanvasFile, setIsDraggingCanvasFile] = useState<boolean>(false);
   const [canvasFileDropNotice, setCanvasFileDropNotice] = useState<{
@@ -565,12 +593,15 @@ function OfflineStudioApp() {
   const [htmlExportProgress, setHtmlExportProgress] = useState<HtmlExportProgress | null>(null);
   const [htmlExportNotice, setHtmlExportNotice] = useState<string | null>(null);
   const [preloadProgress, setPreloadProgress] = useState<WorkspacePreloadProgress | null>(null);
+  const [gpuProxy, setGpuProxy] = useState<SvgGpuProxyResult | null>(null);
 
   // Refs
   const exportAbortControllerRef = useRef<AbortController | null>(null);
   const preloadAbortControllerRef = useRef<AbortController | null>(null);
   const preloadedViewsRef = useRef<Map<string, PreloadedViewCacheEntry>>(new Map());
   const activeViewKeyRef = useRef<string>('master');
+  const gpuProxyRef = useRef<SvgGpuProxyResult | null>(null);
+  const hasInteractiveOverlayStateRef = useRef<boolean>(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
@@ -779,7 +810,7 @@ function OfflineStudioApp() {
       .map((l) => `${l.fromScriptNumber}->${l.toTargetNumber}:${l.label || ''}`)
       .join(',');
     const extSig = (scriptWorkspace.externalEndpoints || []).join(',');
-    return `${dir}::${entry}::${computeFastCacheHash(
+    return `${dir}::${isMasterCompact ? 'compact' : 'full'}::${entry}::${computeFastCacheHash(
       `${moduleFingerprint}||${linksSig}||${extSig}`
     )}`;
   }, [
@@ -788,6 +819,7 @@ function OfflineStudioApp() {
     scriptWorkspace.manualLinks,
     scriptWorkspace.externalEndpoints,
     currentDirection,
+    isMasterCompact,
   ]);
 
   const activeWorkspaceViewKey = useMemo(() => {
@@ -822,6 +854,12 @@ function OfflineStudioApp() {
         errorLine: null,
         lastRenderMs: 0,
       });
+      return;
+    }
+
+    // While upfront pre-rendering is active, let the preloader populate the cache cleanly
+    // without competing canvas repaints in the background.
+    if (preloadProgress?.active) {
       return;
     }
 
@@ -906,6 +944,7 @@ function OfflineStudioApp() {
     currentDirection,
     activeWorkspaceViewKey,
     currentStyleSignature,
+    preloadProgress?.active,
   ]);
 
   const activeNodeOffsets = useMemo<Record<string, NodePositionOffset>>(
@@ -1019,51 +1058,7 @@ function OfflineStudioApp() {
       isolateSubgraphMode: false,
     });
 
-    interface PreloadTaskItem {
-      viewKey: string;
-      label: string;
-      mermaidCode: string;
-      isMaster: boolean;
-    }
-
-    const allTasks: PreloadTaskItem[] = [
-      {
-        viewKey: 'master',
-        label: `Master-Gesamtkarte (${wsSnapshot.modules.length} Skripte)`,
-        mermaidCode: buildMasterOverviewMermaid(wsSnapshot, dir),
-        isMaster: true,
-      },
-      ...wsSnapshot.modules.map((mod) => ({
-        viewKey: `script:${mod.scriptNumber}`,
-        label: formatScriptDisplayLabel(mod),
-        mermaidCode: buildScriptDetailMermaid(wsSnapshot, mod.scriptNumber, dir),
-        isMaster: false,
-      })),
-    ];
-
-    // Prioritize whichever view is currently open so the canvas becomes visible first
-    const currentKey = activeViewKeyRef.current;
-    allTasks.sort((a, b) => {
-      if (a.viewKey === currentKey) return -1;
-      if (b.viewKey === currentKey) return 1;
-      return 0;
-    });
-
-    const pendingTasks = allTasks.filter((task) => {
-      const hit = cache.get(task.viewKey);
-      return !(
-        hit &&
-        hit.mermaidCode.trim() === task.mermaidCode.trim() &&
-        hit.styleSignature === targetStyleSig
-      );
-    });
-
-    if (pendingTasks.length === 0) {
-      setPreloadProgress(null);
-      return;
-    }
-
-    const alreadyDoneCount = allTasks.length - pendingTasks.length;
+    const totalViews = wsSnapshot.modules.length + 1;
     const yieldSmoothFrame = () =>
       new Promise<void>((resolve) => {
         window.requestAnimationFrame(() => {
@@ -1074,16 +1069,75 @@ function OfflineStudioApp() {
     let cancelled = false;
     setPreloadProgress({
       active: true,
-      completed: alreadyDoneCount,
-      total: allTasks.length,
-      currentLabel: pendingTasks[0].label,
-      minimized: false,
+      completed: 0,
+      total: totalViews,
+      currentLabel: 'Ansichten vorbereiten…',
     });
 
     (async () => {
-      let completedCount = alreadyDoneCount;
-      // Short initial yield so popup mounts smoothly once without competing with workspace state commit
+      // Yield 1 frame first so the opaque preload window paints immediately without blocking
       await yieldSmoothFrame();
+      if (cancelled || controller.signal.aborted) return;
+
+      interface PreloadTaskItem {
+        viewKey: string;
+        label: string;
+        mermaidCode: string;
+        isMaster: boolean;
+      }
+
+      const allTasks: PreloadTaskItem[] = [
+        {
+          viewKey: 'master',
+          label: `Master-Gesamtkarte (${wsSnapshot.modules.length} Skripte)`,
+          mermaidCode: buildMasterOverviewMermaid(wsSnapshot, dir, {
+            compact: isMasterCompact,
+          }),
+          isMaster: true,
+        },
+        ...wsSnapshot.modules.map((mod) => ({
+          viewKey: `script:${mod.scriptNumber}`,
+          label: formatScriptDisplayLabel(mod),
+          mermaidCode: buildScriptDetailMermaid(wsSnapshot, mod.scriptNumber, dir),
+          isMaster: false,
+        })),
+      ];
+
+      // Prioritize whichever view is currently open so the canvas becomes visible first
+      const currentKey = activeViewKeyRef.current;
+      allTasks.sort((a, b) => {
+        if (a.viewKey === currentKey) return -1;
+        if (b.viewKey === currentKey) return 1;
+        return 0;
+      });
+
+      const pendingTasks = allTasks.filter((task) => {
+        const hit = cache.get(task.viewKey);
+        return !(
+          hit &&
+          hit.mermaidCode.trim() === task.mermaidCode.trim() &&
+          hit.styleSignature === targetStyleSig
+        );
+      });
+
+      if (pendingTasks.length === 0) {
+        const activeHit = cache.get(activeViewKeyRef.current);
+        if (activeHit) {
+          hasBaseRenderedSvgRef.current = true;
+          setMasterRenderError(null);
+          setBaseRenderedSvg(activeHit.rawSvg);
+        }
+        setPreloadProgress(null);
+        return;
+      }
+
+      let completedCount = allTasks.length - pendingTasks.length;
+      setPreloadProgress({
+        active: true,
+        completed: completedCount,
+        total: allTasks.length,
+        currentLabel: pendingTasks[0].label,
+      });
 
       for (let i = 0; i < pendingTasks.length; i++) {
         if (cancelled || controller.signal.aborted) return;
@@ -1107,22 +1161,13 @@ function OfflineStudioApp() {
               ? {
                   ...prev,
                   completed: completedCount,
-                  currentLabel: task.label,
+                  currentLabel:
+                    i + 1 < pendingTasks.length ? pendingTasks[i + 1].label : 'Abschließen…',
                 }
               : null
           );
           continue;
         }
-
-        setPreloadProgress((prev) =>
-          prev
-            ? {
-                ...prev,
-                completed: completedCount,
-                currentLabel: task.label,
-              }
-            : null
-        );
 
         let renderedResult = await renderLocalMermaidDiagram(
           task.mermaidCode,
@@ -1167,14 +1212,6 @@ function OfflineStudioApp() {
             logicSummary: colored.summary,
             lastUsedAt: Date.now(),
           });
-
-          // Immediately display active view as soon as it finishes
-          if (task.viewKey === activeViewKeyRef.current) {
-            hasBaseRenderedSvgRef.current = true;
-            setValidation(renderedResult.validation);
-            setMasterRenderError(null);
-            setBaseRenderedSvg(renderedResult.svg);
-          }
         }
 
         completedCount += 1;
@@ -1184,7 +1221,7 @@ function OfflineStudioApp() {
                 ...prev,
                 completed: completedCount,
                 currentLabel:
-                  i + 1 < pendingTasks.length ? pendingTasks[i + 1].label : 'Fertig',
+                  i + 1 < pendingTasks.length ? pendingTasks[i + 1].label : 'Abschließen…',
               }
             : null
         );
@@ -1193,6 +1230,14 @@ function OfflineStudioApp() {
       }
 
       if (!cancelled && !controller.signal.aborted) {
+        // Commit the active cached view once right as the opaque cover closes so there is zero background flicker
+        const activeHit = cache.get(activeViewKeyRef.current);
+        if (activeHit) {
+          hasBaseRenderedSvgRef.current = true;
+          pendingAutoFitRef.current = true;
+          setMasterRenderError(null);
+          setBaseRenderedSvg(activeHit.rawSvg);
+        }
         setPreloadProgress(null);
       }
     })();
@@ -1210,6 +1255,7 @@ function OfflineStudioApp() {
     hiddenSmartNodeTypes,
     canvasSurface,
     currentDirection,
+    isMasterCompact,
   ]);
 
   useEffect(() => {
@@ -1254,6 +1300,87 @@ function OfflineStudioApp() {
   // Alias for canvas presence checks & intrinsic dimensions (without re-serializing on drag/select)
   const coloredSvg = baseColoredSvg;
 
+  const isLargeCanvasDiagram = useMemo(() => {
+    if (!coloredSvg) return false;
+    if (callflowGraph.nodes.size >= 30 || callflowGraph.edges.length >= 50) return true;
+    const dims = getSvgDimensions(coloredSvg);
+    return Math.max(dims.width, dims.height) > 2200 || dims.width * dims.height > 2_200_000;
+  }, [coloredSvg, callflowGraph.nodes.size, callflowGraph.edges.length]);
+
+  gpuProxyRef.current = gpuProxy;
+  hasInteractiveOverlayStateRef.current = Boolean(
+    callflowTrace || selectedCallflowNodeId || selectedCallflowEdge
+  );
+
+  // GPU-Safe Hybrid Proxy Rasterizer for large Master & multi-script diagrams (<= 4096px GPU texture)
+  useEffect(() => {
+    if (!coloredSvg || !isLargeCanvasDiagram || preloadProgress?.active) {
+      setGpuProxy((prev) => {
+        if (prev?.objectUrl) URL.revokeObjectURL(prev.objectUrl);
+        return null;
+      });
+      return;
+    }
+
+    const controller = new AbortController();
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      const svgForProxy = hasCustomNodeOffsets
+        ? applyNodeOffsetsToSvg(coloredSvg, activeNodeOffsets, callflowGraph, false)
+        : coloredSvg;
+      void rasterizeSvgToGpuProxy(
+        svgForProxy,
+        {
+          code: effectiveMermaidCode,
+          themeConfig,
+          smartColorMode,
+          hiddenNodeTypes: hiddenSmartNodeTypes,
+          canvasSurface,
+          pathColorMode,
+        },
+        controller.signal
+      ).then((result) => {
+        if (cancelled || controller.signal.aborted) {
+          if (result?.objectUrl) URL.revokeObjectURL(result.objectUrl);
+          return;
+        }
+        setGpuProxy((prev) => {
+          if (prev?.objectUrl && prev.objectUrl !== result?.objectUrl) {
+            URL.revokeObjectURL(prev.objectUrl);
+          }
+          return result;
+        });
+      });
+    }, 80);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    coloredSvg,
+    isLargeCanvasDiagram,
+    preloadProgress?.active,
+    hasCustomNodeOffsets,
+    activeNodeOffsets,
+    callflowGraph,
+    effectiveMermaidCode,
+    themeConfig,
+    smartColorMode,
+    hiddenSmartNodeTypes,
+    canvasSurface,
+    pathColorMode,
+  ]);
+
+  useEffect(() => {
+    return () => {
+      if (gpuProxyRef.current?.objectUrl) {
+        URL.revokeObjectURL(gpuProxyRef.current.objectUrl);
+      }
+    };
+  }, []);
+
   // Build full export SVG string only on-demand (Export buttons & Modal), keeping interactive PC frame rate at 60fps
   const buildExportSvgSnapshot = useCallback(
     (includeSpotlight: boolean): string | null => {
@@ -1286,7 +1413,7 @@ function OfflineStudioApp() {
   // Mount-once SVG DOM indexer: enables <2ms in-place Spotlight & 60fps Live Edge Dragging
   useLayoutEffect(() => {
     const stageEl = stageElRef.current;
-    if (!baseColoredSvg || !stageEl) {
+    if (!baseColoredSvg || !stageEl || preloadProgress?.active) {
       liveSvgIndexRef.current = null;
       return;
     }
@@ -1313,7 +1440,7 @@ function OfflineStudioApp() {
     if (selectedCallflowNodeId && isVisualEditMode) {
       materializeActiveNodePortsInDom(index, selectedCallflowNodeId, true);
     }
-  }, [baseColoredSvg, callflowGraph]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [baseColoredSvg, callflowGraph, preloadProgress?.active]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fast-path: update Spotlight & selected edge padlock visibility in-place (zero SVG rebuild)
   useLayoutEffect(() => {
@@ -1404,7 +1531,11 @@ function OfflineStudioApp() {
               )
             );
           } else {
-            setCode(buildMasterOverviewMermaid(nextWs, currentDirection || 'LR'));
+            setCode(
+              buildMasterOverviewMermaid(nextWs, currentDirection || 'LR', {
+                compact: isMasterCompact,
+              })
+            );
           }
         } else {
           skipAutoConvertRef.current = true;
@@ -1429,6 +1560,7 @@ function OfflineStudioApp() {
     scriptWorkspace,
     callflowViewLevel,
     currentDirection,
+    isMasterCompact,
   ]);
 
   // Keep diagram line/theme contrast synced when toggling Dark/Light canvas surface
@@ -1553,16 +1685,48 @@ function OfflineStudioApp() {
     });
   };
 
-  // Direct DOM gesture attribute toggling so panning/pinching/hover suppression cause 0 React re-renders
-  const setCanvasGestureAttrs = useCallback((panning: boolean, transforming: boolean) => {
-    isTransformingRef.current = transforming;
+  // Toggle GPU-safe raster proxy layer during pan/zoom gestures or zoomed-out overview so huge SVGs never overflow Chromium VRAM
+  const syncGpuProxyDomAttr = useCallback((forceTransforming?: boolean) => {
     const vp = canvasViewportRef.current;
     if (!vp) return;
-    if (panning) vp.setAttribute('data-panning', 'true');
-    else vp.removeAttribute('data-panning');
-    if (transforming) vp.setAttribute('data-transforming', 'true');
-    else vp.removeAttribute('data-transforming');
+    const hasProxy = Boolean(gpuProxyRef.current);
+    const isGesture = Boolean(forceTransforming || isTransformingRef.current);
+    const isZoomedOutOverview =
+      cameraRef.current.zoom < 0.85 && !hasInteractiveOverlayStateRef.current;
+    const shouldUseProxy =
+      hasProxy && !nodeDragRef.current.active && (isGesture || isZoomedOutOverview);
+    if (shouldUseProxy) {
+      vp.setAttribute('data-gpu-proxy', 'true');
+    } else {
+      vp.removeAttribute('data-gpu-proxy');
+    }
   }, []);
+
+  useEffect(() => {
+    syncGpuProxyDomAttr(false);
+  }, [
+    gpuProxy,
+    zoom,
+    callflowTrace,
+    selectedCallflowNodeId,
+    selectedCallflowEdge,
+    syncGpuProxyDomAttr,
+  ]);
+
+  // Direct DOM gesture attribute toggling so panning/pinching/hover suppression cause 0 React re-renders
+  const setCanvasGestureAttrs = useCallback(
+    (panning: boolean, transforming: boolean) => {
+      isTransformingRef.current = transforming;
+      const vp = canvasViewportRef.current;
+      if (!vp) return;
+      if (panning) vp.setAttribute('data-panning', 'true');
+      else vp.removeAttribute('data-panning');
+      if (transforming) vp.setAttribute('data-transforming', 'true');
+      else vp.removeAttribute('data-transforming');
+      syncGpuProxyDomAttr(transforming);
+    },
+    [syncGpuProxyDomAttr]
+  );
 
   useEffect(() => {
     return () => {
@@ -1581,19 +1745,20 @@ function OfflineStudioApp() {
     };
   }, []);
 
-  // Apply GPU transform directly to canvas stage at 60fps without tearing down GPU composite layer
+  // Apply GPU-safe transform directly to canvas stage without promoting giant vector SVGs via permanent will-change
   const applyCameraToDom = useCallback(
-    (panX: number, panY: number, z: number, _activeGesture: boolean) => {
+    (panX: number, panY: number, z: number, activeGesture: boolean) => {
       cameraRef.current = { zoom: z, panX, panY };
       const stage = stageElRef.current;
       if (stage) {
-        if (stage.style.willChange !== 'transform') {
-          stage.style.willChange = 'transform';
+        if (stage.style.willChange) {
+          stage.style.willChange = '';
         }
         stage.style.transform = `translate3d(${panX}px, ${panY}px, 0) scale(${z})`;
       }
+      syncGpuProxyDomAttr(activeGesture);
     },
-    []
+    [syncGpuProxyDomAttr]
   );
 
   // Sync React camera state when programmatic zoom/pan buttons or resets run
@@ -1623,13 +1788,13 @@ function OfflineStudioApp() {
 
   // Automatically center & fit the Master diagram as soon as its SVG renders after loading/switching
   useEffect(() => {
-    if (!coloredSvg || !pendingAutoFitRef.current) return;
+    if (!coloredSvg || preloadProgress?.active || !pendingAutoFitRef.current) return;
     const frameId = requestAnimationFrame(() => {
       handleFitToViewport();
       pendingAutoFitRef.current = false;
     });
     return () => cancelAnimationFrame(frameId);
-  }, [coloredSvg, handleFitToViewport]);
+  }, [coloredSvg, preloadProgress?.active, handleFitToViewport]);
 
   // Center and zoom camera directly onto a specific Callflow node in readable 1:1+ scale
   const handleFocusNodeOnCanvas = useCallback(
@@ -1637,6 +1802,8 @@ function OfflineStudioApp() {
       if (!canvasViewportRef.current) return;
       requestAnimationFrame(() => {
         if (!canvasViewportRef.current) return;
+        // Temporarily reveal vector layer if GPU proxy was hiding SVG nodes for measurement
+        canvasViewportRef.current.removeAttribute('data-gpu-proxy');
         const vpRect = canvasViewportRef.current.getBoundingClientRect();
         const vpCenterX = vpRect.left + vpRect.width / 2;
         const vpCenterY = vpRect.top + vpRect.height / 2;
@@ -1813,10 +1980,28 @@ function OfflineStudioApp() {
         )
       );
     } else {
-      setCode(buildMasterOverviewMermaid(stampedWorkspace, activeDir));
+      setCode(
+        buildMasterOverviewMermaid(stampedWorkspace, activeDir, {
+          compact: isMasterCompact,
+        })
+      );
     }
     setLastIndexRecomputedAt(Date.now());
-  }, [scriptWorkspace, code, callflowViewLevel]);
+  }, [scriptWorkspace, code, callflowViewLevel, isMasterCompact]);
+
+  // Unified hit-test: checks live SVG target first, then falls back to O(1) coordinate lookup while GPU Proxy is active
+  const resolveNodeIdAtClientPoint = useCallback(
+    (targetEl: Element | null, clientX: number, clientY: number): string | null => {
+      const direct = resolveClickedNodeIdFromSvgElement(targetEl, callflowGraph);
+      if (direct) return direct;
+      const index = liveSvgIndexRef.current;
+      if (!index) return null;
+      const frameEl =
+        (stageElRef.current?.querySelector('.mermaid-stage-frame') as HTMLElement | null) || null;
+      return hitTestLiveSvgNodeAtClientPoint(index, clientX, clientY, frameEl);
+    },
+    [callflowGraph]
+  );
 
   const handleOpenNodeEditor = useCallback(
     (nodeId: string) => {
@@ -1893,7 +2078,7 @@ function OfflineStudioApp() {
     const portEl = !clickedLockHit ? targetEl?.closest?.('[data-port-node-id]') : null;
     const clickedNodeId =
       !clickedLockHit && !portEl
-        ? resolveClickedNodeIdFromSvgElement(targetEl, callflowGraph)
+        ? resolveNodeIdAtClientPoint(targetEl, e.clientX, e.clientY)
         : null;
     const clickedEdgeHit =
       !clickedLockHit && !portEl && !clickedNodeId
@@ -2262,7 +2447,7 @@ function OfflineStudioApp() {
           handleDisconnectEdgeEndpoints(lockAtUp.from, lockAtUp.to);
           return;
         }
-        const clickedIdAtUp = resolveClickedNodeIdFromSvgElement(targetAtUp, callflowGraph);
+        const clickedIdAtUp = resolveNodeIdAtClientPoint(targetAtUp, ev.clientX, ev.clientY);
         if (clickedIdAtUp) {
           if (ev.detail < 2) {
             toggleNodeSelectionClean(clickedIdAtUp);
@@ -2380,7 +2565,10 @@ function OfflineStudioApp() {
         handleDisconnectEdgeEndpoints(tappedLock.from, tappedLock.to);
         return;
       }
-      const tappedId = resolveClickedNodeIdFromSvgElement(tappedEl, callflowGraph);
+      const touchPt = e.changedTouches?.[0];
+      const tappedId = touchPt
+        ? resolveNodeIdAtClientPoint(tappedEl, touchPt.clientX, touchPt.clientY)
+        : resolveClickedNodeIdFromSvgElement(tappedEl, callflowGraph);
       if (tappedId) {
         toggleNodeSelectionClean(tappedId);
       } else {
@@ -2449,6 +2637,23 @@ function OfflineStudioApp() {
     );
   }, [canvasSurface, hiddenSmartNodeTypes]);
 
+  const handleChangeMasterDensity = useCallback(
+    (nextMode: 'compact' | 'detailed') => {
+      setMasterDensityMode(nextMode);
+      if (scriptWorkspace.modules.length === 0) return;
+      if (callflowViewLevel.level === 'master') {
+        const dir = currentDirection || 'LR';
+        setCode(
+          buildMasterOverviewMermaid(scriptWorkspace, dir, {
+            compact: nextMode === 'compact',
+          })
+        );
+        pendingAutoFitRef.current = true;
+      }
+    },
+    [scriptWorkspace, callflowViewLevel.level, currentDirection]
+  );
+
   const handleSwitchCallflowViewLevel = useCallback(
     (
       nextLevel: CallflowViewLevel,
@@ -2458,9 +2663,12 @@ function OfflineStudioApp() {
       const ws = overrideWorkspace || scriptWorkspace;
       if (ws.modules.length === 0) return;
       const dir = currentDirection || 'LR';
+      const effectiveCompact =
+        masterDensityMode === 'compact' ||
+        (masterDensityMode === 'auto' && ws.modules.length >= 16);
       const nextCode =
         nextLevel.level === 'master'
-          ? buildMasterOverviewMermaid(ws, dir)
+          ? buildMasterOverviewMermaid(ws, dir, { compact: effectiveCompact })
           : buildScriptDetailMermaid(ws, nextLevel.scriptNumber, dir);
 
       setCallflowViewLevel(nextLevel);
@@ -2495,7 +2703,7 @@ function OfflineStudioApp() {
         setMobileActivePane('preview');
       }
     },
-    [scriptWorkspace, currentDirection]
+    [scriptWorkspace, currentDirection, masterDensityMode]
   );
 
   const refreshDiagramFromWorkspace = useCallback(
@@ -2512,9 +2720,12 @@ function OfflineStudioApp() {
           ? { level: 'master' }
           : targetLevel;
       const dir = currentDirection || 'LR';
+      const effectiveCompact =
+        masterDensityMode === 'compact' ||
+        (masterDensityMode === 'auto' && nextWs.modules.length >= 16);
       const nextCode =
         effectiveLevel.level === 'master'
-          ? buildMasterOverviewMermaid(nextWs, dir)
+          ? buildMasterOverviewMermaid(nextWs, dir, { compact: effectiveCompact })
           : buildScriptDetailMermaid(nextWs, effectiveLevel.scriptNumber, dir);
 
       if (effectiveLevel.level !== callflowViewLevel.level) {
@@ -2542,7 +2753,7 @@ function OfflineStudioApp() {
         );
       }
     },
-    [callflowViewLevel, currentDirection]
+    [callflowViewLevel, currentDirection, masterDensityMode]
   );
 
   const openMultiScriptModalWithPrefill = useCallback((scriptNumber?: string) => {
@@ -3534,7 +3745,7 @@ function OfflineStudioApp() {
           : currentExportSvg;
         return {
           html: generateInteractiveCallflowHtml(
-            diagramTitle,
+            'Callflow',
             rawUnfilteredSvg,
             callflowGraph,
             targetSurface,
@@ -3582,12 +3793,27 @@ function OfflineStudioApp() {
           key: string;
           label: string;
           scriptNumber?: string;
+          masterViewVariant?: 'compact' | 'detailed';
+          viewLevel: CallflowViewLevel;
           mermaidCode: string;
         }> = [
           {
             key: 'master',
             label: `Ebene 1: Master-Gesamtkarte (${scriptWorkspace.modules.length} Skripte)`,
-            mermaidCode: buildMasterOverviewMermaid(scriptWorkspace, dir),
+            masterViewVariant: 'compact',
+            viewLevel: { level: 'master' },
+            mermaidCode: buildMasterOverviewMermaid(scriptWorkspace, dir, {
+              compact: true,
+            }),
+          },
+          {
+            key: 'master:detailed',
+            label: `Ebene 1: Master-Gesamtkarte (${scriptWorkspace.modules.length} Skripte) (Voll-Detail)`,
+            masterViewVariant: 'detailed',
+            viewLevel: { level: 'master' },
+            mermaidCode: buildMasterOverviewMermaid(scriptWorkspace, dir, {
+              compact: false,
+            }),
           },
           ...scriptWorkspace.modules.map((mod) => {
             const isMainMod =
@@ -3597,6 +3823,7 @@ function OfflineStudioApp() {
               key: `script:${mod.scriptNumber}`,
               label: `Ebene 2: ${isMainMod ? 'Main (Einstiegsskript)' : formatScriptDisplayLabel(mod)}`,
               scriptNumber: mod.scriptNumber,
+              viewLevel: { level: 'detail', scriptNumber: mod.scriptNumber } as CallflowViewLevel,
               mermaidCode: buildScriptDetailMermaid(scriptWorkspace, mod.scriptNumber, dir),
             };
           }),
@@ -3640,13 +3867,25 @@ function OfflineStudioApp() {
 
           let rawSvg: string | null = null;
           let wasCacheHit = false;
+          const trimmedSpecCode = spec.mermaidCode.trim();
+          const preloadLookupKey = spec.key === 'master:detailed' ? 'master' : spec.key;
+          const preloadedHit = canReuseActiveCanvasSvg
+            ? preloadedViewsRef.current.get(preloadLookupKey)
+            : undefined;
 
           if (
             canReuseActiveCanvasSvg &&
             baseRenderedSvg &&
-            spec.mermaidCode.trim() === effectiveMermaidCode.trim()
+            trimmedSpecCode === effectiveMermaidCode.trim()
           ) {
             rawSvg = baseRenderedSvg;
+            wasCacheHit = true;
+          } else if (
+            preloadedHit &&
+            preloadedHit.mermaidCode.trim() === trimmedSpecCode &&
+            preloadedHit.rawSvg
+          ) {
+            rawSvg = preloadedHit.rawSvg;
             wasCacheHit = true;
           } else {
             const res = await renderLocalMermaidDiagram(
@@ -3683,12 +3922,54 @@ function OfflineStudioApp() {
               parsedGraph,
               false
             );
+
+            // Precompute structured Element Info snapshots for instant 0ms Double-Click Info Box in Callflow.html
+            const nodeDetails: Record<string, InteractiveCallflowHtmlNodeDetail> = {};
+            parsedGraph.nodes.forEach((node) => {
+              const snap = inspectWorkspaceNodeForEdit(
+                scriptWorkspace,
+                spec.viewLevel,
+                node.id,
+                parsedGraph
+              );
+              nodeDetails[node.id] = {
+                nodeId: snap.nodeId,
+                mode: snap.mode,
+                scriptNumber: snap.scriptNumber,
+                title: snap.title,
+                blockType: snap.blockType,
+                prio: snap.prio,
+                announcement: snap.announcement || undefined,
+                queueTarget: snap.queueTarget || undefined,
+                schedule: snap.schedule || undefined,
+                condition: snap.condition || undefined,
+                canJumpToDetailScript: snap.canJumpToDetailScript,
+                detailTargetScriptNumber: snap.detailTargetScriptNumber,
+                entryDnisNumbers: snap.entryDnisNumbers,
+                organizationName: snap.organizationName,
+                cdnAlias: snap.cdnAlias,
+                resolvedScheduleDisplay: snap.resolvedScheduleDisplay,
+                hasHolidayCheck: snap.hasHolidayCheck,
+                waitSeconds: snap.waitSeconds,
+                treatmentInfo: snap.treatmentInfo,
+                hdxAction: snap.hdxAction,
+                incomingConnections: snap.incomingConnections,
+                outgoingConnections: snap.outgoingConnections,
+                moduleRulesPreview: snap.moduleRulesPreview,
+                specialParameters: snap.specialParameters,
+                relatedFindings: snap.relatedFindings,
+                rawLineSnippet: snap.rawLineSnippet,
+              };
+            });
+
             views.push({
               key: spec.key,
               label: spec.label,
               scriptNumber: spec.scriptNumber,
+              masterViewVariant: spec.masterViewVariant,
               svg: withOffsets,
               graph: parsedGraph,
+              nodeDetails,
             });
           }
 
@@ -3720,7 +4001,7 @@ function OfflineStudioApp() {
         if (views.length === 0) {
           return {
             html: generateInteractiveCallflowHtml(
-              diagramTitle,
+              'Callflow',
               currentExportSvg,
               callflowGraph,
               targetSurface,
@@ -3734,20 +4015,27 @@ function OfflineStudioApp() {
           };
         }
 
+        const initialMasterDensity: 'compact' | 'detailed' = isMasterCompact
+          ? 'compact'
+          : 'detailed';
+        const preferredMasterKey = isMasterCompact ? 'master' : 'master:detailed';
         const activeKey =
           callflowViewLevel.level === 'detail'
             ? `script:${callflowViewLevel.scriptNumber}`
-            : 'master';
+            : views.some((v) => v.key === preferredMasterKey)
+            ? preferredMasterKey
+            : views[0].key;
 
         return {
           html: generateInteractiveCallflowHtml(
-            diagramTitle,
+            'Callflow',
             views[0].svg,
             views[0].graph,
             targetSurface,
             {
               views,
               activeViewKey: activeKey,
+              initialMasterDensity,
               initialPathColorMode: pathColorMode,
               initialHiddenNodeTypes: hiddenSmartNodeTypes,
               initialIsolateSubgraph: isolateSubgraphMode,
@@ -3779,6 +4067,7 @@ function OfflineStudioApp() {
       effectiveMermaidCode,
       isolateSubgraphMode,
       activeNodeOffsets,
+      isMasterCompact,
     ]
   );
 
@@ -3790,9 +4079,7 @@ function OfflineStudioApp() {
       const { html: htmlContent, aborted } = await buildInteractiveHtmlForSurface(canvasSurface);
       if (aborted || !htmlContent) return;
       const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
-      const safeName =
-        diagramTitle.toLowerCase().replace(/[^a-z0-9äöüß_-]+/gi, '-') || 'mermaid-diagramm';
-      triggerLocalDownload(blob, `${safeName}-interaktiv-callflow.html`);
+      triggerLocalDownload(blob, 'Callflow.html');
       setQuickDownloadFeedback('html');
       setTimeout(() => setQuickDownloadFeedback(null), 2200);
     } finally {
@@ -3804,7 +4091,6 @@ function OfflineStudioApp() {
     htmlExportProgress?.active,
     buildInteractiveHtmlForSurface,
     canvasSurface,
-    diagramTitle,
   ]);
 
   const handleClearWorkspace = () => {
@@ -4817,6 +5103,38 @@ function OfflineStudioApp() {
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
+                {callflowViewLevel.level === 'master' && (
+                  <div
+                    className="inline-flex items-center p-0.5 bg-slate-900 border border-slate-800 rounded-md shrink-0"
+                    role="group"
+                    aria-label="Master-Kartendichte"
+                    title="Kompakt-Modus für flüssige Performance bei großen Callflows vs. Voll-Detail mit separaten Queue-/Endpunkt-Knoten"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => handleChangeMasterDensity('compact')}
+                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        isMasterCompact
+                          ? 'bg-indigo-600 text-white'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Kompakt
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleChangeMasterDensity('detailed')}
+                      className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        !isMasterCompact
+                          ? 'bg-indigo-600 text-white'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      Voll-Detail
+                    </button>
+                  </div>
+                )}
+
                 <SearchableScriptDropdown
                   viewLevel={callflowViewLevel}
                   modules={scriptWorkspace.modules}
@@ -4827,11 +5145,14 @@ function OfflineStudioApp() {
 
                 <button
                   type="button"
-                  onClick={() => setIsOpeningHoursModalOpen(true)}
-                  title="Alle Öffnungszeiten & SondZeit-Pläne im Callflow anzeigen"
-                  className="px-2 py-1 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 hover:border-amber-500/60 text-amber-200 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  onClick={() => {
+                    setOpeningHoursInitialSearch('');
+                    setIsOpeningHoursModalOpen(true);
+                  }}
+                  title="Extra Fenster: Übersicht aller Öffnungszeiten, Zeitprofile & SondZeit-Pläne öffnen"
+                  className="px-2.5 py-1 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 hover:border-amber-500/60 text-amber-200 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
                 >
-                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                   <span>Öffnungszeiten</span>
                   {(() => {
                     const count = (scriptWorkspace.modules || []).reduce((acc, m) => {
@@ -4840,8 +5161,8 @@ function OfflineStudioApp() {
                       return acc + (hasHours ? 1 : 0);
                     }, 0);
                     return count > 0 ? (
-                      <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-amber-500/30 text-amber-100 font-mono font-bold tabular-nums">
-                        {count}
+                      <span className="text-[11px] text-amber-300 font-mono font-semibold tabular-nums">
+                        ({count})
                       </span>
                     ) : null;
                   })()}
@@ -5094,9 +5415,10 @@ function OfflineStudioApp() {
             }}
             onDoubleClick={(e) => {
               if (isCanvasOverlayTarget(e.target) || !coloredSvg) return;
-              const doubleClickedNodeId = resolveClickedNodeIdFromSvgElement(
+              const doubleClickedNodeId = resolveNodeIdAtClientPoint(
                 e.target as Element,
-                callflowGraph
+                e.clientX,
+                e.clientY
               );
               if (doubleClickedNodeId) {
                 e.stopPropagation();
@@ -5512,13 +5834,14 @@ function OfflineStudioApp() {
               </svg>
             )}
 
-            {coloredSvg ? (
+            {coloredSvg && !preloadProgress?.active ? (
               <MemoizedSvgStage
                 ref={stageElRef}
                 svgHtml={coloredSvg}
+                gpuProxy={gpuProxy}
               />
             ) : scriptWorkspace.modules.length > 0 || code.trim().length > 0 ? (
-              preloadProgress?.active && !preloadProgress.minimized && !masterRenderError ? (
+              preloadProgress?.active && !masterRenderError ? (
                 <div className="w-full h-full" aria-hidden="true" />
               ) : (
                 <div
@@ -6184,68 +6507,39 @@ function OfflineStudioApp() {
         onCancelInteractiveHtml={cancelInteractiveHtmlExport}
       />
 
-      {/* Calm, Backdrop-Free Floating Pre-Render Popup (No full-screen dimmer, no flickering window) */}
+      {/* Dedicated Full-Screen Opaque Pre-Render Cover: hides all background UI completely until ready */}
       {preloadProgress?.active && !htmlExportProgress?.active && !isExportModalOpen && (
-        preloadProgress.minimized ? (
-          <div
-            role="status"
-            aria-live="polite"
-            className="fixed bottom-5 right-5 z-50 flex items-center gap-3 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl text-xs text-slate-200 tabular-nums"
-          >
-            <div className="w-3.5 h-3.5 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin shrink-0" />
-            <span className="font-medium whitespace-nowrap">
-              Vorab-Rendering {preloadProgress.completed} / {preloadProgress.total}
-            </span>
-            <button
-              type="button"
-              onClick={() =>
-                setPreloadProgress((prev) => (prev ? { ...prev, minimized: false } : null))
-              }
-              className="px-2 py-1 text-[11px] font-medium text-emerald-300 hover:text-emerald-200 bg-slate-800 hover:bg-slate-700 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              Details
-            </button>
-          </div>
-        ) : (
-          <div
-            role="status"
-            aria-live="polite"
-            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[calc(100%-2rem)] max-w-md bg-slate-900 border border-slate-700 rounded-xl p-4 sm:p-5 shadow-2xl space-y-3.5"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0 space-y-0.5">
-                <div className="text-xs sm:text-sm font-semibold text-slate-100">
-                  Ansichten werden vorab gerendert
-                </div>
-                <div className="text-xs text-slate-400 truncate">
-                  {preloadProgress.currentLabel}
-                </div>
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-live="polite"
+          aria-label="Ansichten werden vorab geladen"
+          className="fixed inset-0 z-[100] bg-slate-950 flex items-center justify-center p-4"
+        >
+          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-5">
+            <div className="flex items-start gap-3.5">
+              <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center shrink-0 mt-0.5">
+                <div className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin" />
               </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setPreloadProgress((prev) => (prev ? { ...prev, minimized: true } : null))
-                  }
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-300 hover:text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  Minimieren
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    preloadAbortControllerRef.current?.abort();
-                    setPreloadProgress(null);
-                  }}
-                  className="px-2.5 py-1.5 text-xs font-medium text-rose-200 bg-rose-950/70 hover:bg-rose-900/80 border border-rose-500/40 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  Stoppen
-                </button>
+              <div className="min-w-0 space-y-1">
+                <h2 className="text-sm sm:text-base font-semibold text-slate-100 leading-snug">
+                  Ansichten werden vorab geladen
+                </h2>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Alle Callflow-Diagramme werden vollständig vorbereitet, bevor die Oberfläche angezeigt wird.
+                </p>
               </div>
             </div>
 
-            <div className="space-y-1.5">
-              <div className="h-2 w-full rounded-full bg-slate-800 overflow-hidden">
+            <div className="bg-slate-950/90 border border-slate-800/90 rounded-xl px-3.5 py-2.5 space-y-2.5">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="text-slate-400 shrink-0">Aktuelle Ansicht</span>
+                <span className="font-mono text-slate-200 truncate text-right">
+                  {preloadProgress.currentLabel}
+                </span>
+              </div>
+
+              <div className="h-2.5 w-full rounded-full bg-slate-800 overflow-hidden">
                 <div
                   className="h-full bg-emerald-500 transition-[width] duration-150 ease-out"
                   style={{
@@ -6254,7 +6548,7 @@ function OfflineStudioApp() {
                         ? Math.min(
                             100,
                             Math.max(
-                              4,
+                              3,
                               Math.round(
                                 (preloadProgress.completed / preloadProgress.total) * 100
                               )
@@ -6265,10 +6559,12 @@ function OfflineStudioApp() {
                   }}
                 />
               </div>
+
               <div className="flex items-center justify-between text-[11px] text-slate-400 tabular-nums">
-                <span>Danach 0 ms Sofort-Wechsel zwischen allen Skripten</span>
-                <span className="font-mono text-emerald-300 font-semibold whitespace-nowrap shrink-0 ml-2">
-                  {preloadProgress.completed} / {preloadProgress.total} ·{' '}
+                <span>
+                  {preloadProgress.completed} von {preloadProgress.total} Ansichten bereit
+                </span>
+                <span className="font-mono text-emerald-400 font-semibold">
                   {preloadProgress.total > 0
                     ? Math.round((preloadProgress.completed / preloadProgress.total) * 100)
                     : 0}
@@ -6276,8 +6572,28 @@ function OfflineStudioApp() {
                 </span>
               </div>
             </div>
+
+            <div className="flex items-center justify-end pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  preloadAbortControllerRef.current?.abort();
+                  const activeHit = preloadedViewsRef.current.get(activeViewKeyRef.current);
+                  if (activeHit) {
+                    hasBaseRenderedSvgRef.current = true;
+                    pendingAutoFitRef.current = true;
+                    setMasterRenderError(null);
+                    setBaseRenderedSvg(activeHit.rawSvg);
+                  }
+                  setPreloadProgress(null);
+                }}
+                className="px-3.5 py-2 text-xs font-medium text-slate-300 hover:text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Abbrechen &amp; direkt öffnen
+              </button>
+            </div>
           </div>
-        )
+        </div>
       )}
 
       {/* Quick Interactive HTML Export Progress Modal HUD */}
@@ -6376,6 +6692,7 @@ function OfflineStudioApp() {
         isOpen={isOpeningHoursModalOpen}
         onClose={() => setIsOpeningHoursModalOpen(false)}
         workspace={scriptWorkspace}
+        initialSearchQuery={openingHoursInitialSearch}
         onJumpToScript={(scriptNumber) => {
           handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber });
         }}
@@ -6419,6 +6736,15 @@ function OfflineStudioApp() {
         onSave={handleSaveNodeInlineEdits}
         onResetPositionOffset={(nodeId) => commitNodePositionOffset(nodeId, null)}
         onDeleteNode={handleDeleteNodeFromCanvas}
+        onJumpToScript={(scriptNumber) => {
+          setEditingNodeSnapshot(null);
+          handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber });
+        }}
+        onOpenOpeningHours={(initialSearch) => {
+          setEditingNodeSnapshot(null);
+          setOpeningHoursInitialSearch(initialSearch || '');
+          setIsOpeningHoursModalOpen(true);
+        }}
       />
     </div>
   );
