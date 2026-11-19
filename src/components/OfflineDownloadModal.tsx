@@ -137,10 +137,10 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
             </div>
             <div className="min-w-0">
               <h2 className="text-sm sm:text-base font-semibold text-slate-100 truncate">
-                Lokale Offline-App herunterladen
+                Lokale Offline-App &amp; Projekt-Kopie speichern
               </h2>
               <p className="text-xs text-slate-400 truncate mt-0.5">
-                100 % netzwerkfrei · Start per Doppelklick (file://) · Keine Installation
+                Reiner Offline-Betrieb (file://) · 0 Byte Netzwerk · Keine Installation
               </p>
             </div>
           </div>
@@ -170,7 +170,10 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
               </div>
               <div className="flex items-start gap-2">
                 <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
-                <span>Inkl. Mermaid v11, ELK, AACC-Parser, Visio-Import &amp; Exporte</span>
+                <span>
+                  Inkl. Mermaid v11, ELK, Parser für Avaya-.s-Skripte, Live-Anruf-Simulator,
+                  Öffnungszeiten &amp; Exporte
+                </span>
               </div>
               <div className="flex items-start gap-2">
                 <FileCheck2 className="w-3.5 h-3.5 text-sky-400 shrink-0 mt-0.5" />
@@ -183,8 +186,8 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
             <div className="px-3.5 py-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-xs text-emerald-200 flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
               <span>
-                Sie arbeiten bereits in der lokalen Offline-Version. Hierüber können Sie eine
-                saubere Kopie oder eine Momentaufnahme inklusive aktuellem Stand sichern.
+                Reiner Offline-Modus aktiv (file://): Erstellt direkt aus dieser lokalen
+                Datei ohne Server eine Projekt-Momentaufnahme oder eine saubere Offline-App.
               </span>
             </div>
           )}
@@ -247,11 +250,11 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
               >
                 <div className="space-y-1 min-w-0">
                   <div className="text-sm font-semibold">
-                    Leere Studio-App (Sauberer Start)
+                    Saubere Offline-App (Leerer Start)
                   </div>
                   <p className="text-xs text-slate-400">
-                    Lädt die nackte Offline-Anwendung ohne vorbefüllte Daten – ideal als
-                    wiederverwendbares Werkzeug für neue Callflows.
+                    Erzeugt eine frische Offline-Einzeldatei ohne vorbefüllte Projekt-Daten –
+                    ideal als wiederverwendbares Werkzeug für neue Callflows.
                   </p>
                 </div>
                 <span
@@ -311,7 +314,7 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
               ) : (
                 <>
                   <Download className="w-4 h-4" />
-                  <span>Offline-App (.html) laden</span>
+                  <span>Offline-Kopie (.html) speichern</span>
                 </>
               )}
             </button>

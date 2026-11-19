@@ -4404,15 +4404,50 @@ export function detectWorkspaceIssues(
 
     // 3b. Script-level completeness check: If a loaded script has no actionable routing rules at all
     // Skip helper/config/parameter/CCMA-SondZeit/OCL scripts that contain valid Avaya directives in rawText
+    // or any script module that is already connected to another script module (incoming or outgoing).
+    const modAliasKeys = new Set<string>([modKey]);
+    const suffixKey = canonicalScriptMatchKey(toMermaidNodeSuffix(mod.scriptNumber));
+    if (suffixKey) modAliasKeys.add(suffixKey);
+    if (mod.cdnAlias) modAliasKeys.add(canonicalScriptMatchKey(mod.cdnAlias));
+    const trimmedName = (mod.scriptName || '').trim();
+    if (trimmedName.length >= 3) {
+      modAliasKeys.add(canonicalScriptMatchKey(trimmedName));
+      const cleanNameToken = trimmedName.replace(/\s+/g, '_');
+      modAliasKeys.add(canonicalScriptMatchKey(cleanNameToken));
+    }
+    if (mod.visioPageName && mod.visioPageName.trim().length >= 3) {
+      modAliasKeys.add(canonicalScriptMatchKey(mod.visioPageName));
+    }
+    if (mod.sourceFilename) {
+      const baseFile = mod.sourceFilename.replace(/\.[^.]+$/, '').trim();
+      if (baseFile.length >= 3) {
+        modAliasKeys.add(canonicalScriptMatchKey(baseFile));
+      }
+    }
     const hasValidAvayaDirectivesInRaw = Boolean(
       mod.rawText &&
-        /\b(?:assign|give|queue|dequeue|route|transfer|execute|call|goto|subscript|disconnect|drop|stop|quit|exit|wait|return|send|readvar|set|open|close|log|print|write|get|put|clear|event|voice\s+session|play|prompt|collect|digits|speak|record|host|hdx|cti|section|where|if|else|when|value|case|otherwise|default|sondzeit|sys_sondzeit|holiday|entscheider|entscheidung)\b/i.test(
+        /(?:\b(?:assign|give|queue|dequeue|route|transfer|execute|exec|run|call|goto|jump|subscript|disconnect|drop|stop|quit|exit|wait|return|send|readvar|set|open|close|log|print|write|get|put|clear|event|voice\s+session|play|prompt|collect|digits|speak|record|host|hdx|cti|section|where|if|else|when|value|case|otherwise|default|sondzeit|sys_sondzeit|holiday|entscheider|entscheidung|treatment|announcement|ansage|skillset|music|musik|ran|cdn|ivr|fax|voicemail|mailbox|overflow|ueberlauf|überlauf|script|skript|include|redirect|forward|dial|hangup|terminate|release|const|var|def|define)\b|->|=>|→)/i.test(
           mod.rawText
         )
     );
+    const hasIncomingCaller = modules.some(
+      (other) =>
+        canonicalScriptMatchKey(other.scriptNumber) !== modKey &&
+        (other.outgoingNumbers.some((t) => modAliasKeys.has(canonicalScriptMatchKey(t))) ||
+          other.rules.some(
+            (r) =>
+              (r.targetNumber && modAliasKeys.has(canonicalScriptMatchKey(r.targetNumber))) ||
+              r.choices.some((c) => modAliasKeys.has(canonicalScriptMatchKey(c.targetNumber)))
+          ))
+    );
     const hasModuleLinkOrOutgoing =
       mod.outgoingNumbers.length > 0 ||
-      manualLinks.some((lnk) => canonicalScriptMatchKey(lnk.fromScriptNumber) === modKey);
+      hasIncomingCaller ||
+      manualLinks.some(
+        (lnk) =>
+          modAliasKeys.has(canonicalScriptMatchKey(lnk.fromScriptNumber)) ||
+          modAliasKeys.has(canonicalScriptMatchKey(lnk.toTargetNumber))
+      );
     if (
       mod.rules.length === 0 &&
       !mod.isAnnouncementEndpoint &&
@@ -6102,38 +6137,95 @@ export function analyzeWorkspaceLogicHealth(
   if (modules.length === 0) return findings;
 
   const moduleByKey = new Map<string, ScriptModule>();
-  modules.forEach((m) => moduleByKey.set(canonicalScriptMatchKey(m.scriptNumber), m));
+  const aliasToPrimaryKey = new Map<string, string>();
+  const registerModuleAlias = (alias: string | undefined, primaryKey: string) => {
+    if (!alias) return;
+    const key = canonicalScriptMatchKey(alias);
+    if (key && !aliasToPrimaryKey.has(key)) {
+      aliasToPrimaryKey.set(key, primaryKey);
+    }
+  };
 
-  const masterKey = workspace.masterScriptNumber
-    ? canonicalScriptMatchKey(workspace.masterScriptNumber)
-    : canonicalScriptMatchKey(
-        (modules.find((m) => m.isMaster) || modules[0]).scriptNumber
-      );
+  modules.forEach((m) => {
+    const primaryKey = canonicalScriptMatchKey(m.scriptNumber);
+    if (!primaryKey) return;
+    moduleByKey.set(primaryKey, m);
+    aliasToPrimaryKey.set(primaryKey, primaryKey);
+    registerModuleAlias(toMermaidNodeSuffix(m.scriptNumber), primaryKey);
+    registerModuleAlias(m.cdnAlias, primaryKey);
+    const trimmedName = (m.scriptName || '').trim();
+    if (trimmedName.length >= 3 && !/^(?:main|start)$/i.test(trimmedName)) {
+      registerModuleAlias(trimmedName, primaryKey);
+      registerModuleAlias(trimmedName.replace(/\s+/g, '_'), primaryKey);
+    }
+    if (m.visioPageName && m.visioPageName.trim().length >= 3) {
+      registerModuleAlias(m.visioPageName, primaryKey);
+    }
+    if (m.sourceFilename) {
+      const baseFile = m.sourceFilename.replace(/\.[^.]+$/, '').trim();
+      if (baseFile.length >= 3) {
+        registerModuleAlias(baseFile, primaryKey);
+      }
+    }
+  });
 
-  // Build adjacency map (including manual links)
+  const resolveModuleKey = (ref: string | undefined): string => {
+    if (!ref) return '';
+    const rawKey = canonicalScriptMatchKey(ref);
+    return aliasToPrimaryKey.get(rawKey) || rawKey;
+  };
+
+  // Build adjacency map (including rule targets, choices, manual links, masterChecklist & resolvedIssues)
   const adjacency = new Map<string, Set<string>>();
   const callersByTarget = new Map<string, Set<string>>();
+  const recordEdge = (fromRef: string | undefined, toRef: string | undefined) => {
+    const fromKey = resolveModuleKey(fromRef);
+    const toKey = resolveModuleKey(toRef);
+    if (!fromKey || !toKey) return;
+    if (!adjacency.has(fromKey)) adjacency.set(fromKey, new Set());
+    if (fromKey !== toKey) {
+      adjacency.get(fromKey)!.add(toKey);
+      if (!callersByTarget.has(toKey)) callersByTarget.set(toKey, new Set());
+      callersByTarget.get(toKey)!.add(fromRef || fromKey);
+    }
+  };
+
   modules.forEach((m) => {
     const k = canonicalScriptMatchKey(m.scriptNumber);
     if (!adjacency.has(k)) adjacency.set(k, new Set());
-    m.outgoingNumbers.forEach((out) => {
-      const outKey = canonicalScriptMatchKey(out);
-      if (outKey && outKey !== k) {
-        adjacency.get(k)!.add(outKey);
-        if (!callersByTarget.has(outKey)) callersByTarget.set(outKey, new Set());
-        callersByTarget.get(outKey)!.add(m.scriptNumber);
-      }
+    m.outgoingNumbers.forEach((out) => recordEdge(m.scriptNumber, out));
+    m.rules.forEach((r) => {
+      if (r.targetNumber) recordEdge(m.scriptNumber, r.targetNumber);
+      r.choices.forEach((c) => {
+        if (c.targetNumber) recordEdge(m.scriptNumber, c.targetNumber);
+      });
     });
   });
 
   (workspace.manualLinks || []).forEach((lnk) => {
-    const fromKey = canonicalScriptMatchKey(lnk.fromScriptNumber);
-    const toKey = canonicalScriptMatchKey(lnk.toTargetNumber);
-    if (fromKey && toKey && fromKey !== toKey) {
-      if (!adjacency.has(fromKey)) adjacency.set(fromKey, new Set());
-      adjacency.get(fromKey)!.add(toKey);
-      if (!callersByTarget.has(toKey)) callersByTarget.set(toKey, new Set());
-      callersByTarget.get(toKey)!.add(lnk.fromScriptNumber);
+    recordEdge(lnk.fromScriptNumber, lnk.toTargetNumber);
+  });
+
+  (workspace.masterChecklist || []).forEach((item) => {
+    const callerRef = item.callerScriptNumber || item.parentScriptNumber;
+    const targetRef = item.matchedModuleNumber || item.refKey;
+    if (callerRef && targetRef) {
+      recordEdge(callerRef, targetRef);
+    }
+  });
+
+  const externalEndpointKeys = new Set(
+    (workspace.externalEndpoints || []).map((e) => resolveModuleKey(e))
+  );
+  const resolvedIssueKeys = new Set<string>();
+  Object.entries(workspace.resolvedIssues || {}).forEach(([issueId, rec]) => {
+    const parts = issueId.split(':');
+    const sourceKey = parts.length >= 2 ? resolveModuleKey(parts[1]) : '';
+    if (sourceKey) {
+      resolvedIssueKeys.add(sourceKey);
+      if (rec?.linkedTargetNumber) {
+        recordEdge(sourceKey, rec.linkedTargetNumber);
+      }
     }
   });
 
@@ -6322,25 +6414,27 @@ export function analyzeWorkspaceLogicHealth(
     modKey: string,
     ruleIdx: number,
     totalRules: number,
-    modHasIncomingOrDirectCall: boolean
+    modHasAttachedScriptModule: boolean,
+    modHasOutgoingScriptModule: boolean
   ): boolean => {
     const stepTrim = rule.stepName.trim();
     const combinedText = `${rule.stepName} ${rule.condition || ''} ${rule.rawLine || ''}`;
     const hasManualLinkForRule = manualLinks.some(
       (lnk) =>
-        (canonicalScriptMatchKey(lnk.fromScriptNumber) === modKey &&
+        (resolveModuleKey(lnk.fromScriptNumber) === modKey &&
           (!lnk.fromRuleId || lnk.fromRuleId === rule.id)) ||
-        canonicalScriptMatchKey(lnk.toTargetNumber) === modKey
+        resolveModuleKey(lnk.toTargetNumber) === modKey
     );
     const hasValueOrDnisNumbers =
       Boolean(rule.valueNumbers && rule.valueNumbers.length > 0) ||
       Boolean(mod.entryDnisNumbers && mod.entryDnisNumbers.length > 0 && ruleIdx === 0 && stepTrim.length > 0);
     const hasConnectedFlowForward =
       (ruleIdx < totalRules - 1 && stepTrim.length > 0) ||
-      (mod.outgoingNumbers.length > 0 && stepTrim.length > 0) ||
-      (modHasIncomingOrDirectCall && stepTrim.length > 0 && (ruleIdx === 0 || totalRules === 1));
+      (modHasOutgoingScriptModule && stepTrim.length > 0) ||
+      (modHasAttachedScriptModule && stepTrim.length > 0);
 
     const isCommentOnlyRawLine = /^\s*(?:\/\*|\/\/|--|#|rem\b)/i.test(rule.rawLine || '');
+    const hasArrowOrAssignmentInRaw = /(?:->|=>|→)/.test(rule.rawLine || '');
 
     return (
       Boolean(rule.targetNumber) ||
@@ -6360,12 +6454,13 @@ export function analyzeWorkspaceLogicHealth(
       isDecisionOrFlowRule(rule) ||
       hasConnectedFlowForward ||
       isCommentOnlyRawLine ||
+      hasArrowOrAssignmentInRaw ||
       Boolean(mod.isAnnouncementEndpoint && stepTrim.length > 0) ||
       /deaktiviert\s*=\s*0|0\s*=\s*aus/i.test(combinedText) ||
       /\b(?:inaktiv|reserve|dummy|platzhalter|notiz|kommentar|fallback|standard|sonstige|default_skillset|sys_ueberlauf_skillset|sys_team_skillset|sys_musik|sys_sondstat|sys_sondrouting|sys_besetztgrund|sys_retour_zentrale|sys_ws_[a-z0-9_]+|sys_[a-z0-9_]+|gv_[a-z0-9_]+|cv_[a-z0-9_]+|lv_[a-z0-9_]+|var_[a-z0-9_]+)\b/i.test(
         combinedText
       ) ||
-      /\b(?:assign|give|queue|dequeue|route|transfer|execute|call|goto|subscript|disconnect|drop|stop|quit|exit|abort|continue|wait|return|send|readvar|set|open|close|log|syslog|print|write|get|put|clear|flush|hold|unhold|conference|consult|park|cancel|event|voice\s+session|play|prompt|collect|digits|speak|record|host|hdx|cti|section|end)\b/i.test(
+      /\b(?:assign|give|queue|dequeue|route|transfer|execute|exec|run|call|goto|jump|subscript|disconnect|drop|stop|quit|exit|abort|continue|wait|return|send|readvar|set|open|close|log|syslog|print|write|get|put|clear|flush|hold|unhold|conference|consult|park|cancel|event|voice\s+session|play|prompt|collect|digits|speak|record|host|hdx|cti|section|end|treatment|announcement|skillset|music|ran|cdn|ivr|fax|voicemail|mailbox|overflow|redirect|forward|dial|hangup|terminate|release|include|const|var|def|define)\b/i.test(
         rule.rawLine || ''
       ) ||
       /\b(?:direktruf|durchwahl|dnis|hotline|zentrale|vermittlung|weiterleitung|rufannahme|rufnummer|einstieg|eingang|call-men[uü]|men[uü]|menue|auswahl|abwurf|auflegen|mailbox|voicemail|anrufbeantworter|fax|ivr|ansage|musik|begrüßung|begruessung|willkommen|wartemusik|rücksprung|ruecksprung|routing|event\s+handler|voice\s+session|start|ende|stopp?|weiter|skript|script|sub[_-]?|sc[_-]?)\b/i.test(
@@ -6377,46 +6472,87 @@ export function analyzeWorkspaceLogicHealth(
     );
   };
 
+  // Precompute all known script module tokens to detect direct module references inside rawText
+  const otherModuleTokens = modules.map((m) => ({
+    key: canonicalScriptMatchKey(m.scriptNumber),
+    tokens: [m.scriptNumber, m.cdnAlias, m.scriptName]
+      .filter((t): t is string => Boolean(t && t.trim().length >= 3))
+      .map((t) => t.trim().toLowerCase()),
+  }));
+
   for (const mod of modules) {
     const modKey = canonicalScriptMatchKey(mod.scriptNumber);
     const sortedRules = [...mod.rules].sort((a, b) => a.prio - b.prio);
 
     // 2a. Genuine dead-end module check:
-    // Announcement endpoints, Disconnect/Route-End scripts, Broadcast/Treatment/IVR endpoints,
-    // Entscheider/decision nodes, Direktruf scripts, CTI/Wait steps, Queues, Voice Sessions, Event Handlers,
-    // helper/config OCL scripts, manual links, outgoing targets, and linked graph nodes are all valid Callflow elements.
+    // Any module with an attached incoming/outgoing script module (outgoingNumbers, rule targets/choices,
+    // manualLinks, masterChecklist, resolvedIssues, callersByTarget, or direct rawText script reference),
+    // announcement/external endpoint, Avaya directives, or actionable rules is a valid Callflow element.
     const hasRawAvayaDirectives = Boolean(
       mod.rawText &&
-        /\b(?:assign|give|queue|dequeue|route|transfer|execute|call|goto|subscript|disconnect|drop|stop|quit|exit|abort|continue|wait|return|send|readvar|set|open|close|log|syslog|print|write|get|put|clear|flush|hold|unhold|conference|consult|park|cancel|event|voice\s+session|play|prompt|collect|digits|speak|record|host|hdx|cti|section|where|if|else|when|value|case|otherwise|default|end|sondzeit|sys_sondzeit|holiday|entscheider|entscheidung|decision|direktruf|durchwahl)\b/i.test(
+        /(?:\b(?:assign|give|queue|dequeue|route|transfer|execute|exec|run|call|goto|jump|subscript|disconnect|drop|stop|quit|exit|abort|continue|wait|return|send|readvar|set|open|close|log|syslog|print|write|get|put|clear|flush|hold|unhold|conference|consult|park|cancel|event|voice\s+session|play|prompt|collect|digits|speak|record|host|hdx|cti|section|where|if|else|when|value|case|otherwise|default|end|sondzeit|sys_sondzeit|holiday|entscheider|entscheidung|decision|direktruf|durchwahl|treatment|announcement|ansage|skillset|music|musik|ran|cdn|ivr|fax|voicemail|mailbox|overflow|ueberlauf|überlauf|script|skript|include|redirect|forward|dial|hangup|terminate|release|const|var|def|define)\b|->|=>|→)/i.test(
           mod.rawText
         )
     );
     const hasAnyManualLink = manualLinks.some(
       (l) =>
-        canonicalScriptMatchKey(l.fromScriptNumber) === modKey ||
-        canonicalScriptMatchKey(l.toTargetNumber) === modKey
+        resolveModuleKey(l.fromScriptNumber) === modKey ||
+        resolveModuleKey(l.toTargetNumber) === modKey
     );
-    const isDirektrufOrLinkedModule =
-      callersByTarget.has(modKey) ||
+    const hasOutgoingEdge =
+      mod.outgoingNumbers.length > 0 ||
+      (adjacency.get(modKey)?.size || 0) > 0 ||
+      sortedRules.some(
+        (r) => Boolean(r.targetNumber) || r.choices.some((c) => Boolean(c.targetNumber))
+      );
+    const hasIncomingCaller = (callersByTarget.get(modKey)?.size || 0) > 0;
+    const hasResolvedIssue = resolvedIssueKeys.has(modKey);
+    const isConfirmedExternal = externalEndpointKeys.has(modKey);
+
+    const lowerRaw = (mod.rawText || '').toLowerCase();
+    const referencesAnotherLoadedModuleInRaw =
+      lowerRaw.length > 0 &&
+      otherModuleTokens.some(
+        (entry) =>
+          entry.key !== modKey &&
+          entry.tokens.some((tok) => lowerRaw.includes(tok))
+      );
+    const ownTokens = otherModuleTokens.find((entry) => entry.key === modKey)?.tokens || [];
+    const referencedByAnotherModuleInRaw =
+      ownTokens.length > 0 &&
+      modules.some((other) => {
+        if (canonicalScriptMatchKey(other.scriptNumber) === modKey) return false;
+        const otherRaw = (other.rawText || '').toLowerCase();
+        return otherRaw.length > 0 && ownTokens.some((tok) => otherRaw.includes(tok));
+      });
+
+    const hasAttachedScriptModule =
+      hasOutgoingEdge ||
+      hasIncomingCaller ||
       hasAnyManualLink ||
+      hasResolvedIssue ||
+      isConfirmedExternal ||
+      referencesAnotherLoadedModuleInRaw ||
+      referencedByAnotherModuleInRaw ||
       Boolean(mod.entryDnisNumbers && mod.entryDnisNumbers.length > 0) ||
       Boolean(mod.cdnAlias) ||
       /direktruf|durchwahl|hotline|dnis/i.test(`${mod.scriptNumber} ${mod.scriptName}`);
 
-    const isLinkedTargetWithContent =
-      isDirektrufOrLinkedModule &&
-      (sortedRules.some((r) => r.stepName.trim().length > 0) ||
-        Boolean(mod.rawText && mod.rawText.trim().length > 0));
-
     const hasAnyActionableStep =
       Boolean(mod.isAnnouncementEndpoint) ||
-      mod.outgoingNumbers.length > 0 ||
-      hasAnyManualLink ||
+      hasAttachedScriptModule ||
       sortedRules.some((r, idx) =>
-        isRuleActionable(r, mod, modKey, idx, sortedRules.length, isDirektrufOrLinkedModule)
+        isRuleActionable(
+          r,
+          mod,
+          modKey,
+          idx,
+          sortedRules.length,
+          hasAttachedScriptModule,
+          hasOutgoingEdge || hasAnyManualLink
+        )
       ) ||
-      hasRawAvayaDirectives ||
-      isLinkedTargetWithContent;
+      hasRawAvayaDirectives;
 
     if (!hasAnyActionableStep) {
       findings.push({
@@ -6432,10 +6568,20 @@ export function analyzeWorkspaceLogicHealth(
       });
     }
 
-    // 2b. Check individual rules strictly for truly empty/isolated steps without action, condition, decision role, Direktruf, or link
+    // 2b. Check individual rules strictly for truly empty/isolated steps without action, condition, decision role, or attached script link
     for (let idx = 0; idx < sortedRules.length; idx++) {
       const rule = sortedRules[idx];
-      if (!isRuleActionable(rule, mod, modKey, idx, sortedRules.length, isDirektrufOrLinkedModule)) {
+      if (
+        !isRuleActionable(
+          rule,
+          mod,
+          modKey,
+          idx,
+          sortedRules.length,
+          hasAttachedScriptModule,
+          hasOutgoingEdge || hasAnyManualLink
+        )
+      ) {
         findings.push({
           id: `health:dead-end-rule:${modKey}:${rule.id}`,
           severity: 'error',

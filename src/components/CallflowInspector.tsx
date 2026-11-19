@@ -266,6 +266,9 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
       scriptWorkspace.masterScriptNumber,
       scriptWorkspace.externalEndpoints,
       scriptWorkspace.manualLinks,
+      scriptWorkspace.resolvedIssues,
+      scriptWorkspace.masterChecklist,
+      scriptWorkspace.ignoredChecklistTargets,
       scriptWorkspace.treatUnresolvedAsEndpoint,
     ]
   );
