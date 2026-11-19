@@ -1,4 +1,13 @@
-import { OfflineWorkspaceSeed } from '../types/mermaidStudio';
+import {
+  OfflineWorkspaceSeed,
+  SavedDiagram,
+  ScriptWorkspace,
+  SmartColorMode,
+  SmartColorNodeType,
+  ThemeConfiguration,
+} from '../types/mermaidStudio';
+import { DEFAULT_THEME_CONFIG } from '../data/mermaidTemplates';
+import { buildScriptWorkspace } from './scriptCallflowParser';
 import { triggerLocalDownload } from './mermaidEngine';
 
 export const STUDIO_STORAGE_KEYS = {
@@ -43,9 +52,130 @@ export function writeStudioStorage(key: string, value: string): void {
   }
 }
 
+export interface CachedStudioProjectSummary {
+  hasProjectData: boolean;
+  diagramTitle: string;
+  moduleCount: number;
+  savedDiagramCount: number;
+  activeCodeLength: number;
+  updatedAt: number | null;
+  seedPayload: Omit<OfflineWorkspaceSeed, 'seedId' | 'exportedAt' | 'initialShellView'>;
+}
+
+function safeParseJson<T>(raw: string | null): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+export function seedHasProjectContent(
+  seed: Pick<OfflineWorkspaceSeed, 'code' | 'scriptWorkspace' | 'savedDiagrams'> | null | undefined
+): boolean {
+  if (!seed) return false;
+  const hasModules = Boolean(seed.scriptWorkspace?.modules && seed.scriptWorkspace.modules.length > 0);
+  const hasCode = Boolean(seed.code && seed.code.trim().length > 0);
+  const hasSaved = Boolean(seed.savedDiagrams && seed.savedDiagrams.length > 0);
+  return hasModules || hasCode || hasSaved;
+}
+
+export function inspectCachedStudioProject(): CachedStudioProjectSummary {
+  if (typeof window === 'undefined') {
+    return {
+      hasProjectData: false,
+      diagramTitle: 'Neuer Callflow',
+      moduleCount: 0,
+      savedDiagramCount: 0,
+      activeCodeLength: 0,
+      updatedAt: null,
+      seedPayload: {
+        diagramTitle: 'Neuer Callflow',
+        code: '',
+        themeConfig: DEFAULT_THEME_CONFIG,
+        smartColorMode: 'semantic',
+        hiddenSmartNodeTypes: [],
+        canvasSurface: 'dark',
+        workspaceMode: 'guided',
+        scriptWorkspace: buildScriptWorkspace([]),
+        savedDiagrams: [],
+      },
+    };
+  }
+
+  const parsedWorkspace = safeParseJson<Partial<ScriptWorkspace>>(
+    readStudioStorage(STUDIO_STORAGE_KEYS.SCRIPT_WORKSPACE)
+  );
+  const scriptWorkspace =
+    parsedWorkspace && Array.isArray(parsedWorkspace.modules)
+      ? buildScriptWorkspace(parsedWorkspace.modules, parsedWorkspace)
+      : buildScriptWorkspace([]);
+
+  const activeCode = readStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_CODE) ?? '';
+  const diagramTitle = readStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_TITLE) || 'Neuer Callflow';
+
+  const parsedTheme = safeParseJson<ThemeConfiguration>(
+    readStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_THEME)
+  );
+  const themeConfig = parsedTheme
+    ? { ...DEFAULT_THEME_CONFIG, ...parsedTheme }
+    : DEFAULT_THEME_CONFIG;
+
+  const smartColorRaw = readStudioStorage(STUDIO_STORAGE_KEYS.SMART_COLOR_MODE);
+  const smartColorMode: SmartColorMode =
+    smartColorRaw === 'clusters' ? 'clusters' : 'semantic';
+
+  const hiddenTypesRaw = safeParseJson<SmartColorNodeType[]>(
+    readStudioStorage(STUDIO_STORAGE_KEYS.HIDDEN_SMART_NODE_TYPES)
+  );
+  const hiddenSmartNodeTypes = Array.isArray(hiddenTypesRaw) ? hiddenTypesRaw : [];
+
+  const canvasSurface: 'dark' | 'light' =
+    readStudioStorage(STUDIO_STORAGE_KEYS.CANVAS_SURFACE) === 'light' ? 'light' : 'dark';
+
+  const workspaceMode: 'guided' | 'free' =
+    readStudioStorage(STUDIO_STORAGE_KEYS.WORKSPACE_MODE) === 'free' ? 'free' : 'guided';
+
+  const parsedSaved = safeParseJson<SavedDiagram[]>(
+    readStudioStorage(STUDIO_STORAGE_KEYS.SAVED_LIST)
+  );
+  const savedDiagrams = Array.isArray(parsedSaved) ? parsedSaved : [];
+
+  const moduleCount = scriptWorkspace.modules.length;
+  const savedDiagramCount = savedDiagrams.length;
+  const activeCodeLength = activeCode.trim().length;
+  const hasProjectData = moduleCount > 0 || savedDiagramCount > 0 || activeCodeLength > 0;
+  const updatedAt =
+    typeof scriptWorkspace.updatedAt === 'number' && scriptWorkspace.updatedAt > 0
+      ? scriptWorkspace.updatedAt
+      : savedDiagrams[0]?.updatedAt ?? null;
+
+  return {
+    hasProjectData,
+    diagramTitle,
+    moduleCount,
+    savedDiagramCount,
+    activeCodeLength,
+    updatedAt,
+    seedPayload: {
+      diagramTitle,
+      code: activeCode,
+      themeConfig,
+      smartColorMode,
+      hiddenSmartNodeTypes,
+      canvasSurface,
+      workspaceMode,
+      scriptWorkspace,
+      savedDiagrams,
+    },
+  };
+}
+
 /**
  * Runs before React mounts so any embedded offline workspace seed populates
  * storage synchronously before initial useState initializers read from it.
+ * Empty seeds never overwrite an already cached project in browser storage.
  */
 export function hydrateOfflineWorkspaceSeed(): void {
   if (typeof window === 'undefined') return;
@@ -57,25 +187,44 @@ export function hydrateOfflineWorkspaceSeed(): void {
     return;
   }
 
-  writeStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_TITLE, seed.diagramTitle || 'Neuer Callflow');
-  writeStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_CODE, seed.code ?? '');
-  writeStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_THEME, JSON.stringify(seed.themeConfig));
-  writeStudioStorage(STUDIO_STORAGE_KEYS.SMART_COLOR_MODE, seed.smartColorMode || 'semantic');
-  if (Array.isArray(seed.hiddenSmartNodeTypes)) {
+  const existingCache = inspectCachedStudioProject();
+  const incomingHasData = seedHasProjectContent(seed);
+
+  // Protect existing local browser cache from accidental wipe by an empty starter seed
+  if (incomingHasData || !existingCache.hasProjectData) {
+    writeStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_TITLE, seed.diagramTitle || 'Neuer Callflow');
+    writeStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_CODE, seed.code ?? '');
+    writeStudioStorage(
+      STUDIO_STORAGE_KEYS.SCRIPT_WORKSPACE,
+      JSON.stringify(seed.scriptWorkspace),
+    );
+    if (Array.isArray(seed.savedDiagrams)) {
+      writeStudioStorage(STUDIO_STORAGE_KEYS.SAVED_LIST, JSON.stringify(seed.savedDiagrams));
+    }
+  }
+
+  if (seed.themeConfig && (incomingHasData || !readStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_THEME))) {
+    writeStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_THEME, JSON.stringify(seed.themeConfig));
+  }
+  if (incomingHasData || !readStudioStorage(STUDIO_STORAGE_KEYS.SMART_COLOR_MODE)) {
+    writeStudioStorage(STUDIO_STORAGE_KEYS.SMART_COLOR_MODE, seed.smartColorMode || 'semantic');
+  }
+  if (
+    Array.isArray(seed.hiddenSmartNodeTypes) &&
+    (incomingHasData || !readStudioStorage(STUDIO_STORAGE_KEYS.HIDDEN_SMART_NODE_TYPES))
+  ) {
     writeStudioStorage(
       STUDIO_STORAGE_KEYS.HIDDEN_SMART_NODE_TYPES,
       JSON.stringify(seed.hiddenSmartNodeTypes)
     );
   }
-  writeStudioStorage(STUDIO_STORAGE_KEYS.CANVAS_SURFACE, seed.canvasSurface || 'dark');
-  writeStudioStorage(STUDIO_STORAGE_KEYS.WORKSPACE_MODE, seed.workspaceMode || 'guided');
-  writeStudioStorage(
-    STUDIO_STORAGE_KEYS.SCRIPT_WORKSPACE,
-    JSON.stringify(seed.scriptWorkspace),
-  );
-  if (Array.isArray(seed.savedDiagrams)) {
-    writeStudioStorage(STUDIO_STORAGE_KEYS.SAVED_LIST, JSON.stringify(seed.savedDiagrams));
+  if (incomingHasData || !readStudioStorage(STUDIO_STORAGE_KEYS.CANVAS_SURFACE)) {
+    writeStudioStorage(STUDIO_STORAGE_KEYS.CANVAS_SURFACE, seed.canvasSurface || 'dark');
   }
+  if (incomingHasData || !readStudioStorage(STUDIO_STORAGE_KEYS.WORKSPACE_MODE)) {
+    writeStudioStorage(STUDIO_STORAGE_KEYS.WORKSPACE_MODE, seed.workspaceMode || 'guided');
+  }
+
   writeStudioStorage(STUDIO_STORAGE_KEYS.APPLIED_OFFLINE_SEED_ID, seed.seedId);
 }
 
@@ -168,7 +317,29 @@ export async function buildAndDownloadOfflineApp(options: {
   }
 
   if (!baseHtml) {
-    const response = await fetch('./offline-app.html', { cache: 'no-store' });
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId =
+      controller && typeof window !== 'undefined'
+        ? window.setTimeout(() => controller.abort(), 45000)
+        : null;
+    let response: Response;
+    try {
+      response = await fetch('./offline-app.html', {
+        cache: 'no-store',
+        signal: controller?.signal,
+      });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw new Error(
+          'Zeitüberschreitung beim Zusammenstellen von offline-app.html (über 45 Sek.). Bitte erneut versuchen.'
+        );
+      }
+      throw err;
+    } finally {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    }
     if (!response.ok) {
       throw new Error(
         `Offline-Paket konnte nicht geladen werden (HTTP ${response.status}).`,

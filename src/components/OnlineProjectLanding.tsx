@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
+  Archive,
   CheckCircle2,
+  Database,
   FileCode2,
   HardDriveDownload,
   Layers,
@@ -10,7 +12,11 @@ import {
 } from 'lucide-react';
 import { DEFAULT_THEME_CONFIG } from '../data/mermaidTemplates';
 import { buildScriptWorkspace } from '../utils/scriptCallflowParser';
-import { buildAndDownloadOfflineApp } from '../utils/offlineAppExporter';
+import { triggerLocalDownload } from '../utils/mermaidEngine';
+import {
+  buildAndDownloadOfflineApp,
+  inspectCachedStudioProject,
+} from '../utils/offlineAppExporter';
 
 const PROJECT_OFFLINE_FILENAME = 'MermaidFree2UseOpen_Projekt_Offline.html';
 
@@ -52,13 +58,37 @@ const PACKAGE_CONTENTS = [
 ];
 
 export default function OnlineProjectLanding() {
+  const cachedProject = useMemo(() => inspectCachedStudioProject(), []);
+  const [includeCachedProject, setIncludeCachedProject] = useState<boolean>(
+    () => cachedProject.hasProjectData
+  );
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadResult, setDownloadResult] = useState<{
     filename: string;
     sizeMb: string;
     timestamp: string;
+    includedCache: boolean;
   } | null>(null);
+  const [backupNotice, setBackupNotice] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  const handleDownloadCacheBackupJson = () => {
+    if (!cachedProject.hasProjectData) return;
+    const safeSlug = (cachedProject.diagramTitle || 'callflow-cache')
+      .replace(/[^a-zA-Z0-9_-]+/g, '_')
+      .replace(/^_+|_+$/g, '') || 'callflow-cache';
+    const filename = `${safeSlug}_Cache_Sicherung.json`;
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      source: 'browser-cache-rescue',
+      ...cachedProject.seedPayload,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    triggerLocalDownload(blob, filename);
+    setBackupNotice(`${filename} wurde als Sofort-Sicherung heruntergeladen.`);
+  };
 
   const handleDownloadProjectOffline = async () => {
     if (isDownloading) return;
@@ -66,19 +96,26 @@ export default function OnlineProjectLanding() {
     setDownloadError(null);
 
     try {
+      const useCacheSeed = cachedProject.hasProjectData && includeCachedProject;
+      const seedPayload = useCacheSeed
+        ? cachedProject.seedPayload
+        : {
+            diagramTitle: 'Neuer Callflow',
+            code: '',
+            themeConfig: DEFAULT_THEME_CONFIG,
+            smartColorMode: 'semantic' as const,
+            hiddenSmartNodeTypes: [],
+            canvasSurface: 'dark' as const,
+            workspaceMode: 'guided' as const,
+            scriptWorkspace: buildScriptWorkspace([]),
+            savedDiagrams: [],
+          };
+
       const result = await buildAndDownloadOfflineApp({
         includeWorkspaceSeed: true,
         seed: {
           initialShellView: 'builder',
-          diagramTitle: 'Neuer Callflow',
-          code: '',
-          themeConfig: DEFAULT_THEME_CONFIG,
-          smartColorMode: 'semantic',
-          hiddenSmartNodeTypes: [],
-          canvasSurface: 'dark',
-          workspaceMode: 'guided',
-          scriptWorkspace: buildScriptWorkspace([]),
-          savedDiagrams: [],
+          ...seedPayload,
         },
         filename: PROJECT_OFFLINE_FILENAME,
       });
@@ -94,6 +131,7 @@ export default function OnlineProjectLanding() {
         filename: result.filename,
         sizeMb,
         timestamp,
+        includedCache: useCacheSeed,
       });
     } catch (err) {
       setDownloadError(
@@ -178,6 +216,56 @@ export default function OnlineProjectLanding() {
               </p>
             </div>
 
+            {/* Browser Cache Rescue Panel (shown automatically if prior Studio data exists in localStorage) */}
+            {cachedProject.hasProjectData && (
+              <div className="rounded-xl border border-emerald-500/45 bg-emerald-950/25 p-5 space-y-3.5">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    <Database className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div className="space-y-1 min-w-0">
+                      <h2 className="text-sm font-semibold text-emerald-100">
+                        Vorhandenes Projekt im Browser-Cache gesichert
+                      </h2>
+                      <p className="text-xs text-emerald-200/85 leading-relaxed">
+                        Ihr bisheriger Stand (<span className="font-semibold text-white">{cachedProject.diagramTitle}</span>
+                        {cachedProject.moduleCount > 0 && ` · ${cachedProject.moduleCount} Skripte`}
+                        {cachedProject.savedDiagramCount > 0 && ` · ${cachedProject.savedDiagramCount} Entwürfe`}
+                        {cachedProject.activeCodeLength > 0 && cachedProject.moduleCount === 0 && ` · ${cachedProject.activeCodeLength} Zeichen Code`}
+                        ) liegt unverändert im lokalen Browser-Speicher vor und kann direkt in Ihre Offline-HTML übernommen werden.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+                  <label className="inline-flex items-center gap-2 text-xs text-emerald-100 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={includeCachedProject}
+                      onChange={(e) => setIncludeCachedProject(e.target.checked)}
+                      className="rounded border-emerald-500/60 bg-slate-950 text-emerald-500 focus:ring-emerald-500"
+                    />
+                    <span>Cache-Projekt direkt in Projekt-HTML übernehmen</span>
+                  </label>
+
+                  <button
+                    type="button"
+                    onClick={handleDownloadCacheBackupJson}
+                    className="px-3 py-1.5 text-xs font-medium text-emerald-100 bg-emerald-900/60 hover:bg-emerald-800/70 border border-emerald-500/40 rounded-lg transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Archive className="w-3.5 h-3.5" />
+                    <span>Cache-Sicherung laden (.json)</span>
+                  </button>
+                </div>
+
+                {backupNotice && (
+                  <p className="text-[11px] font-mono text-emerald-300">
+                    {backupNotice}
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Single Primary CTA Block */}
             <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-5 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -199,12 +287,16 @@ export default function OnlineProjectLanding() {
                   {isDownloading ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      <span>Projekt-Paket wird geladen…</span>
+                      <span>Projekt-Paket wird gebündelt (ca. 5 Sek.)…</span>
                     </>
                   ) : (
                     <>
                       <HardDriveDownload className="w-4 h-4" />
-                      <span>Projekt offline laden (.html)</span>
+                      <span>
+                        {cachedProject.hasProjectData && includeCachedProject
+                          ? 'Projekt inkl. Cache offline laden (.html)'
+                          : 'Projekt offline laden (.html)'}
+                      </span>
                     </>
                   )}
                 </button>
@@ -216,6 +308,7 @@ export default function OnlineProjectLanding() {
                   <div className="min-w-0 space-y-0.5">
                     <div className="font-medium truncate">
                       {downloadResult.filename} erfolgreich gespeichert
+                      {downloadResult.includedCache ? ' (inkl. Cache-Projekt)' : ''}
                     </div>
                     <div className="text-[11px] text-emerald-300/90 font-mono tabular-nums">
                       {downloadResult.sizeMb} MB · geladen um {downloadResult.timestamp}

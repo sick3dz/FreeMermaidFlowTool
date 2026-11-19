@@ -19,6 +19,7 @@ import { DEFAULT_THEME_CONFIG } from '../data/mermaidTemplates';
 import { buildScriptWorkspace } from '../utils/scriptCallflowParser';
 import {
   buildAndDownloadOfflineApp,
+  inspectCachedStudioProject,
   isRunningAsOfflineSingleFile,
 } from '../utils/offlineAppExporter';
 import { SmartColorMode } from '../types/mermaidStudio';
@@ -787,6 +788,10 @@ async function copyTextWithOfflineFallback(text: string): Promise<boolean> {
 
 export const LocalHtmlBuilderLanding: React.FC = () => {
   const isOfflineModeActive = useMemo(() => isRunningAsOfflineSingleFile(), []);
+  const cachedProject = useMemo(() => inspectCachedStudioProject(), []);
+  const [embedCachedProject, setEmbedCachedProject] = useState<boolean>(
+    () => cachedProject.hasProjectData
+  );
 
   // Builder configuration state
   const [customFilename, setCustomFilename] = useState<string>(
@@ -890,19 +895,31 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     setBuildError(null);
 
     try {
+      const shouldEmbedProject = cachedProject.hasProjectData && embedCachedProject;
+      const baseProjectSeed = shouldEmbedProject
+        ? {
+            ...cachedProject.seedPayload,
+            smartColorMode: defaultSmartColorMode,
+            canvasSurface: defaultCanvasSurface,
+            workspaceMode: defaultWorkspaceMode,
+          }
+        : {
+            diagramTitle: 'Neuer Callflow',
+            code: '',
+            themeConfig: DEFAULT_THEME_CONFIG,
+            smartColorMode: defaultSmartColorMode,
+            hiddenSmartNodeTypes: [],
+            canvasSurface: defaultCanvasSurface,
+            workspaceMode: defaultWorkspaceMode,
+            scriptWorkspace: buildScriptWorkspace([]),
+            savedDiagrams: [],
+          };
+
       const result = await buildAndDownloadOfflineApp({
         includeWorkspaceSeed: true,
         seed: {
           initialShellView: 'builder',
-          diagramTitle: 'Neuer Callflow',
-          code: '',
-          themeConfig: DEFAULT_THEME_CONFIG,
-          smartColorMode: defaultSmartColorMode,
-          hiddenSmartNodeTypes: [],
-          canvasSurface: defaultCanvasSurface,
-          workspaceMode: defaultWorkspaceMode,
-          scriptWorkspace: buildScriptWorkspace([]),
-          savedDiagrams: [],
+          ...baseProjectSeed,
         },
         filename: 'MermaidFree2UseOpen_Projekt_Offline.html',
       });
@@ -936,19 +953,31 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     setBuildError(null);
 
     try {
+      const shouldEmbedProject = cachedProject.hasProjectData && embedCachedProject;
+      const baseStudioSeed = shouldEmbedProject
+        ? {
+            ...cachedProject.seedPayload,
+            smartColorMode: defaultSmartColorMode,
+            canvasSurface: defaultCanvasSurface,
+            workspaceMode: defaultWorkspaceMode,
+          }
+        : {
+            diagramTitle: 'Neuer Callflow',
+            code: '',
+            themeConfig: DEFAULT_THEME_CONFIG,
+            smartColorMode: defaultSmartColorMode,
+            hiddenSmartNodeTypes: [],
+            canvasSurface: defaultCanvasSurface,
+            workspaceMode: defaultWorkspaceMode,
+            scriptWorkspace: buildScriptWorkspace([]),
+            savedDiagrams: [],
+          };
+
       const result = await buildAndDownloadOfflineApp({
         includeWorkspaceSeed: true,
         seed: {
           initialShellView: 'studio',
-          diagramTitle: 'Neuer Callflow',
-          code: '',
-          themeConfig: DEFAULT_THEME_CONFIG,
-          smartColorMode: defaultSmartColorMode,
-          hiddenSmartNodeTypes: [],
-          canvasSurface: defaultCanvasSurface,
-          workspaceMode: defaultWorkspaceMode,
-          scriptWorkspace: buildScriptWorkspace([]),
-          savedDiagrams: [],
+          ...baseStudioSeed,
         },
         filename: normalizedFilename,
       });
@@ -1318,6 +1347,24 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                 </div>
               </div>
             </div>
+
+            {cachedProject.hasProjectData && (
+              <label className="flex items-start gap-2.5 p-3 rounded-lg bg-emerald-950/35 border border-emerald-500/40 text-xs text-emerald-100 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={embedCachedProject}
+                  onChange={(e) => setEmbedCachedProject(e.target.checked)}
+                  className="mt-0.5 rounded border-emerald-500/60 bg-slate-950 text-emerald-500 focus:ring-emerald-500"
+                />
+                <span className="leading-relaxed">
+                  Vorhandenes Projekt einbetten (
+                  <span className="font-semibold text-white">{cachedProject.diagramTitle}</span>
+                  {cachedProject.moduleCount > 0 && ` · ${cachedProject.moduleCount} Skripte`}
+                  {cachedProject.savedDiagramCount > 0 && ` · ${cachedProject.savedDiagramCount} Entwürfe`}
+                  )
+                </span>
+              </label>
+            )}
 
             {/* Build Action: Pure Studio / Callflow.html Builder Offline HTML */}
             <button
