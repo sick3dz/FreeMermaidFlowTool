@@ -127,7 +127,7 @@ function reconstructHtmlFromActiveOfflineDocument(): string | null {
     `    <title>${safeTitle}</title>`,
     `    <style id="mermaid-offline-app-style">\n${cssText}\n</style>`,
     '  </head>',
-    '  <body class="bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500/30 selection:text-indigo-200 overflow-hidden">',
+    '  <body class="bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500/30 selection:text-indigo-200">',
     '    <div id="root"></div>',
     '    <script id="mermaid-offline-flag">window.__IS_OFFLINE_SINGLEFILE__ = true;</script>',
     '    <!--MERMAID_OFFLINE_SEED_SLOT-->',

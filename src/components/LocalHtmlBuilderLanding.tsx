@@ -461,7 +461,8 @@ const WORKFLOW_STEPS: WorkflowStepSpec[] = [
     codeTitle: 'OFFLINE-ENTRY-ERKENNUNG',
     code: `export function App() {
   const isOfflineSingleFile = useMemo(() => isRunningAsOfflineSingleFile(), []);
-  if (!isOfflineSingleFile) return <LocalHtmlBuilderLanding />;
+  const initialShell = useMemo(() => (isOfflineSingleFile ? getInitialOfflineShellView() : 'builder'), [isOfflineSingleFile]);
+  if (!isOfflineSingleFile || initialShell === 'builder') return <LocalHtmlBuilderLanding />;
   return <OfflineStudioApp />;
 }`,
   },
@@ -784,20 +785,13 @@ async function copyTextWithOfflineFallback(text: string): Promise<boolean> {
   }
 }
 
-interface LocalHtmlBuilderLandingProps {
-  onOpenStudio?: () => void;
-}
-
-export const LocalHtmlBuilderLanding: React.FC<LocalHtmlBuilderLandingProps> = ({
-  onOpenStudio,
-}) => {
+export const LocalHtmlBuilderLanding: React.FC = () => {
   const isOfflineModeActive = useMemo(() => isRunningAsOfflineSingleFile(), []);
 
   // Builder configuration state
   const [customFilename, setCustomFilename] = useState<string>(
     'MermaidFree2UseOpen_Offline.html'
   );
-  const [defaultStartView, setDefaultStartView] = useState<'builder' | 'studio'>('builder');
   const [defaultWorkspaceMode, setDefaultWorkspaceMode] = useState<'guided' | 'free'>(
     'guided'
   );
@@ -806,6 +800,7 @@ export const LocalHtmlBuilderLanding: React.FC<LocalHtmlBuilderLandingProps> = (
   );
   const [defaultSmartColorMode, setDefaultSmartColorMode] =
     useState<SmartColorMode>('semantic');
+  const [isBuildingProject, setIsBuildingProject] = useState<boolean>(false);
   const [isBuilding, setIsBuilding] = useState<boolean>(false);
   const [buildResult, setBuildResult] = useState<{
     filename: string;
@@ -889,36 +884,72 @@ export const LocalHtmlBuilderLanding: React.FC<LocalHtmlBuilderLandingProps> = (
     document.getElementById('info-workspace')?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const handleBuildAndDownload = async (overrideStartView?: 'builder' | 'studio') => {
+  const handleDownloadProjectOffline = async () => {
+    if (isBuildingProject) return;
+    setIsBuildingProject(true);
+    setBuildError(null);
+
+    try {
+      const result = await buildAndDownloadOfflineApp({
+        includeWorkspaceSeed: true,
+        seed: {
+          initialShellView: 'builder',
+          diagramTitle: 'Neuer Callflow',
+          code: '',
+          themeConfig: DEFAULT_THEME_CONFIG,
+          smartColorMode: defaultSmartColorMode,
+          hiddenSmartNodeTypes: [],
+          canvasSurface: defaultCanvasSurface,
+          workspaceMode: defaultWorkspaceMode,
+          scriptWorkspace: buildScriptWorkspace([]),
+          savedDiagrams: [],
+        },
+        filename: 'MermaidFree2UseOpen_Projekt_Offline.html',
+      });
+
+      const sizeMb = (result.byteSize / (1024 * 1024)).toFixed(2);
+      const nowStr = new Date().toLocaleTimeString('de-DE', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+
+      setBuildResult({
+        filename: result.filename,
+        sizeMb,
+        timestamp: nowStr,
+      });
+    } catch (err) {
+      setBuildError(
+        err instanceof Error
+          ? err.message
+          : 'Das lokale Projekt-Paket konnte nicht generiert werden.'
+      );
+    } finally {
+      setIsBuildingProject(false);
+    }
+  };
+
+  const handleBuildAndDownload = async () => {
     if (isBuilding) return;
     setIsBuilding(true);
     setBuildError(null);
 
-    const targetStartView = overrideStartView ?? defaultStartView;
-
     try {
-      const needsSeed =
-        targetStartView === 'studio' ||
-        defaultWorkspaceMode !== 'guided' ||
-        defaultCanvasSurface !== 'dark' ||
-        defaultSmartColorMode !== 'semantic';
-
       const result = await buildAndDownloadOfflineApp({
-        includeWorkspaceSeed: needsSeed,
-        seed: needsSeed
-          ? {
-              initialShellView: targetStartView,
-              diagramTitle: 'Neuer Callflow',
-              code: '',
-              themeConfig: DEFAULT_THEME_CONFIG,
-              smartColorMode: defaultSmartColorMode,
-              hiddenSmartNodeTypes: [],
-              canvasSurface: defaultCanvasSurface,
-              workspaceMode: defaultWorkspaceMode,
-              scriptWorkspace: buildScriptWorkspace([]),
-              savedDiagrams: [],
-            }
-          : undefined,
+        includeWorkspaceSeed: true,
+        seed: {
+          initialShellView: 'studio',
+          diagramTitle: 'Neuer Callflow',
+          code: '',
+          themeConfig: DEFAULT_THEME_CONFIG,
+          smartColorMode: defaultSmartColorMode,
+          hiddenSmartNodeTypes: [],
+          canvasSurface: defaultCanvasSurface,
+          workspaceMode: defaultWorkspaceMode,
+          scriptWorkspace: buildScriptWorkspace([]),
+          savedDiagrams: [],
+        },
         filename: normalizedFilename,
       });
 
@@ -1028,35 +1059,24 @@ export const LocalHtmlBuilderLanding: React.FC<LocalHtmlBuilderLandingProps> = (
             </button>
           </nav>
 
-          {/* Zone 3: Offline Project Download (Studio switch available only locally under file://) */}
+          {/* Zone 3: Project Offline Download (Main Page + Builder without Studio button) */}
           <div className="flex items-center gap-2 shrink-0">
             {isOfflineModeActive && (
               <span className="hidden xl:inline text-[11px] font-mono text-emerald-400 mr-1 whitespace-nowrap">
-                Lokal aktiv (file://)
+                Projekt offline (file://)
               </span>
-            )}
-            {isOfflineModeActive && onOpenStudio && (
-              <button
-                type="button"
-                onClick={onOpenStudio}
-                title="Callflow-Studio direkt in dieser lokalen Offline-Datei öffnen"
-                className="px-3 py-1.5 text-xs font-semibold text-indigo-100 bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <PlayCircle className="w-3.5 h-3.5" />
-                <span>Studio öffnen</span>
-              </button>
             )}
             <button
               type="button"
-              disabled={isBuilding}
-              onClick={() => handleBuildAndDownload()}
-              title="Komplettes Projekt (Hauptseite + Offline-Builder + Callflow-Studio) als Einzeldatei für den lokalen Betrieb laden"
-              className="px-3.5 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              disabled={isBuildingProject}
+              onClick={handleDownloadProjectOffline}
+              title="Hauptseite inklusive Offline-HTML-Builder für den lokalen Betrieb (file://) herunterladen"
+              className="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
-              {isBuilding ? (
+              {isBuildingProject ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
-                <Download className="w-3.5 h-3.5" />
+                <HardDriveDownload className="w-3.5 h-3.5" />
               )}
               <span className="hidden sm:inline">Projekt offline laden</span>
               <span className="sm:hidden">Projekt laden</span>
@@ -1204,7 +1224,7 @@ export const LocalHtmlBuilderLanding: React.FC<LocalHtmlBuilderLandingProps> = (
                   htmlFor="offline-filename-input"
                   className="font-medium text-slate-300"
                 >
-                  Dateiname
+                  Dateiname (Studio &amp; Callflow.html-Builder)
                 </label>
                 <span className="text-[11px] font-mono text-slate-400 truncate max-w-[200px]">
                   {normalizedFilename}
@@ -1218,32 +1238,6 @@ export const LocalHtmlBuilderLanding: React.FC<LocalHtmlBuilderLandingProps> = (
                 placeholder="MermaidFree2UseOpen_Offline.html"
                 className="w-full px-3 py-2 text-xs font-mono text-slate-100 bg-slate-950 border border-slate-800 rounded-lg focus:outline-none focus:border-emerald-500/70"
               />
-            </div>
-
-            {/* Local Start View Mode */}
-            <div className="space-y-1.5">
-              <span className="text-xs font-medium text-slate-300 block">
-                Startansicht beim lokalen Öffnen
-              </span>
-              <div className="grid grid-cols-2 gap-2">
-                {[
-                  { id: 'builder' as const, label: 'Builder-Startseite zuerst' },
-                  { id: 'studio' as const, label: 'Direkt im Studio starten' },
-                ].map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => setDefaultStartView(opt.id)}
-                    className={`py-2 px-3 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      defaultStartView === opt.id
-                        ? 'bg-emerald-500/15 border-emerald-500/70 text-emerald-200'
-                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
             </div>
 
             {/* Workspace Mode */}
@@ -1325,37 +1319,25 @@ export const LocalHtmlBuilderLanding: React.FC<LocalHtmlBuilderLandingProps> = (
               </div>
             </div>
 
-            {/* Build Action */}
-            <div className="flex flex-col sm:flex-row gap-2">
-              <button
-                type="button"
-                disabled={isBuilding}
-                onClick={() => handleBuildAndDownload()}
-                className="flex-1 py-2.5 px-4 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer"
-              >
-                {isBuilding ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Offline-HTML wird gebündelt...</span>
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-4 h-4" />
-                    <span>Projekt + Builder offline (.html) laden</span>
-                  </>
-                )}
-              </button>
-              {isOfflineModeActive && onOpenStudio && (
-                <button
-                  type="button"
-                  onClick={onOpenStudio}
-                  className="py-2.5 px-4 text-sm font-semibold text-indigo-100 bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <PlayCircle className="w-4 h-4" />
-                  <span>Ins Studio</span>
-                </button>
+            {/* Build Action: Pure Studio / Callflow.html Builder Offline HTML */}
+            <button
+              type="button"
+              disabled={isBuilding}
+              onClick={handleBuildAndDownload}
+              className="w-full py-2.5 px-4 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 rounded-lg transition-colors flex items-center justify-center gap-2 whitespace-nowrap cursor-pointer"
+            >
+              {isBuilding ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Offline-HTML wird gebündelt...</span>
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4" />
+                  <span>Offline-HTML laden (Callflow-Studio)</span>
+                </>
               )}
-            </div>
+            </button>
 
             {buildResult && (
               <div className="px-3 py-2.5 rounded-lg bg-emerald-950/50 border border-emerald-500/40 text-xs text-emerald-200 flex items-start gap-2">

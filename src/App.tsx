@@ -179,6 +179,7 @@ import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { CallSimulatorHud } from './components/CallSimulatorHud';
 import { CanvasMinimap } from './components/CanvasMinimap';
 import { LocalHtmlBuilderLanding } from './components/LocalHtmlBuilderLanding';
+import OnlineProjectLanding from './components/OnlineProjectLanding';
 import {
   getInitialOfflineShellView,
   isRunningAsOfflineSingleFile,
@@ -331,42 +332,19 @@ export default function App() {
     () => (isOfflineSingleFile ? getInitialOfflineShellView() : 'builder'),
     [isOfflineSingleFile]
   );
-  const [shellView, setShellView] = useState<'builder' | 'studio'>(initialShell);
-  const [hasMountedStudio, setHasMountedStudio] = useState<boolean>(
-    isOfflineSingleFile && initialShell === 'studio'
-  );
-
-  const handleOpenStudio = useCallback(() => {
-    if (!isOfflineSingleFile) return;
-    setHasMountedStudio(true);
-    setShellView('studio');
-  }, [isOfflineSingleFile]);
-
-  const handleBackToBuilder = useCallback(() => {
-    setShellView('builder');
-  }, []);
 
   if (!isOfflineSingleFile) {
+    return <OnlineProjectLanding />;
+  }
+
+  if (initialShell === 'builder') {
     return <LocalHtmlBuilderLanding />;
   }
 
-  return (
-    <>
-      {shellView === 'builder' && <LocalHtmlBuilderLanding onOpenStudio={handleOpenStudio} />}
-      {hasMountedStudio && (
-        <div className={shellView === 'studio' ? 'contents' : 'hidden'}>
-          <OfflineStudioApp onBackToBuilder={handleBackToBuilder} />
-        </div>
-      )}
-    </>
-  );
+  return <OfflineStudioApp />;
 }
 
-interface OfflineStudioAppProps {
-  onBackToBuilder: () => void;
-}
-
-function OfflineStudioApp({ onBackToBuilder }: OfflineStudioAppProps) {
+function OfflineStudioApp() {
   // Initial state starts empty (or restores user's own workspace from localStorage / offline seed)
   const [diagramTitle, setDiagramTitle] = useState<string>(() => {
     return readStudioStorage(STORAGE_KEYS.ACTIVE_TITLE) || 'Neuer Callflow';
@@ -4302,19 +4280,8 @@ function OfflineStudioApp({ onBackToBuilder }: OfflineStudioAppProps) {
     <div className="h-dvh w-full flex flex-col bg-slate-950 text-slate-100 overflow-hidden select-none">
       {/* Top Bar: Brand + Mode Switcher (Geführter Modus vs. Freier Modus) + Primary Action */}
       <header className="flex items-center justify-between gap-2 sm:gap-4 lg:gap-6 px-2.5 sm:px-4 lg:px-6 h-12 lg:h-14 border-b border-slate-800 bg-slate-950 shrink-0 min-w-0 overflow-x-auto">
-        {/* Zone 1: Brand + Back to Builder + Mode Switcher */}
+        {/* Zone 1: Brand + Mode Switcher */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink-0">
-          <button
-            type="button"
-            onClick={onBackToBuilder}
-            title="Zurück zur Hauptseite mit Offline-Builder, IT & Sicherheit und Modul-Dokumentation"
-            className="px-2 py-1 text-[11px] sm:text-xs font-medium text-slate-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <ArrowLeft className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span className="hidden md:inline">Startseite &amp; Builder</span>
-            <span className="md:hidden">Builder</span>
-          </button>
-
           <a
             href="#studio"
             onClick={(e) => {
