@@ -20,8 +20,30 @@ import {
   inspectCachedStudioProject,
   scanAllBrowserCacheEntries,
 } from '../utils/offlineAppExporter';
+import { OfflineAuditSection } from './OfflineAuditSection';
 
 const PROJECT_OFFLINE_FILENAME = 'MermaidFree2UseOpen_Projekt_Offline.html';
+
+async function copyTextWithFallback(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+      return document.execCommand('copy');
+    } catch {
+      return false;
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
+}
 
 const WORKFLOW_STAGES = [
   {
@@ -51,8 +73,8 @@ const PACKAGE_CONTENTS = [
     detail: 'Konfiguriert Start-Arbeitsmodus, Zeichenfläche und Farblogik für Ihre Studio-Einzeldatei.',
   },
   {
-    title: 'IT-Sicherheit & Compliance-Prüfmatrix',
-    detail: 'Ausgearbeitete Nachweise für DSGVO, ISO/IEC 27001 und NIS2 inklusive 0-Byte-Prüfschritten.',
+    title: 'Vollständiger IT-Audit & Konzern-Dossier',
+    detail: 'Ausgearbeitete Nachweise für DSGVO, ISO/IEC 27001, NIS2, BSI IT-Grundschutz & SBOM.',
   },
   {
     title: 'Eigenständige Studio-Erzeugung (ohne Server)',
@@ -76,6 +98,18 @@ export default function OnlineProjectLanding() {
   } | null>(null);
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<'overview' | 'audit'>('overview');
+
+  const navigateToOnlineSection = (view: 'overview' | 'audit', anchorId?: string) => {
+    setActiveView(view);
+    if (anchorId) {
+      window.setTimeout(() => {
+        document.getElementById(anchorId)?.scrollIntoView({ behavior: 'smooth' });
+      }, 40);
+    } else if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
 
   const handleDownloadCacheBackupJson = () => {
     if (!cachedProject.hasProjectData) return;
@@ -162,35 +196,58 @@ export default function OnlineProjectLanding() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       {/* 3-Zone Top Bar */}
-      <header className="sticky top-0 z-30 border-b border-slate-800/90 bg-slate-950/90 backdrop-blur-sm">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
+      <header className="sticky top-0 z-30 border-b border-slate-800/90 bg-slate-950/95 backdrop-blur-sm">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
           {/* Zone 1: Clean Wordmark */}
-          <div className="flex items-center gap-2.5 min-w-0 shrink-0">
-            <div className="w-8 h-8 rounded-lg bg-indigo-500/15 border border-indigo-500/35 flex items-center justify-center shrink-0">
-              <HardDriveDownload className="w-4 h-4 text-indigo-400" />
-            </div>
-            <span className="text-sm font-semibold tracking-tight text-slate-100 whitespace-nowrap">
-              MermaidFree2UseOpen
-            </span>
-          </div>
-
-          {/* Zone 2: Minimal Section Anchors */}
-          <nav
-            aria-label="Seitenabschnitte"
-            className="hidden sm:flex items-center gap-1"
+          <button
+            type="button"
+            onClick={() => navigateToOnlineSection('overview')}
+            className="text-sm sm:text-base font-semibold tracking-tight text-slate-100 whitespace-nowrap shrink-0 cursor-pointer hover:text-white transition-colors"
           >
-            <a
-              href="#ablauf"
-              className="px-3 py-1.5 text-xs font-medium text-slate-300 hover:text-slate-100 hover:bg-slate-900 rounded-md transition-colors whitespace-nowrap"
+            MermaidFree2UseOpen
+          </button>
+
+          {/* Zone 2: Minimal Navigation + Vollständiger IT-Audit Tab */}
+          <nav
+            aria-label="Hauptnavigation"
+            className="hidden md:flex items-center gap-5"
+          >
+            <button
+              type="button"
+              onClick={() => navigateToOnlineSection('overview')}
+              className={`py-1.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                activeView === 'overview'
+                  ? 'border-indigo-400 text-slate-50'
+                  : 'border-transparent text-slate-400 hover:text-slate-100'
+              }`}
+            >
+              Übersicht &amp; Download
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateToOnlineSection('overview', 'ablauf')}
+              className="py-1.5 text-xs font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               3-Stufen-Ablauf
-            </a>
-            <a
-              href="#sicherheit"
-              className="px-3 py-1.5 text-xs font-medium text-slate-300 hover:text-slate-100 hover:bg-slate-900 rounded-md transition-colors whitespace-nowrap"
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateToOnlineSection('overview', 'sicherheit')}
+              className="py-1.5 text-xs font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Offline-Garantie
-            </a>
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateToOnlineSection('audit')}
+              className={`py-1.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                activeView === 'audit'
+                  ? 'border-emerald-400 text-slate-50'
+                  : 'border-transparent text-slate-400 hover:text-slate-100'
+              }`}
+            >
+              Vollständiger IT-Audit
+            </button>
           </nav>
 
           {/* Zone 3: Version & Direct Project Offline Download */}
@@ -213,9 +270,42 @@ export default function OnlineProjectLanding() {
             </button>
           </div>
         </div>
+
+        {/* Compact Mobile Navigation Strip */}
+        <nav
+          aria-label="Mobile Navigation"
+          className="md:hidden border-t border-slate-800/80 px-4 py-1.5 flex items-center gap-4 overflow-x-auto"
+        >
+          <button
+            type="button"
+            onClick={() => navigateToOnlineSection('overview')}
+            className={`py-1 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeView === 'overview'
+                ? 'border-indigo-400 text-slate-50'
+                : 'border-transparent text-slate-400'
+            }`}
+          >
+            Übersicht &amp; Download
+          </button>
+          <button
+            type="button"
+            onClick={() => navigateToOnlineSection('audit')}
+            className={`py-1 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeView === 'audit'
+                ? 'border-emerald-400 text-slate-50'
+                : 'border-transparent text-slate-400'
+            }`}
+          >
+            Vollständiger IT-Audit
+          </button>
+        </nav>
       </header>
 
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 py-10 sm:py-14 space-y-12">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 sm:py-10 space-y-12">
+        {activeView === 'audit' ? (
+          <OfflineAuditSection onCopyText={copyTextWithFallback} />
+        ) : (
+          <>
         {/* Hero & Primary Conversion Grid */}
         <section className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           {/* Left: Proposition & Primary Action */}
@@ -540,16 +630,25 @@ export default function OnlineProjectLanding() {
             </div>
           </div>
         </section>
+          </>
+        )}
       </main>
 
       {/* Quiet Footer */}
       <footer className="border-t border-slate-800/90 bg-slate-950">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-slate-500">
-          <span className="font-medium text-slate-400">MermaidFree2UseOpen</span>
-          <span>
-            Offline-First Einzeldatei-Verteiler · Builder und Callflow-Studio laufen
-            ausschließlich lokal unter file://
-          </span>
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 py-5 flex flex-col gap-2 text-xs text-slate-500">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+            <span className="font-medium text-slate-400">MermaidFree2UseOpen</span>
+            <span>
+              Offline-First Einzeldatei-Verteiler · Builder und Callflow-Studio laufen
+              ausschließlich lokal unter file://
+            </span>
+          </div>
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Unabhängiges internes Projektwerkzeug ohne Verbindung, Partnerschaft oder
+            Zertifizierung durch Avaya Inc. oder Microsoft Corporation. Markennamen dienen
+            ausschließlich der technischen Beschreibung der Dateikompatibilität (§ 23 MarkenG).
+          </p>
         </div>
       </footer>
     </div>

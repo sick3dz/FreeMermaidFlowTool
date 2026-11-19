@@ -7,13 +7,10 @@ import {
   Download,
   FolderUp,
   HardDriveDownload,
-  Layers,
   Loader2,
   PlayCircle,
-  Scale,
   ShieldCheck,
   Terminal,
-  Wrench,
   X,
 } from 'lucide-react';
 import { DEFAULT_THEME_CONFIG } from '../data/mermaidTemplates';
@@ -25,10 +22,10 @@ import {
   isRunningAsOfflineSingleFile,
 } from '../utils/offlineAppExporter';
 import { OfflineWorkspaceSeed, SmartColorMode } from '../types/mermaidStudio';
+import { OfflineAuditSection } from './OfflineAuditSection';
 
-type InfoWorkspaceTab = 'compliance' | 'architecture' | 'modules' | 'legal';
+type OfflineLandingView = 'builder' | 'audit' | 'architecture' | 'modules';
 type TopTechSpecId = 'runtime' | 'graph-engine' | 'analysis-sim' | 'air-gapped';
-type ComplianceStandardId = 'dsgvo' | 'iso27001' | 'nis2';
 type ArchInspectorTab = 'mermaid-elk' | 'avaya-parser' | 'singlefile-export';
 type ModuleCategory = 'all' | 'engine' | 'parsers' | 'analysis' | 'exports';
 
@@ -43,33 +40,6 @@ interface TopTechSpecItem {
   facts: Array<{ label: string; value: string }>;
   snippetTitle: string;
   snippetCode: string;
-}
-
-interface ComplianceControlRow {
-  reference: string;
-  auditQuestion: string;
-  technicalProof: string;
-  verdict: string;
-}
-
-interface ComplianceStandardSpec {
-  id: ComplianceStandardId;
-  label: string;
-  subtitle: string;
-  statusLabel: string;
-  deepDiveTitle: string;
-  summary: string;
-  accentClass: string;
-  activeBorderClass: string;
-  auditFacts: Array<{ label: string; value: string }>;
-  controlMatrix: ComplianceControlRow[];
-  excludedRisks: string[];
-  operatorResponsibilities: string[];
-  verificationTitle: string;
-  verificationHint: string;
-  verificationSteps: string;
-  approvalCopyText: string;
-  legalClassification: string;
 }
 
 interface WorkflowStepSpec {
@@ -201,233 +171,6 @@ const trace = simulateCallflowPath(workspace, {
     output: { inlineDynamicImports: true, manualChunks: undefined },
   },
 }`,
-  },
-];
-
-const COMPLIANCE_SPECS: ComplianceStandardSpec[] = [
-  {
-    id: 'dsgvo',
-    label: 'DSGVO (EU 2016/679)',
-    subtitle: 'Art. 5 · Art. 25 · Art. 28 · Art. 32 · Art. 44 ff.',
-    statusLabel: 'Technisch geeignet · 0-Byte Offline',
-    deepDiveTitle:
-      'Datenschutz-Prüfmatrix: Reine RAM-Verarbeitung ohne Auftragsverarbeiter oder Drittlandtransfer',
-    summary:
-      'Die generierte Einzeldatei verarbeitet eingelesene Avaya-.s-Skripte, Visio-Dateien und Rufnummernpläne ausschließlich im flüchtigen Browser-Arbeitsspeicher (RAM) über die lokale HTML5-FileReader-API. Es existiert kein Backend, kein Benutzerkonto und kein ausgehender Netzwerkverkehr.',
-    accentClass: 'text-emerald-300',
-    activeBorderClass: 'border-emerald-500/70 bg-slate-900 text-slate-100',
-    auditFacts: [
-      { label: 'AV-Vertrag (Art. 28)', value: 'Nicht erforderlich (kein externer Verarbeiter)' },
-      { label: 'Drittlandtransfer (Art. 44 ff.)', value: 'Ausgeschlossen (0 Byte Traffic)' },
-      { label: 'Tracking / Cookies', value: '0 Cookies · 0 Analytics · 0 Telemetrie' },
-      { label: 'Speicherort', value: 'Lokales Dateisystem & lokaler Browser-Speicher' },
-    ],
-    controlMatrix: [
-      {
-        reference: 'Art. 5 Abs. 1 lit. c & f',
-        auditQuestion: 'Werden Daten minimiert und vor unbefugtem Zugriff geschützt?',
-        technicalProof:
-          'Nur explizit ausgewählte Skripte werden lokal per FileReader im RAM geparst; keine Vorbefüllung mit fremden Unternehmensdaten oder Vorwahlen.',
-        verdict: 'Erfüllt',
-      },
-      {
-        reference: 'Art. 25 Abs. 1 & 2',
-        auditQuestion: 'Sind Privacy by Design & Default technisch umgesetzt?',
-        technicalProof:
-          'Vollständiges Inline-Bundling (inlineDynamicImports: true) eliminiert CDNs, Webfonts, Cloud-APIs und externe Skript-Aufrufe ab Werk.',
-        verdict: 'Erfüllt',
-      },
-      {
-        reference: 'Art. 28 & Art. 44–49',
-        auditQuestion: 'Ist ein AV-Vertrag oder eine TIA (Drittland-Prüfung) nötig?',
-        technicalProof:
-          'Nein. Es werden keine Daten an einen Anbieter, Hoster oder Subprozessor übermittelt; sämtliche Verarbeitung bleibt beim Verantwortlichen.',
-        verdict: 'Kein AVV nötig',
-      },
-      {
-        reference: 'Art. 32 (TOMs)',
-        auditQuestion: 'Wie sind Vertraulichkeit und Integrität im Betrieb abgesichert?',
-        technicalProof:
-          'Ausführung in der bestehenden Browser-Sandbox auf verwalteten Firmen-Endpoints; Exporte (HTML, SVG, CSV, PNG) erfolgen nur per manuellem Download.',
-        verdict: 'Unterstützt',
-      },
-    ],
-    excludedRisks: [
-      'Kein Upload von Durchwahlen, Agenten-Skillsets oder Routing-Skripten an externe Server.',
-      'Keine Benutzer-Registrierung, keine Session-Cookies und kein Fingerprinting.',
-      'Kein impliziter Datenabfluss über CDN-Logs (kein Google Fonts, unpkg oder jsDelivr).',
-    ],
-    operatorResponsibilities: [
-      'Exportierte HTML-/CSV-Dokumentationen auf berechtigten internen Netzlaufwerken ablegen.',
-      'Lokalen Browser-Cache bei gemeinsam genutzten Endgeräten über „Projekt zurücksetzen“ leeren.',
-      'Bei personenbezogenen Namen in Skripten den Einsatz im internen Verarbeitungsverzeichnis dokumentieren.',
-    ],
-    verificationTitle: '60-SEKUNDEN-PRÜFNACHWEIS (DATENSCHUTZ)',
-    verificationHint: 'Browser DevTools · Network',
-    verificationSteps: `# 1. Offline-HTML lokal per Doppelklick (file://) öffnen
-# 2. DevTools öffnen (F12) -> Tab "Netzwerk" (Network)
-# 3. Skript-Ordner laden, Diagramm filtern & HTML/CSV exportieren
-#
-# Erwartetes Prüfergebnis:
-#   Requests: 0  |  Transferred: 0 B  |  External Hosts: keine
-#   Cookies:  0  |  Third-Party-Calls: keine`,
-    approvalCopyText: `Datenschutz-Kurzstellungnahme (DSGVO) – Offline-HTML Callflow-Tool:
-• Betriebsart: Statische lokale Single-File-HTML (file://), Ausführung vollständig im Browser-RAM.
-• Netzwerkverkehr: 0 Byte (keine Cloud-API, keine CDNs, keine Webfonts, keine Telemetrie, keine Cookies).
-• AV-Vertrag (Art. 28 DSGVO) & Drittlandtransfer (Art. 44 ff.): Nicht einschlägig, da kein externer Auftragsverarbeiter eingebunden ist.
-• TOMs & Privacy by Design (Art. 25 / 32 DSGVO): Daten verbleiben auf dem verwalteten Unternehmens-Endgerät; Exporte werden lokal gespeichert.
-• Eigenprüfung: Nachweisbar über Browser-DevTools (Network-Tab = 0 Requests).`,
-    legalClassification:
-      'Einordnung: Die 0-Byte-Offline-Architektur erfüllt die technischen Voraussetzungen für datenschutzkonformen lokalen Betrieb. Organisatorische Pflichten (Endgeräte-Zugriff, Ablage exportierter Dateien) liegen beim betreibenden Unternehmen.',
-  },
-  {
-    id: 'iso27001',
-    label: 'ISO/IEC 27001:2022',
-    subtitle: 'Annex A.5.14 · A.5.21 · A.8.12 · A.8.20 · A.8.25',
-    statusLabel: 'Technisch geeignet · Air-Gapped',
-    deepDiveTitle:
-      'ISMS-Prüfmatrix (Annex A): Keine Ports, kein DLP-Risiko und SHA-256-hashbares Einzelartefakt',
-    summary:
-      'Das Werkzeug benötigt weder lokale Server-Prozesse noch administrative Installationsrechte oder Firewall-Ausnahmen. Die gesamte Laufzeit liegt statisch in einer einzigen auditierbaren HTML-Datei vor und lässt sich wie ein statisches Dokument freigeben und hashen.',
-    accentClass: 'text-indigo-300',
-    activeBorderClass: 'border-indigo-500/70 bg-slate-900 text-slate-100',
-    auditFacts: [
-      { label: 'Datenabfluss (A.8.12)', value: 'Kein Upload, kein Fetch/XHR, kein Beacon' },
-      { label: 'Netzwerk (A.8.20)', value: 'Kein offener Port · 100 % Air-Gap-fähig' },
-      { label: 'Lieferkette (A.5.21)', value: 'Keine Runtime-CDNs oder dynamischen Chunks' },
-      { label: 'Integrität', value: 'Einzeldatei direkt per SHA-256 prüf- & archivierbar' },
-    ],
-    controlMatrix: [
-      {
-        reference: 'A.5.14 & A.8.12',
-        auditQuestion: 'Besteht ein Risiko für ungewollten Datenabfluss (DLP)?',
-        technicalProof:
-          'Keine ausgehenden HTTP/HTTPS/WebSocket-Verbindungen; sensible Netz- und Callflow-Topologien verlassen das interne Segment nicht.',
-        verdict: 'Erfüllt',
-      },
-      {
-        reference: 'A.5.19 & A.5.21',
-        auditQuestion: 'Sind Drittanbieter-Laufzeitabhängigkeiten kontrollierbar?',
-        technicalProof:
-          'Alle Bibliotheken (React, Mermaid v11, ELK, JSZip) sind fest zur Build-Zeit eingebettet – keine fremden Skript-Nachladungen zur Laufzeit.',
-        verdict: 'Erfüllt',
-      },
-      {
-        reference: 'A.8.9 & A.8.20',
-        auditQuestion: 'Sind Installationsrechte, Daemons oder Firewall-Regeln nötig?',
-        technicalProof:
-          'Zero-Install-Betrieb direkt im Standard-Browser; kein Node.js-Dienst, kein lokaler Port und keine Proxy-Freischaltung erforderlich.',
-        verdict: 'Erfüllt',
-      },
-      {
-        reference: 'A.8.25 & A.8.28',
-        auditQuestion: 'Wie wird sicheres Rendering gegen Skript-Injektionen gewährleistet?',
-        technicalProof:
-          'Mermaid nutzt securityLevel: "strict", HTML-Export maskiert JSON-Payloads XSS-sicher und der gesamte Quellcode ist statisch auditierbar.',
-        verdict: 'Unterstützt',
-      },
-    ],
-    excludedRisks: [
-      'Keine lokalen Hintergrunddienste, offenen TCP-Ports oder OS-Registry-Änderungen.',
-      'Keine unkontrollierten Auto-Updates durch Drittanbieter während des Betriebs.',
-      'Kein Zugriff auf das Dateisystem außerhalb explizit vom Nutzer gewählter Dateien.',
-    ],
-    operatorResponsibilities: [
-      'Freigegebene HTML-Datei per SHA-256-Hash dokumentieren und schreibgeschützt verteilen.',
-      'Unternehmens-Browser aktuell halten (reguläres Patch-Management gemäß A.8.8).',
-      'Schutzbedarfs-Klassifizierung der erzeugten Callflow-Exporte gemäß interner Richtlinie einhalten.',
-    ],
-    verificationTitle: 'PRÜFNACHWEIS FÜR IT-SECURITY / ISMS',
-    verificationHint: 'PowerShell / SHA-256 Audit',
-    verificationSteps: `# 1. SHA-256 Freigabe-Hash erzeugen (Windows PowerShell):
-Get-FileHash .\\MermaidFree2UseOpen_Offline.html -Algorithm SHA256
-
-# 2. Statische Prüfung auf externe Skript-/CDN-Aufrufe (0 Treffer):
-Select-String -Path .\\MermaidFree2UseOpen_Offline.html -Pattern "<script[^>]+src=https?://|unpkg\\.com|jsdelivr\\.net|fonts\\.googleapis"
-
-# Linux / macOS:
-sha256sum MermaidFree2UseOpen_Offline.html`,
-    approvalCopyText: `IT-Security / ISMS-Kurzstellungnahme (ISO/IEC 27001:2022) – Offline-HTML Callflow-Tool:
-• Architektur: Statische Single-File-HTML ohne lokale Installation, ohne Server-Port und ohne Admin-Rechte.
-• Annex A.8.12 / A.8.20 (DLP & Netzwerksicherheit): 0 Byte ausgehender Traffic, 100 % Air-Gap-fähig auf isolierten VMs/Sprungservern.
-• Annex A.5.21 (IKT-Lieferkette): Keine externen Runtime-CDNs oder dynamischen Skript-Nachladungen; statisch im Artefakt eingefroren.
-• Annex A.8.25 (Sichere Entwicklung): Mermaid securityLevel="strict", XSS-sichere Serialisierung, vollständig per SHA-256 hash- und prüfbar.`,
-    legalClassification:
-      'Einordnung: Eine einzelne HTML-Datei trägt keine eigene ISO-27001-Organisationszertifizierung. Die Architektur ist gezielt darauf ausgelegt, die technischen Annex-A-Kontrollen eines bestehenden ISMS ohne Zusatzrisiken zu erfüllen.',
-  },
-  {
-    id: 'nis2',
-    label: 'NIS2 (EU 2022/2555)',
-    subtitle: 'Art. 21 Abs. 2 lit. a, c, d, i (Risiko · Kontinuität · Lieferkette)',
-    statusLabel: 'Technisch geeignet · Zero-Cloud',
-    deepDiveTitle:
-      'NIS2-Prüfmatrix (Art. 21): Resiliente Offline-Verfügbarkeit & geschlossene Laufzeit-Lieferkette',
-    summary:
-      'Für NIS2-regulierte Einrichtungen und KRITIS-nahe Telekommunikations-Teams eliminiert der autarke Offline-Betrieb klassische Cloud-, API- und Lieferketten-Risiken und sichert die jederzeitige Nutzbarkeit von Notfall- und Callflow-Plänen.',
-    accentClass: 'text-sky-300',
-    activeBorderClass: 'border-sky-500/70 bg-slate-900 text-slate-100',
-    auditFacts: [
-      { label: 'Risikomanagement (Art. 21 2a)', value: 'Keine Server-, API- oder Cloud-Angriffsfläche' },
-      { label: 'Kontinuität (Art. 21 2c)', value: '100 % lauffähig bei Internet- / Netzausfall' },
-      { label: 'Lieferkette (Art. 21 2d)', value: 'Keine dynamischen Drittanbieter-Skripte' },
-      { label: 'Least Privilege', value: 'Kein Admin-Recht · keine OS-Installation' },
-    ],
-    controlMatrix: [
-      {
-        reference: 'Art. 21 Abs. 2 lit. a',
-        auditQuestion: 'Entstehen neue Angriffsflächen für Risikoanalyse & Systemsicherheit?',
-        technicalProof:
-          'Nein. Kein exponierter Dienst, keine API-Keys, keine Cloud-Schnittstelle und keine privilegierte Systeminstallation erforderlich.',
-        verdict: 'Minimales Risiko',
-      },
-      {
-        reference: 'Art. 21 Abs. 2 lit. c',
-        auditQuestion: 'Bleibt das Werkzeug im Krisen- oder Offline-Fall nutzbar (BCM)?',
-        technicalProof:
-          'Ja. Callflow-Analysen, Live-Anruf-Simulator, Öffnungszeiten-Prüfungen und interaktive HTML-Exporte funktionieren ohne Internet, Proxy oder Lizenzserver.',
-        verdict: 'Voll resilient',
-      },
-      {
-        reference: 'Art. 21 Abs. 2 lit. d',
-        auditQuestion: 'Besteht ein Laufzeit-Supply-Chain-Risiko über Drittanbieter?',
-        technicalProof:
-          'Ausgeschlossen. Kein Nachladen von Fremdskripten, keine externen CDNs und keine automatischen Fern-Updates nach der internen Freigabe.',
-        verdict: 'Geschlossen',
-      },
-      {
-        reference: 'Art. 21 Abs. 2 lit. i',
-        auditQuestion: 'Lässt sich das Artefakt sauber in Zugriffskontrolle & Asset-Management einbinden?',
-        technicalProof:
-          'Zentrale Ablage einer einzigen versionierten und gehashten HTML-Datei auf internen Netzlaufwerken mit bestehenden NTFS/RBAC-Rechten.',
-        verdict: 'Unterstützt',
-      },
-    ],
-    excludedRisks: [
-      'Kein Ausfallrisiko durch externe SaaS-Störungen, abgelaufene Cloud-Lizenzen oder Proxy-Blockaden.',
-      'Kein Supply-Chain-Kompromittierungsrisiko über manipulierte CDN-Skripte zur Laufzeit.',
-      'Keine zusätzlichen Meldepflichten durch Cloud-Anbieter-Sicherheitsvorfälle.',
-    ],
-    operatorResponsibilities: [
-      'Freigegebene Datei zentral versioniert ablegen und bei Bedarf im Notfall-Handbuch/BCM verlinken.',
-      'Interne Freigabe und Versionsaktualisierungen kontrolliert über das Change-Management steuern.',
-      'Ausführung ausschließlich auf verwalteten, gepatchten Endgeräten im berechtigten Benutzerkontext.',
-    ],
-    verificationTitle: 'AIR-GAP- & RESILIENZ-TEST (NIS2)',
-    verificationHint: 'Offline-VM / Flugmodus-Test',
-    verificationSteps: `# 1. Netzwerkadapter trennen (Flugmodus / isolierte Offline-VM)
-# 2. Freigegebene .html-Datei direkt im Unternehmens-Browser öffnen
-# 3. Skript-Ordner einlesen, Logik prüfen & HTML/CSV exportieren
-#
-# Erwartetes Prüfergebnis:
-#   100 % Funktionsumfang ohne Internet, Proxy oder Server.
-#   Keine Installationsspuren oder offenen Ports im OS.`,
-    approvalCopyText: `NIS2-Kurzstellungnahme (EU 2022/2555 Art. 21) – Offline-HTML Callflow-Tool:
-• Risikomanagement (Art. 21 Abs. 2a): Statisches Offline-Werkzeug ohne Cloud-Backend, ohne offene Ports und ohne Admin-Rechte.
-• Betriebskontinuität / BCM (Art. 21 Abs. 2c): 100 % offline- und air-gap-fähig – auch bei vollständigem Außennetzausfall nutzbar.
-• Lieferketten-Sicherheit (Art. 21 Abs. 2d): Keine dynamischen Drittanbieter-CDNs oder Fern-Updates zur Laufzeit; eingefrorene Einzeldatei.
-• Asset-Kontrolle (Art. 21 Abs. 2i): Zentral versionierbar und per SHA-256 verifizierbar auf internen Netzlaufwerken.`,
-    legalClassification:
-      'Einordnung: NIS2 verpflichtet die regulierte Einrichtung als Ganzes. Durch den autarken Offline-Betrieb entstehen keine zusätzlichen Cloud-, Melde- oder Lieferketten-Risiken im Sinne von Art. 21.',
   },
 ];
 
@@ -822,24 +565,19 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
   } | null>(null);
   const [buildError, setBuildError] = useState<string | null>(null);
 
-  // Interactive UI state
+  // Interactive UI state (Top-Header-Only View Switcher)
   const [activeTopSpecId, setActiveTopSpecId] = useState<TopTechSpecId | null>(null);
-  const [activeInfoTab, setActiveInfoTab] = useState<InfoWorkspaceTab>('compliance');
+  const [activeView, setActiveView] = useState<OfflineLandingView>('builder');
 
-  // Tab 1: IT-Sicherheit & Datenschutz state
-  const [activeComplianceId, setActiveComplianceId] =
-    useState<ComplianceStandardId>('dsgvo');
-  const [copiedCompliance, setCopiedCompliance] = useState<boolean>(false);
-
-  // Tab 2: Architecture & Workflow state
+  // Architecture & Workflow state
   const [activeWorkflowStepId, setActiveWorkflowStepId] = useState<string>('step-1');
   const [activeArchTab, setActiveArchTab] = useState<ArchInspectorTab>('mermaid-elk');
 
-  // Tab 3: Modules Master-Detail state
+  // Modules Master-Detail state
   const [activeModuleCategory, setActiveModuleCategory] = useState<ModuleCategory>('all');
   const [selectedModuleId, setSelectedModuleId] = useState<string>('mermaid-elk');
 
-  // Tab 4: Legal copy state
+  // Legal copy state
   const [copiedLegalNotice, setCopiedLegalNotice] = useState<boolean>(false);
 
   const normalizedFilename = useMemo(() => {
@@ -851,10 +589,6 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
 
   const activeTopSpec =
     TOP_TECH_SPECS.find((spec) => spec.id === activeTopSpecId) ?? null;
-
-  const activeComplianceSpec =
-    COMPLIANCE_SPECS.find((spec) => spec.id === activeComplianceId) ??
-    COMPLIANCE_SPECS[0];
 
   const activeWorkflowStep =
     WORKFLOW_STEPS.find((step) => step.id === activeWorkflowStepId) ??
@@ -888,13 +622,11 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     }
   };
 
-  const navigateToSection = (target: 'builder' | InfoWorkspaceTab) => {
-    if (target === 'builder') {
-      document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
-      return;
+  const handleSwitchHeaderView = (target: OfflineLandingView) => {
+    setActiveView(target);
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     }
-    setActiveInfoTab(target);
-    document.getElementById('info-workspace')?.scrollIntoView({ behavior: 'smooth' });
   };
 
   const handleDownloadProjectOffline = async () => {
@@ -1042,14 +774,6 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     }
   };
 
-  const handleCopyComplianceSummary = async () => {
-    const ok = await copyTextWithOfflineFallback(activeComplianceSpec.approvalCopyText);
-    if (ok) {
-      setCopiedCompliance(true);
-      window.setTimeout(() => setCopiedCompliance(false), 2200);
-    }
-  };
-
   const handleCopyLegalNotice = async () => {
     const ok = await copyTextWithOfflineFallback(LEGAL_TRADEMARK_COPY_TEXT);
     if (ok) {
@@ -1058,83 +782,56 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     }
   };
 
+  const headerViews: Array<{ id: OfflineLandingView; label: string }> = [
+    { id: 'builder', label: 'Offline-Builder' },
+    { id: 'audit', label: 'Vollständiger IT-Audit' },
+    { id: 'architecture', label: 'Architektur & Datenfluss' },
+    { id: 'modules', label: 'Module & Rechtliches' },
+  ];
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      {/* 3-Zone Top Bar */}
-      <header className="sticky top-0 z-30 border-b border-slate-800/90 bg-slate-950/90 backdrop-blur-sm">
+      {/* 3-Zone Top Bar (Single Header View Switcher) */}
+      <header className="sticky top-0 z-30 border-b border-slate-800/90 bg-slate-950/95 backdrop-blur-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
-          {/* Zone 1: Brand */}
-          <div className="flex items-center gap-2.5 min-w-0 shrink-0">
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center shrink-0">
-              <HardDriveDownload className="w-4 h-4 text-emerald-400" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-sm font-semibold tracking-tight text-slate-100 whitespace-nowrap">
-                MermaidFree2UseOpen
-              </div>
-              <div className="text-[11px] text-slate-400 whitespace-nowrap hidden sm:block">
-                Offline-Callflow-Studio · Einzeldatei-Builder
-              </div>
-            </div>
-          </div>
+          {/* Zone 1: Brand Wordmark */}
+          <button
+            type="button"
+            onClick={() => handleSwitchHeaderView('builder')}
+            className="text-sm sm:text-base font-semibold tracking-tight text-slate-100 whitespace-nowrap shrink-0 cursor-pointer hover:text-white transition-colors"
+          >
+            MermaidFree2UseOpen
+          </button>
 
-          {/* Zone 2: Section Nav */}
+          {/* Zone 2: Primary View Navigation (Header-Only Switching) */}
           <nav
             aria-label="Hauptnavigation"
-            className="hidden md:flex items-center gap-1"
+            className="hidden md:flex items-center gap-5"
           >
-            <button
-              type="button"
-              onClick={() => navigateToSection('builder')}
-              className="px-3 py-1.5 text-xs font-medium text-slate-300 hover:text-slate-100 hover:bg-slate-900 rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              Offline-Builder
-            </button>
-            <button
-              type="button"
-              onClick={() => navigateToSection('compliance')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activeInfoTab === 'compliance'
-                  ? 'text-emerald-300 bg-slate-900'
-                  : 'text-slate-300 hover:text-slate-100 hover:bg-slate-900'
-              }`}
-            >
-              IT &amp; Sicherheit
-            </button>
-            <button
-              type="button"
-              onClick={() => navigateToSection('architecture')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activeInfoTab === 'architecture'
-                  ? 'text-indigo-300 bg-slate-900'
-                  : 'text-slate-300 hover:text-slate-100 hover:bg-slate-900'
-              }`}
-            >
-              Architektur
-            </button>
-            <button
-              type="button"
-              onClick={() => navigateToSection('modules')}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                activeInfoTab === 'modules' || activeInfoTab === 'legal'
-                  ? 'text-sky-300 bg-slate-900'
-                  : 'text-slate-300 hover:text-slate-100 hover:bg-slate-900'
-              }`}
-            >
-              Module &amp; Rechtliches
-            </button>
+            {headerViews.map((item) => {
+              const isActive = activeView === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => handleSwitchHeaderView(item.id)}
+                  className={`py-1.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    isActive
+                      ? 'border-emerald-400 text-slate-50'
+                      : 'border-transparent text-slate-400 hover:text-slate-100'
+                  }`}
+                >
+                  {item.label}
+                </button>
+              );
+            })}
           </nav>
 
-          {/* Zone 3: Version & Project Offline Download (Main Page + Builder without Studio button) */}
-          <div className="flex items-center gap-2.5 shrink-0">
+          {/* Zone 3: Version & Project Offline Download */}
+          <div className="flex items-center gap-3 shrink-0">
             <span className="text-[11px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
               Version 1.0.5
             </span>
-            {isOfflineModeActive && (
-              <span className="hidden xl:inline text-[11px] font-mono text-emerald-400 whitespace-nowrap">
-                · file://
-              </span>
-            )}
             <button
               type="button"
               disabled={isBuildingProject}
@@ -1152,9 +849,35 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
             </button>
           </div>
         </div>
+
+        {/* Compact Mobile View Switcher within Header */}
+        <nav
+          aria-label="Mobile Hauptnavigation"
+          className="md:hidden border-t border-slate-800/80 px-4 py-1.5 flex items-center gap-4 overflow-x-auto"
+        >
+          {headerViews.map((item) => {
+            const isActive = activeView === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => handleSwitchHeaderView(item.id)}
+                className={`py-1 text-xs font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  isActive
+                    ? 'border-emerald-400 text-slate-50'
+                    : 'border-transparent text-slate-400'
+                }`}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </nav>
       </header>
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 sm:py-8 space-y-8">
+        {activeView === 'builder' && (
+          <>
         {/* ABOVE THE FOLD: Compact Intro + Offline-HTML-Builder */}
         <section
           id="builder"
@@ -1478,240 +1201,47 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
           </div>
         </section>
 
-        {/* INTERACTIVE 4-TAB INFO WORKSPACE */}
-        <section id="info-workspace" className="scroll-mt-20 space-y-5">
-          {/* Segmented Tab Bar */}
-          <div className="border-b border-slate-800 flex items-center gap-1 overflow-x-auto pb-px">
-            {[
-              {
-                id: 'compliance' as const,
-                label: 'IT-Sicherheit & Datenschutz',
-                icon: ShieldCheck,
-                meta: '3 Normen',
-              },
-              {
-                id: 'architecture' as const,
-                label: 'Architektur & Datenfluss',
-                icon: Layers,
-                meta: '4 Schritte',
-              },
-              {
-                id: 'modules' as const,
-                label: 'Eingebundene Module',
-                icon: Wrench,
-                meta: `${EMBEDDED_MODULES.length}`,
-              },
-              {
-                id: 'legal' as const,
-                label: 'Marken- & Nutzungshinweis',
-                icon: Scale,
-                meta: null,
-              },
-            ].map((tab) => {
-              const Icon = tab.icon;
-              const isActive = activeInfoTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive}
-                  onClick={() => setActiveInfoTab(tab.id)}
-                  className={`px-3.5 py-2.5 text-xs font-medium border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer ${
-                    isActive
-                      ? 'border-emerald-400 text-slate-50 bg-slate-900/60'
-                      : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/30'
-                  }`}
-                >
-                  <Icon
-                    className={`w-3.5 h-3.5 shrink-0 ${
-                      isActive ? 'text-emerald-400' : 'text-slate-500'
-                    }`}
-                  />
-                  <span>{tab.label}</span>
-                  {tab.meta && (
-                    <span className="text-[11px] font-mono tabular-nums text-slate-400">
-                      {tab.meta}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* TAB 1: IT-SICHERHEIT & DATENSCHUTZ (REINE FAKTEN) */}
-          {activeInfoTab === 'compliance' && (
-            <div className="space-y-4">
-              {/* Norm Switcher + Copy Action */}
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  {COMPLIANCE_SPECS.map((spec) => {
-                    const isSelected = spec.id === activeComplianceId;
-                    return (
-                      <button
-                        key={spec.id}
-                        type="button"
-                        onClick={() => setActiveComplianceId(spec.id)}
-                        className={`px-3.5 py-2 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                          isSelected
-                            ? spec.activeBorderClass
-                            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
-                        }`}
-                      >
-                        {spec.label}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleCopyComplianceSummary}
-                  className="px-3.5 py-2 text-xs font-semibold text-slate-100 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer self-start md:self-auto"
-                >
-                  {copiedCompliance ? (
-                    <>
-                      <Check className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Freigabetext kopiert</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3.5 h-3.5 text-slate-300" />
-                      <span>Freigabetext kopieren</span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-              {/* Compact 2-Column Pure Facts Layout */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-                {/* Left Column: Control Matrix + Excluded Risks & Operator Responsibilities */}
-                <div className="lg:col-span-7 space-y-4">
-                  {/* Control Matrix */}
-                  <div className="rounded-xl border border-slate-800 bg-slate-900 overflow-hidden">
-                    <div className="px-4 py-3 border-b border-slate-800 space-y-0.5">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <h3 className="text-sm font-semibold text-slate-100">
-                          {activeComplianceSpec.deepDiveTitle}
-                        </h3>
-                      </div>
-                      <p className="text-[11px] font-mono text-slate-400">
-                        {activeComplianceSpec.subtitle}
-                      </p>
-                    </div>
-
-                    <div className="divide-y divide-slate-800/90">
-                      {activeComplianceSpec.controlMatrix.map((row) => (
-                        <div key={row.reference} className="px-4 py-3 space-y-1">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <span className="text-xs font-semibold text-slate-100">
-                              {row.auditQuestion}
-                            </span>
-                            <span
-                              className={`text-[11px] font-mono whitespace-nowrap shrink-0 ${activeComplianceSpec.accentClass}`}
-                            >
-                              {row.reference} · {row.verdict}
-                            </span>
-                          </div>
-                          <p className="text-xs text-slate-300 leading-relaxed">
-                            {row.technicalProof}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Excluded Risks & Operator Responsibilities Side-by-Side */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-2">
-                      <h4 className="text-xs font-semibold text-slate-100">
-                        Technisch ausgeschlossene Risiken
-                      </h4>
-                      <ul className="space-y-1.5 text-xs text-slate-300 leading-relaxed">
-                        {activeComplianceSpec.excludedRisks.map((risk) => (
-                          <li key={risk} className="flex items-start gap-2">
-                            <span className="text-emerald-400 select-none">•</span>
-                            <span>{risk}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-
-                    <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-2">
-                      <h4 className="text-xs font-semibold text-slate-100">
-                        Organisatorische Betreiberpflichten
-                      </h4>
-                      <ul className="space-y-1.5 text-xs text-slate-300 leading-relaxed">
-                        {activeComplianceSpec.operatorResponsibilities.map((duty) => (
-                          <li key={duty} className="flex items-start gap-2">
-                            <span className="text-slate-500 select-none">•</span>
-                            <span>{duty}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Right Column: Summary + 4 Audit Facts + Verification Block + Classification */}
-                <div className="lg:col-span-5 space-y-4">
-                  <div className="rounded-xl border border-slate-800 bg-slate-900 p-4 space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-800">
-                      <span className="text-xs font-semibold text-slate-100">
-                        {activeComplianceSpec.label}
-                      </span>
-                      <span
-                        className={`text-[11px] font-mono ${activeComplianceSpec.accentClass}`}
-                      >
-                        {activeComplianceSpec.statusLabel}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-300 leading-relaxed">
-                      {activeComplianceSpec.summary}
-                    </p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                      {activeComplianceSpec.auditFacts.map((fact) => (
-                        <div
-                          key={fact.label}
-                          className="p-2.5 rounded-lg bg-slate-950/80 border border-slate-800"
-                        >
-                          <div className="text-[11px] text-slate-400">{fact.label}</div>
-                          <div
-                            className={`text-xs font-medium mt-0.5 ${activeComplianceSpec.accentClass}`}
-                          >
-                            {fact.value}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-slate-800 bg-slate-950 overflow-hidden">
-                    <div className="px-3.5 py-2 border-b border-slate-800 flex items-center justify-between gap-2 text-[11px] font-mono">
-                      <span className="text-slate-300 flex items-center gap-1.5">
-                        <Terminal className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        <span>{activeComplianceSpec.verificationTitle}</span>
-                      </span>
-                      <span className="text-slate-500">
-                        {activeComplianceSpec.verificationHint}
-                      </span>
-                    </div>
-                    <pre className="p-3.5 text-[11px] font-mono text-slate-300 overflow-x-auto leading-relaxed">
-                      {activeComplianceSpec.verificationSteps}
-                    </pre>
-                  </div>
-
-                  <p className="text-[11px] text-slate-400 leading-relaxed">
-                    {activeComplianceSpec.legalClassification}
-                  </p>
-                </div>
-              </div>
+        {/* Quick Access Strip to Full IT Audit without secondary sub-tabs */}
+        <section className="rounded-xl border border-slate-800 bg-slate-900 p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-xs font-medium text-emerald-300">
+              <ShieldCheck className="w-4 h-4 shrink-0" />
+              <span>Vollständiges IT-Audit- &amp; Konzern-Freigabe-Dossier</span>
             </div>
-          )}
+            <p className="text-xs text-slate-300 leading-relaxed max-w-3xl">
+              Alle 4 Normen (DSGVO, ISO/IEC 27001:2022, NIS2, BSI IT-Grundschutz),
+              reine Fakten nach Fachbereichen, Quellcode-Belege mit Code-Inspect,
+              Open-Source-SBOM, Avaya-/Visio-Datenerklärung sowie Gesamtbericht-Export (.md / .html).
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => handleSwitchHeaderView('audit')}
+            className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer self-start md:self-auto"
+          >
+            Vollständigen IT-Audit öffnen
+          </button>
+        </section>
+          </>
+        )}
 
-          {/* TAB 2: ARCHITEKTUR & OFFLINE-DATENFLUSS */}
-          {activeInfoTab === 'architecture' && (
-            <div className="space-y-6">
+        {/* VIEW 2: VOLLSTÄNDIGER IT-AUDIT */}
+        {activeView === 'audit' && (
+          <OfflineAuditSection onCopyText={copyTextWithOfflineFallback} />
+        )}
+
+        {/* VIEW 3: ARCHITEKTUR & OFFLINE-DATENFLUSS */}
+        {activeView === 'architecture' && (
+          <section className="space-y-6">
+            <div className="space-y-1">
+              <h1 className="text-2xl font-semibold tracking-tight text-slate-50">
+                Architektur &amp; Offline-Datenfluss
+              </h1>
+              <p className="text-xs sm:text-sm text-slate-400">
+                Wie das Einzeldatei-Paket ohne Webserver startet, Skripte im RAM verarbeitet und
+                Ergebnisse lokal exportiert.
+              </p>
+            </div>
               {/* Interactive 4-Step Offline Lifecycle */}
               <div className="space-y-3">
                 <div className="text-xs font-medium text-slate-300">
@@ -1837,12 +1367,22 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                   </div>
                 </div>
               </div>
-            </div>
+            </section>
           )}
 
-          {/* TAB 3: EINGEBUNDENE MODULE (MASTER-DETAIL) */}
-          {activeInfoTab === 'modules' && (
-            <div className="space-y-4">
+          {/* VIEW 4: EINGEBUNDENE MODULE & RECHTLICHES */}
+          {activeView === 'modules' && (
+            <div className="space-y-8">
+              <div className="space-y-1">
+                <h1 className="text-2xl font-semibold tracking-tight text-slate-50">
+                  Eingebundene Module &amp; Rechtliche Hinweise
+                </h1>
+                <p className="text-xs sm:text-sm text-slate-400">
+                  Übersicht aller im Einzeldatei-Paket aktiven Fachmodule sowie Marken- und
+                  Nutzungshinweise für den internen Einsatz.
+                </p>
+              </div>
+              <div className="space-y-4">
               {/* Category Filter */}
               <div className="flex flex-wrap items-center gap-2">
                 {[
@@ -1964,11 +1504,9 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                 </div>
               </div>
             </div>
-          )}
 
-          {/* TAB 4: MARKEN-, URHEBER- & NUTZUNGSHINWEIS */}
-          {activeInfoTab === 'legal' && (
-            <div className="space-y-4">
+          {/* MARKEN-, URHEBER- & NUTZUNGSHINWEIS */}
+            <div className="space-y-4 pt-6 border-t border-slate-800">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <h3 className="text-sm font-semibold text-slate-100">
@@ -2054,8 +1592,8 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                 Rechtsberatung im Einzelfall.
               </p>
             </div>
+            </div>
           )}
-        </section>
       </main>
 
       {/* Quiet Footer */}
