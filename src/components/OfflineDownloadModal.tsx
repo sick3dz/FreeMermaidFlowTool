@@ -55,6 +55,7 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
     savedDiagrams.length > 0;
 
   const [includeSeed, setIncludeSeed] = useState<boolean>(hasWorkspaceContent);
+  const [initialShellView, setInitialShellView] = useState<'builder' | 'studio'>('builder');
   const [isDownloading, setIsDownloading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -62,6 +63,7 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setIncludeSeed(hasWorkspaceContent);
+      setInitialShellView('builder');
       setStatusMessage(null);
       setErrorMessage(null);
     }
@@ -89,11 +91,14 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
     setStatusMessage(null);
 
     try {
+      const shouldIncludeProject = includeSeed && hasWorkspaceContent;
+      const shouldInjectSeed = shouldIncludeProject || initialShellView === 'studio';
       const result = await buildAndDownloadOfflineApp({
-        includeWorkspaceSeed: includeSeed && hasWorkspaceContent,
-        seed:
-          includeSeed && hasWorkspaceContent
+        includeWorkspaceSeed: shouldInjectSeed,
+        seed: shouldInjectSeed
+          ? shouldIncludeProject
             ? {
+                initialShellView,
                 diagramTitle,
                 code,
                 themeConfig,
@@ -104,7 +109,19 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
                 scriptWorkspace,
                 savedDiagrams,
               }
-            : undefined,
+            : {
+                initialShellView,
+                diagramTitle: 'Neuer Callflow',
+                code: '',
+                themeConfig,
+                smartColorMode,
+                hiddenSmartNodeTypes,
+                canvasSurface,
+                workspaceMode,
+                scriptWorkspace: { modules: [], missingTargets: [], updatedAt: Date.now() },
+                savedDiagrams: [],
+              }
+          : undefined,
         filename: suggestedFilename,
       });
 
@@ -269,6 +286,38 @@ export const OfflineDownloadModal: React.FC<OfflineDownloadModalProps> = ({
                   )}
                 </span>
               </button>
+            </div>
+          </div>
+
+          {/* Start View Selection */}
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-slate-300">
+              Startseite beim Öffnen der Offline-Datei
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {[
+                {
+                  id: 'builder' as const,
+                  label: 'Builder-Startseite zuerst (mit Studio-Wechsel)',
+                },
+                {
+                  id: 'studio' as const,
+                  label: 'Direkt im Callflow-Studio öffnen',
+                },
+              ].map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setInitialShellView(opt.id)}
+                  className={`py-2 px-3 rounded-lg border text-xs font-medium text-left transition-colors cursor-pointer ${
+                    initialShellView === opt.id
+                      ? 'bg-emerald-950/35 border-emerald-500/70 text-emerald-200'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
             </div>
           </div>
 

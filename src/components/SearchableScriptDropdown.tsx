@@ -57,6 +57,11 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
 
   // Formatted label for current selection
   const currentSelectionLabel = useMemo(() => {
+    if (viewLevel.level === 'welcome') {
+      return variant === 'compact'
+        ? 'Startseite · Ansicht wählen'
+        : `Startseite · ${modules.length} Skripte bereit`;
+    }
     if (viewLevel.level === 'master') {
       return variant === 'compact'
         ? 'Ebene 1: Master-Karte'
@@ -243,7 +248,9 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
         } ${isOpen ? 'border-indigo-500 ring-1 ring-indigo-500/50' : ''}`}
       >
         <div className="flex items-center gap-1.5 min-w-0 truncate">
-          {viewLevel.level === 'master' ? (
+          {viewLevel.level === 'welcome' ? (
+            <Sparkles className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          ) : viewLevel.level === 'master' ? (
             <Layers className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
           ) : (
             <FileCode2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />

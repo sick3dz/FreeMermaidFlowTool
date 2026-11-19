@@ -245,6 +245,7 @@ export interface ScriptWorkspace {
 }
 
 export type CallflowViewLevel =
+  | { level: 'welcome' }
   | { level: 'master' }
   | { level: 'detail'; scriptNumber: string };
 
@@ -429,6 +430,7 @@ export interface CallflowScheduleSummaryRow {
 export interface OfflineWorkspaceSeed {
   seedId: string;
   exportedAt: string;
+  initialShellView?: 'builder' | 'studio';
   diagramTitle: string;
   code: string;
   themeConfig: ThemeConfiguration;

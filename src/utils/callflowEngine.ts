@@ -3344,7 +3344,7 @@ export function generateInteractiveCallflowHtml(
           },
         ];
 
-  const initialViewKey =
+  const targetViewKey =
     options?.activeViewKey && effectiveViews.some((v) => v.key === options.activeViewKey)
       ? options.activeViewKey
       : effectiveViews[0].key;
@@ -3353,11 +3353,18 @@ export function generateInteractiveCallflowHtml(
   const hasDetailedMaster = effectiveViews.some((v) => v.key === 'master:detailed');
   const initialMasterDensity: 'compact' | 'detailed' =
     options?.initialMasterDensity ||
-    (initialViewKey === 'master:detailed' ? 'detailed' : 'compact');
+    (targetViewKey === 'master:detailed' ? 'detailed' : 'compact');
 
   const initialPathColorMode: PathColorMode = options?.initialPathColorMode || 'semantic';
   const initialHiddenNodeTypes: SmartColorNodeType[] = options?.initialHiddenNodeTypes || [];
   const initialIsolateSubgraph = Boolean(options?.initialIsolateSubgraph);
+
+  const mainView =
+    effectiveViews.find(
+      (v) =>
+        v.scriptNumber &&
+        /^(?:main|start|master(?:script)?)$/i.test(v.scriptNumber.trim())
+    ) || effectiveViews.find((v) => /Main \(Einstiegsskript\)/i.test(v.label));
 
   const serializedViews = effectiveViews.map((v) => ({
     key: v.key,
@@ -3386,9 +3393,19 @@ export function generateInteractiveCallflowHtml(
     drillTargetsByNodeId[`SELF_${suffix}`] = entry;
   });
 
+  const scriptCount = effectiveViews.filter((v) => Boolean(v.scriptNumber)).length;
   const safePayloadJson = JSON.stringify({
     views: serializedViews,
-    initialViewKey,
+    initialViewKey: 'welcome',
+    defaultTargetViewKey: targetViewKey,
+    mainViewKey: mainView ? mainView.key : null,
+    mainViewLabel: mainView ? mainView.label : null,
+    welcomeSummary: {
+      title: diagramTitle || 'Callflow',
+      viewCount: effectiveViews.length,
+      scriptCount,
+      hasMultiViews: effectiveViews.length > 1,
+    },
     initialMasterDensity,
     hasBothMasterVariants: hasCompactMaster && hasDetailedMaster,
     initialPathColorMode,
@@ -3404,8 +3421,6 @@ export function generateInteractiveCallflowHtml(
     simulationModel: options?.simulationModel || { scripts: [], dnisEntries: [] },
   }).replace(/<\/script>/gi, '<\\/script>');
 
-  const initialSvg =
-    effectiveViews.find((v) => v.key === initialViewKey)?.svg || svgString;
   const hasMultiViews = effectiveViews.length > 1;
   const safeTitle = escapeHtmlText(diagramTitle || 'Callflow');
   const isDarkSurface = canvasSurface === 'dark';
@@ -3662,6 +3677,121 @@ export function generateInteractiveCallflowHtml(
     #svg-stage svg g.edgeLabel,
     #svg-stage svg g.edgeLabels > g {
       cursor: pointer;
+    }
+    #welcome-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 6;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background: var(--bg-canvas);
+      overflow-y: auto;
+      cursor: default;
+    }
+    #welcome-overlay.open {
+      display: flex;
+    }
+    .welcome-card {
+      width: 100%;
+      max-width: 520px;
+      background: var(--bg-header);
+      border: 1px solid var(--border-strong);
+      border-radius: 12px;
+      padding: 22px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .welcome-eyebrow {
+      font-size: 11px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #34d399;
+      font-weight: 600;
+    }
+    html.light .welcome-eyebrow {
+      color: #059669;
+    }
+    .welcome-title {
+      margin: 4px 0 0;
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--text-main);
+      line-height: 1.3;
+    }
+    .welcome-sub {
+      margin: 5px 0 0;
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 1.45;
+      font-variant-numeric: tabular-nums;
+    }
+    .welcome-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .welcome-actions .welcome-btn-main-primary {
+      flex: 1;
+      min-width: 210px;
+      padding: 9px 14px;
+      font-size: 12.5px;
+    }
+    .welcome-picker {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .welcome-picker-label {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-muted);
+    }
+    .welcome-script-list {
+      max-height: 185px;
+      overflow-y: auto;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .welcome-script-item {
+      width: 100%;
+      justify-content: flex-start;
+      text-align: left;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-main);
+      padding: 6px 9px;
+      border-radius: 6px;
+      font-size: 11.5px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .welcome-script-item:hover {
+      background: var(--bg-hover);
+      border-color: var(--border-strong);
+    }
+    .welcome-footer {
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+    .welcome-footer button {
+      font-size: 11px;
+      padding: 4px 9px;
     }
     aside {
       width: 392px;
@@ -4254,7 +4384,7 @@ export function generateInteractiveCallflowHtml(
       bottom: 12px;
       left: 50%;
       transform: translateX(-50%);
-      width: min(780px, calc(100% - 24px));
+      width: min(860px, calc(100% - 24px));
       z-index: 35;
       display: none;
       flex-direction: column;
@@ -4267,7 +4397,7 @@ export function generateInteractiveCallflowHtml(
     }
     #call-sim-hud.open { display: flex; }
     .sim-hud-head {
-      padding: 7px 10px;
+      padding: 7px 11px;
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
@@ -4275,13 +4405,55 @@ export function generateInteractiveCallflowHtml(
       gap: 8px;
       flex-wrap: wrap;
     }
-    .sim-hud-setup {
-      padding: 8px 10px;
+    .sim-pro-panel {
       border-bottom: 1px solid var(--border);
       background: var(--bg-input);
       display: flex;
       flex-direction: column;
-      gap: 7px;
+    }
+    .sim-pro-bar {
+      padding: 6px 11px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .sim-pro-tabs {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 2px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--bg-panel);
+    }
+    .sim-pro-tab {
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 600;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      border-radius: 5px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .sim-pro-tab:hover { color: var(--text-main); }
+    .sim-pro-tab.active {
+      background: var(--accent);
+      color: #ffffff;
+    }
+    .sim-hud-setup {
+      padding: 9px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .sim-hud-divider {
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
     }
     .sim-hud-row {
       display: flex;
@@ -4289,6 +4461,129 @@ export function generateInteractiveCallflowHtml(
       gap: 6px;
       flex-wrap: wrap;
     }
+    .sim-caller-grid {
+      display: grid;
+      grid-template-columns: 1fr 216px;
+    }
+    @media (max-width: 680px) {
+      .sim-caller-grid { grid-template-columns: 1fr; }
+    }
+    .sim-caller-col {
+      padding: 9px 11px;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .sim-caller-keypad-col {
+      padding: 9px 11px;
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 7px;
+    }
+    @media (max-width: 680px) {
+      .sim-caller-keypad-col {
+        border-left: none;
+        border-top: 1px solid var(--border);
+      }
+    }
+    .sim-caller-feed {
+      max-height: 170px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+    .sim-caller-row {
+      width: 100%;
+      text-align: left;
+      border: none;
+      border-bottom: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-main);
+      padding: 5px 6px;
+      border-radius: 4px;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .sim-caller-row:last-child { border-bottom: none; }
+    .sim-caller-row:hover { background: var(--bg-hover); }
+    .sim-caller-row.current { background: rgba(99, 102, 241, 0.14); }
+    .sim-caller-row.future { opacity: 0.45; }
+    .sim-caller-row.future:hover { opacity: 0.8; }
+    .sim-keypad-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+    }
+    .sim-key-btn {
+      min-height: 34px;
+      padding: 4px 3px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg-panel);
+      color: var(--text-muted);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: default;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: 11.5px;
+    }
+    .sim-key-btn.active {
+      border-color: var(--amber-border);
+      background: var(--amber-bg);
+      color: var(--amber-text);
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .sim-key-btn.active:hover { filter: brightness(1.08); }
+    .sim-key-sub {
+      font-family: inherit;
+      font-size: 9px;
+      max-width: 54px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      opacity: 0.85;
+      margin-top: 1px;
+    }
+    .sim-matrix-wrap {
+      padding: 9px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .sim-matrix-scroll {
+      max-height: 200px;
+      overflow: auto;
+    }
+    .sim-matrix-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      text-align: left;
+    }
+    .sim-matrix-table th {
+      padding: 5px 7px;
+      border-bottom: 1px solid var(--border-strong);
+      color: var(--text-muted);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .sim-matrix-table td {
+      padding: 5px 7px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    .sim-matrix-table tr.active-row { background: rgba(99, 102, 241, 0.12); }
+    .sim-matrix-table tr:hover { background: var(--bg-hover); }
     .sim-hud-body {
       padding: 9px 11px;
       display: flex;
@@ -4322,6 +4617,11 @@ export function generateInteractiveCallflowHtml(
       background: rgba(16, 185, 129, 0.1);
       color: var(--text-main);
     }
+    .sim-step-seg.overflow {
+      border-color: var(--amber-border);
+      background: var(--amber-bg);
+      color: var(--amber-text);
+    }
     .sim-step-seg.current {
       border-color: var(--accent);
       background: var(--accent);
@@ -4352,22 +4652,12 @@ export function generateInteractiveCallflowHtml(
       color: #ffffff;
       font-weight: 600;
     }
-    .sim-status-tag {
-      display: inline-flex;
-      align-items: center;
-      padding: 1px 6px;
-      border-radius: 4px;
-      border: 1px solid var(--border-strong);
-      font-size: 10.5px;
-      font-weight: 600;
-      white-space: nowrap;
-    }
-    .sim-status-tag.ok { border-color: rgba(16, 185, 129, 0.45); background: rgba(16, 185, 129, 0.14); color: #34d399; }
-    .sim-status-tag.jump { border-color: rgba(99, 102, 241, 0.45); background: rgba(99, 102, 241, 0.14); color: var(--accent-text); }
-    .sim-status-tag.warn { border-color: var(--amber-border); background: var(--amber-bg); color: var(--amber-text); }
-    .sim-status-tag.err { border-color: var(--err-border); background: var(--err-bg); color: var(--err-text); }
-    .sim-status-tag.muted { border-color: var(--border); background: var(--bg-input); color: var(--text-muted); }
-    body.light .sim-status-tag.ok { color: #047857; }
+    .sim-tone-ok { color: #34d399; font-weight: 600; }
+    .sim-tone-jump { color: var(--accent-text); font-weight: 600; }
+    .sim-tone-warn { color: var(--amber-text); font-weight: 600; }
+    .sim-tone-err { color: var(--err-text); font-weight: 600; }
+    .sim-tone-muted { color: var(--text-muted); font-weight: 600; }
+    body.light .sim-tone-ok { color: #047857; }
     @media (max-width: 960px) {
       main { flex-direction: column; }
       aside { width: 100%; height: 46vh; border-left: none; border-top: 1px solid var(--border); }
@@ -4382,7 +4672,7 @@ export function generateInteractiveCallflowHtml(
       <div class="view-bar" id="view-bar">
         <div class="script-dropdown-wrap" id="script-dropdown-wrap">
           <button type="button" class="script-dropdown-btn" id="script-dropdown-btn" title="Skript oder Ebene wählen">
-            <span id="script-dropdown-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Master-Gesamtkarte</span>
+            <span id="script-dropdown-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Startseite · Ansicht wählen</span>
             <span style="opacity:0.6;font-size:10px;">▼</span>
           </button>
           <div class="script-dropdown-popover" id="script-dropdown-popover" style="display:none;">
@@ -4400,6 +4690,7 @@ export function generateInteractiveCallflowHtml(
         <button type="button" id="btn-call-simulator" style="display:none;padding:3px 9px;font-size:11px;font-weight:600;border-radius:6px;border:1px solid rgba(16,185,129,0.45);background:rgba(16,185,129,0.14);color:#34d399;cursor:pointer;align-items:center;gap:5px;white-space:nowrap;flex-shrink:0;" title="Interaktiver Anruf-Simulator live auf dem Callflow (Play/Pause, Vor &amp; Zurück)">Anruf-Simulator</button>
         <button type="button" id="btn-global-search" title="Globale Suche über alle Skripte, DNIS, Queues &amp; Ansagen (Strg+K)" style="white-space:nowrap;">Suche <span style="opacity:0.65;font-family:ui-monospace,monospace;font-size:10px;">Strg+K</span></button>
         <button id="btn-master-back" style="display:none;" title="Zurück zur Master-Gesamtkarte (Ebene 1)">← Master-Karte</button>
+        <button id="btn-welcome-home" style="display:none;" title="Zurück zur leeren Willkommensseite (Ansicht schließen)">Startseite</button>
       </div>
       <div class="seg-group" id="pathmode-group" title="Pfad-Färbung umschalten: Modus A (Semantik) vs. Modus B (Verzweigungen)">
         <button class="seg-btn${initialPathColorMode === 'semantic' ? ' active' : ''}" data-pathmode="semantic">A: Semantik</button>
@@ -4435,10 +4726,11 @@ export function generateInteractiveCallflowHtml(
       <div id="canvas-wrap">
         <div id="svg-stage">
           <div id="svg-stage-frame">
-            <div id="svg-layer">${initialSvg}</div>
+            <div id="svg-layer"></div>
             <img id="gpu-proxy-layer" alt="" draggable="false" />
           </div>
         </div>
+        <div id="welcome-overlay" class="open" aria-label="Schnellstart Willkommensseite"></div>
         <div id="minimap-box" aria-label="Diagramm-Minimap">
           <div class="minimap-head">
             <span id="minimap-zoom-label">Minimap</span>
@@ -4637,8 +4929,8 @@ export function generateInteractiveCallflowHtml(
     const viewsByKey = new Map(PAYLOAD.views.map(v => [v.key, v]));
     let isDarkSurface = PAYLOAD.initialSurface !== 'light';
     let activeViewKey = PAYLOAD.initialViewKey;
-    let GRAPH = viewsByKey.get(activeViewKey).graph;
-    let nodeMap = new Map(GRAPH.nodes.map(n => [n.id, n]));
+    let GRAPH = (viewsByKey.get(activeViewKey) || { graph: { nodes: [], edges: [] } }).graph;
+    let nodeMap = new Map((GRAPH.nodes || []).map(n => [n.id, n]));
 
     const scriptDropdownWrap = document.getElementById('script-dropdown-wrap');
     const scriptDropdownBtn = document.getElementById('script-dropdown-btn');
@@ -4647,6 +4939,7 @@ export function generateInteractiveCallflowHtml(
     const scriptDropdownSearch = document.getElementById('script-dropdown-search');
     const scriptDropdownItems = document.getElementById('script-dropdown-items');
     const masterBackBtn = document.getElementById('btn-master-back');
+    const welcomeHomeBtn = document.getElementById('btn-welcome-home');
     const masterDensityGroup = document.getElementById('master-density-group');
     const selectEl = document.getElementById('node-select');
     const searchEl = document.getElementById('node-search');
@@ -4660,6 +4953,7 @@ export function generateInteractiveCallflowHtml(
     const stageFrame = document.getElementById('svg-stage-frame');
     const svgLayer = document.getElementById('svg-layer');
     const gpuProxyImg = document.getElementById('gpu-proxy-layer');
+    const welcomeOverlay = document.getElementById('welcome-overlay');
     const wrap = document.getElementById('canvas-wrap');
 
     let masterDensity = PAYLOAD.initialMasterDensity || 'compact';
@@ -4700,7 +4994,8 @@ export function generateInteractiveCallflowHtml(
     function getActiveMasterViewKey() {
       if (masterDensity === 'detailed' && viewsByKey.has('master:detailed')) return 'master:detailed';
       if (viewsByKey.has('master')) return 'master';
-      return viewsByKey.has('master:detailed') ? 'master:detailed' : PAYLOAD.initialViewKey;
+      if (viewsByKey.has('master:detailed')) return 'master:detailed';
+      return PAYLOAD.defaultTargetViewKey || (PAYLOAD.views[0] && PAYLOAD.views[0].key) || 'current';
     }
 
     function getCurrentThemeSig() {
@@ -5039,16 +5334,26 @@ export function generateInteractiveCallflowHtml(
       document.documentElement.classList.toggle('light', !isDarkSurface);
       document.documentElement.classList.toggle('dark', isDarkSurface);
       if (themeBtn) themeBtn.textContent = isDarkSurface ? '☀ Hell' : '☾ Dunkel';
+      if (activeViewKey === 'welcome') {
+        renderWelcomeOverlay();
+        return;
+      }
       const activeSvg = svgLayer.querySelector('svg');
-      applySvgSurfaceTheme(activeSvg, GRAPH, true);
-      viewThemeSigCache.set(activeViewKey, getCurrentThemeSig());
-      ensureGpuProxyForView(activeViewKey, activeSvg);
+      if (activeSvg) {
+        applySvgSurfaceTheme(activeSvg, GRAPH, true);
+        viewThemeSigCache.set(activeViewKey, getCurrentThemeSig());
+        ensureGpuProxyForView(activeViewKey, activeSvg);
+      }
       applyCombinedCanvasState(false);
     }
 
     function renderLegendBar(spotlightItems) {
       const bar = document.getElementById('legend-bar');
       if (!bar) return;
+      if (activeViewKey === 'welcome' && !spotlightItems) {
+        bar.innerHTML = '<strong style="color:var(--accent-text);">Schnellstart:</strong><span class="leg-item">Ansicht über Startkarte oder Skript-Menü wählen — Grafik wird erst bei Bedarf gerendert.</span>';
+        return;
+      }
       const items = spotlightItems || currentEdgeLegend;
       const prefix = spotlightItems
         ? '<strong style="color:var(--amber-text);">Aktiver Pfad:</strong>'
@@ -5069,10 +5374,136 @@ export function generateInteractiveCallflowHtml(
       }
     }
 
+    let welcomeScriptFilterQuery = '';
+    function renderWelcomeOverlay() {
+      if (!welcomeOverlay) return;
+      if (activeViewKey !== 'welcome') {
+        welcomeOverlay.classList.remove('open');
+        return;
+      }
+      welcomeOverlay.classList.add('open');
+
+      const summary = PAYLOAD.welcomeSummary || { title: 'Callflow', viewCount: 0, scriptCount: 0, hasMultiViews: false };
+      const rawViews = PAYLOAD.views || [];
+      const scriptViews = rawViews.filter(v => Boolean(v.scriptNumber));
+      const masterTargetKey = (PAYLOAD.defaultTargetViewKey && isMasterViewKey(PAYLOAD.defaultTargetViewKey))
+        ? getActiveMasterViewKey()
+        : (viewsByKey.has('master') || viewsByKey.has('master:detailed'))
+        ? getActiveMasterViewKey()
+        : (PAYLOAD.defaultTargetViewKey || (rawViews[0] && rawViews[0].key) || '');
+      const hasMainBtn = Boolean(PAYLOAD.mainViewKey && viewsByKey.has(PAYLOAD.mainViewKey));
+      const hasSchedBtn = Boolean(PAYLOAD.analysis && Array.isArray(PAYLOAD.analysis.scheduleRows) && PAYLOAD.analysis.scheduleRows.length > 0);
+      const hasSimBtn = Boolean(PAYLOAD.simulationModel && Array.isArray(PAYLOAD.simulationModel.scripts) && PAYLOAD.simulationModel.scripts.length > 0);
+
+      const subtitleText = summary.scriptCount > 0
+        ? summary.scriptCount + ' Skripte geladen · Das Hauptscript wird für maximale Geschwindigkeit erst bei Klick geladen.'
+        : 'Callflow geladen · Das Diagramm wird erst bei Bedarf gerendert.';
+
+      const primaryLabel = summary.hasMultiViews
+        ? 'Hauptscript (Master-Karte) laden'
+        : 'Diagramm jetzt laden';
+
+      let html =
+        '<div class="welcome-card">' +
+          '<div>' +
+            '<div class="welcome-eyebrow">Schnellstart · Leere Willkommensseite</div>' +
+            '<h2 class="welcome-title">' + esc(summary.title || 'Callflow') + '</h2>' +
+            '<p class="welcome-sub">' + esc(subtitleText) + '</p>' +
+          '</div>' +
+          '<div class="welcome-actions">' +
+            '<button type="button" class="primary welcome-btn-main-primary" id="welcome-btn-master">' + esc(primaryLabel) + '</button>' +
+            (hasMainBtn ? '<button type="button" class="amber" id="welcome-btn-main">Main öffnen</button>' : '') +
+          '</div>';
+
+      if (scriptViews.length > 0) {
+        html +=
+          '<div class="welcome-picker">' +
+            '<span class="welcome-picker-label">Oder direkt einzelnes Skript ohne Master-Render öffnen:</span>' +
+            '<input type="text" id="welcome-script-search" placeholder="Skript auswählen (Nr., Name)..." value="' + esc(welcomeScriptFilterQuery) + '" />' +
+            '<div class="welcome-script-list" id="welcome-script-list"></div>' +
+          '</div>';
+      }
+
+      html +=
+        '<div class="welcome-footer">' +
+          '<button type="button" id="welcome-btn-search">Suche (Strg+K)</button>' +
+          (hasSimBtn ? '<button type="button" id="welcome-btn-sim" style="border-color:rgba(16,185,129,0.45);color:#34d399;">Anruf-Simulator</button>' : '') +
+          (hasSchedBtn ? '<button type="button" id="welcome-btn-sched" class="amber">Öffnungszeiten</button>' : '') +
+        '</div>' +
+      '</div>';
+
+      welcomeOverlay.innerHTML = html;
+
+      const btnMaster = document.getElementById('welcome-btn-master');
+      if (btnMaster && masterTargetKey) {
+        btnMaster.addEventListener('click', () => switchView(masterTargetKey));
+      }
+      const btnMain = document.getElementById('welcome-btn-main');
+      if (btnMain && PAYLOAD.mainViewKey) {
+        btnMain.addEventListener('click', () => switchView(PAYLOAD.mainViewKey));
+      }
+      const btnSearch = document.getElementById('welcome-btn-search');
+      if (btnSearch) {
+        btnSearch.addEventListener('click', () => openGlobalSearchModal());
+      }
+      const btnSim = document.getElementById('welcome-btn-sim');
+      if (btnSim) {
+        btnSim.addEventListener('click', () => openCallSimHud());
+      }
+      const btnSched = document.getElementById('welcome-btn-sched');
+      if (btnSched) {
+        btnSched.addEventListener('click', () => openSchedulesModal(''));
+      }
+
+      const listEl = document.getElementById('welcome-script-list');
+      const searchInp = document.getElementById('welcome-script-search');
+      const fillScriptList = (q) => {
+        if (!listEl) return;
+        const needle = (q || '').trim().toLowerCase();
+        const matches = needle
+          ? scriptViews.filter(v => (v.label || '').toLowerCase().includes(needle) || String(v.scriptNumber || '').toLowerCase().includes(needle))
+          : scriptViews;
+        listEl.innerHTML = '';
+        if (matches.length === 0) {
+          const emptyDiv = document.createElement('div');
+          emptyDiv.style.cssText = 'padding:10px;text-align:center;font-size:11px;color:var(--text-muted);';
+          emptyDiv.textContent = 'Kein passendes Skript gefunden.';
+          listEl.appendChild(emptyDiv);
+          return;
+        }
+        matches.forEach(v => {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'welcome-script-item';
+          btn.textContent = v.label.replace(/^Ebene 2:\\s*/i, '');
+          btn.addEventListener('click', () => switchView(v.key));
+          listEl.appendChild(btn);
+        });
+      };
+      fillScriptList(welcomeScriptFilterQuery);
+      if (searchInp) {
+        searchInp.addEventListener('input', () => {
+          welcomeScriptFilterQuery = searchInp.value || '';
+          fillScriptList(welcomeScriptFilterQuery);
+        });
+      }
+    }
+
     function populateViewSelect(filterQuery) {
       if (!scriptDropdownItems) return;
       const q = (filterQuery !== undefined ? filterQuery : (scriptDropdownSearch ? scriptDropdownSearch.value : '')).trim().toLowerCase();
       scriptDropdownItems.innerHTML = '';
+
+      if (!q || 'startseite'.includes(q) || 'willkommen'.includes(q) || 'leer'.includes(q) || 'home'.includes(q)) {
+        const homeEl = document.createElement('div');
+        homeEl.className = 'script-dropdown-item' + (activeViewKey === 'welcome' ? ' selected' : '');
+        homeEl.textContent = 'Startseite (Leere Willkommensseite)';
+        homeEl.addEventListener('click', () => {
+          switchView('welcome');
+          if (scriptDropdownPopover) scriptDropdownPopover.style.display = 'none';
+        });
+        scriptDropdownItems.appendChild(homeEl);
+      }
 
       // Show a single Master entry (mapping to active masterDensity) plus all Detail scripts
       const rawViews = PAYLOAD.views || [];
@@ -5089,10 +5520,14 @@ export function generateInteractiveCallflowHtml(
         : views;
 
       const activeView = viewsByKey.get(activeViewKey);
-      if (scriptDropdownLabel && activeView) {
-        scriptDropdownLabel.textContent = isMasterViewKey(activeView.key)
-          ? activeView.label.replace(/\\s*\\((?:Kompakt|Voll-Detail)\\)$/i, '')
-          : activeView.label;
+      if (scriptDropdownLabel) {
+        if (activeViewKey === 'welcome') {
+          scriptDropdownLabel.textContent = 'Startseite · Ansicht wählen';
+        } else if (activeView) {
+          scriptDropdownLabel.textContent = isMasterViewKey(activeView.key)
+            ? activeView.label.replace(/\\s*\\((?:Kompakt|Voll-Detail)\\)$/i, '')
+            : activeView.label;
+        }
       }
 
       if (filtered.length === 0) {
@@ -5118,7 +5553,10 @@ export function generateInteractiveCallflowHtml(
       }
 
       if (masterBackBtn) {
-        masterBackBtn.style.display = (PAYLOAD.views.length > 1 && !isMasterViewKey(activeViewKey)) ? 'inline-block' : 'none';
+        masterBackBtn.style.display = (PAYLOAD.views.length > 1 && activeViewKey !== 'welcome' && !isMasterViewKey(activeViewKey)) ? 'inline-block' : 'none';
+      }
+      if (welcomeHomeBtn) {
+        welcomeHomeBtn.style.display = activeViewKey !== 'welcome' ? 'inline-block' : 'none';
       }
       syncMasterDensityUi();
     }
@@ -5482,11 +5920,33 @@ export function generateInteractiveCallflowHtml(
     }
 
     function switchView(nextKey) {
+      if (nextKey === 'welcome') {
+        delete wrap.dataset.gpuProxy;
+        applyProxyImgElement(null);
+        activeViewKey = 'welcome';
+        GRAPH = { nodes: [], edges: [] };
+        nodeMap = new Map();
+        activeNodeId = '';
+        activeEdge = null;
+        svgLayer.replaceChildren();
+        zoom = 1;
+        panX = 0;
+        panY = 0;
+        renderWelcomeOverlay();
+        populateViewSelect();
+        populateSelect();
+        renderNodeTypeFilters();
+        applyCombinedCanvasState(false);
+        updateMinimapViewport();
+        return;
+      }
+
       const nextView = viewsByKey.get(nextKey);
       if (!nextView) return;
       if (nextKey === 'master') masterDensity = 'compact';
       else if (nextKey === 'master:detailed') masterDensity = 'detailed';
 
+      if (welcomeOverlay) welcomeOverlay.classList.remove('open');
       delete wrap.dataset.gpuProxy;
       activeViewKey = nextKey;
       GRAPH = nextView.graph;
@@ -5632,6 +6092,7 @@ export function generateInteractiveCallflowHtml(
     }
 
     wrap.addEventListener('wheel', e => {
+      if (activeViewKey === 'welcome' || (e.target && e.target.closest && e.target.closest('#welcome-overlay'))) return;
       e.preventDefault();
       const rect = wrap.getBoundingClientRect();
       const cursorOffsetX = e.clientX - (rect.left + rect.width / 2);
@@ -5646,6 +6107,7 @@ export function generateInteractiveCallflowHtml(
     }, { passive: false });
 
     wrap.addEventListener('mousedown', e => {
+      if (activeViewKey === 'welcome' || (e.target && e.target.closest && e.target.closest('#welcome-overlay'))) return;
       isDragging = true;
       didDrag = false;
       downClientX = e.clientX;
@@ -5668,6 +6130,7 @@ export function generateInteractiveCallflowHtml(
       setTimeout(() => { didDrag = false; }, 0);
     });
     wrap.addEventListener('click', e => {
+      if (activeViewKey === 'welcome' || (e.target && e.target.closest && e.target.closest('#welcome-overlay'))) return;
       if (didDrag) return;
       const directNodeId = e.target && e.target.closest ? resolveNodeId(e.target) : null;
       if (directNodeId) return; // handled by SVG node listener
@@ -5686,6 +6149,7 @@ export function generateInteractiveCallflowHtml(
       }
     });
     wrap.addEventListener('dblclick', e => {
+      if (activeViewKey === 'welcome' || (e.target && e.target.closest && e.target.closest('#welcome-overlay'))) return;
       const directNodeId = e.target && e.target.closest ? resolveNodeId(e.target) : null;
       const targetNodeId = directNodeId || hitTestNodeAtClientPoint(e.clientX, e.clientY);
       if (targetNodeId) {
@@ -6086,8 +6550,9 @@ export function generateInteractiveCallflowHtml(
         updateClusterVisibility(visibleSvgNodes);
         renderLegendBar(null);
 
-        document.getElementById('selected-info').innerHTML =
-          '<strong>' + visibleSvgNodes.length + ' von ' + GRAPH.nodes.length + ' Knoten</strong> und <strong>' + GRAPH.edges.length + ' Verbindungen</strong> im Diagramm.';
+        document.getElementById('selected-info').innerHTML = activeViewKey === 'welcome'
+          ? 'Willkommensseite aktiv — Hauptscript oder einzelnes Skript wählen, um den Callflow zu rendern.'
+          : '<strong>' + visibleSvgNodes.length + ' von ' + GRAPH.nodes.length + ' Knoten</strong> und <strong>' + GRAPH.edges.length + ' Verbindungen</strong> im Diagramm.';
         drillSlot.innerHTML = '';
         cycleCard.style.display = 'none';
         const filterFn = n => (!q || n.label.toLowerCase().includes(q) || n.id.toLowerCase().includes(q)) && allowedByType.has(n.id);
@@ -6361,12 +6826,12 @@ export function generateInteractiveCallflowHtml(
     }
 
     function jumpToScriptOrNode(scriptRef, preferredNodeTextOrId) {
-      let targetViewKey = activeViewKey;
+      let targetViewKey = activeViewKey === 'welcome' ? getActiveMasterViewKey() : activeViewKey;
       if (scriptRef && PAYLOAD.viewKeyByScriptNumber) {
         const vk = PAYLOAD.viewKeyByScriptNumber[scriptRef] || PAYLOAD.viewKeyByScriptNumber[String(scriptRef).toLowerCase()];
         if (vk && viewsByKey.has(vk)) targetViewKey = vk;
       }
-      if (targetViewKey !== activeViewKey) {
+      if (targetViewKey && targetViewKey !== activeViewKey) {
         switchView(targetViewKey);
       }
       // Try finding exact or matching node in current GRAPH
@@ -7399,6 +7864,9 @@ export function generateInteractiveCallflowHtml(
     if (masterBackBtn) {
       masterBackBtn.addEventListener('click', () => switchView(getActiveMasterViewKey()));
     }
+    if (welcomeHomeBtn) {
+      welcomeHomeBtn.addEventListener('click', () => switchView('welcome'));
+    }
 
     document.querySelectorAll('#pathmode-group .seg-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -7406,9 +7874,11 @@ export function generateInteractiveCallflowHtml(
         btn.classList.add('active');
         pathColorMode = btn.getAttribute('data-pathmode') || 'semantic';
         const activeSvg = svgLayer.querySelector('svg');
-        recolorExportEdges(activeSvg, GRAPH, true);
-        viewThemeSigCache.set(activeViewKey, getCurrentThemeSig());
-        ensureGpuProxyForView(activeViewKey, activeSvg);
+        if (activeSvg && activeViewKey !== 'welcome') {
+          recolorExportEdges(activeSvg, GRAPH, true);
+          viewThemeSigCache.set(activeViewKey, getCurrentThemeSig());
+          ensureGpuProxyForView(activeViewKey, activeSvg);
+        }
         if (activeNodeId || activeEdge) {
           applyCombinedCanvasState(false);
         } else {
@@ -7692,7 +8162,7 @@ export function generateInteractiveCallflowHtml(
       const targetViewKey =
         (entry.viewKey && viewsByKey.has(entry.viewKey) ? entry.viewKey : null) ||
         (entry.scriptNumber && PAYLOAD.viewKeyByScriptNumber[entry.scriptNumber]) ||
-        activeViewKey;
+        (activeViewKey === 'welcome' ? getActiveMasterViewKey() : activeViewKey);
       if (targetViewKey && targetViewKey !== activeViewKey) {
         switchView(targetViewKey);
       }
@@ -7823,9 +8293,25 @@ export function generateInteractiveCallflowHtml(
     const simNow = new Date();
     const simDayOrder = ['so', 'mo', 'di', 'mi', 'do', 'fr', 'sa'];
     const SIM_SPEED_MS = { 0.5: 2800, 1: 1500, 1.5: 1000, 2: 680 };
+    const SIM_QUEUE_MODES = [
+      { id: 'normal', label: 'Normal (Agent frei)', shortLabel: 'Normal', desc: 'Zustellung in der ersten passenden Warteschlange.' },
+      { id: 'no-agents', label: 'Keine Agenten', shortLabel: 'Unbesetzt', desc: 'Simuliert unbesetztes Skillset (NOT LOGGED) und prüft Überlauf.' },
+      { id: 'queue-full', label: 'Queue voll / Besetzt', shortLabel: 'Besetzt', desc: 'Simuliert volle Warteschlange (BUSY / FULL) und prüft Ausweichziele.' },
+      { id: 'wait-timeout', label: 'Wartezeit-Überlauf', shortLabel: 'Timeout', desc: 'Simuliert Wartezeit-Ablauf (EWT / Timeout) und folgt dem Überlauf.' }
+    ];
+    const SIM_MATRIX_PRESETS = [
+      { id: 'workday', label: 'Werktag', shortTime: 'Mo 10:00', weekday: 'mo', timeHHMM: '10:00', isHoliday: false, isSondZeit: false },
+      { id: 'evening', label: 'Abend', shortTime: 'Di 20:00', weekday: 'di', timeHHMM: '20:00', isHoliday: false, isSondZeit: false },
+      { id: 'saturday', label: 'Samstag', shortTime: 'Sa 11:00', weekday: 'sa', timeHHMM: '11:00', isHoliday: false, isSondZeit: false },
+      { id: 'sunday', label: 'Sonntag', shortTime: 'So 12:00', weekday: 'so', timeHHMM: '12:00', isHoliday: false, isSondZeit: false },
+      { id: 'holiday', label: 'Feiertag', shortTime: 'Mo 10:00 · FT', weekday: 'mo', timeHHMM: '10:00', isHoliday: true, isSondZeit: false },
+      { id: 'sondzeit', label: 'SondZeit / Notfall', shortTime: 'Mo 10:00 · SZ', weekday: 'mo', timeHHMM: '10:00', isHoliday: false, isSondZeit: true }
+    ];
+    const SIM_KEYPAD_DIGITS = ['1','2','3','4','5','6','7','8','9','*','0','#'];
     const simState = {
       active: false,
-      setupOpen: true,
+      proPanelOpen: true,
+      proTab: 'scenario',
       isPlaying: false,
       stepIndex: 0,
       speed: 1,
@@ -7835,6 +8321,8 @@ export function generateInteractiveCallflowHtml(
       timeHHMM: String(simNow.getHours()).padStart(2, '0') + ':' + String(simNow.getMinutes()).padStart(2, '0'),
       isHoliday: false,
       isSondZeit: false,
+      queueMode: 'normal',
+      maxWaitOverrideSeconds: 30,
       showSkipped: false,
       dtmfChoices: {},
       dynamicOverrides: {},
@@ -7848,6 +8336,10 @@ export function generateInteractiveCallflowHtml(
       callSimHud.addEventListener('touchstart', e => e.stopPropagation());
     }
 
+    function simFormatMMSS(sec) {
+      const s = Math.max(0, Math.round(Number(sec) || 0));
+      return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+    }
     function simParseClockMin(raw) {
       const m = String(raw || '').trim().match(/^(\d{1,2})[:.](\d{2})$/);
       if (!m) return 600;
@@ -7873,31 +8365,69 @@ export function generateInteractiveCallflowHtml(
       return String(ref || '').trim().toLowerCase().replace(/^0+(?=\d)/, '');
     }
     function simNodeSuffix(ref) {
-      return String(ref || '').replace(/[^A-Za-z0-9_]/g, '_');
+      return String(ref || '')
+        .replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue')
+        .replace(/Ä/g, 'Ae').replace(/Ö/g, 'Oe').replace(/Ü/g, 'Ue').replace(/ß/g, 'ss')
+        .replace(/[^A-Za-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'Item';
+    }
+    function simDescribeQueueMode(mode, waitSec) {
+      if (mode === 'no-agents') return 'Keine Agenten eingeloggt (Not Staffed) — Überlauf ausgelöst';
+      if (mode === 'queue-full') return 'Warteschlange voll / besetzt — Überlauf ausgelöst';
+      if (mode === 'wait-timeout') return 'Wartezeit-Überlauf nach ' + waitSec + ' s (EWT/Timeout)';
+      return 'Standard-Zustellung';
     }
 
-    function runHtmlCallSimulation() {
+    function runHtmlCallSimulation(overrideInput) {
+      const cfg = Object.assign({
+        startScriptNumber: simState.startScriptNumber,
+        dialedDnis: simState.dialedDnis,
+        weekday: simState.weekday,
+        timeHHMM: simState.timeHHMM,
+        isHoliday: simState.isHoliday,
+        isSondZeit: simState.isSondZeit,
+        queueMode: simState.queueMode,
+        maxWaitOverrideSeconds: simState.maxWaitOverrideSeconds,
+        dtmfChoices: simState.dtmfChoices,
+        dynamicOverrides: simState.dynamicOverrides,
+      }, overrideInput || {});
+
       const byKey = new Map();
+      const regAlias = (k, s) => {
+        if (!k) return;
+        if (!byKey.has(k)) byKey.set(k, s);
+        const ck = simCanonicalKey(k);
+        if (ck && !byKey.has(ck)) byKey.set(ck, s);
+      };
       (SIM_MODEL.scripts || []).forEach(s => {
         byKey.set(s.scriptNumber, s);
         byKey.set(simCanonicalKey(s.scriptNumber), s);
-        if (s.cdnAlias) {
-          byKey.set(s.cdnAlias, s);
-          byKey.set(simCanonicalKey(s.cdnAlias), s);
+        regAlias(simNodeSuffix(s.scriptNumber), s);
+        if (s.cdnAlias) regAlias(s.cdnAlias, s);
+        const nm = String(s.scriptName || '').trim();
+        if (nm.length >= 3 && !/^(?:main|start)$/i.test(nm)) {
+          regAlias(nm, s);
+          regAlias(nm.replace(/\s+/g, '_'), s);
         }
       });
       const resolveS = ref => (!ref ? null : byKey.get(ref) || byKey.get(simCanonicalKey(ref)) || null);
-      const startScript = resolveS(simState.startScriptNumber) || SIM_MODEL.scripts[0];
+      const startScript = resolveS(cfg.startScriptNumber) || SIM_MODEL.scripts[0];
       if (!startScript) {
-        return { outcomeType: 'script-end', outcomeTitle: 'Kein Skript geladen', outcomeDetail: '', finalScriptNumber: '', visitedScripts: [], totalWaitSeconds: 0, steps: [], dynamicPrompts: [] };
+        return { outcomeType: 'script-end', outcomeTitle: 'Kein Skript geladen', outcomeDetail: '', finalScriptNumber: '', visitedScripts: [], totalWaitSeconds: 0, overflowTriggered: false, steps: [], dtmfHistory: [], dynamicPrompts: [] };
       }
 
       const dayLabels = { mo: 'Mo', di: 'Di', mi: 'Mi', do: 'Do', fr: 'Fr', sa: 'Sa', so: 'So' };
-      const tMin = simParseClockMin(simState.timeHHMM);
+      const qMode = cfg.queueMode || 'normal';
+      const qMeta = SIM_QUEUE_MODES.find(q => q.id === qMode) || SIM_QUEUE_MODES[0];
+      const defaultOverflowWait = Math.max(5, Number(cfg.maxWaitOverrideSeconds) || 30);
+      const tMin = simParseClockMin(cfg.timeHHMM);
       const steps = [];
       const visitedScripts = [];
       const dynamicPrompts = [];
+      const dtmfHistory = [];
       let totalWaitSeconds = 0;
+      let elapsedSeconds = 0;
+      let overflowTriggered = false;
+      let overflowQueueName = '';
       let current = startScript;
       let lastAnnouncement = '';
       let hop = 0;
@@ -7908,14 +8438,22 @@ export function generateInteractiveCallflowHtml(
         scriptName: startScript.scriptName,
         kind: 'entry',
         statusLabel: 'Start',
+        elapsedSeconds: 0,
         title: 'Anruf-Eingang: ' + startScript.scriptNumber + ' · ' + startScript.scriptName,
         detail: [
-          simState.dialedDnis ? 'DNIS ' + simState.dialedDnis : null,
-          dayLabels[simState.weekday] + ' ' + simState.timeHHMM,
-          simState.isHoliday ? 'Feiertag aktiv' : null,
-          simState.isSondZeit ? 'SondZeit aktiv' : null,
+          cfg.dialedDnis ? 'DNIS ' + cfg.dialedDnis : null,
+          dayLabels[cfg.weekday] + ' ' + cfg.timeHHMM,
+          cfg.isHoliday ? 'Feiertag aktiv' : null,
+          cfg.isSondZeit ? 'SondZeit aktiv' : null,
+          qMode !== 'normal' ? 'Queue-Test: ' + qMeta.shortLabel : null,
         ].filter(Boolean).join(' · '),
         reason: 'Startpunkt der Simulation',
+        callerEvent: {
+          kind: 'ring',
+          label: 'Anrufaufbau',
+          text: cfg.dialedDnis ? 'Anrufer wählt ' + cfg.dialedDnis + ' (' + startScript.scriptName + ')' : 'Eingehender Anruf auf ' + startScript.scriptName + ' (' + startScript.scriptNumber + ')',
+          elapsedSeconds: 0,
+        },
         targetNodeId: startScript.entryNodeId || ('SELF_' + simNodeSuffix(startScript.scriptNumber)),
         fallbackNodeId: 'S_' + simNodeSuffix(startScript.scriptNumber),
       });
@@ -7929,13 +8467,15 @@ export function generateInteractiveCallflowHtml(
             scriptName: current.scriptName,
             kind: 'cycle-guard',
             statusLabel: 'Zyklus',
+            elapsedSeconds,
             title: 'Rücksprung / Zyklus erkannt (' + current.scriptNumber + ')',
             detail: 'Skript wurde bereits durchlaufen.',
             reason: 'Zyklus-Schutz',
+            callerEvent: { kind: 'overflow', label: 'Rücksprung', text: 'Rücksprung zu Skript ' + current.scriptNumber + ' erkannt', elapsedSeconds },
             targetNodeId: current.entryNodeId || ('SELF_' + simNodeSuffix(current.scriptNumber)),
             fallbackNodeId: 'S_' + simNodeSuffix(current.scriptNumber),
           });
-          return { outcomeType: 'cycle', outcomeTitle: 'Zyklus bei Skript ' + current.scriptNumber, outcomeDetail: 'Routing kehrt zu ' + current.scriptNumber + ' zurück.', finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+          return { outcomeType: 'cycle', outcomeTitle: 'Zyklus bei Skript ' + current.scriptNumber, outcomeDetail: 'Routing kehrt zu ' + current.scriptNumber + ' zurück.', finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, overflowTriggered, steps, dtmfHistory, dynamicPrompts };
         }
         if (visitedScripts.length > 0) {
           steps.push({
@@ -7944,6 +8484,7 @@ export function generateInteractiveCallflowHtml(
             scriptName: current.scriptName,
             kind: 'entry',
             statusLabel: 'Skript-Wechsel',
+            elapsedSeconds,
             title: 'Eintritt in Zielskript ' + current.scriptNumber + ' · ' + current.scriptName,
             detail: (current.rules || []).length + ' Routing-Regeln werden nach Priorität geprüft.',
             reason: 'Automatischer Wechsel in das aufgerufene Zielskript',
@@ -7953,6 +8494,8 @@ export function generateInteractiveCallflowHtml(
         }
         visitedScripts.push(current.scriptNumber);
         let jumped = null;
+        let localOverflowPending = false;
+        let skippedQueuesHere = 0;
 
         for (let rIdx = 0; rIdx < (current.rules || []).length; rIdx++) {
           const rule = current.rules[rIdx];
@@ -7962,13 +8505,13 @@ export function generateInteractiveCallflowHtml(
           let reason = 'Standard-Regel';
 
           if (rule.dnisMatchValues && rule.dnisMatchValues.length > 0) {
-            if (simState.dialedDnis.trim()) {
-              const hit = rule.dnisMatchValues.some(v => simDnisMatches(simState.dialedDnis, v));
+            if (String(cfg.dialedDnis || '').trim()) {
+              const hit = rule.dnisMatchValues.some(v => simDnisMatches(cfg.dialedDnis, v));
               if (!hit) {
                 matched = false;
-                reason = 'DNIS ' + simState.dialedDnis + ' passt nicht zu ' + rule.dnisMatchValues.slice(0, 3).join(', ');
+                reason = 'DNIS ' + cfg.dialedDnis + ' passt nicht zu ' + rule.dnisMatchValues.slice(0, 3).join(', ');
               } else {
-                reason = 'DNIS ' + simState.dialedDnis + ' trifft Regel';
+                reason = 'DNIS ' + cfg.dialedDnis + ' trifft Regel';
               }
             } else if (current.isMaster) {
               matched = false;
@@ -7977,12 +8520,12 @@ export function generateInteractiveCallflowHtml(
           }
 
           if (matched && rule.isHolidayRule) {
-            if (simState.isHoliday) reason = 'Feiertag aktiv — Feiertagsregel greift';
+            if (cfg.isHoliday) reason = 'Feiertag aktiv — Feiertagsregel greift';
             else { matched = false; reason = 'Kein Feiertag aktiv'; }
           }
 
           if (matched && rule.isSondZeitRule) {
-            if (simState.isSondZeit) reason = 'SondZeit aktiv — Sonderregel greift';
+            if (cfg.isSondZeit) reason = 'SondZeit aktiv — Sonderregel greift';
             else { matched = false; reason = 'SondZeit inaktiv'; }
           }
 
@@ -7990,7 +8533,7 @@ export function generateInteractiveCallflowHtml(
             const hasDays = Array.isArray(rule.weekdays) && rule.weekdays.length > 0;
             const hasTimes = Array.isArray(rule.timeRanges) && rule.timeRanges.length > 0;
             if (hasDays || hasTimes) {
-              const dayOk = !hasDays || rule.weekdays.includes(simState.weekday);
+              const dayOk = !hasDays || rule.weekdays.includes(cfg.weekday);
               const timeOk = !hasTimes || rule.timeRanges.some(r => simTimeMatches(tMin, r));
               const isNeg = /\b(nicht|not|außerhalb|ausserhalb|closed|geschlossen|else|sonst)\b/i.test((rule.conditionRaw || '') + ' ' + (rule.stepName || ''));
               const finalHit = isNeg ? !(dayOk && timeOk) : (dayOk && timeOk);
@@ -8011,11 +8554,16 @@ export function generateInteractiveCallflowHtml(
 
           if (matched && rule.isDynamicCondition) {
             const dynKey = current.scriptNumber + ':' + rule.id;
-            const isAct = simState.dynamicOverrides[dynKey] === true;
-            dynamicPrompts.push({ key: dynKey, scriptNumber: current.scriptNumber, prio: rule.prio, label: rule.conditionRaw || rule.stepName, active: isAct });
+            const hasExplicit = Object.prototype.hasOwnProperty.call(cfg.dynamicOverrides || {}, dynKey);
+            const autoMatch = qMode !== 'normal' && (rule.dynamicCategory === qMode || (qMode === 'wait-timeout' && Boolean(rule.isOverflowRule)));
+            const isAct = hasExplicit ? cfg.dynamicOverrides[dynKey] === true : autoMatch;
+            dynamicPrompts.push({ key: dynKey, scriptNumber: current.scriptNumber, prio: rule.prio, label: rule.conditionRaw || rule.stepName, active: isAct, autoActivatedByQueueMode: !hasExplicit && autoMatch });
             if (!isAct) {
               matched = false;
               reason = 'Laufzeit-Bedingung inaktiv (umschaltbar)';
+            } else if (!hasExplicit && autoMatch) {
+              overflowTriggered = true;
+              reason = 'Aktiviert durch Queue-Test (' + qMeta.shortLabel + ')';
             } else {
               reason = 'Laufzeit-Bedingung manuell aktiviert';
             }
@@ -8029,6 +8577,7 @@ export function generateInteractiveCallflowHtml(
               prio: rule.prio,
               kind: 'rule-skipped',
               statusLabel: 'Übersprungen',
+              elapsedSeconds,
               title: 'Prio ' + rule.prio + ' · ' + rule.stepName,
               detail: rule.conditionRaw || rule.scheduleRaw || 'Bedingung nicht erfüllt',
               reason,
@@ -8038,12 +8587,14 @@ export function generateInteractiveCallflowHtml(
             continue;
           }
 
-          if (typeof rule.waitSeconds === 'number' && rule.waitSeconds > 0) totalWaitSeconds += rule.waitSeconds;
+          const ruleWait = typeof rule.waitSeconds === 'number' && rule.waitSeconds > 0 ? rule.waitSeconds : 0;
+          if (ruleWait > 0) { totalWaitSeconds += ruleWait; elapsedSeconds += ruleWait; }
+          else if (rule.announcement) { elapsedSeconds += 5; }
           if (rule.announcement) lastAnnouncement = rule.announcement;
 
           if (Array.isArray(rule.choices) && rule.choices.length > 0) {
             const dtmfKey = current.scriptNumber + ':' + rule.id;
-            const chosenDigit = simState.dtmfChoices[dtmfKey];
+            const chosenDigit = (cfg.dtmfChoices || {})[dtmfKey];
             const chosen = chosenDigit ? rule.choices.find(c => c.choice === chosenDigit) : null;
             if (!chosen) {
               steps.push({
@@ -8053,9 +8604,17 @@ export function generateInteractiveCallflowHtml(
                 prio: rule.prio,
                 kind: 'dtmf-prompt',
                 statusLabel: 'Wahl nötig',
+                elapsedSeconds,
                 title: 'Prio ' + rule.prio + ' · Auswahlmenü (DTMF)',
-                detail: rule.choices.length + ' Tasten verfügbar — Taste wählen, um fortzufahren.',
+                detail: rule.announcement ? 'Ansage „' + rule.announcement + '“ · ' + rule.choices.length + ' Tasten verfügbar' : rule.choices.length + ' Tasten verfügbar — Taste wählen.',
                 reason,
+                choices: rule.choices,
+                callerEvent: {
+                  kind: 'dtmf-prompt',
+                  label: 'Sprachmenü (DTMF)',
+                  text: rule.announcement ? 'Hört „' + rule.announcement + '“ — wartet auf Taste (' + rule.choices.map(c => c.choice).join(', ') + ')' : 'Auswahlmenü aktiv — Tasten: ' + rule.choices.map(c => c.choice + (c.label ? ' (' + c.label + ')' : '')).join(', '),
+                  elapsedSeconds,
+                },
                 targetNodeId: ruleNodeId,
                 fallbackNodeId: entryFallback,
               });
@@ -8066,11 +8625,14 @@ export function generateInteractiveCallflowHtml(
                 finalScriptNumber: current.scriptNumber,
                 visitedScripts,
                 totalWaitSeconds,
+                overflowTriggered,
                 steps,
+                dtmfHistory,
                 pendingDtmf: { key: dtmfKey, scriptNumber: current.scriptNumber, scriptName: current.scriptName, choices: rule.choices },
                 dynamicPrompts,
               };
             }
+            dtmfHistory.push({ key: dtmfKey, scriptNumber: current.scriptNumber, choice: chosen.choice, label: chosen.label, targetNumber: chosen.targetNumber });
             steps.push({
               index: steps.length + 1,
               scriptNumber: current.scriptNumber,
@@ -8078,35 +8640,114 @@ export function generateInteractiveCallflowHtml(
               prio: rule.prio,
               kind: 'jump',
               statusLabel: 'Erfüllt',
+              elapsedSeconds,
               title: 'Prio ' + rule.prio + ' · Taste ' + chosen.choice + ' gewählt',
               detail: 'Weiterleitung zu ' + chosen.targetNumber + (chosen.label ? ' (' + chosen.label + ')' : ''),
               reason: 'DTMF Taste ' + chosen.choice,
+              callerEvent: { kind: 'dtmf-press', label: 'Taste [' + chosen.choice + ']', text: 'Anrufer drückt [' + chosen.choice + ']' + (chosen.label ? ' — ' + chosen.label : '') + ' → Ziel ' + chosen.targetNumber, elapsedSeconds },
               targetScriptNumber: chosen.targetNumber,
               targetNodeId: chosen.choiceNodeId || ruleNodeId,
               fallbackNodeId: ruleNodeId,
             });
             const nextS = resolveS(chosen.targetNumber);
             if (nextS) { jumped = nextS; break; }
-            return { outcomeType: 'external', outcomeTitle: 'Weiterleitung: ' + chosen.targetNumber, outcomeDetail: 'Taste ' + chosen.choice + ' routet an ' + chosen.targetNumber, finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+            return { outcomeType: 'external', outcomeTitle: 'Weiterleitung: ' + chosen.targetNumber, outcomeDetail: 'Taste ' + chosen.choice + ' routet an ' + chosen.targetNumber, finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, overflowTriggered, steps, dtmfHistory, dynamicPrompts };
           }
 
           if (rule.queueTarget) {
+            const triggerOv = qMode !== 'normal' && skippedQueuesHere === 0 && !localOverflowPending;
+            if (triggerOv) {
+              const addedW = qMode === 'wait-timeout' ? (ruleWait > 0 ? 0 : defaultOverflowWait) : 0;
+              if (addedW > 0) { totalWaitSeconds += addedW; elapsedSeconds += addedW; }
+              overflowTriggered = true;
+              localOverflowPending = true;
+              skippedQueuesHere++;
+              overflowQueueName = rule.queueTarget;
+              const ovReason = simDescribeQueueMode(qMode, ruleWait > 0 ? ruleWait : defaultOverflowWait);
+              const remaining = (current.rules || []).slice(rIdx + 1);
+              const ruleLink = (current.manualTargets || []).find(m => m.fromRuleId === rule.id);
+              const scriptLink = (current.manualTargets || []).find(m => !m.fromRuleId);
+              const hasNextPath = remaining.length > 0 || Boolean(rule.targetNumber) || Boolean(ruleLink) || Boolean(scriptLink);
+
+              steps.push({
+                index: steps.length + 1,
+                scriptNumber: current.scriptNumber,
+                scriptName: current.scriptName,
+                prio: rule.prio,
+                kind: 'overflow',
+                statusLabel: 'Überlauf',
+                elapsedSeconds,
+                isOverflowStep: true,
+                title: 'Prio ' + rule.prio + ' · Überlauf aus Queue ' + rule.queueTarget,
+                detail: [rule.announcement ? 'Ansage: ' + rule.announcement : null, rule.treatmentInfo ? 'Treatment: ' + rule.treatmentInfo : null, (addedW || ruleWait) ? 'Wartezeit: ' + (addedW || ruleWait) + ' s' : null].filter(Boolean).join(' · ') || 'Queue ' + rule.queueTarget + ' nicht zustellbar',
+                reason: ovReason,
+                queueTarget: rule.queueTarget,
+                focusHint: rule.queueTarget,
+                callerEvent: {
+                  kind: 'overflow',
+                  label: 'Queue-Überlauf',
+                  text: qMode === 'wait-timeout' ? 'Wartet ' + (addedW || ruleWait) + ' s in ' + rule.queueTarget + ' — Überlauf startet' : rule.queueTarget + ': ' + ovReason,
+                  elapsedSeconds,
+                },
+                targetNodeId: ruleNodeId,
+                fallbackNodeId: entryFallback,
+              });
+
+              const ovTargetRef = rule.targetNumber || (ruleLink && ruleLink.toTargetNumber);
+              if (ovTargetRef && !rule.isExternalRoute) {
+                const nextS = resolveS(ovTargetRef);
+                if (nextS) {
+                  steps.push({
+                    index: steps.length + 1,
+                    scriptNumber: current.scriptNumber,
+                    scriptName: current.scriptName,
+                    prio: rule.prio,
+                    kind: 'jump',
+                    statusLabel: 'Überlauf',
+                    elapsedSeconds,
+                    isOverflowStep: true,
+                    title: 'Überlauf-Sprung → ' + nextS.scriptNumber + ' (' + nextS.scriptName + ')',
+                    detail: 'Übergabe nach Queue-Überlauf aus ' + rule.queueTarget,
+                    reason: ovReason,
+                    targetScriptNumber: nextS.scriptNumber,
+                    callerEvent: { kind: 'transfer', label: 'Überlauf-Ziel', text: 'Weiterleitung an Überlauf-Skript ' + nextS.scriptNumber + ' (' + nextS.scriptName + ')', elapsedSeconds },
+                    targetNodeId: ruleNodeId,
+                    fallbackNodeId: 'JUMP_' + simNodeSuffix(nextS.scriptNumber),
+                  });
+                  jumped = nextS;
+                  break;
+                }
+              }
+
+              if (hasNextPath) continue;
+              return { outcomeType: 'queue', outcomeTitle: 'Kein Überlauf nach Queue: ' + rule.queueTarget, outcomeDetail: ovReason + ' — kein Fallback-Ziel gefunden.', finalScriptNumber: current.scriptNumber, focusHint: rule.queueTarget, visitedScripts, totalWaitSeconds, overflowTriggered: true, missingOverflowTarget: true, steps, dtmfHistory, dynamicPrompts };
+            }
+
+            const isOvDest = overflowTriggered;
             steps.push({
               index: steps.length + 1,
               scriptNumber: current.scriptNumber,
               scriptName: current.scriptName,
               prio: rule.prio,
               kind: 'outcome',
-              statusLabel: 'Ziel erreicht',
-              title: 'Prio ' + rule.prio + ' · Queue ' + rule.queueTarget,
-              detail: rule.announcement ? 'Ansage: ' + rule.announcement : 'Zustellung in Warteschlange',
-              reason,
+              statusLabel: isOvDest ? 'Überlauf-Ziel' : 'Ziel erreicht',
+              elapsedSeconds,
+              isOverflowStep: isOvDest,
+              title: 'Prio ' + rule.prio + ' · ' + (isOvDest ? 'Überlauf-Queue ' : 'Queue ') + rule.queueTarget,
+              detail: [rule.announcement ? 'Ansage: ' + rule.announcement : null, rule.treatmentInfo ? 'Treatment: ' + rule.treatmentInfo : null, ruleWait ? 'Wartezeit: ' + ruleWait + ' s' : null].filter(Boolean).join(' · ') || 'Zustellung in Warteschlange',
+              reason: isOvDest ? 'Überlauf-Zustellung nach ' + (overflowQueueName || 'Erst-Queue') : reason,
               queueTarget: rule.queueTarget,
               focusHint: rule.queueTarget,
+              callerEvent: {
+                kind: 'queue-enter',
+                label: isOvDest ? 'Überlauf-Queue' : 'Warteschlange',
+                text: ['Zustellung in ' + rule.queueTarget, rule.announcement ? 'Ansage: „' + rule.announcement + '“' : null, rule.treatmentInfo ? 'Musik: ' + rule.treatmentInfo : null].filter(Boolean).join(' · '),
+                elapsedSeconds,
+              },
               targetNodeId: ruleNodeId,
               fallbackNodeId: entryFallback,
             });
-            return { outcomeType: 'queue', outcomeTitle: 'Queue: ' + rule.queueTarget, outcomeDetail: 'Zugestellt in Skript ' + current.scriptNumber + ' (' + current.scriptName + ') über Prio ' + rule.prio + '.', finalScriptNumber: current.scriptNumber, focusHint: rule.queueTarget, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+            return { outcomeType: 'queue', outcomeTitle: (isOvDest ? 'Überlauf-Queue: ' : 'Queue: ') + rule.queueTarget, outcomeDetail: 'Zugestellt in Skript ' + current.scriptNumber + ' (' + current.scriptName + ') über Prio ' + rule.prio + '.', finalScriptNumber: current.scriptNumber, focusHint: rule.queueTarget, visitedScripts, totalWaitSeconds, overflowTriggered, steps, dtmfHistory, dynamicPrompts };
           }
 
           if (rule.isDisconnect) {
@@ -8117,17 +8758,21 @@ export function generateInteractiveCallflowHtml(
               prio: rule.prio,
               kind: 'outcome',
               statusLabel: 'Beendet',
+              elapsedSeconds,
               title: 'Prio ' + rule.prio + ' · Verbindung trennen',
               detail: rule.announcement ? 'Nach Ansage: ' + rule.announcement : 'Anruf wird beendet',
               reason,
+              callerEvent: { kind: 'disconnect', label: 'Aufgelegt', text: rule.announcement ? 'Hört „' + rule.announcement + '“, Verbindung getrennt' : 'Verbindung systemseitig getrennt (Disconnect)', elapsedSeconds },
               targetNodeId: ruleNodeId,
               fallbackNodeId: entryFallback,
             });
-            return { outcomeType: 'disconnect', outcomeTitle: 'Verbindung getrennt (Disconnect)', outcomeDetail: 'Beendet in Skript ' + current.scriptNumber + ' (' + current.scriptName + ').', finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+            return { outcomeType: 'disconnect', outcomeTitle: 'Verbindung getrennt (Disconnect)', outcomeDetail: 'Beendet in Skript ' + current.scriptNumber + ' (' + current.scriptName + ').', finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, overflowTriggered, steps, dtmfHistory, dynamicPrompts };
           }
 
-          if (rule.targetNumber) {
-            const nextS = resolveS(rule.targetNumber);
+          const ruleManualFb = !rule.targetNumber ? (current.manualTargets || []).find(m => m.fromRuleId === rule.id) : null;
+          const targetRef = rule.targetNumber || (ruleManualFb && ruleManualFb.toTargetNumber);
+          if (targetRef) {
+            const nextS = resolveS(targetRef);
             if (nextS && !rule.isExternalRoute) {
               steps.push({
                 index: steps.length + 1,
@@ -8135,11 +8780,16 @@ export function generateInteractiveCallflowHtml(
                 scriptName: current.scriptName,
                 prio: rule.prio,
                 kind: 'jump',
-                statusLabel: 'Sprung',
+                statusLabel: overflowTriggered ? 'Überlauf' : 'Sprung',
+                elapsedSeconds,
+                isOverflowStep: overflowTriggered,
                 title: 'Prio ' + rule.prio + ' · Sprung zu ' + nextS.scriptNumber + ' (' + nextS.scriptName + ')',
-                detail: rule.announcement ? 'Ansage: ' + rule.announcement : 'Übergabe an Zielskript',
+                detail: rule.announcement ? 'Ansage: ' + rule.announcement : (ruleManualFb && ruleManualFb.label ? 'Verknüpfung (' + ruleManualFb.label + ')' : 'Übergabe an Zielskript'),
                 reason,
                 targetScriptNumber: nextS.scriptNumber,
+                callerEvent: rule.announcement
+                  ? { kind: 'announcement', label: 'Ansage & Übergabe', text: 'Hört „' + rule.announcement + '“, Übergabe an ' + nextS.scriptName, elapsedSeconds }
+                  : { kind: 'transfer', label: 'Weiterleitung', text: 'Interne Übergabe an ' + nextS.scriptName + ' (' + nextS.scriptNumber + ')', elapsedSeconds },
                 targetNodeId: ruleNodeId,
                 fallbackNodeId: 'JUMP_' + simNodeSuffix(nextS.scriptNumber),
               });
@@ -8153,15 +8803,25 @@ export function generateInteractiveCallflowHtml(
               prio: rule.prio,
               kind: 'outcome',
               statusLabel: 'Weitergeleitet',
-              title: 'Prio ' + rule.prio + ' · Externe Weiterleitung ' + rule.targetNumber,
+              elapsedSeconds,
+              title: 'Prio ' + rule.prio + ' · Externe Weiterleitung ' + targetRef,
               detail: rule.organizationName ? 'Organisation: ' + rule.organizationName : 'Externes Ziel',
               reason,
-              targetScriptNumber: rule.targetNumber,
+              targetScriptNumber: targetRef,
+              callerEvent: { kind: 'transfer', label: 'Externes Ziel', text: 'Externe Übergabe an ' + targetRef + (rule.organizationName ? ' (' + rule.organizationName + ')' : ''), elapsedSeconds },
               targetNodeId: ruleNodeId,
               fallbackNodeId: entryFallback,
             });
-            return { outcomeType: 'external', outcomeTitle: 'Weiterleitung: ' + rule.targetNumber, outcomeDetail: 'Externes Ziel aus Skript ' + current.scriptNumber + ' (' + current.scriptName + ').', finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+            return { outcomeType: 'external', outcomeTitle: 'Weiterleitung: ' + targetRef, outcomeDetail: 'Externes Ziel aus Skript ' + current.scriptNumber + ' (' + current.scriptName + ').', finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, overflowTriggered, steps, dtmfHistory, dynamicPrompts };
           }
+
+          const cEvent = rule.announcement
+            ? { kind: 'announcement', label: 'Ansage', text: 'Hört „' + rule.announcement + '“' + (ruleWait ? ' (' + ruleWait + ' s)' : ''), elapsedSeconds }
+            : rule.treatmentInfo
+              ? { kind: 'music', label: 'Wartemusik', text: rule.treatmentInfo + (ruleWait ? ' (' + ruleWait + ' s)' : ''), elapsedSeconds }
+              : ruleWait > 0
+                ? { kind: 'wait', label: 'Wartezeit', text: 'Anrufer wartet ' + ruleWait + ' s (' + rule.stepName + ')', elapsedSeconds }
+                : null;
 
           steps.push({
             index: steps.length + 1,
@@ -8170,30 +8830,98 @@ export function generateInteractiveCallflowHtml(
             prio: rule.prio,
             kind: 'rule-matched',
             statusLabel: 'Erfüllt',
+            elapsedSeconds,
             title: 'Prio ' + rule.prio + ' · ' + rule.stepName,
-            detail: [rule.announcement ? 'Ansage: ' + rule.announcement : null, rule.waitSeconds ? 'Warten: ' + rule.waitSeconds + ' s' : null].filter(Boolean).join(' · ') || 'Schritt ausgeführt',
+            detail: [rule.announcement ? 'Ansage: ' + rule.announcement : null, rule.treatmentInfo ? 'Treatment: ' + rule.treatmentInfo : null, ruleWait ? 'Warten: ' + ruleWait + ' s' : null].filter(Boolean).join(' · ') || 'Schritt ausgeführt',
             reason,
             focusHint: rule.announcement || undefined,
+            callerEvent: cEvent,
             targetNodeId: ruleNodeId,
             fallbackNodeId: entryFallback,
           });
         }
 
+        // Script-level manualLinks fallback
+        if (!jumped && Array.isArray(current.manualTargets) && current.manualTargets.length > 0) {
+          const sLink = current.manualTargets.find(m => !m.fromRuleId) || current.manualTargets[0];
+          if (sLink) {
+            const nextS = resolveS(sLink.toTargetNumber);
+            if (nextS) {
+              steps.push({
+                index: steps.length + 1,
+                scriptNumber: current.scriptNumber,
+                scriptName: current.scriptName,
+                kind: 'jump',
+                statusLabel: localOverflowPending ? 'Überlauf' : 'Sprung',
+                elapsedSeconds,
+                isOverflowStep: localOverflowPending,
+                title: 'Verknüpftes Skript → ' + nextS.scriptNumber + ' (' + nextS.scriptName + ')',
+                detail: sLink.label ? 'Manuelle Verknüpfung (' + sLink.label + ')' : 'Übergabe an verknüpftes Zielskript',
+                reason: localOverflowPending ? 'Überlauf über verknüpftes Folge-Skript' : 'Verknüpftes Folge-Skript',
+                targetScriptNumber: nextS.scriptNumber,
+                callerEvent: { kind: 'transfer', label: localOverflowPending ? 'Überlauf-Ziel' : 'Weiterleitung', text: 'Übergabe an ' + nextS.scriptName + ' (' + nextS.scriptNumber + ')', elapsedSeconds },
+                targetNodeId: current.entryNodeId || ('SELF_' + simNodeSuffix(current.scriptNumber)),
+                fallbackNodeId: 'JUMP_' + simNodeSuffix(nextS.scriptNumber),
+              });
+              jumped = nextS;
+            } else {
+              steps.push({
+                index: steps.length + 1,
+                scriptNumber: current.scriptNumber,
+                scriptName: current.scriptName,
+                kind: 'outcome',
+                statusLabel: 'Weitergeleitet',
+                elapsedSeconds,
+                title: 'Verknüpftes Ziel: ' + sLink.toTargetNumber,
+                detail: sLink.label || 'Externes Ziel über manuelle Verknüpfung',
+                reason: 'Manuelle Verknüpfung',
+                targetScriptNumber: sLink.toTargetNumber,
+                callerEvent: { kind: 'transfer', label: 'Externes Ziel', text: 'Weiterleitung an ' + sLink.toTargetNumber, elapsedSeconds },
+                targetNodeId: current.entryNodeId || ('SELF_' + simNodeSuffix(current.scriptNumber)),
+                fallbackNodeId: 'S_' + simNodeSuffix(current.scriptNumber),
+              });
+              return { outcomeType: 'external', outcomeTitle: 'Weiterleitung: ' + sLink.toTargetNumber, outcomeDetail: 'Manuelle Verknüpfung aus ' + current.scriptNumber, finalScriptNumber: current.scriptNumber, visitedScripts, totalWaitSeconds, overflowTriggered, steps, dtmfHistory, dynamicPrompts };
+            }
+          }
+        }
+
         if (jumped) { current = jumped; continue; }
+        const missingOv = localOverflowPending && Boolean(overflowQueueName);
         return {
-          outcomeType: lastAnnouncement ? 'announcement' : 'script-end',
-          outcomeTitle: lastAnnouncement ? 'Ansage-Ende: ' + lastAnnouncement : 'Skript-Ende: ' + current.scriptNumber,
+          outcomeType: missingOv ? 'queue' : (lastAnnouncement ? 'announcement' : 'script-end'),
+          outcomeTitle: missingOv ? 'Kein Überlauf nach Queue: ' + overflowQueueName : (lastAnnouncement ? 'Ansage-Ende: ' + lastAnnouncement : 'Skript-Ende: ' + current.scriptNumber),
           outcomeDetail: 'Durchlauf in Skript ' + current.scriptNumber + ' (' + current.scriptName + ') abgeschlossen.',
           finalScriptNumber: current.scriptNumber,
           focusHint: lastAnnouncement || undefined,
           visitedScripts,
           totalWaitSeconds,
+          overflowTriggered,
+          missingOverflowTarget: missingOv,
           steps,
+          dtmfHistory,
           dynamicPrompts,
         };
       }
 
-      return { outcomeType: 'cycle', outcomeTitle: 'Maximale Sprungtiefe erreicht', outcomeDetail: 'Nach 24 Sprüngen gestoppt.', finalScriptNumber: startScript.scriptNumber, visitedScripts, totalWaitSeconds, steps, dynamicPrompts };
+      return { outcomeType: 'cycle', outcomeTitle: 'Maximale Sprungtiefe erreicht', outcomeDetail: 'Nach 24 Sprüngen gestoppt.', finalScriptNumber: startScript.scriptNumber, visitedScripts, totalWaitSeconds, overflowTriggered, steps, dtmfHistory, dynamicPrompts };
+    }
+
+    function runHtmlScenarioMatrix() {
+      const statusMap = { queue: 'Warteschlange', announcement: 'Ansage', external: 'Weiterleitung', disconnect: 'Getrennt', 'script-end': 'Skript-Ende', 'dtmf-wait': 'DTMF-Menü', cycle: 'Zyklus' };
+      return SIM_MATRIX_PRESETS.map(p => {
+        const r = runHtmlCallSimulation({ weekday: p.weekday, timeHHMM: p.timeHHMM, isHoliday: p.isHoliday, isSondZeit: p.isSondZeit });
+        return {
+          preset: p,
+          outcomeType: r.outcomeType,
+          statusLabel: r.missingOverflowTarget ? 'Überlauf fehlt' : (r.overflowTriggered && r.outcomeType === 'queue' ? 'Überlauf-Queue' : (statusMap[r.outcomeType] || r.outcomeType)),
+          outcomeTitle: r.outcomeTitle,
+          totalWaitSeconds: r.totalWaitSeconds || 0,
+          visitedScripts: r.visitedScripts || [],
+          overflowTriggered: Boolean(r.overflowTriggered),
+          missingOverflowTarget: Boolean(r.missingOverflowTarget),
+          needsDtmf: r.outcomeType === 'dtmf-wait',
+        };
+      });
     }
 
     function stopSimTimer() {
@@ -8234,6 +8962,18 @@ export function generateInteractiveCallflowHtml(
 
     function simGetVisibleSteps(res) {
       return simState.showSkipped ? res.steps : res.steps.filter(s => s.kind !== 'rule-skipped');
+    }
+
+    function simDialDtmfDigit(digit) {
+      const res = runHtmlCallSimulation();
+      if (!res.pendingDtmf) return;
+      const opt = (res.pendingDtmf.choices || []).find(c => c.choice === digit);
+      if (!opt) return;
+      simState.dtmfChoices[res.pendingDtmf.key] = digit;
+      simState.lastFocusedKey = '';
+      simState.isPlaying = true;
+      renderCallSimHud();
+      scheduleSimNextStep();
     }
 
     function scheduleSimNextStep() {
@@ -8278,7 +9018,7 @@ export function generateInteractiveCallflowHtml(
         simState.stepIndex = 0;
         simState.lastFocusedKey = '';
       }
-      simState.setupOpen = false;
+      if (simState.proTab !== 'caller') simState.proPanelOpen = false;
       simState.isPlaying = true;
       renderCallSimHud();
       scheduleSimNextStep();
@@ -8331,24 +9071,27 @@ export function generateInteractiveCallflowHtml(
         { id: 'do', label: 'Do' }, { id: 'fr', label: 'Fr' }, { id: 'sa', label: 'Sa' }, { id: 'so', label: 'So' }
       ];
       const speeds = [0.5, 1, 1.5, 2];
+      const activeQMeta = SIM_QUEUE_MODES.find(q => q.id === simState.queueMode) || SIM_QUEUE_MODES[0];
 
-      let statusTone = 'jump';
+      let statusToneClass = 'sim-tone-jump';
       if (activeStep) {
-        if (activeStep.kind === 'outcome') statusTone = res.outcomeType === 'disconnect' ? 'err' : 'ok';
-        else if (activeStep.kind === 'jump') statusTone = 'jump';
-        else if (activeStep.kind === 'dtmf-prompt') statusTone = 'warn';
-        else if (activeStep.kind === 'rule-skipped') statusTone = 'muted';
+        if (activeStep.kind === 'outcome') statusToneClass = res.outcomeType === 'disconnect' ? 'sim-tone-err' : (res.missingOverflowTarget ? 'sim-tone-warn' : 'sim-tone-ok');
+        else if (activeStep.kind === 'overflow' || activeStep.kind === 'dtmf-prompt') statusToneClass = 'sim-tone-warn';
+        else if (activeStep.kind === 'cycle-guard') statusToneClass = 'sim-tone-err';
+        else if (activeStep.kind === 'rule-skipped') statusToneClass = 'sim-tone-muted';
       }
 
       let html = '';
-      // Header bar with transport controls
+      // Top Header Bar + Pro-Panel Toggle + Transport
       html += '<div class="sim-hud-head">' +
-        '<div style="display:flex;align-items:center;gap:8px;min-width:0;">' +
+        '<div style="display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap;">' +
           '<span style="font-size:12px;font-weight:700;color:var(--text-main);white-space:nowrap;">Anruf-Simulator</span>' +
           '<span style="font-size:11px;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;color:var(--text-muted);white-space:nowrap;">' +
             (visibleSteps.length > 0 ? 'Schritt ' + (simState.stepIndex + 1) + ' / ' + visibleSteps.length : '0 Schritte') +
+            ' · ' + simFormatMMSS(activeStep ? activeStep.elapsedSeconds : 0) +
           '</span>' +
-          '<button type="button" id="sim-btn-toggle-setup" style="padding:3px 7px;font-size:11px;">Szenario ' + (simState.setupOpen ? '▲' : '▼') + '</button>' +
+          (simState.queueMode !== 'normal' ? '<span class="sim-tone-warn" style="font-size:11px;white-space:nowrap;">· Überlauf: ' + escapeHtml(activeQMeta.shortLabel) + '</span>' : '') +
+          '<button type="button" id="sim-btn-toggle-pro" class="' + (simState.proPanelOpen ? 'primary' : '') + '" style="padding:3px 8px;font-size:11px;">Profi-Panel ' + (simState.proPanelOpen ? '▲' : '▼') + '</button>' +
         '</div>' +
         '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">' +
           '<button type="button" id="sim-btn-restart" title="Von vorn beginnen" style="padding:3px 7px;"' + (visibleSteps.length === 0 ? ' disabled' : '') + '>↺</button>' +
@@ -8362,65 +9105,175 @@ export function generateInteractiveCallflowHtml(
         '</div>' +
       '</div>';
 
-      // Collapsible scenario setup strip
-      if (simState.setupOpen) {
-        html += '<div class="sim-hud-setup">' +
-          '<div class="sim-hud-row">' +
-            '<select id="sim-start-select" style="flex:1;min-width:170px;font-family:ui-monospace,monospace;">' +
-              (SIM_MODEL.scripts || []).map(s => '<option value="' + escapeHtml(s.scriptNumber) + '"' + (s.scriptNumber === simState.startScriptNumber ? ' selected' : '') + '>' + escapeHtml(s.scriptNumber + ' · ' + s.scriptName + (s.isMaster ? ' [Master]' : '')) + '</option>').join('') +
-            '</select>' +
-            '<input type="text" id="sim-dnis-input" list="sim-html-dnis-list" value="' + escapeHtml(simState.dialedDnis) + '" placeholder="DNIS (optional)..." style="width:130px;font-family:ui-monospace,monospace;" />' +
-            '<datalist id="sim-html-dnis-list">' + (SIM_MODEL.dnisEntries || []).slice(0, 100).map(d => '<option value="' + escapeHtml(d.dnis) + '">' + escapeHtml(d.scriptNumber + ' · ' + d.scriptName) + '</option>').join('') + '</datalist>' +
-            '<div style="display:inline-flex;gap:2px;">' +
-              weekdays.map(w => '<button type="button" class="sim-day-btn' + (simState.weekday === w.id ? ' primary' : '') + '" data-day="' + w.id + '" style="padding:3px 6px;font-size:10.5px;">' + w.label + '</button>').join('') +
+      // Collapsible 3-Tab Pro Panel
+      if (simState.proPanelOpen) {
+        const dayLbl = (weekdays.find(w => w.id === simState.weekday) || weekdays[0]).label;
+        html += '<div class="sim-pro-panel">' +
+          '<div class="sim-pro-bar">' +
+            '<div class="sim-pro-tabs" role="tablist">' +
+              '<button type="button" class="sim-pro-tab' + (simState.proTab === 'scenario' ? ' active' : '') + '" data-protab="scenario">Szenario &amp; Überlauf</button>' +
+              '<button type="button" class="sim-pro-tab' + (simState.proTab === 'caller' ? ' active' : '') + '" data-protab="caller">Anrufer-Sicht &amp; DTMF' + (res.pendingDtmf ? ' · Wahl offen' : '') + '</button>' +
+              '<button type="button" class="sim-pro-tab' + (simState.proTab === 'matrix' ? ' active' : '') + '" data-protab="matrix">Szenario-Matrix (6 Fälle)</button>' +
             '</div>' +
-            '<input type="time" id="sim-time-input" value="' + escapeHtml(simState.timeHHMM) + '" style="font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;" />' +
-          '</div>' +
-          '<div class="sim-hud-row" style="justify-content:space-between;">' +
-            '<div class="sim-hud-row" style="gap:10px;font-size:11px;">' +
-              '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="sim-chk-holiday"' + (simState.isHoliday ? ' checked' : '') + ' /> Feiertag</label>' +
-              '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="sim-chk-sondzeit"' + (simState.isSondZeit ? ' checked' : '') + ' /> SondZeit</label>' +
-              '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="sim-chk-skipped"' + (simState.showSkipped ? ' checked' : '') + ' /> Alle Prüfungen</label>' +
+            '<span style="font-size:11px;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;color:var(--text-muted);white-space:nowrap;">' +
+              escapeHtml(simState.startScriptNumber) +
+              (simState.dialedDnis ? ' · DNIS ' + escapeHtml(simState.dialedDnis) : '') +
+              ' · ' + dayLbl + ' ' + escapeHtml(simState.timeHHMM) +
+              (simState.isHoliday ? ' · Feiertag' : '') +
+              (simState.isSondZeit ? ' · SondZeit' : '') +
+            '</span>' +
+          '</div>';
+
+        if (simState.proTab === 'scenario') {
+          html += '<div class="sim-hud-setup">' +
+            '<div class="sim-hud-row">' +
+              '<select id="sim-start-select" style="flex:1;min-width:170px;font-family:ui-monospace,monospace;">' +
+                (SIM_MODEL.scripts || []).map(s => '<option value="' + escapeHtml(s.scriptNumber) + '"' + (s.scriptNumber === simState.startScriptNumber ? ' selected' : '') + '>' + escapeHtml(s.scriptNumber + ' · ' + s.scriptName + (s.isMaster ? ' [Master]' : '')) + '</option>').join('') +
+              '</select>' +
+              '<input type="text" id="sim-dnis-input" list="sim-html-dnis-list" value="' + escapeHtml(simState.dialedDnis) + '" placeholder="DNIS (optional)..." style="width:130px;font-family:ui-monospace,monospace;" />' +
+              '<datalist id="sim-html-dnis-list">' + (SIM_MODEL.dnisEntries || []).slice(0, 100).map(d => '<option value="' + escapeHtml(d.dnis) + '">' + escapeHtml(d.scriptNumber + ' · ' + d.scriptName) + '</option>').join('') + '</datalist>' +
+              '<div style="display:inline-flex;gap:2px;">' +
+                weekdays.map(w => '<button type="button" class="sim-day-btn' + (simState.weekday === w.id ? ' primary' : '') + '" data-day="' + w.id + '" style="padding:3px 6px;font-size:10.5px;">' + w.label + '</button>').join('') +
+              '</div>' +
+              '<input type="time" id="sim-time-input" value="' + escapeHtml(simState.timeHHMM) + '" style="font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;" />' +
             '</div>' +
-            '<div class="sim-hud-row" style="gap:4px;">' +
-              '<button type="button" class="sim-preset-btn" data-d="mo" data-t="10:00" data-h="0" data-s="0" style="padding:2px 6px;font-size:10.5px;">Werktag 10:00</button>' +
-              '<button type="button" class="sim-preset-btn" data-d="di" data-t="20:00" data-h="0" data-s="0" style="padding:2px 6px;font-size:10.5px;">Abend 20:00</button>' +
-              '<button type="button" class="sim-preset-btn" data-d="sa" data-t="11:00" data-h="0" data-s="0" style="padding:2px 6px;font-size:10.5px;">Sa 11:00</button>' +
-              '<button type="button" class="sim-preset-btn" data-d="mo" data-t="10:00" data-h="1" data-s="0" style="padding:2px 6px;font-size:10.5px;color:var(--amber-text);">Feiertag</button>' +
+            '<div class="sim-hud-row" style="justify-content:space-between;">' +
+              '<div class="sim-hud-row" style="gap:10px;font-size:11px;">' +
+                '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="sim-chk-holiday"' + (simState.isHoliday ? ' checked' : '') + ' /> Feiertag</label>' +
+                '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="sim-chk-sondzeit"' + (simState.isSondZeit ? ' checked' : '') + ' /> SondZeit / Notfall</label>' +
+                '<label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" id="sim-chk-skipped"' + (simState.showSkipped ? ' checked' : '') + ' /> Alle Prüfungen</label>' +
+              '</div>' +
+              '<div class="sim-hud-row" style="gap:4px;">' +
+                '<button type="button" class="sim-preset-btn" data-d="mo" data-t="10:00" data-h="0" data-s="0" style="padding:2px 6px;font-size:10.5px;">Werktag 10:00</button>' +
+                '<button type="button" class="sim-preset-btn" data-d="di" data-t="20:00" data-h="0" data-s="0" style="padding:2px 6px;font-size:10.5px;">Abend 20:00</button>' +
+                '<button type="button" class="sim-preset-btn" data-d="sa" data-t="11:00" data-h="0" data-s="0" style="padding:2px 6px;font-size:10.5px;">Sa 11:00</button>' +
+                '<button type="button" class="sim-preset-btn" data-d="mo" data-t="10:00" data-h="1" data-s="0" style="padding:2px 6px;font-size:10.5px;color:var(--amber-text);">Feiertag</button>' +
+              '</div>' +
             '</div>' +
-          '</div>' +
-        '</div>';
+            '<div class="sim-hud-row sim-hud-divider" style="justify-content:space-between;">' +
+              '<div class="sim-hud-row" style="gap:5px;">' +
+                '<span style="font-size:11px;color:var(--text-muted);white-space:nowrap;">Queue- &amp; Überlauf-Test:</span>' +
+                SIM_QUEUE_MODES.map(q => '<button type="button" class="sim-qmode-btn' + (simState.queueMode === q.id ? ' primary' : '') + '" data-qmode="' + q.id + '" title="' + escapeHtml(q.desc) + '" style="padding:3px 7px;font-size:10.5px;' + (simState.queueMode === q.id ? (q.id === 'normal' ? 'background:#059669;border-color:#10b981;' : 'background:#d97706;border-color:#f59e0b;') : '') + '">' + escapeHtml(q.label) + '</button>').join('') +
+              '</div>' +
+              (simState.queueMode === 'wait-timeout'
+                ? '<div class="sim-hud-row" style="gap:4px;"><span style="font-size:10.5px;color:var(--text-muted);">Wartezeit:</span>' +
+                  [15, 30, 60, 120].map(sec => '<button type="button" class="sim-wait-btn' + (simState.maxWaitOverrideSeconds === sec ? ' primary' : '') + '" data-wait="' + sec + '" style="padding:2px 6px;font-size:10.5px;font-family:ui-monospace,monospace;">' + sec + 's</button>').join('') +
+                  '</div>'
+                : '') +
+            '</div>' +
+            (res.dynamicPrompts && res.dynamicPrompts.length > 0
+              ? '<div class="sim-hud-row sim-hud-divider" style="gap:5px;"><span style="font-size:10.5px;color:var(--text-muted);">Erkannte Laufzeit-Regeln:</span>' +
+                res.dynamicPrompts.map(dp => '<button type="button" class="sim-dyn-btn' + (dp.active ? ' btn-active' : '') + '" data-key="' + escapeHtml(dp.key) + '" style="font-size:10.5px;padding:2px 6px;">' + (dp.active ? 'Aktiv: ' : 'Inaktiv: ') + escapeHtml(dp.label) + (dp.autoActivatedByQueueMode ? ' (Auto)' : '') + '</button>').join('') +
+                '</div>'
+              : '') +
+          '</div>';
+        } else if (simState.proTab === 'caller') {
+          const feedItems = visibleSteps.map((st, vIdx) => ({ st, vIdx })).filter(x => Boolean(x.st.callerEvent));
+          const activeChoiceMap = new Map();
+          const availChoices = (res.pendingDtmf && res.pendingDtmf.choices) || (activeStep && activeStep.choices) || [];
+          availChoices.forEach(c => activeChoiceMap.set(c.choice, { label: c.label || c.targetNumber, targetNumber: c.targetNumber }));
+          const hasChosenDtmf = Object.keys(simState.dtmfChoices || {}).length > 0;
+
+          html += '<div class="sim-caller-grid">' +
+            '<div class="sim-caller-col">' +
+              '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">' +
+                '<span style="font-size:11px;font-weight:700;color:var(--text-main);">Anrufer-Perspektive — Was der Anrufer hört &amp; erlebt</span>' +
+                '<span style="font-size:11px;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;color:var(--text-muted);white-space:nowrap;">Dauer ' + simFormatMMSS(activeStep ? activeStep.elapsedSeconds : 0) + (res.totalWaitSeconds > 0 ? ' · Wartezeit ' + res.totalWaitSeconds + ' s' : '') + '</span>' +
+              '</div>' +
+              '<div class="sim-caller-feed">' +
+                (feedItems.length > 0
+                  ? feedItems.map(({ st, vIdx }) => {
+                      const ev = st.callerEvent;
+                      const evTone = (ev.kind === 'overflow' || ev.kind === 'dtmf-prompt') ? 'sim-tone-warn' : (ev.kind === 'disconnect' ? 'sim-tone-err' : ((ev.kind === 'queue-enter' || ev.kind === 'dtmf-press') ? 'sim-tone-ok' : 'sim-tone-jump'));
+                      const rowCls = vIdx === simState.stepIndex ? 'current' : (vIdx > simState.stepIndex ? 'future' : '');
+                      return '<button type="button" class="sim-caller-row ' + rowCls + '" data-step-idx="' + vIdx + '">' +
+                        '<span style="font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;color:var(--text-muted);flex-shrink:0;">' + simFormatMMSS(ev.elapsedSeconds) + '</span>' +
+                        '<span class="' + evTone + '" style="flex-shrink:0;white-space:nowrap;">' + escapeHtml(ev.label) + '</span>' +
+                        '<span style="flex:1;min-width:0;">' + escapeHtml(ev.text) + '</span>' +
+                      '</button>';
+                    }).join('')
+                  : '<div style="font-size:11px;color:var(--text-muted);padding:8px 0;">Keine Ansagen oder Hörerlebnisse im aktuellen Pfad.</div>') +
+              '</div>' +
+            '</div>' +
+            '<div class="sim-caller-keypad-col">' +
+              '<div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">' +
+                '<span style="font-size:11px;font-weight:700;color:var(--text-main);">DTMF-Tastenfeld</span>' +
+                (hasChosenDtmf ? '<button type="button" id="sim-btn-clear-dtmf" style="border:none;background:transparent;color:var(--text-muted);font-size:10px;text-decoration:underline;cursor:pointer;padding:0;">Leeren</button>' : '') +
+              '</div>' +
+              (res.dtmfHistory && res.dtmfHistory.length > 0
+                ? '<div style="font-size:10.5px;font-family:ui-monospace,monospace;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Gewählt: ' + res.dtmfHistory.map(h => '[' + escapeHtml(h.choice) + ']').join(' → ') + '</div>'
+                : '') +
+              '<div class="sim-keypad-grid">' +
+                SIM_KEYPAD_DIGITS.map(d => {
+                  const opt = activeChoiceMap.get(d);
+                  const selectable = Boolean(res.pendingDtmf && opt);
+                  return '<button type="button" class="sim-key-btn' + (selectable ? ' active' : '') + '" data-digit="' + d + '"' + (selectable ? '' : ' disabled') + ' title="' + escapeHtml(opt ? 'Taste ' + d + ': ' + opt.label + ' (' + opt.targetNumber + ')' : 'Taste ' + d + ' nicht belegt') + '">' +
+                    '<span>' + d + '</span>' +
+                    (opt ? '<span class="sim-key-sub">' + escapeHtml(opt.label) + '</span>' : '') +
+                  '</button>';
+                }).join('') +
+              '</div>' +
+              '<div style="font-size:10px;color:var(--text-muted);line-height:1.3;">' + (res.pendingDtmf ? 'Aktive Tasten per Klick oder Tastatur wählen.' : 'Wird aktiv, sobald ein IVR-Auswahlmenü erreicht wird.') + '</div>' +
+            '</div>' +
+          '</div>';
+        } else if (simState.proTab === 'matrix') {
+          const rows = runHtmlScenarioMatrix();
+          html += '<div class="sim-matrix-wrap">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">' +
+              '<span style="font-size:11px;font-weight:700;color:var(--text-main);">Szenario-Matrix — 6 Standardfälle für ' + escapeHtml(simState.startScriptNumber) + (simState.dialedDnis ? ' · DNIS ' + escapeHtml(simState.dialedDnis) : '') + '</span>' +
+              '<div class="sim-hud-row" style="gap:4px;">' +
+                SIM_QUEUE_MODES.map(q => '<button type="button" class="sim-qmode-btn' + (simState.queueMode === q.id ? ' primary' : '') + '" data-qmode="' + q.id + '" style="padding:2px 6px;font-size:10px;' + (simState.queueMode === q.id ? (q.id === 'normal' ? 'background:#059669;border-color:#10b981;' : 'background:#d97706;border-color:#f59e0b;') : '') + '">' + escapeHtml(q.shortLabel) + '</button>').join('') +
+              '</div>' +
+            '</div>' +
+            '<div class="sim-matrix-scroll">' +
+              '<table class="sim-matrix-table">' +
+                '<thead><tr><th>Szenario</th><th>Status</th><th>Endziel</th><th style="text-align:right;">Wartezeit</th><th style="text-align:right;">Skripte</th><th style="text-align:right;">Aktion</th></tr></thead>' +
+                '<tbody>' +
+                  rows.map(r => {
+                    const isCur = r.preset.weekday === simState.weekday && r.preset.timeHHMM === simState.timeHHMM && r.preset.isHoliday === simState.isHoliday && r.preset.isSondZeit === simState.isSondZeit;
+                    const tCls = (r.missingOverflowTarget || r.needsDtmf || r.overflowTriggered) ? 'sim-tone-warn' : ((r.outcomeType === 'disconnect' || r.outcomeType === 'cycle') ? 'sim-tone-err' : ((r.outcomeType === 'queue' || r.outcomeType === 'external') ? 'sim-tone-ok' : 'sim-tone-muted'));
+                    return '<tr class="' + (isCur ? 'active-row' : '') + '">' +
+                      '<td style="white-space:nowrap;"><strong>' + escapeHtml(r.preset.label) + '</strong> <span style="font-size:10px;font-family:ui-monospace,monospace;color:var(--text-muted);">' + escapeHtml(r.preset.shortTime) + '</span></td>' +
+                      '<td class="' + tCls + '" style="white-space:nowrap;">' + escapeHtml(r.statusLabel) + '</td>' +
+                      '<td style="max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(r.outcomeTitle) + '">' + escapeHtml(r.outcomeTitle) + '</td>' +
+                      '<td style="text-align:right;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;white-space:nowrap;">' + r.totalWaitSeconds + ' s</td>' +
+                      '<td style="text-align:right;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;color:var(--text-muted);" title="' + escapeHtml(r.visitedScripts.join(' → ')) + '">' + r.visitedScripts.length + '</td>' +
+                      '<td style="text-align:right;white-space:nowrap;"><button type="button" class="sim-matrix-load-btn" data-preset="' + r.preset.id + '" style="padding:2px 7px;font-size:10.5px;">Live prüfen</button></td>' +
+                    '</tr>';
+                  }).join('') +
+                '</tbody>' +
+              '</table>' +
+            '</div>' +
+          '</div>';
+        }
+        html += '</div>';
       }
 
-      // Live step explanation body + timeline
+      // Live step explanation body + timeline (unboxed typography, zero static pills)
       html += '<div class="sim-hud-body">';
       if (activeStep) {
         html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">' +
           '<div style="min-width:0;flex:1;">' +
-            '<div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:11px;">' +
-              '<span class="sim-status-tag ' + statusTone + '">' + escapeHtml(activeStep.statusLabel) + '</span>' +
+            '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11px;">' +
+              '<span class="' + statusToneClass + '">' + escapeHtml(activeStep.statusLabel) + '</span>' +
+              '<span style="color:var(--text-muted);">·</span>' +
               '<span style="font-family:ui-monospace,monospace;font-weight:600;color:var(--text-muted);font-variant-numeric:tabular-nums;">Skript ' + escapeHtml(activeStep.scriptNumber) + '</span>' +
               '<span style="color:var(--text-muted);">· ' + escapeHtml(activeStep.scriptName || '') + '</span>' +
+              (res.visitedScripts && res.visitedScripts.length > 1
+                ? '<span style="color:var(--text-muted);">·</span><span style="font-family:ui-monospace,monospace;font-size:10.5px;color:var(--text-muted);" title="Skript-Pfad">' + escapeHtml(res.visitedScripts.join(' → ')) + '</span>'
+                : '') +
             '</div>' +
-            '<div style="font-size:12.5px;font-weight:700;color:var(--text-main);margin-top:4px;">' + escapeHtml(activeStep.title) + '</div>' +
+            '<div style="font-size:12.5px;font-weight:700;color:var(--text-main);margin-top:3px;">' + escapeHtml(activeStep.title) + '</div>' +
             '<div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;">' + escapeHtml(activeStep.detail + (activeStep.reason ? ' — ' + activeStep.reason : '')) + '</div>' +
           '</div>' +
-          (isAtEnd && res.outcomeTitle ? '<div style="text-align:right;flex-shrink:0;"><div style="font-size:10px;color:var(--text-muted);">Endergebnis</div><div style="font-size:11.5px;font-weight:700;font-family:ui-monospace,monospace;color:var(--text-main);">' + escapeHtml(res.outcomeTitle) + '</div></div>' : '') +
+          (isAtEnd && res.outcomeTitle ? '<div style="text-align:right;flex-shrink:0;max-width:210px;"><div style="font-size:10px;color:var(--text-muted);">' + (res.missingOverflowTarget ? 'Überlauf-Hinweis' : 'Endergebnis') + '</div><div class="' + (res.missingOverflowTarget ? 'sim-tone-warn' : '') + '" style="font-size:11.5px;font-weight:700;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + escapeHtml(res.outcomeTitle) + '">' + escapeHtml(res.outcomeTitle) + '</div></div>' : '') +
         '</div>';
 
-        // Inline DTMF digit choice
+        // Inline DTMF digit choice (also works when Pro Panel is collapsed)
         if (activeStep.kind === 'dtmf-prompt' && res.pendingDtmf) {
           html += '<div class="sim-hud-row" style="padding-top:2px;">' +
             '<span style="font-size:11px;font-weight:600;color:var(--amber-text);">Taste wählen:</span>' +
-            res.pendingDtmf.choices.map(c => '<button type="button" class="sim-dtmf-btn" data-key="' + escapeHtml(res.pendingDtmf.key) + '" data-choice="' + escapeHtml(c.choice) + '" style="border-color:var(--amber-border);background:var(--amber-bg);color:var(--amber-text);font-size:11px;">[' + escapeHtml(c.choice) + '] ' + escapeHtml(c.label || c.targetNumber) + '</button>').join('') +
-          '</div>';
-        }
-
-        // Inline dynamic runtime toggles
-        if (res.dynamicPrompts && res.dynamicPrompts.length > 0) {
-          html += '<div class="sim-hud-row" style="padding-top:2px;">' +
-            '<span style="font-size:10.5px;color:var(--text-muted);">Laufzeit:</span>' +
-            res.dynamicPrompts.map(dp => '<button type="button" class="sim-dyn-btn' + (dp.active ? ' btn-active' : '') + '" data-key="' + escapeHtml(dp.key) + '" style="font-size:10.5px;padding:2px 6px;">' + (dp.active ? 'Aktiv: ' : 'Inaktiv: ') + escapeHtml(dp.label) + '</button>').join('') +
+            res.pendingDtmf.choices.map(c => '<button type="button" class="sim-dtmf-btn" data-choice="' + escapeHtml(c.choice) + '" style="border-color:var(--amber-border);background:var(--amber-bg);color:var(--amber-text);font-size:11px;">[' + escapeHtml(c.choice) + '] ' + escapeHtml(c.label || c.targetNumber) + '</button>').join('') +
           '</div>';
         }
       } else {
@@ -8431,9 +9284,9 @@ export function generateInteractiveCallflowHtml(
       if (visibleSteps.length > 0) {
         html += '<div class="sim-hud-timeline" role="tablist" aria-label="Simulationsschritte">' +
           visibleSteps.map((st, idx) => {
-            const cls = idx === simState.stepIndex ? 'current' : idx < simState.stepIndex ? 'past' : '';
-            const shortLbl = st.kind === 'entry' ? 'Skript ' + st.scriptNumber : st.kind === 'jump' ? '→ ' + (st.targetScriptNumber || st.scriptNumber) : st.kind === 'dtmf-prompt' ? 'DTMF' : st.kind === 'outcome' ? (st.queueTarget || st.statusLabel) : (st.prio !== undefined ? 'P' + st.prio : '#' + (idx + 1));
-            return '<button type="button" class="sim-step-seg ' + cls + '" data-step-idx="' + idx + '" title="' + escapeHtml('Schritt ' + (idx + 1) + ': ' + st.title) + '">' + (idx + 1) + '. ' + escapeHtml(shortLbl) + '</button>';
+            const cls = idx === simState.stepIndex ? 'current' : (st.kind === 'overflow' ? 'overflow' : (idx < simState.stepIndex ? 'past' : ''));
+            const shortLbl = st.kind === 'entry' ? 'Skript ' + st.scriptNumber : st.kind === 'jump' ? '→ ' + (st.targetScriptNumber || st.scriptNumber) : st.kind === 'overflow' ? 'Überlauf' : st.kind === 'dtmf-prompt' ? 'DTMF' : st.kind === 'outcome' ? (st.queueTarget || st.statusLabel) : (st.prio !== undefined ? 'P' + st.prio : '#' + (idx + 1));
+            return '<button type="button" class="sim-step-seg ' + cls + '" data-step-idx="' + idx + '" title="' + escapeHtml('Schritt ' + (idx + 1) + ' (' + simFormatMMSS(st.elapsedSeconds) + '): ' + st.title) + '">' + (idx + 1) + '. ' + escapeHtml(shortLbl) + '</button>';
           }).join('') +
         '</div>';
       }
@@ -8451,8 +9304,14 @@ export function generateInteractiveCallflowHtml(
         renderCallSimHud();
       };
 
-      const btnToggleSetup = document.getElementById('sim-btn-toggle-setup');
-      if (btnToggleSetup) btnToggleSetup.addEventListener('click', () => { simState.setupOpen = !simState.setupOpen; renderCallSimHud(); });
+      const btnTogglePro = document.getElementById('sim-btn-toggle-pro');
+      if (btnTogglePro) btnTogglePro.addEventListener('click', () => { simState.proPanelOpen = !simState.proPanelOpen; renderCallSimHud(); });
+      callSimHud.querySelectorAll('.sim-pro-tab').forEach(b => {
+        b.addEventListener('click', () => {
+          simState.proTab = b.getAttribute('data-protab') || 'scenario';
+          renderCallSimHud();
+        });
+      });
       const btnRestart = document.getElementById('sim-btn-restart');
       if (btnRestart) btnRestart.addEventListener('click', simRestart);
       const btnBack = document.getElementById('sim-btn-back');
@@ -8500,26 +9359,48 @@ export function generateInteractiveCallflowHtml(
           simState.isSondZeit = b.getAttribute('data-s') === '1';
         }));
       });
+      callSimHud.querySelectorAll('.sim-qmode-btn').forEach(b => {
+        b.addEventListener('click', () => onScenarioReset(() => { simState.queueMode = b.getAttribute('data-qmode') || 'normal'; }));
+      });
+      callSimHud.querySelectorAll('.sim-wait-btn').forEach(b => {
+        b.addEventListener('click', () => onScenarioReset(() => { simState.maxWaitOverrideSeconds = Number(b.getAttribute('data-wait') || '30'); }));
+      });
       callSimHud.querySelectorAll('.sim-dtmf-btn').forEach(b => {
         b.addEventListener('click', () => {
-          const k = b.getAttribute('data-key');
           const c = b.getAttribute('data-choice');
-          if (k && c) {
-            simState.dtmfChoices[k] = c;
-            simState.lastFocusedKey = '';
-            simState.isPlaying = true;
-            renderCallSimHud();
-            scheduleSimNextStep();
-          }
+          if (c) simDialDtmfDigit(c);
         });
       });
+      callSimHud.querySelectorAll('.sim-key-btn.active').forEach(b => {
+        b.addEventListener('click', () => {
+          const d = b.getAttribute('data-digit');
+          if (d) simDialDtmfDigit(d);
+        });
+      });
+      const btnClearDtmf = document.getElementById('sim-btn-clear-dtmf');
+      if (btnClearDtmf) btnClearDtmf.addEventListener('click', () => onScenarioReset(() => { simState.dtmfChoices = {}; }));
       callSimHud.querySelectorAll('.sim-dyn-btn').forEach(b => {
         b.addEventListener('click', () => {
           const k = b.getAttribute('data-key');
           if (k) onScenarioReset(() => { simState.dynamicOverrides[k] = !simState.dynamicOverrides[k]; });
         });
       });
-      callSimHud.querySelectorAll('.sim-step-seg').forEach(b => {
+      callSimHud.querySelectorAll('.sim-matrix-load-btn').forEach(b => {
+        b.addEventListener('click', () => {
+          const pid = b.getAttribute('data-preset');
+          const p = SIM_MATRIX_PRESETS.find(x => x.id === pid);
+          if (p) {
+            onScenarioReset(() => {
+              simState.weekday = p.weekday;
+              simState.timeHHMM = p.timeHHMM;
+              simState.isHoliday = p.isHoliday;
+              simState.isSondZeit = p.isSondZeit;
+              simState.proTab = 'caller';
+            });
+          }
+        });
+      });
+      callSimHud.querySelectorAll('.sim-step-seg, .sim-caller-row').forEach(b => {
         b.addEventListener('click', () => {
           const idx = Number(b.getAttribute('data-step-idx') || '0');
           simState.isPlaying = false;
@@ -8536,7 +9417,7 @@ export function generateInteractiveCallflowHtml(
         simState.startScriptNumber = curView.scriptNumber;
       }
       simState.active = true;
-      simState.setupOpen = true;
+      simState.proPanelOpen = true;
       simState.isPlaying = false;
       simState.stepIndex = 0;
       simState.lastFocusedKey = '';
@@ -8575,6 +9456,14 @@ export function generateInteractiveCallflowHtml(
         if (e.key === ' ') { e.preventDefault(); simTogglePlay(); return; }
         if (e.key === 'ArrowLeft') { e.preventDefault(); simStepBack(); return; }
         if (e.key === 'ArrowRight') { e.preventDefault(); simStepForward(); return; }
+        if (/^[0-9*#]$/.test(e.key)) {
+          const curRes = runHtmlCallSimulation();
+          if (curRes.pendingDtmf && curRes.pendingDtmf.choices.some(c => c.choice === e.key)) {
+            e.preventDefault();
+            simDialDtmfDigit(e.key);
+            return;
+          }
+        }
       }
       const key = e.key.toLowerCase();
       if (key === 'm') {
@@ -8590,6 +9479,17 @@ export function generateInteractiveCallflowHtml(
     });
 
     function bootActiveViewOnDemand() {
+      if (activeViewKey === 'welcome') {
+        svgLayer.replaceChildren();
+        renderWelcomeOverlay();
+        populateViewSelect();
+        populateSelect();
+        syncIsolateUi();
+        renderAnalysisTab();
+        applyCombinedCanvasStateInner(false);
+        updateMinimapViewport();
+        return;
+      }
       normalizeSvgElement(svgLayer.querySelector('svg'), viewsByKey.get(activeViewKey), true);
       populateViewSelect();
       populateSelect();

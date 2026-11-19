@@ -84,6 +84,13 @@ export function isRunningAsOfflineSingleFile(): boolean {
   return Boolean(window.__IS_OFFLINE_SINGLEFILE__) || window.location.protocol === 'file:';
 }
 
+export function getInitialOfflineShellView(): 'builder' | 'studio' {
+  if (typeof window !== 'undefined' && window.__MERMAID_OFFLINE_SEED__?.initialShellView === 'studio') {
+    return 'studio';
+  }
+  return 'builder';
+}
+
 function escapeJsonForInlineScript(value: unknown): string {
   // Escapes '<', '>', '&', U+2028, and U+2029 so arbitrary script content can never
   // break out of <script> tags or HTML comments.

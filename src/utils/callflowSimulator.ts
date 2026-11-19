@@ -33,6 +33,14 @@ export interface GlobalSearchEntry {
 
 export type SimulationWeekday = 'mo' | 'di' | 'mi' | 'do' | 'fr' | 'sa' | 'so';
 
+export type SimulationQueueMode =
+  | 'normal'
+  | 'no-agents'
+  | 'queue-full'
+  | 'wait-timeout';
+
+export type SimDynamicCategory = 'no-agents' | 'queue-full' | 'wait-timeout' | 'other';
+
 export interface SimTimeRange {
   startMin: number;
   endMin: number;
@@ -44,6 +52,12 @@ export interface SimChoiceOption {
   targetNumber: string;
   label?: string;
   choiceNodeId?: string;
+}
+
+export interface SimManualTarget {
+  toTargetNumber: string;
+  fromRuleId?: string;
+  label?: string;
 }
 
 export interface SimRule {
@@ -60,10 +74,13 @@ export interface SimRule {
   isSondZeitRule?: boolean;
   conditionRaw?: string;
   isDynamicCondition?: boolean;
+  dynamicCategory?: SimDynamicCategory;
+  isOverflowRule?: boolean;
   dnisMatchValues?: string[];
   targetNumber?: string;
   queueTarget?: string;
   announcement?: string;
+  treatmentInfo?: string;
   waitSeconds?: number;
   isDisconnect?: boolean;
   isExternalRoute?: boolean;
@@ -80,6 +97,7 @@ export interface SimScript {
   entryDnisNumbers: string[];
   organizationName?: string;
   rules: SimRule[];
+  manualTargets?: SimManualTarget[];
 }
 
 export interface SimDnisEntry {
@@ -103,6 +121,29 @@ export interface CallSimulationInput {
   isSondZeit: boolean;
   dtmfChoices: Record<string, string>;
   dynamicOverrides: Record<string, boolean>;
+  queueMode?: SimulationQueueMode;
+  maxWaitOverrideSeconds?: number;
+}
+
+export type CallerEventKind =
+  | 'ring'
+  | 'announcement'
+  | 'music'
+  | 'wait'
+  | 'dtmf-prompt'
+  | 'dtmf-press'
+  | 'queue-enter'
+  | 'overflow'
+  | 'transfer'
+  | 'disconnect';
+
+export interface CallerExperienceEvent {
+  kind: CallerEventKind;
+  label: string;
+  text: string;
+  elapsedSeconds: number;
+  waitAddedSeconds?: number;
+  digit?: string;
 }
 
 export interface CallSimulationStep {
@@ -118,19 +159,32 @@ export interface CallSimulationStep {
     | 'jump'
     | 'dtmf-prompt'
     | 'dynamic-branch'
+    | 'overflow'
     | 'outcome'
     | 'cycle-guard';
   title: string;
   detail: string;
   reason: string;
   statusLabel: string;
+  elapsedSeconds: number;
+  isOverflowStep?: boolean;
+  callerEvent?: CallerExperienceEvent;
   queueTarget?: string;
   announcement?: string;
+  treatmentInfo?: string;
   targetScriptNumber?: string;
   targetNodeId?: string;
   fallbackNodeId?: string;
   choices?: SimChoiceOption[];
   dynamicKey?: string;
+}
+
+export interface CallSimulationDtmfHistoryItem {
+  key: string;
+  scriptNumber: string;
+  choice: string;
+  label?: string;
+  targetNumber: string;
 }
 
 export interface CallSimulationResult {
@@ -148,7 +202,10 @@ export interface CallSimulationResult {
   finalScriptName: string;
   visitedScripts: string[];
   totalWaitSeconds: number;
+  overflowTriggered: boolean;
+  missingOverflowTarget?: boolean;
   steps: CallSimulationStep[];
+  dtmfHistory: CallSimulationDtmfHistoryItem[];
   pendingDtmf?: {
     key: string;
     scriptNumber: string;
@@ -162,7 +219,79 @@ export interface CallSimulationResult {
     prio: number;
     label: string;
     active: boolean;
+    autoActivatedByQueueMode?: boolean;
   }>;
+}
+
+export interface ScenarioMatrixPreset {
+  id: string;
+  label: string;
+  shortTime: string;
+  weekday: SimulationWeekday;
+  timeHHMM: string;
+  isHoliday: boolean;
+  isSondZeit: boolean;
+}
+
+export interface ScenarioMatrixRow {
+  preset: ScenarioMatrixPreset;
+  outcomeType: CallSimulationResult['outcomeType'];
+  statusLabel: string;
+  outcomeTitle: string;
+  totalWaitSeconds: number;
+  visitedScripts: string[];
+  stepCount: number;
+  overflowTriggered: boolean;
+  missingOverflowTarget: boolean;
+  needsDtmf: boolean;
+}
+
+export const SCENARIO_MATRIX_PRESETS: ScenarioMatrixPreset[] = [
+  { id: 'workday', label: 'Werktag', shortTime: 'Mo 10:00', weekday: 'mo', timeHHMM: '10:00', isHoliday: false, isSondZeit: false },
+  { id: 'evening', label: 'Abend', shortTime: 'Di 20:00', weekday: 'di', timeHHMM: '20:00', isHoliday: false, isSondZeit: false },
+  { id: 'saturday', label: 'Samstag', shortTime: 'Sa 11:00', weekday: 'sa', timeHHMM: '11:00', isHoliday: false, isSondZeit: false },
+  { id: 'sunday', label: 'Sonntag', shortTime: 'So 12:00', weekday: 'so', timeHHMM: '12:00', isHoliday: false, isSondZeit: false },
+  { id: 'holiday', label: 'Feiertag', shortTime: 'Mo 10:00 · FT', weekday: 'mo', timeHHMM: '10:00', isHoliday: true, isSondZeit: false },
+  { id: 'sondzeit', label: 'SondZeit / Notfall', shortTime: 'Mo 10:00 · SZ', weekday: 'mo', timeHHMM: '10:00', isHoliday: false, isSondZeit: true },
+];
+
+export const QUEUE_MODE_OPTIONS: Array<{
+  id: SimulationQueueMode;
+  label: string;
+  shortLabel: string;
+  description: string;
+}> = [
+  {
+    id: 'normal',
+    label: 'Normal (Agent frei)',
+    shortLabel: 'Normal',
+    description: 'Anruf wird bei Erreichen der ersten passenden Warteschlange zugestellt.',
+  },
+  {
+    id: 'no-agents',
+    label: 'Keine Agenten',
+    shortLabel: 'Unbesetzt',
+    description: 'Simuliert unbesetztes Skillset (NOT LOGGED / Not Staffed) und prüft Überlauf-Ziele.',
+  },
+  {
+    id: 'queue-full',
+    label: 'Queue voll / Besetzt',
+    shortLabel: 'Besetzt',
+    description: 'Simuliert volle Warteschlange (BUSY / FULL) und prüft nachgelagerte Ausweichziele.',
+  },
+  {
+    id: 'wait-timeout',
+    label: 'Wartezeit-Überlauf',
+    shortLabel: 'Timeout',
+    description: 'Simuliert Wartezeit-Ablauf (EWT / Wait Timeout) und verfolgt den Überlauf-Pfad.',
+  },
+];
+
+export function formatSecondsMMSS(totalSeconds: number): string {
+  const safe = Math.max(0, Math.round(totalSeconds || 0));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
 const WEEKDAY_ORDER: SimulationWeekday[] = ['mo', 'di', 'mi', 'do', 'fr', 'sa', 'so'];
@@ -355,8 +484,29 @@ export function extractTimeRangesFromText(text: string): SimTimeRange[] {
 
 function isDynamicRuntimeConditionText(cond?: string): boolean {
   if (!cond) return false;
-  return /\b(NOT\s+LOGGED|LOGGED|STAFFED|AVAILABLE|AGENT|WAIT|EWT|EXPECTED|QUEUE\s+COUNT|CALLS\s+WAITING|OUT\s+OF\s+SERVICE|OVERFLOW|BUSY|FULL|CLOSED_QUEUE|SKILLSET\s+STATE|NOT\s+IN\s+SERVICE)\b/i.test(
+  return /\b(NOT\s+LOGGED|LOGGED|STAFFED|AVAILABLE|AGENT|WAIT|EWT|EXPECTED|QUEUE\s+COUNT|CALLS\s+WAITING|OUT\s+OF\s+SERVICE|OVERFLOW|BUSY|FULL|CLOSED_QUEUE|SKILLSET\s+STATE|NOT\s+IN\s+SERVICE|KEINE\s+AGENTEN|UNBESETZT|BESETZT|ÜBERLAUF|UEBERLAUF)\b/i.test(
     cond
+  );
+}
+
+function classifyDynamicCategory(text?: string): SimDynamicCategory {
+  if (!text) return 'other';
+  if (/\b(NOT\s+LOGGED|LOGGED|STAFFED|AVAILABLE|AGENT|OUT\s+OF\s+SERVICE|NOT\s+IN\s+SERVICE|CLOSED_QUEUE|KEINE\s+AGENTEN|UNBESETZT)\b/i.test(text)) {
+    return 'no-agents';
+  }
+  if (/\b(BUSY|FULL|QUEUE\s+COUNT|CALLS\s+WAITING|BESETZT|VOLL)\b/i.test(text)) {
+    return 'queue-full';
+  }
+  if (/\b(WAIT|EWT|EXPECTED|TIMEOUT|OVERFLOW|ÜBERLAUF|UEBERLAUF)\b/i.test(text)) {
+    return 'wait-timeout';
+  }
+  return 'other';
+}
+
+function isOverflowRuleText(rule: ScriptRule): boolean {
+  const combined = `${rule.stepName || ''} ${rule.condition || ''} ${rule.rawLine || ''} ${rule.queueTarget || ''}`;
+  return /\b(überlauf|ueberlauf|overflow|fallback|ausweich|notziel|sys_retour_zentrale|retour|besetzt|busy|full|ewt|timeout|not\s+logged|keine\s+agenten)\b/i.test(
+    combined
   );
 }
 
@@ -387,6 +537,7 @@ export function buildCallflowSimulationModel(
 
   const dnisEntries: SimDnisEntry[] = [];
   const dnisSeen = new Set<string>();
+  const manualLinks = workspace.manualLinks || [];
 
   const scripts: SimScript[] = workspace.modules.map((mod: ScriptModule) => {
     const entryDnis = Array.from(
@@ -414,6 +565,25 @@ export function buildCallflowSimulationModel(
     const entryNodeId = `SELF_${modSuffix}`;
     const sortedRules = [...(mod.rules || [])].sort((a, b) => a.prio - b.prio);
 
+    // Collect manual links originating from this module (matching number, alias, suffix, or name)
+    const modAliasSet = new Set<string>([
+      canonicalScriptMatchKey(mod.scriptNumber),
+      canonicalScriptMatchKey(modSuffix),
+    ]);
+    if (mod.cdnAlias) modAliasSet.add(canonicalScriptMatchKey(mod.cdnAlias));
+    if (mod.scriptName && mod.scriptName.trim().length >= 3) {
+      modAliasSet.add(canonicalScriptMatchKey(mod.scriptName));
+      modAliasSet.add(canonicalScriptMatchKey(mod.scriptName.trim().replace(/\s+/g, '_')));
+    }
+
+    const modManualTargets: SimManualTarget[] = manualLinks
+      .filter((lnk) => modAliasSet.has(canonicalScriptMatchKey(lnk.fromScriptNumber)))
+      .map((lnk) => ({
+        toTargetNumber: lnk.toTargetNumber,
+        fromRuleId: lnk.fromRuleId || undefined,
+        label: lnk.label || lnk.note || undefined,
+      }));
+
     const simRules: SimRule[] = sortedRules.map((rule, ruleIdx) => {
       const schedCombined = [rule.schedule, rule.holiday, rule.condition]
         .filter(Boolean)
@@ -425,12 +595,15 @@ export function buildCallflowSimulationModel(
       );
       const isHolidayRule = isHolidayRuleText(rule);
       const isSondZeitRule = isSondZeitRuleText(rule);
+      const dynSource = `${rule.condition || ''} ${rule.rawLine || ''}`;
       const isDynamic =
         !isHolidayRule &&
         !isSondZeitRule &&
         timeRanges.length === 0 &&
         weekdays.length === 0 &&
-        isDynamicRuntimeConditionText(rule.condition || rule.rawLine);
+        isDynamicRuntimeConditionText(dynSource);
+      const dynamicCategory = isDynamic ? classifyDynamicCategory(dynSource) : undefined;
+      const isOverflowRule = isOverflowRuleText(rule);
 
       const dnisValues = (rule.valueNumbers || [])
         .map((v) => String(v || '').trim())
@@ -466,10 +639,13 @@ export function buildCallflowSimulationModel(
         isSondZeitRule: isSondZeitRule || undefined,
         conditionRaw: rule.condition || undefined,
         isDynamicCondition: isDynamic || undefined,
+        dynamicCategory,
+        isOverflowRule: isOverflowRule || undefined,
         dnisMatchValues: dnisValues.length > 0 ? dnisValues : undefined,
         targetNumber: rule.targetNumber || undefined,
         queueTarget: rule.queueTarget || undefined,
         announcement: rule.announcement || undefined,
+        treatmentInfo: rule.treatmentInfo || undefined,
         waitSeconds: typeof rule.waitSeconds === 'number' ? rule.waitSeconds : undefined,
         isDisconnect: rule.isDisconnect || undefined,
         isExternalRoute: rule.isExternalRouteCall || undefined,
@@ -495,6 +671,7 @@ export function buildCallflowSimulationModel(
       entryDnisNumbers: entryDnis,
       organizationName: mod.entryOrganizationName || undefined,
       rules: simRules,
+      manualTargets: modManualTargets.length > 0 ? modManualTargets : undefined,
     };
   });
 
@@ -528,17 +705,34 @@ function dnisMatchesPattern(dialed: string, pattern: string): boolean {
   return false;
 }
 
+function describeQueueModeReason(mode: SimulationQueueMode, waitSec: number): string {
+  if (mode === 'no-agents') return 'Keine Agenten eingeloggt (Not Staffed) — Überlauf ausgelöst';
+  if (mode === 'queue-full') return 'Warteschlange voll / besetzt — Überlauf ausgelöst';
+  if (mode === 'wait-timeout') return `Wartezeit-Überlauf nach ${waitSec} s (EWT/Timeout)`;
+  return 'Standard-Zustellung';
+}
+
 export function simulateCallflow(
   model: CallflowSimulationModel,
   input: CallSimulationInput
 ): CallSimulationResult {
   const byKey = new Map<string, SimScript>();
+  const registerScriptAlias = (key: string | undefined, script: SimScript) => {
+    if (!key) return;
+    if (!byKey.has(key)) byKey.set(key, script);
+    const canon = canonicalScriptMatchKey(key);
+    if (canon && !byKey.has(canon)) byKey.set(canon, script);
+  };
+
   model.scripts.forEach((s) => {
     byKey.set(s.scriptNumber, s);
     byKey.set(canonicalScriptMatchKey(s.scriptNumber), s);
-    if (s.cdnAlias) {
-      byKey.set(s.cdnAlias, s);
-      byKey.set(canonicalScriptMatchKey(s.cdnAlias), s);
+    registerScriptAlias(toMermaidNodeSuffix(s.scriptNumber), s);
+    registerScriptAlias(s.cdnAlias, s);
+    const trimmedName = (s.scriptName || '').trim();
+    if (trimmedName.length >= 3 && !/^(?:main|start)$/i.test(trimmedName)) {
+      registerScriptAlias(trimmedName, s);
+      registerScriptAlias(trimmedName.replace(/\s+/g, '_'), s);
     }
   });
 
@@ -561,16 +755,24 @@ export function simulateCallflow(
       finalScriptName: '',
       visitedScripts: [],
       totalWaitSeconds: 0,
+      overflowTriggered: false,
       steps: [],
+      dtmfHistory: [],
       dynamicPrompts: [],
     };
   }
 
+  const queueMode: SimulationQueueMode = input.queueMode || 'normal';
+  const defaultOverflowWaitSec = Math.max(5, input.maxWaitOverrideSeconds ?? 30);
   const timeMin = parseClockToMinutes(input.timeHHMM) ?? 10 * 60;
   const steps: CallSimulationStep[] = [];
   const visitedScripts: string[] = [];
   const dynamicPrompts: CallSimulationResult['dynamicPrompts'] = [];
+  const dtmfHistory: CallSimulationDtmfHistoryItem[] = [];
   let totalWaitSeconds = 0;
+  let elapsedSeconds = 0;
+  let overflowTriggered = false;
+  let overflowQueueName: string | undefined;
   let current: SimScript | undefined = startScript;
   let hopCount = 0;
   const maxHops = 24;
@@ -586,6 +788,8 @@ export function simulateCallflow(
     so: 'So',
   };
 
+  const queueModeShort = QUEUE_MODE_OPTIONS.find((q) => q.id === queueMode)?.shortLabel;
+
   steps.push({
     index: 1,
     scriptNumber: startScript.scriptNumber,
@@ -597,11 +801,21 @@ export function simulateCallflow(
       `${weekdayLabelMap[input.weekday]} ${input.timeHHMM}`,
       input.isHoliday ? 'Feiertag aktiv' : null,
       input.isSondZeit ? 'SondZeit aktiv' : null,
+      queueMode !== 'normal' && queueModeShort ? `Queue-Test: ${queueModeShort}` : null,
     ]
       .filter(Boolean)
       .join(' · '),
     reason: 'Startpunkt der Simulation',
     statusLabel: 'Start',
+    elapsedSeconds: 0,
+    callerEvent: {
+      kind: 'ring',
+      label: 'Anrufaufbau',
+      text: input.dialedDnis
+        ? `Anrufer wählt ${input.dialedDnis} (${startScript.scriptName})`
+        : `Eingehender Anruf auf ${startScript.scriptName} (${startScript.scriptNumber})`,
+      elapsedSeconds: 0,
+    },
     targetNodeId: startScript.entryNodeId,
     fallbackNodeId: `S_${toMermaidNodeSuffix(startScript.scriptNumber)}`,
   });
@@ -618,6 +832,13 @@ export function simulateCallflow(
         detail: `Skript ${current.scriptNumber} wurde bereits durchlaufen. Simulation gestoppt.`,
         reason: 'Zyklus-Schutz verhindert Endlosschleife',
         statusLabel: 'Zyklus',
+        elapsedSeconds,
+        callerEvent: {
+          kind: 'overflow',
+          label: 'Rücksprung',
+          text: `Rücksprung zu Skript ${current.scriptNumber} (${current.scriptName}) erkannt`,
+          elapsedSeconds,
+        },
         targetNodeId: current.entryNodeId,
         fallbackNodeId: `S_${toMermaidNodeSuffix(current.scriptNumber)}`,
       });
@@ -629,7 +850,9 @@ export function simulateCallflow(
         finalScriptName: current.scriptName,
         visitedScripts,
         totalWaitSeconds,
+        overflowTriggered,
         steps,
+        dtmfHistory,
         dynamicPrompts,
       };
     }
@@ -644,6 +867,7 @@ export function simulateCallflow(
         detail: `${current.rules.length} Routing-Regeln werden nach Priorität geprüft.`,
         reason: 'Automatischer Wechsel in das aufgerufene Zielskript',
         statusLabel: 'Skript-Wechsel',
+        elapsedSeconds,
         targetNodeId: current.entryNodeId,
         fallbackNodeId: `S_${toMermaidNodeSuffix(current.scriptNumber)}`,
       });
@@ -652,8 +876,11 @@ export function simulateCallflow(
     visitedScripts.push(current.scriptNumber);
     let jumpedToNext: SimScript | undefined;
     let terminated = false;
+    let localOverflowPending = false;
+    let skippedQueueTargetsInThisScript = 0;
 
-    for (const rule of current.rules) {
+    for (let rIdx = 0; rIdx < current.rules.length; rIdx++) {
+      const rule = current.rules[rIdx];
       let matched = true;
       let reason = 'Standard-Regel (bedingungslos)';
 
@@ -736,7 +963,18 @@ export function simulateCallflow(
       // 5. Dynamic runtime condition (Agents logged in / EWT / Queue overflow)
       if (matched && rule.isDynamicCondition) {
         const dynKey = `${current.scriptNumber}:${rule.id}`;
-        const isActive = input.dynamicOverrides[dynKey] === true;
+        const hasExplicitOverride = Object.prototype.hasOwnProperty.call(
+          input.dynamicOverrides,
+          dynKey
+        );
+        const autoMatchedByQueueMode =
+          queueMode !== 'normal' &&
+          (rule.dynamicCategory === queueMode ||
+            (queueMode === 'wait-timeout' && Boolean(rule.isOverflowRule)));
+        const isActive = hasExplicitOverride
+          ? input.dynamicOverrides[dynKey] === true
+          : autoMatchedByQueueMode;
+
         dynamicPrompts.push({
           key: dynKey,
           scriptNumber: current.scriptNumber,
@@ -744,10 +982,15 @@ export function simulateCallflow(
           prio: rule.prio,
           label: rule.conditionRaw || rule.stepName,
           active: isActive,
+          autoActivatedByQueueMode: !hasExplicitOverride && autoMatchedByQueueMode,
         });
+
         if (!isActive) {
           matched = false;
           reason = `Laufzeit-Bedingung inaktiv (umschaltbar): ${rule.conditionRaw || rule.stepName}`;
+        } else if (!hasExplicitOverride && autoMatchedByQueueMode) {
+          overflowTriggered = true;
+          reason = `Aktiviert durch Queue-Test (${queueModeShort}): ${rule.conditionRaw || rule.stepName}`;
         } else {
           reason = `Laufzeit-Bedingung manuell aktiviert: ${rule.conditionRaw || rule.stepName}`;
         }
@@ -765,6 +1008,7 @@ export function simulateCallflow(
           detail: rule.conditionRaw || rule.scheduleRaw || 'Bedingung nicht erfüllt',
           reason,
           statusLabel: 'Übersprungen',
+          elapsedSeconds,
           targetNodeId: rule.stepNodeId,
           fallbackNodeId: current.entryNodeId,
           dynamicKey: rule.isDynamicCondition ? `${current.scriptNumber}:${rule.id}` : undefined,
@@ -772,9 +1016,13 @@ export function simulateCallflow(
         continue;
       }
 
-      // Rule matched!
-      if (typeof rule.waitSeconds === 'number' && rule.waitSeconds > 0) {
-        totalWaitSeconds += rule.waitSeconds;
+      // Rule matched! Track wait time & announcement
+      const ruleWait = typeof rule.waitSeconds === 'number' && rule.waitSeconds > 0 ? rule.waitSeconds : 0;
+      if (ruleWait > 0) {
+        totalWaitSeconds += ruleWait;
+        elapsedSeconds += ruleWait;
+      } else if (rule.announcement) {
+        elapsedSeconds += 5; // Typical short announcement duration for caller timeline
       }
       if (rule.announcement) {
         lastAnnouncement = rule.announcement;
@@ -797,9 +1045,21 @@ export function simulateCallflow(
             prio: rule.prio,
             kind: 'dtmf-prompt',
             title: `Prio ${rule.prio} · Auswahlmenü (DTMF)`,
-            detail: `${rule.choices.length} Ziffern verfügbar — Taste auswählen, um weiter zu simulieren.`,
+            detail: rule.announcement
+              ? `Ansage „${rule.announcement}“ · ${rule.choices.length} Ziffern verfügbar`
+              : `${rule.choices.length} Ziffern verfügbar — Taste über Tastenfeld wählen.`,
             reason,
             statusLabel: 'Wahl nötig',
+            elapsedSeconds,
+            announcement: rule.announcement,
+            callerEvent: {
+              kind: 'dtmf-prompt',
+              label: 'Sprachmenü (DTMF)',
+              text: rule.announcement
+                ? `Hört „${rule.announcement}“ — wartet auf Eingabe (${rule.choices.map((c) => c.choice).join(', ')})`
+                : `Auswahlmenü aktiv — verfügbare Tasten: ${rule.choices.map((c) => `${c.choice}${c.label ? ` (${c.label})` : ''}`).join(', ')}`,
+              elapsedSeconds,
+            },
             targetNodeId: rule.stepNodeId,
             fallbackNodeId: current.entryNodeId,
             choices: rule.choices,
@@ -812,7 +1072,9 @@ export function simulateCallflow(
             finalScriptName: current.scriptName,
             visitedScripts,
             totalWaitSeconds,
+            overflowTriggered,
             steps,
+            dtmfHistory,
             pendingDtmf: {
               key: dtmfKey,
               scriptNumber: current.scriptNumber,
@@ -822,6 +1084,14 @@ export function simulateCallflow(
             dynamicPrompts,
           };
         }
+
+        dtmfHistory.push({
+          key: dtmfKey,
+          scriptNumber: current.scriptNumber,
+          choice: chosenOpt.choice,
+          label: chosenOpt.label,
+          targetNumber: chosenOpt.targetNumber,
+        });
 
         steps.push({
           index: steps.length + 1,
@@ -834,6 +1104,14 @@ export function simulateCallflow(
           detail: `Weiterleitung zu ${chosenOpt.targetNumber}${chosenOpt.label ? ` (${chosenOpt.label})` : ''}`,
           reason: `DTMF-Auswahl Taste ${chosenOpt.choice}`,
           statusLabel: 'Erfüllt',
+          elapsedSeconds,
+          callerEvent: {
+            kind: 'dtmf-press',
+            label: `Taste [${chosenOpt.choice}]`,
+            text: `Anrufer drückt [${chosenOpt.choice}]${chosenOpt.label ? ` — ${chosenOpt.label}` : ''} → Ziel ${chosenOpt.targetNumber}`,
+            elapsedSeconds,
+            digit: chosenOpt.choice,
+          },
           targetScriptNumber: chosenOpt.targetNumber,
           targetNodeId: chosenOpt.choiceNodeId || rule.stepNodeId,
           fallbackNodeId: rule.stepNodeId,
@@ -852,13 +1130,174 @@ export function simulateCallflow(
           finalScriptName: current.scriptName,
           visitedScripts,
           totalWaitSeconds,
+          overflowTriggered,
           steps,
+          dtmfHistory,
           dynamicPrompts,
         };
       }
 
-      // Queue routing?
+      // Queue routing — respect Queue & Overflow test modes!
       if (rule.queueTarget) {
+        const shouldTriggerOverflow =
+          queueMode !== 'normal' &&
+          skippedQueueTargetsInThisScript === 0 &&
+          !localOverflowPending;
+
+        if (shouldTriggerOverflow) {
+          const addedWait =
+            queueMode === 'wait-timeout'
+              ? ruleWait > 0
+                ? 0
+                : defaultOverflowWaitSec
+              : 0;
+          if (addedWait > 0) {
+            totalWaitSeconds += addedWait;
+            elapsedSeconds += addedWait;
+          }
+          overflowTriggered = true;
+          localOverflowPending = true;
+          skippedQueueTargetsInThisScript += 1;
+          overflowQueueName = rule.queueTarget;
+          const overflowReason = describeQueueModeReason(
+            queueMode,
+            ruleWait > 0 ? ruleWait : defaultOverflowWaitSec
+          );
+
+          // Check whether any subsequent rule or manual link exists for overflow
+          const remainingRules = current.rules.slice(rIdx + 1);
+          const ruleManualLink = (current.manualTargets || []).find(
+            (m) => m.fromRuleId === rule.id
+          );
+          const scriptManualLink = (current.manualTargets || []).find((m) => !m.fromRuleId);
+          const hasPossibleOverflowPath =
+            remainingRules.length > 0 ||
+            Boolean(rule.targetNumber) ||
+            Boolean(ruleManualLink) ||
+            Boolean(scriptManualLink);
+
+          steps.push({
+            index: steps.length + 1,
+            scriptNumber: current.scriptNumber,
+            scriptName: current.scriptName,
+            ruleId: rule.id,
+            prio: rule.prio,
+            kind: 'overflow',
+            title: `Prio ${rule.prio} · Überlauf aus Queue ${rule.queueTarget}`,
+            detail: [
+              rule.announcement ? `Ansage: ${rule.announcement}` : null,
+              rule.treatmentInfo ? `Treatment: ${rule.treatmentInfo}` : null,
+              addedWait > 0 || ruleWait > 0
+                ? `Wartezeit: ${addedWait > 0 ? addedWait : ruleWait} s`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(' · ') || `Queue ${rule.queueTarget} nicht zustellbar`,
+            reason: overflowReason,
+            statusLabel: 'Überlauf',
+            elapsedSeconds,
+            isOverflowStep: true,
+            queueTarget: rule.queueTarget,
+            announcement: rule.announcement,
+            treatmentInfo: rule.treatmentInfo,
+            callerEvent: {
+              kind: 'overflow',
+              label: 'Queue-Überlauf',
+              text:
+                queueMode === 'wait-timeout'
+                  ? `Wartet ${addedWait > 0 ? addedWait : ruleWait} s in ${rule.queueTarget}${rule.treatmentInfo ? ` (${rule.treatmentInfo})` : ''} — Überlauf startet`
+                  : `${rule.queueTarget}: ${overflowReason}`,
+              elapsedSeconds,
+              waitAddedSeconds: addedWait > 0 ? addedWait : ruleWait || undefined,
+            },
+            targetNodeId: rule.stepNodeId,
+            fallbackNodeId: current.entryNodeId,
+          });
+
+          // If this rule itself carries a fallback targetNumber or manual link, follow it
+          if (rule.targetNumber) {
+            const nextScript = resolveScript(rule.targetNumber);
+            if (nextScript && !rule.isExternalRoute) {
+              steps.push({
+                index: steps.length + 1,
+                scriptNumber: current.scriptNumber,
+                scriptName: current.scriptName,
+                ruleId: rule.id,
+                prio: rule.prio,
+                kind: 'jump',
+                title: `Überlauf-Sprung → ${nextScript.scriptNumber} (${nextScript.scriptName})`,
+                detail: `Übergabe nach Queue-Überlauf aus ${rule.queueTarget}`,
+                reason: overflowReason,
+                statusLabel: 'Überlauf',
+                elapsedSeconds,
+                isOverflowStep: true,
+                targetScriptNumber: nextScript.scriptNumber,
+                callerEvent: {
+                  kind: 'transfer',
+                  label: 'Überlauf-Ziel',
+                  text: `Weiterleitung an Überlauf-Skript ${nextScript.scriptNumber} (${nextScript.scriptName})`,
+                  elapsedSeconds,
+                },
+                targetNodeId: rule.stepNodeId,
+                fallbackNodeId: `JUMP_${toMermaidNodeSuffix(nextScript.scriptNumber)}`,
+              });
+              jumpedToNext = nextScript;
+              break;
+            }
+          } else if (ruleManualLink) {
+            const nextScript = resolveScript(ruleManualLink.toTargetNumber);
+            if (nextScript) {
+              steps.push({
+                index: steps.length + 1,
+                scriptNumber: current.scriptNumber,
+                scriptName: current.scriptName,
+                ruleId: rule.id,
+                prio: rule.prio,
+                kind: 'jump',
+                title: `Überlauf (Link) → ${nextScript.scriptNumber} (${nextScript.scriptName})`,
+                detail: ruleManualLink.label || `Verknüpftes Überlauf-Skript ${nextScript.scriptNumber}`,
+                reason: overflowReason,
+                statusLabel: 'Überlauf',
+                elapsedSeconds,
+                isOverflowStep: true,
+                targetScriptNumber: nextScript.scriptNumber,
+                callerEvent: {
+                  kind: 'transfer',
+                  label: 'Überlauf-Ziel',
+                  text: `Weiterleitung an ${nextScript.scriptNumber} (${nextScript.scriptName})`,
+                  elapsedSeconds,
+                },
+                targetNodeId: rule.stepNodeId,
+                fallbackNodeId: `JUMP_${toMermaidNodeSuffix(nextScript.scriptNumber)}`,
+              });
+              jumpedToNext = nextScript;
+              break;
+            }
+          }
+
+          if (hasPossibleOverflowPath) {
+            continue;
+          }
+
+          // No overflow target configured after this queue!
+          return {
+            outcomeType: 'queue',
+            outcomeTitle: `Kein Überlauf nach Queue: ${rule.queueTarget}`,
+            outcomeDetail: `${overflowReason} — im Skript ${current.scriptNumber} (${current.scriptName}) folgt jedoch kein Überlauf- oder Fallback-Ziel.`,
+            finalScriptNumber: current.scriptNumber,
+            finalScriptName: current.scriptName,
+            visitedScripts,
+            totalWaitSeconds,
+            overflowTriggered: true,
+            missingOverflowTarget: true,
+            steps,
+            dtmfHistory,
+            dynamicPrompts,
+          };
+        }
+
+        // Normal queue delivery (or secondary overflow queue reached!)
+        const isOverflowDestination = overflowTriggered;
         steps.push({
           index: steps.length + 1,
           scriptNumber: current.scriptNumber,
@@ -866,29 +1305,54 @@ export function simulateCallflow(
           ruleId: rule.id,
           prio: rule.prio,
           kind: 'outcome',
-          title: `Prio ${rule.prio} · Warteschlange ${rule.queueTarget}`,
+          title: isOverflowDestination
+            ? `Prio ${rule.prio} · Überlauf-Queue ${rule.queueTarget}`
+            : `Prio ${rule.prio} · Warteschlange ${rule.queueTarget}`,
           detail: [
             rule.announcement ? `Ansage: ${rule.announcement}` : null,
-            rule.waitSeconds ? `Wartezeit: ${rule.waitSeconds} s` : null,
+            rule.treatmentInfo ? `Wartemusik / Treatment: ${rule.treatmentInfo}` : null,
+            ruleWait ? `Wartezeit: ${ruleWait} s` : null,
           ]
             .filter(Boolean)
             .join(' · ') || 'Anruf wird in Queue zugestellt',
-          reason,
-          statusLabel: 'Ziel erreicht',
+          reason: isOverflowDestination
+            ? `Überlauf-Zustellung nach ${overflowQueueName || 'Erst-Queue'} (${reason})`
+            : reason,
+          statusLabel: isOverflowDestination ? 'Überlauf-Ziel' : 'Ziel erreicht',
+          elapsedSeconds,
+          isOverflowStep: isOverflowDestination,
           queueTarget: rule.queueTarget,
           announcement: rule.announcement,
+          treatmentInfo: rule.treatmentInfo,
+          callerEvent: {
+            kind: 'queue-enter',
+            label: isOverflowDestination ? 'Überlauf-Queue' : 'Warteschlange',
+            text: [
+              `Zustellung in ${rule.queueTarget}`,
+              rule.announcement ? `Ansage: „${rule.announcement}“` : null,
+              rule.treatmentInfo ? `Musik/Treatment: ${rule.treatmentInfo}` : null,
+            ]
+              .filter(Boolean)
+              .join(' · '),
+            elapsedSeconds,
+            waitAddedSeconds: ruleWait || undefined,
+          },
           targetNodeId: rule.stepNodeId,
           fallbackNodeId: current.entryNodeId,
         });
         return {
           outcomeType: 'queue',
-          outcomeTitle: `Queue: ${rule.queueTarget}`,
+          outcomeTitle: isOverflowDestination
+            ? `Überlauf-Queue: ${rule.queueTarget}`
+            : `Queue: ${rule.queueTarget}`,
           outcomeDetail: `Zugestellt in Skript ${current.scriptNumber} (${current.scriptName}) über Prio ${rule.prio}.`,
           finalScriptNumber: current.scriptNumber,
           finalScriptName: current.scriptName,
           visitedScripts,
           totalWaitSeconds,
+          overflowTriggered,
           steps,
+          dtmfHistory,
           dynamicPrompts,
         };
       }
@@ -908,7 +1372,16 @@ export function simulateCallflow(
             : 'Anruf wird beendet',
           reason,
           statusLabel: 'Beendet',
+          elapsedSeconds,
           announcement: rule.announcement,
+          callerEvent: {
+            kind: 'disconnect',
+            label: 'Aufgelegt',
+            text: rule.announcement
+              ? `Hört „${rule.announcement}“, danach wird die Verbindung getrennt`
+              : 'Verbindung wird systemseitig getrennt (Disconnect)',
+            elapsedSeconds,
+          },
           targetNodeId: rule.stepNodeId,
           fallbackNodeId: current.entryNodeId,
         });
@@ -922,14 +1395,22 @@ export function simulateCallflow(
           finalScriptName: current.scriptName,
           visitedScripts,
           totalWaitSeconds,
+          overflowTriggered,
           steps,
+          dtmfHistory,
           dynamicPrompts,
         };
       }
 
       // Jump to target script or external route?
-      if (rule.targetNumber) {
-        const nextScript = resolveScript(rule.targetNumber);
+      const ruleManualFallback =
+        !rule.targetNumber
+          ? (current.manualTargets || []).find((m) => m.fromRuleId === rule.id)
+          : undefined;
+      const resolvedTargetRef = rule.targetNumber || ruleManualFallback?.toTargetNumber;
+
+      if (resolvedTargetRef) {
+        const nextScript = resolveScript(resolvedTargetRef);
         if (nextScript && !rule.isExternalRoute) {
           steps.push({
             index: steps.length + 1,
@@ -941,11 +1422,28 @@ export function simulateCallflow(
             title: `Prio ${rule.prio} · Sprung zu ${nextScript.scriptNumber} (${nextScript.scriptName})`,
             detail: rule.announcement
               ? `Mit Ansage: ${rule.announcement}`
-              : `Übergabe an Zielskript ${nextScript.scriptNumber}`,
+              : ruleManualFallback?.label
+                ? `Verknüpfung (${ruleManualFallback.label}) → ${nextScript.scriptNumber}`
+                : `Übergabe an Zielskript ${nextScript.scriptNumber}`,
             reason,
-            statusLabel: 'Sprung',
+            statusLabel: overflowTriggered ? 'Überlauf' : 'Sprung',
+            elapsedSeconds,
+            isOverflowStep: overflowTriggered,
             targetScriptNumber: nextScript.scriptNumber,
             announcement: rule.announcement,
+            callerEvent: rule.announcement
+              ? {
+                  kind: 'announcement',
+                  label: 'Ansage & Übergabe',
+                  text: `Hört „${rule.announcement}“, Weiterleitung an ${nextScript.scriptName}`,
+                  elapsedSeconds,
+                }
+              : {
+                  kind: 'transfer',
+                  label: 'Weiterleitung',
+                  text: `Interne Übergabe an ${nextScript.scriptName} (${nextScript.scriptNumber})`,
+                  elapsedSeconds,
+                },
             targetNodeId: rule.stepNodeId,
             fallbackNodeId: `JUMP_${toMermaidNodeSuffix(nextScript.scriptNumber)}`,
           });
@@ -960,30 +1458,66 @@ export function simulateCallflow(
           ruleId: rule.id,
           prio: rule.prio,
           kind: 'outcome',
-          title: `Prio ${rule.prio} · Externe Weiterleitung ${rule.targetNumber}`,
+          title: `Prio ${rule.prio} · Externe Weiterleitung ${resolvedTargetRef}`,
           detail: rule.organizationName
             ? `Organisation: ${rule.organizationName}`
             : 'Externes Ziel / Direktruf',
           reason,
           statusLabel: 'Weitergeleitet',
-          targetScriptNumber: rule.targetNumber,
+          elapsedSeconds,
+          isOverflowStep: overflowTriggered,
+          targetScriptNumber: resolvedTargetRef,
+          callerEvent: {
+            kind: 'transfer',
+            label: 'Externes Ziel',
+            text: `Anruf wird extern an ${resolvedTargetRef}${rule.organizationName ? ` (${rule.organizationName})` : ''} übergeben`,
+            elapsedSeconds,
+          },
           targetNodeId: rule.stepNodeId,
           fallbackNodeId: current.entryNodeId,
         });
         return {
           outcomeType: 'external',
-          outcomeTitle: `Weiterleitung: ${rule.targetNumber}`,
+          outcomeTitle: `Weiterleitung: ${resolvedTargetRef}`,
           outcomeDetail: `Externes Routing aus Skript ${current.scriptNumber} (${current.scriptName}) über Prio ${rule.prio}.`,
           finalScriptNumber: current.scriptNumber,
           finalScriptName: current.scriptName,
           visitedScripts,
           totalWaitSeconds,
+          overflowTriggered,
           steps,
+          dtmfHistory,
           dynamicPrompts,
         };
       }
 
-      // Announcement / intermediate step without terminal exit
+      // Announcement / treatment / wait / intermediate step without terminal exit
+      const callerEvent: CallerExperienceEvent | undefined = rule.announcement
+        ? {
+            kind: 'announcement',
+            label: 'Ansage',
+            text: `Hört Ansage „${rule.announcement}“${ruleWait ? ` (${ruleWait} s)` : ''}`,
+            elapsedSeconds,
+            waitAddedSeconds: ruleWait || undefined,
+          }
+        : rule.treatmentInfo
+          ? {
+              kind: 'music',
+              label: 'Wartemusik',
+              text: `${rule.treatmentInfo}${ruleWait ? ` (${ruleWait} s)` : ''}`,
+              elapsedSeconds,
+              waitAddedSeconds: ruleWait || undefined,
+            }
+          : ruleWait > 0
+            ? {
+                kind: 'wait',
+                label: 'Wartezeit',
+                text: `Anrufer wartet ${ruleWait} s (${rule.stepName})`,
+                elapsedSeconds,
+                waitAddedSeconds: ruleWait,
+              }
+            : undefined;
+
       steps.push({
         index: steps.length + 1,
         scriptNumber: current.scriptNumber,
@@ -994,7 +1528,8 @@ export function simulateCallflow(
         title: `Prio ${rule.prio} · ${rule.stepName}`,
         detail: [
           rule.announcement ? `Ansage: ${rule.announcement}` : null,
-          rule.waitSeconds ? `Warten: ${rule.waitSeconds} s` : null,
+          rule.treatmentInfo ? `Treatment: ${rule.treatmentInfo}` : null,
+          ruleWait ? `Warten: ${ruleWait} s` : null,
           rule.conditionRaw && isTimeConditionText(rule.conditionRaw)
             ? rule.conditionRaw
             : null,
@@ -1003,10 +1538,84 @@ export function simulateCallflow(
           .join(' · ') || 'Schritt ausgeführt',
         reason,
         statusLabel: 'Erfüllt',
+        elapsedSeconds,
         announcement: rule.announcement,
+        treatmentInfo: rule.treatmentInfo,
+        callerEvent,
         targetNodeId: rule.stepNodeId,
         fallbackNodeId: current.entryNodeId,
       });
+    }
+
+    // If no rule jumped, check script-level manualLinks before terminating!
+    if (!jumpedToNext && current.manualTargets && current.manualTargets.length > 0) {
+      const scriptLink =
+        current.manualTargets.find((m) => !m.fromRuleId) || current.manualTargets[0];
+      if (scriptLink) {
+        const nextScript = resolveScript(scriptLink.toTargetNumber);
+        if (nextScript) {
+          steps.push({
+            index: steps.length + 1,
+            scriptNumber: current.scriptNumber,
+            scriptName: current.scriptName,
+            kind: 'jump',
+            title: `Verknüpftes Skript → ${nextScript.scriptNumber} (${nextScript.scriptName})`,
+            detail: scriptLink.label
+              ? `Manuelle Verknüpfung (${scriptLink.label})`
+              : `Übergabe an verknüpftes Zielskript ${nextScript.scriptNumber}`,
+            reason: localOverflowPending
+              ? 'Überlauf über verknüpftes Folge-Skript'
+              : 'Verknüpftes Folge-Skript im Callflow',
+            statusLabel: localOverflowPending ? 'Überlauf' : 'Sprung',
+            elapsedSeconds,
+            isOverflowStep: localOverflowPending,
+            targetScriptNumber: nextScript.scriptNumber,
+            callerEvent: {
+              kind: 'transfer',
+              label: localOverflowPending ? 'Überlauf-Ziel' : 'Weiterleitung',
+              text: `Übergabe an ${nextScript.scriptName} (${nextScript.scriptNumber})`,
+              elapsedSeconds,
+            },
+            targetNodeId: current.entryNodeId,
+            fallbackNodeId: `JUMP_${toMermaidNodeSuffix(nextScript.scriptNumber)}`,
+          });
+          jumpedToNext = nextScript;
+        } else {
+          steps.push({
+            index: steps.length + 1,
+            scriptNumber: current.scriptNumber,
+            scriptName: current.scriptName,
+            kind: 'outcome',
+            title: `Verknüpftes Ziel: ${scriptLink.toTargetNumber}`,
+            detail: scriptLink.label || 'Externes Ziel über manuelle Verknüpfung',
+            reason: 'Manuelle Verknüpfung im Callflow',
+            statusLabel: 'Weitergeleitet',
+            elapsedSeconds,
+            targetScriptNumber: scriptLink.toTargetNumber,
+            callerEvent: {
+              kind: 'transfer',
+              label: 'Externes Ziel',
+              text: `Weiterleitung an ${scriptLink.toTargetNumber}${scriptLink.label ? ` (${scriptLink.label})` : ''}`,
+              elapsedSeconds,
+            },
+            targetNodeId: current.entryNodeId,
+            fallbackNodeId: `S_${toMermaidNodeSuffix(current.scriptNumber)}`,
+          });
+          return {
+            outcomeType: 'external',
+            outcomeTitle: `Weiterleitung: ${scriptLink.toTargetNumber}`,
+            outcomeDetail: `Manuelle Verknüpfung aus Skript ${current.scriptNumber} (${current.scriptName}).`,
+            finalScriptNumber: current.scriptNumber,
+            finalScriptName: current.scriptName,
+            visitedScripts,
+            totalWaitSeconds,
+            overflowTriggered,
+            steps,
+            dtmfHistory,
+            dynamicPrompts,
+          };
+        }
+      }
     }
 
     if (jumpedToNext) {
@@ -1015,19 +1624,31 @@ export function simulateCallflow(
     }
 
     if (!terminated) {
+      const missingOverflow = localOverflowPending && Boolean(overflowQueueName);
       return {
-        outcomeType: lastAnnouncement ? 'announcement' : 'script-end',
-        outcomeTitle: lastAnnouncement
-          ? `Ansage-Ende: ${lastAnnouncement}`
-          : `Skript-Ende: ${current.scriptNumber}`,
-        outcomeDetail: lastAnnouncement
-          ? `Letzte abgespielte Ansage in ${current.scriptNumber} (${current.scriptName}) ohne weiteres Sprungziel.`
-          : `Alle Regeln in ${current.scriptNumber} (${current.scriptName}) wurden ohne weiteres Ziel durchlaufen.`,
+        outcomeType: missingOverflow
+          ? 'queue'
+          : lastAnnouncement
+            ? 'announcement'
+            : 'script-end',
+        outcomeTitle: missingOverflow
+          ? `Kein Überlauf nach Queue: ${overflowQueueName}`
+          : lastAnnouncement
+            ? `Ansage-Ende: ${lastAnnouncement}`
+            : `Skript-Ende: ${current.scriptNumber}`,
+        outcomeDetail: missingOverflow
+          ? `Nach Überlauf aus ${overflowQueueName} griff in ${current.scriptNumber} (${current.scriptName}) keine weitere Ausweichregel.`
+          : lastAnnouncement
+            ? `Letzte abgespielte Ansage in ${current.scriptNumber} (${current.scriptName}) ohne weiteres Sprungziel.`
+            : `Alle Regeln in ${current.scriptNumber} (${current.scriptName}) wurden ohne weiteres Ziel durchlaufen.`,
         finalScriptNumber: current.scriptNumber,
         finalScriptName: current.scriptName,
         visitedScripts,
         totalWaitSeconds,
+        overflowTriggered,
+        missingOverflowTarget: missingOverflow || undefined,
         steps,
+        dtmfHistory,
         dynamicPrompts,
       };
     }
@@ -1041,9 +1662,60 @@ export function simulateCallflow(
     finalScriptName: startScript.scriptName,
     visitedScripts,
     totalWaitSeconds,
+    overflowTriggered,
     steps,
+    dtmfHistory,
     dynamicPrompts,
   };
+}
+
+export function simulateScenarioMatrix(
+  model: CallflowSimulationModel,
+  baseInput: Pick<
+    CallSimulationInput,
+    | 'startScriptNumber'
+    | 'dialedDnis'
+    | 'dtmfChoices'
+    | 'dynamicOverrides'
+    | 'queueMode'
+    | 'maxWaitOverrideSeconds'
+  >
+): ScenarioMatrixRow[] {
+  const statusMap: Record<CallSimulationResult['outcomeType'], string> = {
+    queue: 'Warteschlange',
+    announcement: 'Ansage',
+    external: 'Weiterleitung',
+    disconnect: 'Getrennt',
+    'script-end': 'Skript-Ende',
+    'dtmf-wait': 'DTMF-Menü',
+    cycle: 'Zyklus',
+  };
+
+  return SCENARIO_MATRIX_PRESETS.map((preset) => {
+    const res = simulateCallflow(model, {
+      ...baseInput,
+      weekday: preset.weekday,
+      timeHHMM: preset.timeHHMM,
+      isHoliday: preset.isHoliday,
+      isSondZeit: preset.isSondZeit,
+    });
+    return {
+      preset,
+      outcomeType: res.outcomeType,
+      statusLabel: res.missingOverflowTarget
+        ? 'Überlauf fehlt'
+        : res.overflowTriggered && res.outcomeType === 'queue'
+          ? 'Überlauf-Queue'
+          : statusMap[res.outcomeType] || res.outcomeType,
+      outcomeTitle: res.outcomeTitle,
+      totalWaitSeconds: res.totalWaitSeconds,
+      visitedScripts: res.visitedScripts,
+      stepCount: res.steps.filter((s) => s.kind !== 'rule-skipped').length,
+      overflowTriggered: res.overflowTriggered,
+      missingOverflowTarget: Boolean(res.missingOverflowTarget),
+      needsDtmf: res.outcomeType === 'dtmf-wait',
+    };
+  });
 }
 
 export function buildWorkspaceGlobalSearchIndex(

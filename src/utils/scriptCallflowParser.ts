@@ -8077,7 +8077,7 @@ export function inspectWorkspaceNodeForEdit(
 
     const hoursSummary = getModuleOpeningHoursSummary(mod, workspace);
     const isDifferentFromActiveDetail =
-      viewLevel.level === 'master' ||
+      viewLevel.level !== 'detail' ||
       canonicalScriptMatchKey(viewLevel.scriptNumber) !== targetKey;
 
     return {

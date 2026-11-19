@@ -163,7 +163,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   const handleDownloadInteractiveHtml = async () => {
     const rawHtmlSvg = unfilteredSvgContent || svgContent;
-    if (!rawHtmlSvg || isExportingHtml || htmlExportProgress?.active) return;
+    if ((!rawHtmlSvg && scriptCount === 0 && !code.trim()) || isExportingHtml || htmlExportProgress?.active) {
+      return;
+    }
     setIsExportingHtml(true);
     setExportStatus(null);
     try {
@@ -180,7 +182,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         setTimeout(() => setExportStatus(null), 3000);
         return;
       }
-      if (!htmlContent) {
+      if (!htmlContent && rawHtmlSvg) {
         const htmlSvg =
           targetSurface === 'dark' ? getSurfaceAdjustedSvg(rawHtmlSvg, 'dark') : rawHtmlSvg;
         htmlContent = generateInteractiveCallflowHtml(
@@ -190,6 +192,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           targetSurface,
           { initialPathColorMode: pathColorMode }
         );
+      }
+      if (!htmlContent) {
+        setExportStatus('Es konnte kein Callflow für den HTML-Export gefunden werden.');
+        return;
       }
       const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
       triggerLocalDownload(blob, 'Callflow.html');
@@ -328,7 +334,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           {scriptCount > 0 && (
             <div className="space-y-2">
               <label className="text-xs font-medium text-slate-300 block">
-                Start-Ansicht beim Öffnen der Callflow.html
+                Schnellstart aktiv (Willkommensseite zuerst) · Hauptscript-Ziel in Callflow.html
               </label>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 {[
@@ -378,7 +384,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
             <button
               type="button"
-              disabled={!svgContent || isExportingHtml || Boolean(htmlExportProgress?.active)}
+              disabled={(!svgContent && scriptCount === 0 && !code.trim()) || isExportingHtml || Boolean(htmlExportProgress?.active)}
               onClick={handleDownloadInteractiveHtml}
               className="p-4 rounded-xl bg-emerald-950/30 border border-emerald-500/50 hover:border-emerald-400 text-left transition-colors flex flex-col justify-between group disabled:opacity-50 cursor-pointer"
             >
