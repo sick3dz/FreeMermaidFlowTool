@@ -833,6 +833,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     nis2: false,
   });
   const [copiedComplianceId, setCopiedComplianceId] = useState<ComplianceStandardId | null>(null);
+  const [copiedLegalNotice, setCopiedLegalNotice] = useState<boolean>(false);
 
   // Expandable state for the 6 embedded tool cards
   const [expandedToolIds, setExpandedToolIds] = useState<Record<string, boolean>>({});
@@ -948,6 +949,36 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
         window.setTimeout(() => {
           setCopiedComplianceId((prev) => (prev === item.id ? null : prev));
         }, 2200);
+      } finally {
+        document.body.removeChild(textarea);
+      }
+    }
+  };
+
+  const LEGAL_TRADEMARK_COPY_TEXT = [
+    'Marken-, Unabhängigkeits- & Nutzungshinweis (Internes Projektwerkzeug):',
+    '• Unabhängiges Werkzeug: Dieses Visualisierungs- und Analyse-Tool ist ein unabhängiges internes Projektwerkzeug. Es besteht keine Verbindung, Partnerschaft, Zertifizierung oder Unterstützung durch Avaya Inc., Microsoft Corporation oder sonstige Rechteinhaber.',
+    '• Beschreibende Markennennung: Avaya, Avaya Aura, Nortel und Microsoft Visio sind eingetragene Marken der jeweiligen Rechteinhaber und werden ausschließlich beschreibend zur Kennzeichnung der unterstützten Dateiformate (.s, .vsdx, .vdx) genannt. Es werden keine geschützten Hersteller-Logos oder proprietären Programmdateien verwendet.',
+    '• Interner Einsatz in Kundenprojekten: Produktive Kundenskripte und Rufnummernpläne sollten über die lokal gespeicherte Offline-Einzeldatei im Browser-RAM verarbeitet werden (kein Server-Upload, kein Auftragsverarbeiter).',
+    '• Hinweis: Allgemeine Orientierung auf Basis von Open-Source-Bibliotheken (MIT/EPL); ersetzt keine verbindliche Rechtsberatung.',
+  ].join('\n');
+
+  const handleCopyLegalNotice = async () => {
+    try {
+      await navigator.clipboard.writeText(LEGAL_TRADEMARK_COPY_TEXT);
+      setCopiedLegalNotice(true);
+      window.setTimeout(() => setCopiedLegalNotice(false), 2200);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = LEGAL_TRADEMARK_COPY_TEXT;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        setCopiedLegalNotice(true);
+        window.setTimeout(() => setCopiedLegalNotice(false), 2200);
       } finally {
         document.body.removeChild(textarea);
       }
@@ -1319,6 +1350,79 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                 </div>
               );
             })}
+          </div>
+
+          {/* Marken-, Unabhängigkeits- & Nutzungshinweis (Internes Projekt-Tool) */}
+          <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 sm:p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
+              <div className="space-y-0.5">
+                <h3 className="text-sm font-semibold text-slate-100">
+                  Marken-, Unabhängigkeits- &amp; Nutzungshinweis
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Orientierung für den nicht-öffentlichen Einsatz als internes Projekt-Tool in
+                  Kundenprojekten
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleCopyLegalNotice()}
+                className="min-h-[36px] px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-100 flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+              >
+                {copiedLegalNotice ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span className="text-emerald-300">Vermerk kopiert</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5 text-slate-300 shrink-0" />
+                    <span>Vermerk kopieren</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6 text-xs leading-relaxed">
+              <div className="space-y-1">
+                <div className="font-semibold text-slate-200">
+                  Markenrecht &amp; Unabhängigkeit
+                </div>
+                <p className="text-slate-400">
+                  Unabhängiges Visualisierungswerkzeug ohne Verbindung, Partnerschaft oder
+                  Unterstützung durch Avaya Inc. oder Microsoft Corporation. Marken wie{' '}
+                  <span className="text-slate-300">
+                    Avaya, Avaya Aura, Nortel und Microsoft Visio
+                  </span>{' '}
+                  gehören den jeweiligen Rechteinhabern und werden ausschließlich beschreibend zur
+                  Dateiformat-Kompatibilität genannt.
+                </p>
+              </div>
+
+              <div className="space-y-1">
+                <div className="font-semibold text-slate-200">
+                  Interner Projekteinsatz &amp; Vertraulichkeit
+                </div>
+                <p className="text-slate-400">
+                  Für produktive Kunden-Callflows, interne Rufnummernpläne (DNIS) und
+                  NDA-geschützte Skripte wird empfohlen, ausschließlich die lokal heruntergeladene
+                  Offline-Einzeldatei im Browser-Arbeitsspeicher zu nutzen – ohne Server-Upload
+                  oder Drittanbieter-Transfer.
+                </p>
+              </div>
+
+              <div className="space-y-1">
+                <div className="font-semibold text-slate-200">
+                  Urheberrecht &amp; Open-Source-Basis
+                </div>
+                <p className="text-slate-400">
+                  Das Werkzeug enthält keine geschützten Hersteller-Logos oder proprietären
+                  Programmdateien und basiert auf offen lizenzierten Bibliotheken (MIT/EPL). Dieser
+                  Hinweis dient der praxisnahen Orientierung und ersetzt keine verbindliche
+                  Rechtsberatung.
+                </p>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -2360,20 +2464,28 @@ const { svg } = await mermaid.render(id, code);
       </main>
 
       {/* Quiet Footer */}
-      <footer className="border-t border-slate-900 px-4 sm:px-6 lg:px-10 py-5 text-xs text-slate-500 flex flex-col sm:flex-row items-center justify-between gap-3 text-center sm:text-left">
-        <div>
-          MermaidFree2UseOpen · Lokaler Single-File HTML-Builder (100 % Client-Side &amp;
-          Air-Gapped)
+      <footer className="border-t border-slate-900 px-4 sm:px-6 lg:px-10 py-5 text-xs text-slate-500 space-y-3">
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 text-center sm:text-left">
+          <div>
+            MermaidFree2UseOpen · Lokaler Single-File HTML-Builder (100 % Client-Side &amp;
+            Air-Gapped)
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-x-2.5 gap-y-1 font-mono text-[11px]">
+            <span>Mermaid v11.12 ESM</span>
+            <span aria-hidden="true">·</span>
+            <span>Eclipse ELK &amp; Dagre</span>
+            <span aria-hidden="true">·</span>
+            <span>Parser für Avaya-.s-Skripte</span>
+            <span aria-hidden="true">·</span>
+            <span>JSZip Visio Parser</span>
+          </div>
         </div>
-        <div className="flex flex-wrap items-center justify-center gap-x-2.5 gap-y-1 font-mono text-[11px]">
-          <span>Mermaid v11.12 ESM</span>
-          <span aria-hidden="true">·</span>
-          <span>Eclipse ELK &amp; Dagre</span>
-          <span aria-hidden="true">·</span>
-          <span>Avaya AACC Compiler</span>
-          <span aria-hidden="true">·</span>
-          <span>JSZip Visio Parser</span>
-        </div>
+        <p className="border-t border-slate-900/90 pt-3 text-[11px] leading-relaxed text-slate-500 text-center sm:text-left">
+          Unabhängiges internes Projektwerkzeug – keine Verbindung, Partnerschaft oder
+          Unterstützung durch Avaya Inc. oder Microsoft Corporation. Avaya, Avaya Aura, Nortel und
+          Microsoft Visio sind eingetragene Marken der jeweiligen Rechteinhaber und werden
+          ausschließlich zur Beschreibung der Dateiformat-Kompatibilität genannt.
+        </p>
       </footer>
     </div>
   );
