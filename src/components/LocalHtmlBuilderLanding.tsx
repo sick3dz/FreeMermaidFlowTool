@@ -5,6 +5,7 @@ import {
   Code2,
   Copy,
   Download,
+  FolderUp,
   HardDriveDownload,
   Layers,
   Loader2,
@@ -19,10 +20,11 @@ import { DEFAULT_THEME_CONFIG } from '../data/mermaidTemplates';
 import { buildScriptWorkspace } from '../utils/scriptCallflowParser';
 import {
   buildAndDownloadOfflineApp,
+  extractSeedFromRecoveryFile,
   inspectCachedStudioProject,
   isRunningAsOfflineSingleFile,
 } from '../utils/offlineAppExporter';
-import { SmartColorMode } from '../types/mermaidStudio';
+import { OfflineWorkspaceSeed, SmartColorMode } from '../types/mermaidStudio';
 
 type InfoWorkspaceTab = 'compliance' | 'architecture' | 'modules' | 'legal';
 type TopTechSpecId = 'runtime' | 'graph-engine' | 'analysis-sim' | 'air-gapped';
@@ -789,6 +791,12 @@ async function copyTextWithOfflineFallback(text: string): Promise<boolean> {
 export const LocalHtmlBuilderLanding: React.FC = () => {
   const isOfflineModeActive = useMemo(() => isRunningAsOfflineSingleFile(), []);
   const cachedProject = useMemo(() => inspectCachedStudioProject(), []);
+  const [importedRecoverySeed, setImportedRecoverySeed] = useState<Omit<
+    OfflineWorkspaceSeed,
+    'seedId' | 'exportedAt' | 'initialShellView'
+  > | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  const effectiveSeedSource = importedRecoverySeed ?? (cachedProject.hasProjectData ? cachedProject.seedPayload : null);
   const [embedCachedProject, setEmbedCachedProject] = useState<boolean>(
     () => cachedProject.hasProjectData
   );
@@ -895,10 +903,10 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     setBuildError(null);
 
     try {
-      const shouldEmbedProject = cachedProject.hasProjectData && embedCachedProject;
-      const baseProjectSeed = shouldEmbedProject
+      const shouldEmbedProject = Boolean(effectiveSeedSource) && embedCachedProject;
+      const baseProjectSeed = shouldEmbedProject && effectiveSeedSource
         ? {
-            ...cachedProject.seedPayload,
+            ...effectiveSeedSource,
             smartColorMode: defaultSmartColorMode,
             canvasSurface: defaultCanvasSurface,
             workspaceMode: defaultWorkspaceMode,
@@ -947,16 +955,45 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     }
   };
 
+  const handleImportRecoveryFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setBuildError(null);
+    setRecoveryNotice(null);
+    try {
+      const extracted = await extractSeedFromRecoveryFile(file);
+      if (!extracted) {
+        setBuildError(
+          `In "${file.name}" wurden keine gespeicherten Projektdaten (__MERMAID_OFFLINE_SEED__ oder JSON-Backup) gefunden.`
+        );
+        return;
+      }
+      setImportedRecoverySeed(extracted);
+      setEmbedCachedProject(true);
+      const modCount = extracted.scriptWorkspace?.modules?.length ?? 0;
+      setRecoveryNotice(
+        `Stand "${extracted.diagramTitle}" (${modCount} Skripte) aus "${file.name}" geladen.`
+      );
+    } catch (err) {
+      setBuildError(
+        err instanceof Error
+          ? err.message
+          : 'Die Sicherungsdatei konnte nicht gelesen werden.'
+      );
+    }
+  };
+
   const handleBuildAndDownload = async () => {
     if (isBuilding) return;
     setIsBuilding(true);
     setBuildError(null);
 
     try {
-      const shouldEmbedProject = cachedProject.hasProjectData && embedCachedProject;
-      const baseStudioSeed = shouldEmbedProject
+      const shouldEmbedProject = Boolean(effectiveSeedSource) && embedCachedProject;
+      const baseStudioSeed = shouldEmbedProject && effectiveSeedSource
         ? {
-            ...cachedProject.seedPayload,
+            ...effectiveSeedSource,
             smartColorMode: defaultSmartColorMode,
             canvasSurface: defaultCanvasSurface,
             workspaceMode: defaultWorkspaceMode,
@@ -1348,7 +1385,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
               </div>
             </div>
 
-            {cachedProject.hasProjectData && (
+            {effectiveSeedSource && (
               <label className="flex items-start gap-2.5 p-3 rounded-lg bg-emerald-950/35 border border-emerald-500/40 text-xs text-emerald-100 cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -1358,12 +1395,36 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                 />
                 <span className="leading-relaxed">
                   Vorhandenes Projekt einbetten (
-                  <span className="font-semibold text-white">{cachedProject.diagramTitle}</span>
-                  {cachedProject.moduleCount > 0 && ` · ${cachedProject.moduleCount} Skripte`}
-                  {cachedProject.savedDiagramCount > 0 && ` · ${cachedProject.savedDiagramCount} Entwürfe`}
+                  <span className="font-semibold text-white">
+                    {effectiveSeedSource.diagramTitle}
+                  </span>
+                  {(effectiveSeedSource.scriptWorkspace?.modules?.length ?? 0) > 0 &&
+                    ` · ${effectiveSeedSource.scriptWorkspace.modules.length} Skripte`}
+                  {(effectiveSeedSource.savedDiagrams?.length ?? 0) > 0 &&
+                    ` · ${effectiveSeedSource.savedDiagrams.length} Entwürfe`}
                   )
                 </span>
               </label>
+            )}
+
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="text-slate-400">
+                Optional: Sicherung (.json / ältere Offline.html) laden
+              </span>
+              <label className="px-2.5 py-1 rounded-md border border-slate-700 bg-slate-950 hover:bg-slate-800 text-slate-200 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0">
+                <FolderUp className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Stand laden</span>
+                <input
+                  type="file"
+                  accept=".json,.html,.htm"
+                  onChange={handleImportRecoveryFile}
+                  className="hidden"
+                />
+              </label>
+            </div>
+
+            {recoveryNotice && (
+              <p className="text-[11px] font-mono text-emerald-300">{recoveryNotice}</p>
             )}
 
             {/* Build Action: Pure Studio / Callflow.html Builder Offline HTML */}

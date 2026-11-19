@@ -2,6 +2,8 @@ import React, { useMemo, useState } from 'react';
 import {
   Archive,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Database,
   FileCode2,
   HardDriveDownload,
@@ -16,6 +18,7 @@ import { triggerLocalDownload } from '../utils/mermaidEngine';
 import {
   buildAndDownloadOfflineApp,
   inspectCachedStudioProject,
+  scanAllBrowserCacheEntries,
 } from '../utils/offlineAppExporter';
 
 const PROJECT_OFFLINE_FILENAME = 'MermaidFree2UseOpen_Projekt_Offline.html';
@@ -59,6 +62,8 @@ const PACKAGE_CONTENTS = [
 
 export default function OnlineProjectLanding() {
   const cachedProject = useMemo(() => inspectCachedStudioProject(), []);
+  const cacheDiag = useMemo(() => scanAllBrowserCacheEntries(), []);
+  const [showCacheDiag, setShowCacheDiag] = useState<boolean>(false);
   const [includeCachedProject, setIncludeCachedProject] = useState<boolean>(
     () => cachedProject.hasProjectData
   );
@@ -88,6 +93,16 @@ export default function OnlineProjectLanding() {
     });
     triggerLocalDownload(blob, filename);
     setBackupNotice(`${filename} wurde als Sofort-Sicherung heruntergeladen.`);
+  };
+
+  const handleDownloadRawCacheDump = () => {
+    if (cacheDiag.totalKeys === 0) return;
+    const filename = 'Browser_Raw_Cache_Sicherung.json';
+    const blob = new Blob([JSON.stringify(cacheDiag.rawDump, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    triggerLocalDownload(blob, filename);
+    setBackupNotice(`${filename} (${cacheDiag.totalKeys} Schlüssel) heruntergeladen.`);
   };
 
   const handleDownloadProjectOffline = async () => {
@@ -217,7 +232,7 @@ export default function OnlineProjectLanding() {
             </div>
 
             {/* Browser Cache Rescue Panel (shown automatically if prior Studio data exists in localStorage) */}
-            {cachedProject.hasProjectData && (
+            {cachedProject.hasProjectData ? (
               <div className="rounded-xl border border-emerald-500/45 bg-emerald-950/25 p-5 space-y-3.5">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-start gap-2.5 min-w-0">
@@ -262,6 +277,75 @@ export default function OnlineProjectLanding() {
                   <p className="text-[11px] font-mono text-emerald-300">
                     {backupNotice}
                   </p>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 space-y-2.5">
+                <button
+                  type="button"
+                  onClick={() => setShowCacheDiag((prev) => !prev)}
+                  className="w-full flex items-center justify-between gap-3 text-left text-xs text-slate-300 hover:text-slate-100 cursor-pointer"
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Database className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <span>
+                      Browser-Cache-Status (dieser Online-Origin):{' '}
+                      <span className="font-mono text-slate-200 tabular-nums">
+                        {cacheDiag.available
+                          ? `${cacheDiag.totalKeys} Einträge (${(cacheDiag.totalBytes / 1024).toFixed(1)} KB)`
+                          : 'Speicherzugriff gesperrt'}
+                      </span>
+                    </span>
+                  </span>
+                  {showCacheDiag ? (
+                    <ChevronUp className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  )}
+                </button>
+
+                {showCacheDiag && (
+                  <div className="pt-2 border-t border-slate-800/80 space-y-2.5 text-xs text-slate-400">
+                    <p className="leading-relaxed">
+                      Im <span className="font-mono text-slate-300">localStorage</span> dieser URL (
+                      <span className="font-mono text-slate-300 break-all">{cacheDiag.originLabel}</span>) sind
+                      aktuell keine gespeicherten Callflow-Skripte hinterlegt. Falls Sie Ihr Projekt zuvor in einer
+                      heruntergeladenen Offline-HTML (<span className="font-mono text-slate-300">file://</span>)
+                      geöffnet hatten, besitzt jede lokale Datei bzw. <span className="font-mono text-slate-300">file://</span>-Umgebung
+                      einen eigenen, von dieser Webseite getrennten Browserspeicher — oder ältere leere Offline-Downloads
+                      können beim Doppelklick einen vorhandenen lokalen Speicher überschrieben haben (ab der neuen Version geschützt).
+                    </p>
+                    <p className="leading-relaxed text-slate-300">
+                      Tipp: Falls Sie noch eine ältere heruntergeladene <span className="font-mono">Offline.html</span> oder
+                      eine <span className="font-mono">.json</span>-Sicherung besitzen, können Sie deren Projektstand
+                      im lokalen Offline-HTML-Builder wieder einlesen und in eine neue Studio-HTML übernehmen.
+                    </p>
+                    {cacheDiag.entries.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium text-slate-300">Gefundene Schlüssel:</span>
+                          <button
+                            type="button"
+                            onClick={handleDownloadRawCacheDump}
+                            className="px-2.5 py-1 text-[11px] font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 rounded border border-slate-700 cursor-pointer"
+                          >
+                            Roh-Cache sichern (.json)
+                          </button>
+                        </div>
+                        <ul className="max-h-28 overflow-y-auto space-y-1 font-mono text-[11px] text-slate-400">
+                          {cacheDiag.entries.map((entry) => (
+                            <li key={entry.key} className="flex justify-between gap-2">
+                              <span className="truncate">{entry.key}</span>
+                              <span className="tabular-nums shrink-0">{entry.bytes} B</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {backupNotice && (
+                      <p className="text-[11px] font-mono text-emerald-300">{backupNotice}</p>
+                    )}
+                  </div>
                 )}
               </div>
             )}

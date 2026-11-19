@@ -107,10 +107,38 @@ export function inspectCachedStudioProject(): CachedStudioProjectSummary {
   const parsedWorkspace = safeParseJson<Partial<ScriptWorkspace>>(
     readStudioStorage(STUDIO_STORAGE_KEYS.SCRIPT_WORKSPACE)
   );
-  const scriptWorkspace =
-    parsedWorkspace && Array.isArray(parsedWorkspace.modules)
-      ? buildScriptWorkspace(parsedWorkspace.modules, parsedWorkspace)
-      : buildScriptWorkspace([]);
+  let scriptWorkspace: ScriptWorkspace;
+  if (parsedWorkspace && Array.isArray(parsedWorkspace.modules)) {
+    try {
+      scriptWorkspace = buildScriptWorkspace(parsedWorkspace.modules, parsedWorkspace);
+    } catch {
+      scriptWorkspace = {
+        modules: parsedWorkspace.modules,
+        missingTargets: Array.isArray(parsedWorkspace.missingTargets)
+          ? parsedWorkspace.missingTargets
+          : [],
+        externalEndpoints: Array.isArray(parsedWorkspace.externalEndpoints)
+          ? parsedWorkspace.externalEndpoints
+          : [],
+        ignoredChecklistTargets: Array.isArray(parsedWorkspace.ignoredChecklistTargets)
+          ? parsedWorkspace.ignoredChecklistTargets
+          : [],
+        resolvedIssues: parsedWorkspace.resolvedIssues || {},
+        manualQuestions: Array.isArray(parsedWorkspace.manualQuestions)
+          ? parsedWorkspace.manualQuestions
+          : [],
+        manualLinks: Array.isArray(parsedWorkspace.manualLinks)
+          ? parsedWorkspace.manualLinks
+          : [],
+        updatedAt:
+          typeof parsedWorkspace.updatedAt === 'number'
+            ? parsedWorkspace.updatedAt
+            : Date.now(),
+      };
+    }
+  } else {
+    scriptWorkspace = buildScriptWorkspace([]);
+  }
 
   const activeCode = readStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_CODE) ?? '';
   const diagramTitle = readStudioStorage(STUDIO_STORAGE_KEYS.ACTIVE_TITLE) || 'Neuer Callflow';
@@ -170,6 +198,124 @@ export function inspectCachedStudioProject(): CachedStudioProjectSummary {
       savedDiagrams,
     },
   };
+}
+
+export interface BrowserCacheDiagnostic {
+  available: boolean;
+  originLabel: string;
+  totalKeys: number;
+  totalBytes: number;
+  entries: Array<{ key: string; bytes: number }>;
+  rawDump: Record<string, string>;
+}
+
+export function scanAllBrowserCacheEntries(): BrowserCacheDiagnostic {
+  if (typeof window === 'undefined') {
+    return {
+      available: false,
+      originLabel: 'unbekannt',
+      totalKeys: 0,
+      totalBytes: 0,
+      entries: [],
+      rawDump: {},
+    };
+  }
+
+  const originLabel =
+    window.location.protocol === 'file:'
+      ? 'file:// (Lokale HTML-Datei)'
+      : window.location.origin || window.location.href;
+
+  const entries: Array<{ key: string; bytes: number }> = [];
+  const rawDump: Record<string, string> = {};
+  let totalBytes = 0;
+
+  try {
+    const storage = window.localStorage;
+    for (let i = 0; i < storage.length; i += 1) {
+      const key = storage.key(i);
+      if (!key) continue;
+      const val = storage.getItem(key) ?? '';
+      const bytes = key.length + val.length;
+      totalBytes += bytes;
+      entries.push({ key, bytes });
+      rawDump[key] = val;
+    }
+    entries.sort((a, b) => b.bytes - a.bytes);
+    return {
+      available: true,
+      originLabel,
+      totalKeys: entries.length,
+      totalBytes,
+      entries,
+      rawDump,
+    };
+  } catch {
+    return {
+      available: false,
+      originLabel,
+      totalKeys: 0,
+      totalBytes: 0,
+      entries: [],
+      rawDump: {},
+    };
+  }
+}
+
+export async function extractSeedFromRecoveryFile(
+  file: File
+): Promise<Omit<OfflineWorkspaceSeed, 'seedId' | 'exportedAt' | 'initialShellView'> | null> {
+  const text = await file.text();
+  if (!text.trim()) return null;
+
+  // Case 1: Direct JSON backup (*_Cache_Sicherung.json)
+  if (file.name.toLowerCase().endsWith('.json') || text.trim().startsWith('{')) {
+    const parsed = safeParseJson<Partial<OfflineWorkspaceSeed>>(text);
+    if (parsed && typeof parsed === 'object' && seedHasProjectContent(parsed as OfflineWorkspaceSeed)) {
+      return {
+        diagramTitle: parsed.diagramTitle || 'Wiederhergestellter Callflow',
+        code: parsed.code ?? '',
+        themeConfig: parsed.themeConfig
+          ? { ...DEFAULT_THEME_CONFIG, ...parsed.themeConfig }
+          : DEFAULT_THEME_CONFIG,
+        smartColorMode: parsed.smartColorMode || 'semantic',
+        hiddenSmartNodeTypes: Array.isArray(parsed.hiddenSmartNodeTypes)
+          ? parsed.hiddenSmartNodeTypes
+          : [],
+        canvasSurface: parsed.canvasSurface === 'light' ? 'light' : 'dark',
+        workspaceMode: parsed.workspaceMode === 'free' ? 'free' : 'guided',
+        scriptWorkspace: parsed.scriptWorkspace || buildScriptWorkspace([]),
+        savedDiagrams: Array.isArray(parsed.savedDiagrams) ? parsed.savedDiagrams : [],
+      };
+    }
+  }
+
+  // Case 2: Embedded seed inside an existing Offline-HTML snapshot
+  const match = text.match(
+    /<script[^>]*id=["']mermaid-offline-seed["'][^>]*>window\.__MERMAID_OFFLINE_SEED__\s*=\s*([\s\S]*?);<\/script>/
+  );
+  if (match && match[1]) {
+    const parsed = safeParseJson<Partial<OfflineWorkspaceSeed>>(match[1]);
+    if (parsed && typeof parsed === 'object') {
+      return {
+        diagramTitle: parsed.diagramTitle || 'Wiederhergestellter Callflow',
+        code: parsed.code ?? '',
+        themeConfig: parsed.themeConfig
+          ? { ...DEFAULT_THEME_CONFIG, ...parsed.themeConfig }
+          : DEFAULT_THEME_CONFIG,
+        smartColorMode: parsed.smartColorMode || 'semantic',
+        hiddenSmartNodeTypes: Array.isArray(parsed.hiddenSmartNodeTypes)
+          ? parsed.hiddenSmartNodeTypes
+          : [],
+        canvasSurface: parsed.canvasSurface === 'light' ? 'light' : 'dark',
+        workspaceMode: parsed.workspaceMode === 'free' ? 'free' : 'guided',
+        scriptWorkspace: parsed.scriptWorkspace || buildScriptWorkspace([]),
+        savedDiagrams: Array.isArray(parsed.savedDiagrams) ? parsed.savedDiagrams : [],
+      };
+    }
+  }
+
+  return null;
 }
 
 /**
