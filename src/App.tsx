@@ -18,7 +18,6 @@ import {
   GitBranch,
   Globe,
   Grid,
-  HardDriveDownload,
   Layers,
   Map as MapIcon,
   Maximize2,
@@ -127,6 +126,7 @@ import {
   buildWorkspaceScheduleOverview,
   canonicalScriptMatchKey,
   connectNodesInWorkspace,
+  createWorkspaceInspectContext,
   deleteNodeFromWorkspace,
   disconnectEdgeInWorkspace,
   EditableCallflowNodeSnapshot,
@@ -174,7 +174,6 @@ import { ExportModal, PreferredInitialHtmlView } from './components/ExportModal'
 import { MultiScriptModal } from './components/MultiScriptModal';
 import { NewCallflowModal } from './components/NewCallflowModal';
 import { NodeInlineEditorModal } from './components/NodeInlineEditorModal';
-import { OfflineDownloadModal } from './components/OfflineDownloadModal';
 import { OpeningHoursModal } from './components/OpeningHoursModal';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { CallSimulatorHud } from './components/CallSimulatorHud';
@@ -546,7 +545,6 @@ function OfflineStudioApp() {
     tab: 'templates' | 'snippets' | 'saved' | 'help';
   }>({ isOpen: false, tab: 'templates' });
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
-  const [isOfflineModalOpen, setIsOfflineModalOpen] = useState<boolean>(false);
 
   // PC Visual Drag-and-Drop Callflow Editor State (enabled automatically when a Callflow workspace is loaded)
   const [isVisualEditMode, setIsVisualEditMode] = useState<boolean>(
@@ -3874,10 +3872,19 @@ function OfflineStudioApp() {
 
       const yieldFrame = () =>
         new Promise<void>((resolve) => {
+          let done = false;
+          const finish = () => {
+            if (!done) {
+              done = true;
+              resolve();
+            }
+          };
+          const fallbackTimer = window.setTimeout(finish, 40);
           if (typeof requestAnimationFrame === 'function') {
-            requestAnimationFrame(() => resolve());
-          } else {
-            window.setTimeout(resolve, 0);
+            requestAnimationFrame(() => {
+              window.clearTimeout(fallbackTimer);
+              finish();
+            });
           }
         });
       const yieldMicroTick = () =>
@@ -3939,6 +3946,11 @@ function OfflineStudioApp() {
         const healthFindings = analyzeWorkspaceLogicHealth(scriptWorkspace);
         const scheduleRows = buildWorkspaceScheduleOverview(scriptWorkspace);
         const routingMatrixRows = buildWorkspaceRoutingMatrix(scriptWorkspace);
+        const inspectContext = createWorkspaceInspectContext(
+          scriptWorkspace,
+          healthFindings,
+          registry.parametersByScript
+        );
         const analysisPayload: InteractiveCallflowHtmlAnalysisPayload = {
           openIssues: scriptWorkspace.issues || [],
           healthFindings,
@@ -4068,7 +4080,18 @@ function OfflineStudioApp() {
           ) {
             rawSvg = preloadedHit.rawSvg;
             wasCacheHit = true;
-          } else {
+          } else if (spec.key === 'master:detailed' && trimmedSpecCode.length > 45000) {
+            const compactView = views.find((v) => v.key === 'master');
+            if (compactView) {
+              rawSvg = compactView.svg;
+              usedFallback = true;
+              lastWarning =
+                'Voll-Detail-Karte bei Großprojekt durch Kompakt-Master ersetzt';
+              await yieldFrame();
+            }
+          }
+
+          if (!rawSvg) {
             // Yield a frame BEFORE starting heavy Mermaid rendering so the UI updates immediately
             await yieldFrame();
             if (signal.aborted) return { html: null, aborted: true };
@@ -4176,7 +4199,7 @@ function OfflineStudioApp() {
               lastWarning = `${spec.label}: SVG-Nachbearbeitung vereinfacht`;
             }
 
-            // Precompute structured Element Info snapshots for instant 0ms Double-Click Info Box in Callflow.html
+            // Precompute structured Element Info snapshots using O(1) WorkspaceInspectContext
             const nodeDetails: Record<string, InteractiveCallflowHtmlNodeDetail> = {};
             try {
               parsedGraph.nodes.forEach((node) => {
@@ -4184,7 +4207,8 @@ function OfflineStudioApp() {
                   scriptWorkspace,
                   spec.viewLevel,
                   node.id,
-                  parsedGraph
+                  parsedGraph,
+                  inspectContext
                 );
                 nodeDetails[node.id] = {
                   nodeId: snap.nodeId,
@@ -4230,8 +4254,12 @@ function OfflineStudioApp() {
             });
           }
 
-          if (wasCacheHit && (idx + 1) % 6 === 0) {
-            await yieldMicroTick();
+          if (wasCacheHit) {
+            if (idx === 0 || (idx + 1) % 3 === 0) {
+              await yieldFrame();
+            } else {
+              await yieldMicroTick();
+            }
           }
         }
 
@@ -4648,22 +4676,6 @@ function OfflineStudioApp() {
               </button>
             )
           )}
-          <button
-            type="button"
-            onClick={() => setIsOfflineModalOpen(true)}
-            title="Komplette App als einzelne HTML-Datei für 100 % lokalen Offline-Betrieb (ohne Internet) herunterladen"
-            className="px-2.5 lg:px-3 py-1.5 lg:py-2 text-xs font-medium text-emerald-200 bg-emerald-950/50 hover:bg-emerald-900/60 border border-emerald-500/40 hover:border-emerald-400/70 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <HardDriveDownload className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span className="hidden sm:inline">Offline-App</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setIsExportModalOpen(true)}
-            className="px-3.5 lg:px-4 py-1.5 lg:py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            PNG &amp; HTML Export
-          </button>
         </div>
       </header>
 
@@ -7421,20 +7433,6 @@ function OfflineStudioApp() {
         hasExistingWorkspace={scriptWorkspace.modules.length > 0 || code.trim().length > 0}
         onClose={() => setIsNewCallflowModalOpen(false)}
         onStartNewCallflow={handleStartNewCallflow}
-      />
-
-      <OfflineDownloadModal
-        isOpen={isOfflineModalOpen}
-        onClose={() => setIsOfflineModalOpen(false)}
-        diagramTitle={diagramTitle}
-        code={code}
-        themeConfig={themeConfig}
-        smartColorMode={smartColorMode}
-        hiddenSmartNodeTypes={hiddenSmartNodeTypes}
-        canvasSurface={canvasSurface}
-        workspaceMode={workspaceMode}
-        scriptWorkspace={scriptWorkspace}
-        savedDiagrams={savedDiagrams}
       />
 
       <NodeInlineEditorModal

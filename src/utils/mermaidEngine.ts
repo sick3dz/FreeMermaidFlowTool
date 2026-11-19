@@ -497,7 +497,12 @@ export async function renderLocalMermaidDiagram(
 }> {
   const trimmed = code.trim();
   const diagramType = detectDiagramTypeLabel(trimmed);
-  const timeoutMs = options?.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : 0;
+  const timeoutMs =
+    options?.timeoutMs === undefined
+      ? 25000
+      : options.timeoutMs > 0
+      ? options.timeoutMs
+      : 0;
 
   if (!trimmed) {
     return {
@@ -644,7 +649,9 @@ export async function renderLocalMermaidDiagram(
       const isTimeoutErr = err instanceof Error && err.message.startsWith('RENDER_TIMEOUT_');
 
       if (typeof document !== 'undefined') {
-        const strayErrorNodes = document.querySelectorAll('[id^="dmermaid-local-svg-"]');
+        const strayErrorNodes = document.querySelectorAll(
+          '[id^="dmermaid-local-svg-"], body > [id^="mermaid-local-svg-"]'
+        );
         strayErrorNodes.forEach((node) => node.remove());
       }
 

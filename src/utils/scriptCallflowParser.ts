@@ -7922,6 +7922,114 @@ export interface EditableCallflowNodeSnapshot {
   rawLineSnippet?: string;
 }
 
+export interface WorkspaceInspectContext {
+  moduleByKey: Map<string, ScriptModule>;
+  findingsByModKey: Map<string, CallflowHealthFinding[]>;
+  parametersByScript: Record<string, CallflowScriptParameterItem[]>;
+  incomingByModKey: Map<string, EditableNodeIncomingItem[]>;
+  hoursSummaryByModKey: Map<string, ReturnType<typeof getModuleOpeningHoursSummary>>;
+  rulesPreviewByModKey: Map<string, EditableNodeRulePreviewItem[]>;
+}
+
+/**
+ * Builds a single-pass precomputed lookup context for `inspectWorkspaceNodeForEdit`
+ * so batch exports (Interactive HTML) run in milliseconds instead of re-running
+ * `analyzeWorkspaceLogicHealth` and full-workspace scans for every node.
+ */
+export function createWorkspaceInspectContext(
+  workspace: ScriptWorkspace,
+  precomputedFindings?: CallflowHealthFinding[],
+  precomputedParametersByScript?: Record<string, CallflowScriptParameterItem[]>
+): WorkspaceInspectContext {
+  const moduleByKey = new Map<string, ScriptModule>();
+  for (const m of workspace.modules || []) {
+    const k = canonicalScriptMatchKey(m.scriptNumber);
+    if (k && !moduleByKey.has(k)) {
+      moduleByKey.set(k, m);
+    }
+    if (m.cdnAlias) {
+      const aliasKey = canonicalScriptMatchKey(m.cdnAlias);
+      if (aliasKey && !moduleByKey.has(aliasKey)) {
+        moduleByKey.set(aliasKey, m);
+      }
+    }
+  }
+
+  const allFindings = precomputedFindings ?? analyzeWorkspaceLogicHealth(workspace);
+  const findingsByModKey = new Map<string, CallflowHealthFinding[]>();
+  for (const f of allFindings) {
+    const mk = canonicalScriptMatchKey(f.scriptNumber);
+    if (!mk) continue;
+    let list = findingsByModKey.get(mk);
+    if (!list) {
+      list = [];
+      findingsByModKey.set(mk, list);
+    }
+    list.push(f);
+  }
+
+  const parametersByScript =
+    precomputedParametersByScript ?? buildWorkspaceSpecialParametersMap(workspace);
+
+  const incomingByModKey = new Map<string, EditableNodeIncomingItem[]>();
+  const seenByTarget = new Map<string, Set<string>>();
+  const pushIncoming = (
+    targetRef: string | undefined,
+    fromScriptNumber: string,
+    fromLabel: string,
+    edgeLabel: string
+  ) => {
+    if (!targetRef) return;
+    const tKey = canonicalScriptMatchKey(targetRef);
+    if (!tKey) return;
+    let seen = seenByTarget.get(tKey);
+    if (!seen) {
+      seen = new Set<string>();
+      seenByTarget.set(tKey, seen);
+    }
+    const dedupKey = `${canonicalScriptMatchKey(fromScriptNumber)}::${edgeLabel}`;
+    if (seen.has(dedupKey)) return;
+    seen.add(dedupKey);
+    let list = incomingByModKey.get(tKey);
+    if (!list) {
+      list = [];
+      incomingByModKey.set(tKey, list);
+    }
+    list.push({ fromScriptNumber, fromLabel, edgeLabel });
+  };
+
+  for (const m of workspace.modules || []) {
+    const mLabel = formatScriptDisplayLabel(m);
+    for (const r of m.rules) {
+      if (r.targetNumber) {
+        pushIncoming(r.targetNumber, m.scriptNumber, mLabel, r.stepName || `Prio ${r.prio}`);
+      }
+      for (const ch of r.choices) {
+        pushIncoming(ch.targetNumber, m.scriptNumber, mLabel, `Taste ${ch.choice}`);
+      }
+    }
+  }
+
+  for (const lnk of workspace.manualLinks || []) {
+    const callerMod = moduleByKey.get(canonicalScriptMatchKey(lnk.fromScriptNumber));
+    pushIncoming(
+      lnk.toTargetNumber,
+      lnk.fromScriptNumber,
+      callerMod ? formatScriptDisplayLabel(callerMod) : lnk.fromScriptNumber,
+      lnk.label || 'Manuelle Verknüpfung'
+    );
+  }
+
+  return {
+    moduleByKey,
+    findingsByModKey,
+    parametersByScript,
+    incomingByModKey,
+    hoursSummaryByModKey: new Map(),
+    rulesPreviewByModKey: new Map(),
+  };
+}
+
 /**
  * Inspects a node from the current diagram so the Double-Click Node Info & Editor modal can
  * display structured overview facts (incoming callers, outgoing targets, schedules, DNIS,
@@ -7931,19 +8039,24 @@ export function inspectWorkspaceNodeForEdit(
   workspace: ScriptWorkspace,
   viewLevel: CallflowViewLevel,
   nodeId: string,
-  graph: CallflowGraph
+  graph: CallflowGraph,
+  inspectCtx?: WorkspaceInspectContext
 ): EditableCallflowNodeSnapshot {
   const graphNode = graph.nodes.get(nodeId);
   const fallbackLabel = graphNode?.label || nodeId;
 
-  const collectGraphIncoming = (): EditableNodeIncomingItem[] =>
-    graph.edges
+  let cachedGraphIncoming: EditableNodeIncomingItem[] | null = null;
+  const collectGraphIncoming = (): EditableNodeIncomingItem[] => {
+    if (cachedGraphIncoming) return cachedGraphIncoming;
+    cachedGraphIncoming = graph.edges
       .filter((e) => e.to === nodeId)
       .map((e) => ({
         fromScriptNumber: e.from,
         fromLabel: graph.nodes.get(e.from)?.label || e.from,
         edgeLabel: e.label || '',
       }));
+    return cachedGraphIncoming;
+  };
 
   if (workspace.modules.length === 0) {
     const rawOutgoing: EditableNodeConnectionItem[] = graph.edges
@@ -7969,7 +8082,15 @@ export function inspectWorkspaceNodeForEdit(
     };
   }
 
+  const findModuleByKey = (key: string): ScriptModule | undefined =>
+    inspectCtx
+      ? inspectCtx.moduleByKey.get(key)
+      : workspace.modules.find((m) => canonicalScriptMatchKey(m.scriptNumber) === key);
+
   const collectWorkspaceIncomingForKey = (tKey: string): EditableNodeIncomingItem[] => {
+    if (inspectCtx) {
+      return inspectCtx.incomingByModKey.get(tKey) || [];
+    }
     const incoming: EditableNodeIncomingItem[] = [];
     const seen = new Set<string>();
     const pushItem = (fromScriptNumber: string, fromLabel: string, edgeLabel: string) => {
@@ -7994,9 +8115,7 @@ export function inspectWorkspaceNodeForEdit(
     }
     for (const lnk of workspace.manualLinks || []) {
       if (canonicalScriptMatchKey(lnk.toTargetNumber) === tKey) {
-        const callerMod = workspace.modules.find(
-          (m) => canonicalScriptMatchKey(m.scriptNumber) === canonicalScriptMatchKey(lnk.fromScriptNumber)
-        );
+        const callerMod = findModuleByKey(canonicalScriptMatchKey(lnk.fromScriptNumber));
         pushItem(
           lnk.fromScriptNumber,
           callerMod ? formatScriptDisplayLabel(callerMod) : lnk.fromScriptNumber,
@@ -8007,8 +8126,13 @@ export function inspectWorkspaceNodeForEdit(
     return incoming;
   };
 
-  const buildModuleRulesPreview = (mod: ScriptModule): EditableNodeRulePreviewItem[] =>
-    [...mod.rules]
+  const buildModuleRulesPreview = (mod: ScriptModule): EditableNodeRulePreviewItem[] => {
+    const mKey = canonicalScriptMatchKey(mod.scriptNumber);
+    if (inspectCtx) {
+      const cached = inspectCtx.rulesPreviewByModKey.get(mKey);
+      if (cached) return cached;
+    }
+    const preview = [...mod.rules]
       .sort((a, b) => a.prio - b.prio)
       .map((r) => ({
         id: r.id,
@@ -8024,15 +8148,41 @@ export function inspectWorkspaceNodeForEdit(
         announcement: r.announcement || r.treatmentInfo,
         choicesCount: r.choices.length,
       }));
+    if (inspectCtx) {
+      inspectCtx.rulesPreviewByModKey.set(mKey, preview);
+    }
+    return preview;
+  };
+
+  const getCachedHoursSummary = (mod: ScriptModule) => {
+    const mKey = canonicalScriptMatchKey(mod.scriptNumber);
+    if (inspectCtx) {
+      const cached = inspectCtx.hoursSummaryByModKey.get(mKey);
+      if (cached) return cached;
+    }
+    const summary = getModuleOpeningHoursSummary(mod, workspace);
+    if (inspectCtx) {
+      inspectCtx.hoursSummaryByModKey.set(mKey, summary);
+    }
+    return summary;
+  };
+
+  const getCachedSpecialParameters = (mod: ScriptModule) => {
+    if (inspectCtx) {
+      const hit = inspectCtx.parametersByScript[mod.scriptNumber];
+      if (hit) return hit;
+    }
+    return extractScriptSpecialParameters(mod, workspace);
+  };
 
   const collectFindingsForMod = (modKey: string, ruleId?: string) => {
-    const allFindings = analyzeWorkspaceLogicHealth(workspace);
-    return allFindings
-      .filter((f) => {
-        if (canonicalScriptMatchKey(f.scriptNumber) !== modKey) return false;
-        if (ruleId && f.ruleId && f.ruleId !== ruleId) return false;
-        return true;
-      })
+    const modFindings = inspectCtx
+      ? inspectCtx.findingsByModKey.get(modKey) || []
+      : analyzeWorkspaceLogicHealth(workspace).filter(
+          (f) => canonicalScriptMatchKey(f.scriptNumber) === modKey
+        );
+    return modFindings
+      .filter((f) => !(ruleId && f.ruleId && f.ruleId !== ruleId))
       .slice(0, 8)
       .map((f) => ({
         severity: f.severity,
@@ -8045,11 +8195,7 @@ export function inspectWorkspaceNodeForEdit(
   const stepMatch = nodeId.match(/^STEP_([A-Za-z0-9_]+)_(\d+)$/);
   if (viewLevel.level === 'detail' && stepMatch) {
     const stepIndex = Math.max(0, parseInt(stepMatch[2], 10) - 1);
-    const mod = workspace.modules.find(
-      (m) =>
-        canonicalScriptMatchKey(m.scriptNumber) ===
-        canonicalScriptMatchKey(viewLevel.scriptNumber)
-    );
+    const mod = findModuleByKey(canonicalScriptMatchKey(viewLevel.scriptNumber));
     const sortedRules = mod ? [...mod.rules].sort((a, b) => a.prio - b.prio) : [];
     const rule = sortedRules[stepIndex];
     if (mod && rule) {
@@ -8105,12 +8251,10 @@ export function inspectWorkspaceNodeForEdit(
         : '';
 
       const firstTargetMod = rule.targetNumber
-        ? workspace.modules.find(
-            (m) =>
-              canonicalScriptMatchKey(m.scriptNumber) ===
-              canonicalScriptMatchKey(rule.targetNumber || '')
-          )
+        ? findModuleByKey(canonicalScriptMatchKey(rule.targetNumber))
         : undefined;
+
+      const graphIn = collectGraphIncoming();
 
       return {
         nodeId,
@@ -8128,19 +8272,21 @@ export function inspectWorkspaceNodeForEdit(
         canJumpToDetailScript: Boolean(firstTargetMod),
         detailTargetScriptNumber: firstTargetMod?.scriptNumber,
         incomingConnections:
-          collectGraphIncoming().length > 0
-            ? collectGraphIncoming()
-            : collectWorkspaceIncomingForKey(modKey),
-        entryDnisNumbers: rule.valueNumbers && rule.valueNumbers.length > 0 ? rule.valueNumbers : mod.entryDnisNumbers,
+          graphIn.length > 0 ? graphIn : collectWorkspaceIncomingForKey(modKey),
+        entryDnisNumbers:
+          rule.valueNumbers && rule.valueNumbers.length > 0
+            ? rule.valueNumbers
+            : mod.entryDnisNumbers,
         organizationName: rule.organizationName || mod.entryOrganizationName,
         cdnAlias: mod.cdnAlias,
-        resolvedScheduleDisplay: resolvedSched || getModuleOpeningHoursSummary(mod, workspace).combinedBadge || undefined,
+        resolvedScheduleDisplay:
+          resolvedSched || getCachedHoursSummary(mod).combinedBadge || undefined,
         hasHolidayCheck: Boolean(rule.holiday),
         waitSeconds: rule.waitSeconds,
         treatmentInfo: rule.treatmentInfo,
         hdxAction: rule.hdxAction,
         moduleRulesPreview: buildModuleRulesPreview(mod),
-        specialParameters: extractScriptSpecialParameters(mod, workspace).slice(0, 10),
+        specialParameters: getCachedSpecialParameters(mod).slice(0, 10),
         relatedFindings: collectFindingsForMod(modKey, rule.id),
         rawLineSnippet: rule.rawLine?.trim() || undefined,
       };
@@ -8152,9 +8298,7 @@ export function inspectWorkspaceNodeForEdit(
     extractScriptNumberFromNodeId(nodeId, workspace.modules) ||
     (viewLevel.level === 'detail' ? viewLevel.scriptNumber : nodeId.replace(/^S_/, ''));
   const targetKey = canonicalScriptMatchKey(extractedRef);
-  const mod = workspace.modules.find(
-    (m) => canonicalScriptMatchKey(m.scriptNumber) === targetKey
-  );
+  const mod = findModuleByKey(targetKey);
 
   if (mod) {
     const primaryRule = [...mod.rules].sort((a, b) => a.prio - b.prio)[0];
@@ -8210,7 +8354,7 @@ export function inspectWorkspaceNodeForEdit(
       ? 'announcement'
       : 'script';
 
-    const hoursSummary = getModuleOpeningHoursSummary(mod, workspace);
+    const hoursSummary = getCachedHoursSummary(mod);
     const isDifferentFromActiveDetail =
       viewLevel.level !== 'detail' ||
       canonicalScriptMatchKey(viewLevel.scriptNumber) !== targetKey;
@@ -8240,7 +8384,7 @@ export function inspectWorkspaceNodeForEdit(
       treatmentInfo: mod.rules.find((r) => Boolean(r.treatmentInfo))?.treatmentInfo,
       hdxAction: mod.rules.find((r) => Boolean(r.hdxAction))?.hdxAction,
       moduleRulesPreview: buildModuleRulesPreview(mod),
-      specialParameters: extractScriptSpecialParameters(mod, workspace).slice(0, 12),
+      specialParameters: getCachedSpecialParameters(mod).slice(0, 12),
       relatedFindings: collectFindingsForMod(targetKey),
       rawLineSnippet: mod.rawText ? mod.rawText.trim().split('\n').slice(0, 8).join('\n') : undefined,
     };
