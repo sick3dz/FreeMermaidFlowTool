@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import {
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Code2,
+  Copy,
   Download,
   HardDriveDownload,
   Loader2,
@@ -20,6 +22,37 @@ import { SmartColorMode } from '../types/mermaidStudio';
 type ToolCategory = 'all' | 'engine' | 'parsers' | 'analysis' | 'exports';
 type TechStackTab = 'mermaid-pipeline' | 'aacc-compiler' | 'offline-sandbox';
 type TopTechSpecId = 'graph-engine' | 'layout-solver' | 'air-gapped' | 'runtime-protocol';
+type ComplianceStandardId = 'dsgvo' | 'iso27001' | 'nis2';
+
+interface ComplianceControlRow {
+  reference: string;
+  auditQuestion: string;
+  technicalProof: string;
+  verdict: string;
+}
+
+interface ComplianceStandardSpec {
+  id: ComplianceStandardId;
+  standardCode: string;
+  normSubtitle: string;
+  statusLabel: string;
+  shortStatement: string;
+  accentTextClass: string;
+  activeBorderClass: string;
+  deepDiveTitle: string;
+  summary: string;
+  auditFacts: Array<{ label: string; value: string }>;
+  controlMatrix: ComplianceControlRow[];
+  excludedRisks: string[];
+  operatorResponsibilities: string[];
+  verificationBlock: {
+    title: string;
+    methodHint: string;
+    steps: string;
+  };
+  approvalCopyText: string;
+  legalNote: string;
+}
 
 interface TopTechSpecBox {
   id: TopTechSpecId;
@@ -220,6 +253,245 @@ function safeStorageSet(key: string, value: string): void {
   catch { memoryStorageFallback.set(key, value); }
 }`,
     },
+  },
+];
+
+const COMPLIANCE_SPECS: ComplianceStandardSpec[] = [
+  {
+    id: 'dsgvo',
+    standardCode: 'DSGVO (EU 2016/679)',
+    normSubtitle: 'Art. 5 · Art. 25 · Art. 28 · Art. 32 · Art. 44 ff.',
+    statusLabel: 'Technisch geeignet · 0-Byte Offline',
+    shortStatement:
+      'Privacy by Design: Rufnummern, Skillsets und Skripte verlassen niemals den lokalen Arbeitsplatz.',
+    accentTextClass: 'text-emerald-300',
+    activeBorderClass: 'border-emerald-500/60 bg-slate-900',
+    deepDiveTitle:
+      'Datenschutz-Prüfmatrix: Reine RAM-Verarbeitung ohne Auftragsverarbeiter oder Drittlandtransfer',
+    summary:
+      'Die generierte Einzeldatei verarbeitet eingelesene Avaya-.s-Skripte, Visio-Dateien und Rufnummernpläne ausschließlich im flüchtigen Browser-Arbeitsspeicher (RAM) über die lokale HTML5-FileReader-API. Es existiert kein Backend, kein Benutzerkonto und kein ausgehender Netzwerkverkehr.',
+    auditFacts: [
+      { label: 'AV-Vertrag (Art. 28)', value: 'Nicht erforderlich (kein externer Verarbeiter)' },
+      { label: 'Drittlandtransfer (Art. 44 ff.)', value: 'Ausgeschlossen (0 Byte Traffic)' },
+      { label: 'Tracking / Cookies', value: '0 Cookies · 0 Analytics · 0 Telemetrie' },
+      { label: 'Speicherort', value: 'Lokales Dateisystem & lokaler Browser-Speicher' },
+    ],
+    controlMatrix: [
+      {
+        reference: 'Art. 5 Abs. 1 lit. c & f',
+        auditQuestion: 'Werden Daten minimiert und vor unbefugtem Zugriff geschützt?',
+        technicalProof:
+          'Nur explizit ausgewählte Skripte werden lokal per FileReader im RAM geparst; keine Vorbefüllung mit fremden Unternehmensdaten oder Vorwahlen.',
+        verdict: 'Erfüllt',
+      },
+      {
+        reference: 'Art. 25 Abs. 1 & 2',
+        auditQuestion: 'Sind Privacy by Design & Default technisch umgesetzt?',
+        technicalProof:
+          'Vollständiges Inline-Bundling (inlineDynamicImports: true) eliminiert CDNs, Webfonts, Cloud-APIs und externe Skript-Aufrufe ab Werk.',
+        verdict: 'Erfüllt',
+      },
+      {
+        reference: 'Art. 28 & Art. 44–49',
+        auditQuestion: 'Ist ein AV-Vertrag oder eine TIA (Drittland-Prüfung) nötig?',
+        technicalProof:
+          'Nein. Es werden keine Daten an einen Anbieter, Hoster oder Subprozessor übermittelt; sämtliche Verarbeitung bleibt beim Verantwortlichen.',
+        verdict: 'Kein AVV nötig',
+      },
+      {
+        reference: 'Art. 32 (TOMs)',
+        auditQuestion: 'Wie sind Vertraulichkeit und Integrität im Betrieb abgesichert?',
+        technicalProof:
+          'Ausführung in der bestehenden Browser-Sandbox auf verwalteten Firmen-Endpoints; Exporte (HTML, SVG, CSV, PNG) erfolgen nur per manuellem Download.',
+        verdict: 'Unterstützt',
+      },
+    ],
+    excludedRisks: [
+      'Kein Upload von Durchwahlen, Agenten-Skillsets oder Routing-Skripten an externe Server.',
+      'Keine Benutzer-Registrierung, keine Session-Cookies und kein Fingerprinting.',
+      'Kein impliziter Datenabfluss über CDN-Logs (kein Google Fonts, unpkg oder jsDelivr).',
+    ],
+    operatorResponsibilities: [
+      'Exportierte HTML-/CSV-Dokumentationen auf berechtigten internen Netzlaufwerken ablegen.',
+      'Lokalen Browser-Cache bei gemeinsam genutzten Endgeräten über „Projekt zurücksetzen“ leeren.',
+      'Bei personenbezogenen Namen in Skripten den Einsatz im internen Verarbeitungsverzeichnis dokumentieren.',
+    ],
+    verificationBlock: {
+      title: '60-SEKUNDEN-PRÜFNACHWEIS (DATENSCHUTZ)',
+      methodHint: 'Browser DevTools · Network',
+      steps: `# 1. Offline-HTML lokal per Doppelklick (file://) öffnen
+# 2. DevTools öffnen (F12) -> Tab "Netzwerk" (Network)
+# 3. Skript-Ordner laden, Diagramm filtern & HTML/CSV exportieren
+#
+# Erwartetes Prüfergebnis:
+#   Requests: 0  |  Transferred: 0 B  |  External Hosts: keine
+#   Cookies:  0  |  Third-Party-Calls: keine`,
+    },
+    approvalCopyText: `Datenschutz-Kurzstellungnahme (DSGVO) – Offline-HTML Callflow-Tool:
+• Betriebsart: Statische lokale Single-File-HTML (file://), Ausführung vollständig im Browser-RAM.
+• Netzwerkverkehr: 0 Byte (keine Cloud-API, keine CDNs, keine Webfonts, keine Telemetrie, keine Cookies).
+• AV-Vertrag (Art. 28 DSGVO) & Drittlandtransfer (Art. 44 ff.): Nicht einschlägig, da kein externer Auftragsverarbeiter eingebunden ist.
+• TOMs & Privacy by Design (Art. 25 / 32 DSGVO): Daten verbleiben auf dem verwalteten Unternehmens-Endgerät; Exporte werden lokal gespeichert.
+• Eigenprüfung: Nachweisbar über Browser-DevTools (Network-Tab = 0 Requests).`,
+    legalNote:
+      'Einordnung: Die 0-Byte-Offline-Architektur erfüllt die technischen Voraussetzungen für datenschutzkonformen lokalen Betrieb. Organisatorische Pflichten (Endgeräte-Zugriff, Ablage exportierter Dateien) liegen beim betreibenden Unternehmen.',
+  },
+  {
+    id: 'iso27001',
+    standardCode: 'ISO/IEC 27001:2022',
+    normSubtitle: 'Annex A.5.14 · A.5.21 · A.8.12 · A.8.20 · A.8.25',
+    statusLabel: 'Technisch geeignet · Air-Gapped',
+    shortStatement:
+      'Unterstützt ISMS-Kontrollen für Datenabfluss-Schutz, Netzwerktrennung und Integritätsprüfung.',
+    accentTextClass: 'text-indigo-300',
+    activeBorderClass: 'border-indigo-500/60 bg-slate-900',
+    deepDiveTitle:
+      'ISMS-Prüfmatrix (Annex A): Keine Ports, kein DLP-Risiko und SHA-256-hashbares Einzelartefakt',
+    summary:
+      'Das Werkzeug benötigt weder lokale Server-Prozesse noch administrative Installationsrechte oder Firewall-Ausnahmen. Die gesamte Laufzeit liegt statisch in einer einzigen auditierbaren HTML-Datei vor und lässt sich wie ein statisches Dokument freigeben und hashen.',
+    auditFacts: [
+      { label: 'Datenabfluss (A.8.12)', value: 'Kein Upload, kein Fetch/XHR, kein Beacon' },
+      { label: 'Netzwerk (A.8.20)', value: 'Kein offener Port · 100 % Air-Gap-fähig' },
+      { label: 'Lieferkette (A.5.21)', value: 'Keine Runtime-CDNs oder dynamischen Chunks' },
+      { label: 'Integrität', value: 'Einzeldatei direkt per SHA-256 prüf- & archivierbar' },
+    ],
+    controlMatrix: [
+      {
+        reference: 'A.5.14 & A.8.12',
+        auditQuestion: 'Besteht ein Risiko für ungewollten Datenabfluss (DLP)?',
+        technicalProof:
+          'Keine ausgehenden HTTP/HTTPS/WebSocket-Verbindungen; sensible Netz- und Callflow-Topologien verlassen das interne Segment nicht.',
+        verdict: 'Erfüllt',
+      },
+      {
+        reference: 'A.5.19 & A.5.21',
+        auditQuestion: 'Sind Drittanbieter-Laufzeitabhängigkeiten kontrollierbar?',
+        technicalProof:
+          'Alle Bibliotheken (React, Mermaid v11, ELK, JSZip) sind fest zur Build-Zeit eingebettet – keine fremden Skript-Nachladungen zur Laufzeit.',
+        verdict: 'Erfüllt',
+      },
+      {
+        reference: 'A.8.9 & A.8.20',
+        auditQuestion: 'Sind Installationsrechte, Daemons oder Firewall-Regeln nötig?',
+        technicalProof:
+          'Zero-Install-Betrieb direkt im Standard-Browser; kein Node.js-Dienst, kein lokaler Port und keine Proxy-Freischaltung erforderlich.',
+        verdict: 'Erfüllt',
+      },
+      {
+        reference: 'A.8.25 & A.8.28',
+        auditQuestion: 'Wie wird sicheres Rendering gegen Skript-Injektionen gewährleistet?',
+        technicalProof:
+          'Mermaid nutzt securityLevel: "strict", HTML-Export maskiert JSON-Payloads XSS-sicher und der gesamte Quellcode ist statisch auditierbar.',
+        verdict: 'Unterstützt',
+      },
+    ],
+    excludedRisks: [
+      'Keine lokalen Hintergrunddienste, offenen TCP-Ports oder OS-Registry-Änderungen.',
+      'Keine unkontrollierten Auto-Updates durch Drittanbieter während des Betriebs.',
+      'Kein Zugriff auf das Dateisystem außerhalb explizit vom Nutzer gewählter Dateien.',
+    ],
+    operatorResponsibilities: [
+      'Freigegebene HTML-Datei per SHA-256-Hash dokumentieren und schreibgeschützt verteilen.',
+      'Unternehmens-Browser aktuell halten (reguläres Patch-Management gemäß A.8.8).',
+      'Schutzbedarfs-Klassifizierung der erzeugten Callflow-Exporte gemäß interner Richtlinie einhalten.',
+    ],
+    verificationBlock: {
+      title: 'PRÜFNACHWEIS FÜR IT-SECURITY / ISMS',
+      methodHint: 'PowerShell / SHA-256 Audit',
+      steps: `# 1. SHA-256 Freigabe-Hash erzeugen (Windows PowerShell):
+Get-FileHash .\\MermaidFree2UseOpen_Offline.html -Algorithm SHA256
+
+# 2. Statische Prüfung auf externe Skript-/CDN-Aufrufe (0 Treffer):
+Select-String -Path .\\MermaidFree2UseOpen_Offline.html -Pattern "<script[^>]+src=https?://|unpkg\\.com|jsdelivr\\.net|fonts\\.googleapis"
+
+# Linux / macOS:
+sha256sum MermaidFree2UseOpen_Offline.html`,
+    },
+    approvalCopyText: `IT-Security / ISMS-Kurzstellungnahme (ISO/IEC 27001:2022) – Offline-HTML Callflow-Tool:
+• Architektur: Statische Single-File-HTML ohne lokale Installation, ohne Server-Port und ohne Admin-Rechte.
+• Annex A.8.12 / A.8.20 (DLP & Netzwerksicherheit): 0 Byte ausgehender Traffic, 100 % Air-Gap-fähig auf isolierten VMs/Sprungservern.
+• Annex A.5.21 (IKT-Lieferkette): Keine externen Runtime-CDNs oder dynamischen Skript-Nachladungen; statisch im Artefakt eingefroren.
+• Annex A.8.25 (Sichere Entwicklung): Mermaid securityLevel="strict", XSS-sichere Serialisierung, vollständig per SHA-256 hash- und prüfbar.`,
+    legalNote:
+      'Einordnung: Eine einzelne HTML-Datei trägt keine eigene ISO-27001-Organisationszertifizierung. Die Architektur ist gezielt darauf ausgelegt, die technischen Annex-A-Kontrollen eines bestehenden ISMS ohne Zusatzrisiken zu erfüllen.',
+  },
+  {
+    id: 'nis2',
+    standardCode: 'NIS2 (EU 2022/2555)',
+    normSubtitle: 'Art. 21 Abs. 2 lit. a, c, d, i (Risiko · Kontinuität · Lieferkette)',
+    statusLabel: 'Technisch geeignet · Zero-Cloud',
+    shortStatement:
+      'Minimale Angriffsfläche ohne Cloud-Abhängigkeit – voll einsatzfähig auch im Krisen- und Offline-Fall.',
+    accentTextClass: 'text-sky-300',
+    activeBorderClass: 'border-sky-500/60 bg-slate-900',
+    deepDiveTitle:
+      'NIS2-Prüfmatrix (Art. 21): Resiliente Offline-Verfügbarkeit & geschlossene Laufzeit-Lieferkette',
+    summary:
+      'Für NIS2-regulierte Einrichtungen und KRITIS-nahe Telekommunikations-Teams eliminiert der autarke Offline-Betrieb klassische Cloud-, API- und Lieferketten-Risiken und sichert die jederzeitige Nutzbarkeit von Notfall- und Callflow-Plänen.',
+    auditFacts: [
+      { label: 'Risikomanagement (Art. 21 2a)', value: 'Keine Server-, API- oder Cloud-Angriffsfläche' },
+      { label: 'Kontinuität (Art. 21 2c)', value: '100 % lauffähig bei Internet- / Netzausfall' },
+      { label: 'Lieferkette (Art. 21 2d)', value: 'Keine dynamischen Drittanbieter-Skripte' },
+      { label: 'Least Privilege', value: 'Kein Admin-Recht · keine OS-Installation' },
+    ],
+    controlMatrix: [
+      {
+        reference: 'Art. 21 Abs. 2 lit. a',
+        auditQuestion: 'Entstehen neue Angriffsflächen für Risikoanalyse & Systemsicherheit?',
+        technicalProof:
+          'Nein. Kein exponierter Dienst, keine API-Keys, keine Cloud-Schnittstelle und keine privilegierte Systeminstallation erforderlich.',
+        verdict: 'Minimales Risiko',
+      },
+      {
+        reference: 'Art. 21 Abs. 2 lit. c',
+        auditQuestion: 'Bleibt das Werkzeug im Krisen- oder Offline-Fall nutzbar (BCM)?',
+        technicalProof:
+          'Ja. Callflow-Analysen, Öffnungszeiten-Prüfungen und interaktive HTML-Exporte funktionieren ohne Internet, Proxy oder Lizenzserver.',
+        verdict: 'Voll resilient',
+      },
+      {
+        reference: 'Art. 21 Abs. 2 lit. d',
+        auditQuestion: 'Besteht ein Laufzeit-Supply-Chain-Risiko über Drittanbieter?',
+        technicalProof:
+          'Ausgeschlossen. Kein Nachladen von Fremdskripten, keine externen CDNs und keine automatischen Fern-Updates nach der internen Freigabe.',
+        verdict: 'Geschlossen',
+      },
+      {
+        reference: 'Art. 21 Abs. 2 lit. i',
+        auditQuestion: 'Lässt sich das Artefakt sauber in Zugriffskontrolle & Asset-Management einbinden?',
+        technicalProof:
+          'Zentrale Ablage einer einzigen versionierten und gehashten HTML-Datei auf internen Netzlaufwerken mit bestehenden NTFS/RBAC-Rechten.',
+        verdict: 'Unterstützt',
+      },
+    ],
+    excludedRisks: [
+      'Kein Ausfallrisiko durch externe SaaS-Störungen, abgelaufene Cloud-Lizenzen oder Proxy-Blockaden.',
+      'Kein Supply-Chain-Kompromittierungsrisiko über manipulierte CDN-Skripte zur Laufzeit.',
+      'Keine zusätzlichen Meldepflichten durch Cloud-Anbieter-Sicherheitsvorfälle.',
+    ],
+    operatorResponsibilities: [
+      'Freigegebene Datei zentral versioniert ablegen und bei Bedarf im Notfall-Handbuch/BCM verlinken.',
+      'Interne Freigabe und Versionsaktualisierungen kontrolliert über das Change-Management steuern.',
+      'Ausführung ausschließlich auf verwalteten, gepatchten Endgeräten im berechtigten Benutzerkontext.',
+    ],
+    verificationBlock: {
+      title: 'AIR-GAP- & RESILIENZ-TEST (NIS2)',
+      methodHint: 'Offline-VM / Flugmodus-Test',
+      steps: `# 1. Netzwerkadapter trennen (Flugmodus / isolierte Offline-VM)
+# 2. Freigegebene .html-Datei direkt im Unternehmens-Browser öffnen
+# 3. Skript-Ordner einlesen, Logik prüfen & HTML/CSV exportieren
+#
+# Erwartetes Prüfergebnis:
+#   100 % Funktionsumfang ohne Internet, Proxy oder Server.
+#   Keine Installationsspuren oder offenen Ports im OS.`,
+    },
+    approvalCopyText: `NIS2-Kurzstellungnahme (EU 2022/2555 Art. 21) – Offline-HTML Callflow-Tool:
+• Risikomanagement (Art. 21 Abs. 2a): Statisches Offline-Werkzeug ohne Cloud-Backend, ohne offene Ports und ohne Admin-Rechte.
+• Betriebskontinuität / BCM (Art. 21 Abs. 2c): 100 % offline- und air-gap-fähig – auch bei vollständigem Außennetzausfall nutzbar.
+• Lieferketten-Sicherheit (Art. 21 Abs. 2d): Keine dynamischen Drittanbieter-CDNs oder Fern-Updates zur Laufzeit; eingefrorene Einzeldatei.
+• Asset-Kontrolle (Art. 21 Abs. 2i): Zentral versionierbar und per SHA-256 verifizierbar auf internen Netzlaufwerken.`,
+    legalNote:
+      'Einordnung: NIS2 verpflichtet die regulierte Einrichtung als Ganzes. Durch den autarken Offline-Betrieb entstehen keine zusätzlichen Cloud-, Melde- oder Lieferketten-Risiken im Sinne von Art. 21.',
   },
 ];
 
@@ -552,6 +824,16 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
   // Expandable state for the 4 top technical boxes (e.g., Graph-Engine, Layout-Solver, etc.)
   const [activeTopSpecId, setActiveTopSpecId] = useState<TopTechSpecId | null>(null);
 
+  // Expandable state for the 3 compliance & IT-security boxes (DSGVO, ISO/IEC 27001, NIS2)
+  const [expandedComplianceIds, setExpandedComplianceIds] = useState<
+    Record<ComplianceStandardId, boolean>
+  >({
+    dsgvo: false,
+    iso27001: false,
+    nis2: false,
+  });
+  const [copiedComplianceId, setCopiedComplianceId] = useState<ComplianceStandardId | null>(null);
+
   // Expandable state for the 6 embedded tool cards
   const [expandedToolIds, setExpandedToolIds] = useState<Record<string, boolean>>({});
 
@@ -631,6 +913,56 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
       : EMBEDDED_TOOLS.filter((tool) => tool.category === activeCategory);
 
   const activeTopSpec = TOP_TECH_SPECS.find((item) => item.id === activeTopSpecId) || null;
+
+  const areAllComplianceExpanded = COMPLIANCE_SPECS.every((item) =>
+    Boolean(expandedComplianceIds[item.id])
+  );
+
+  const toggleAllCompliance = () => {
+    const nextState = !areAllComplianceExpanded;
+    setExpandedComplianceIds({
+      dsgvo: nextState,
+      iso27001: nextState,
+      nis2: nextState,
+    });
+  };
+
+  const handleCopyComplianceApproval = async (item: ComplianceStandardSpec) => {
+    try {
+      await navigator.clipboard.writeText(item.approvalCopyText);
+      setCopiedComplianceId(item.id);
+      window.setTimeout(() => {
+        setCopiedComplianceId((prev) => (prev === item.id ? null : prev));
+      }, 2200);
+    } catch {
+      // Fallback for restricted file:// clipboards
+      const textarea = document.createElement('textarea');
+      textarea.value = item.approvalCopyText;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        document.execCommand('copy');
+        setCopiedComplianceId(item.id);
+        window.setTimeout(() => {
+          setCopiedComplianceId((prev) => (prev === item.id ? null : prev));
+        }, 2200);
+      } finally {
+        document.body.removeChild(textarea);
+      }
+    }
+  };
+
+  const handleJumpToCompliance = () => {
+    setExpandedComplianceIds((prev) =>
+      prev.dsgvo || prev.iso27001 || prev.nis2 ? prev : { ...prev, dsgvo: true }
+    );
+    const el = document.getElementById('compliance-freigabe');
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
 
   const areAllFilteredToolsExpanded =
     filteredTools.length > 0 && filteredTools.every((t) => Boolean(expandedToolIds[t.id]));
@@ -758,6 +1090,14 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                 <span>MERMAID V11 + ELK INLINE</span>
                 <span aria-hidden="true">·</span>
                 <span>ZERO CDN / ZERO SERVER</span>
+                <span aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  onClick={handleJumpToCompliance}
+                  className="text-sky-300 hover:text-sky-200 underline decoration-sky-500/40 underline-offset-4 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 rounded"
+                >
+                  DSGVO · ISO 27001 · NIS2 Nachweis
+                </button>
               </div>
 
               <h1
@@ -1113,6 +1453,243 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                 )}
               </button>
             </div>
+          </div>
+        </section>
+
+        {/* Compliance & IT-Security-Freigabe Strip (Upper Area: 3 Expandable Inline-Detail Cards for DSGVO, ISO/IEC 27001 & NIS2) */}
+        <section
+          id="compliance-freigabe"
+          aria-labelledby="compliance-freigabe-heading"
+          className="border-t border-slate-800/90 pt-8 sm:pt-10 space-y-5"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+            <div className="space-y-1 max-w-3xl">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-mono text-emerald-400">
+                <ShieldCheck className="w-4 h-4 shrink-0" />
+                <span>Compliance &amp; IT-Security-Freigabe</span>
+                <span aria-hidden="true">·</span>
+                <span className="text-slate-400">0-Byte-Offline-Nachweis</span>
+              </div>
+              <h2
+                id="compliance-freigabe-heading"
+                className="text-lg sm:text-xl font-bold text-slate-100"
+              >
+                Technisch geeignet für DSGVO-, ISO/IEC-27001- und NIS2-Umgebungen
+              </h2>
+              <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
+                Klappen Sie eine oder alle drei Boxen direkt auf, um die vollständige
+                Artikel-/Control-Prüfmatrix, Risiko-Abgrenzung, Prüfbefehle und eine fertige
+                Freigabe-Kurzstellungnahme für Datenschutz &amp; IT-Security einzusehen.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={toggleAllCompliance}
+              className="self-start sm:self-end min-h-[38px] px-3 py-1.5 text-xs font-mono text-emerald-300 hover:text-emerald-200 bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+            >
+              {areAllComplianceExpanded ? (
+                <>
+                  <ChevronUp className="w-3.5 h-3.5 shrink-0" />
+                  <span>Alle 3 Nachweise einklappen</span>
+                </>
+              ) : (
+                <>
+                  <ChevronDown className="w-3.5 h-3.5 shrink-0" />
+                  <span>Alle 3 Nachweise ausklappen</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+            {COMPLIANCE_SPECS.map((item) => {
+              const isExpanded = Boolean(expandedComplianceIds[item.id]);
+              const isCopied = copiedComplianceId === item.id;
+              return (
+                <div
+                  key={item.id}
+                  className={`rounded-xl p-4 sm:p-5 border transition-colors flex flex-col justify-between space-y-3.5 ${
+                    isExpanded
+                      ? item.activeBorderClass
+                      : 'bg-slate-900/60 border-slate-800/90 hover:border-slate-700'
+                  }`}
+                >
+                  {/* Card Header & Summary */}
+                  <div className="space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="space-y-0.5 min-w-0">
+                        <div className={`text-sm sm:text-base font-semibold ${item.accentTextClass}`}>
+                          {item.standardCode}
+                        </div>
+                        <div className="text-[11px] font-mono text-slate-400 tabular-nums">
+                          {item.normSubtitle}
+                        </div>
+                      </div>
+                      <span className="text-[10.5px] font-mono text-slate-300 text-right shrink-0">
+                        {item.statusLabel.split(' · ')[0]}
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      {item.shortStatement}
+                    </p>
+                  </div>
+
+                  {/* Direct Inline Expand / Collapse Button */}
+                  <button
+                    type="button"
+                    aria-expanded={isExpanded}
+                    onClick={() =>
+                      setExpandedComplianceIds((prev) => ({
+                        ...prev,
+                        [item.id]: !prev[item.id],
+                      }))
+                    }
+                    className="w-full min-h-[38px] px-3 py-2 rounded-lg bg-slate-950 hover:bg-slate-950/80 border border-slate-800 hover:border-emerald-500/40 text-xs font-mono text-emerald-300 flex items-center justify-between gap-2 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+                  >
+                    <span className="truncate">
+                      {isExpanded
+                        ? 'Prüfmatrix & Nachweis einklappen'
+                        : 'Prüfmatrix, Risiken & Nachweis ausklappen'}
+                    </span>
+                    {isExpanded ? (
+                      <ChevronUp className="w-4 h-4 shrink-0" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 shrink-0" />
+                    )}
+                  </button>
+
+                  {/* Deep Inline Expansion Directly Inside the Card */}
+                  {isExpanded && (
+                    <div className="pt-3 border-t border-slate-800 space-y-4">
+                      <div className="space-y-1.5">
+                        <h3 className="text-xs sm:text-sm font-semibold text-slate-100 leading-snug">
+                          {item.deepDiveTitle}
+                        </h3>
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          {item.summary}
+                        </p>
+                      </div>
+
+                      {/* 4 Structured Audit Facts */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono tabular-nums">
+                        {item.auditFacts.map((fact, fIdx) => (
+                          <div
+                            key={fIdx}
+                            className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 space-y-0.5"
+                          >
+                            <div className="text-[10px] text-slate-400">{fact.label}</div>
+                            <div className="text-[11px] font-semibold text-slate-100 break-words">
+                              {fact.value}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Concrete Article / Control Matrix */}
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-mono text-slate-400">
+                          Norm- &amp; Kontroll-Nachweis (Artikel / Annex)
+                        </div>
+                        <div className="space-y-2">
+                          {item.controlMatrix.map((row, rIdx) => (
+                            <div
+                              key={rIdx}
+                              className="bg-slate-950/90 border border-slate-800/90 rounded-lg p-2.5 space-y-1"
+                            >
+                              <div className="flex items-center justify-between gap-2 text-[11px] font-mono">
+                                <span className={`font-semibold ${item.accentTextClass}`}>
+                                  {row.reference}
+                                </span>
+                                <span className="text-emerald-400 shrink-0">✓ {row.verdict}</span>
+                              </div>
+                              <div className="text-[11px] font-medium text-slate-200 leading-snug">
+                                {row.auditQuestion}
+                              </div>
+                              <p className="text-[11px] text-slate-400 leading-relaxed">
+                                {row.technicalProof}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Clear Separation: Excluded by Architecture vs. Operator Duties */}
+                      <div className="space-y-2.5 pt-2 border-t border-slate-800/80">
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] font-mono text-emerald-400">
+                            Technisch ausgeschlossen (Architektur)
+                          </div>
+                          <ul className="space-y-1 text-[11px] text-slate-300 leading-relaxed">
+                            {item.excludedRisks.map((risk, idx) => (
+                              <li key={idx} className="flex items-start gap-1.5">
+                                <span className="text-emerald-400 font-mono shrink-0">✓</span>
+                                <span>{risk}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] font-mono text-amber-300">
+                            Organisatorische Verantwortung (Betreiber)
+                          </div>
+                          <ul className="space-y-1 text-[11px] text-slate-400 leading-relaxed">
+                            {item.operatorResponsibilities.map((duty, idx) => (
+                              <li key={idx} className="flex items-start gap-1.5">
+                                <span className="text-amber-300 font-mono shrink-0">•</span>
+                                <span>{duty}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+
+                      {/* Executable 60-Second Verification Block */}
+                      <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2 font-mono text-xs">
+                        <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400 border-b border-slate-800 pb-1.5">
+                          <span>{item.verificationBlock.title}</span>
+                          <span className={item.accentTextClass}>
+                            {item.verificationBlock.methodHint}
+                          </span>
+                        </div>
+                        <pre className="text-[10.5px] leading-relaxed text-slate-200 overflow-x-auto whitespace-pre">
+                          {item.verificationBlock.steps}
+                        </pre>
+                      </div>
+
+                      {/* 1-Click Copy Approval Statement for Internal IT-Security / DSB Ticket */}
+                      <div className="flex flex-col gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyComplianceApproval(item)}
+                          className="w-full min-h-[38px] px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-100 flex items-center justify-center gap-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
+                        >
+                          {isCopied ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              <span className="text-emerald-300">
+                                Freigabetext in Zwischenablage kopiert
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3.5 h-3.5 text-slate-300 shrink-0" />
+                              <span>Freigabetext für IT-Security / DSB kopieren</span>
+                            </>
+                          )}
+                        </button>
+
+                        <p className="text-[11px] text-slate-400 leading-relaxed">
+                          {item.legalNote}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </section>
 

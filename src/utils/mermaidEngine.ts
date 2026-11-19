@@ -13,6 +13,37 @@ let renderCounter = 0;
 let elkRegistered = false;
 let elkRegisterPromise: Promise<void> | null = null;
 let lastEngineConfigSignature: string | null = null;
+let mermaidRenderMutex: Promise<void> = Promise.resolve();
+
+function getOrCreateMermaidOffscreenSandbox(): HTMLDivElement | undefined {
+  if (typeof document === 'undefined' || !document.body) return undefined;
+  let sandbox = document.getElementById('mermaid-offscreen-sandbox') as HTMLDivElement | null;
+  if (!sandbox) {
+    sandbox = document.createElement('div');
+    sandbox.id = 'mermaid-offscreen-sandbox';
+    sandbox.setAttribute('aria-hidden', 'true');
+    sandbox.style.position = 'fixed';
+    sandbox.style.left = '-99999px';
+    sandbox.style.top = '-99999px';
+    sandbox.style.width = '0px';
+    sandbox.style.height = '0px';
+    sandbox.style.overflow = 'hidden';
+    sandbox.style.visibility = 'hidden';
+    sandbox.style.pointerEvents = 'none';
+    sandbox.style.contain = 'strict';
+    document.body.appendChild(sandbox);
+  }
+  return sandbox;
+}
+
+function enqueueMermaidRender<T>(task: () => Promise<T>): Promise<T> {
+  const next = mermaidRenderMutex.then(task, task);
+  mermaidRenderMutex = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
 
 const MAX_SVG_RENDER_CACHE = 160;
 const svgRenderCache = new Map<
@@ -491,100 +522,122 @@ export async function renderLocalMermaidDiagram(
     };
   }
 
-  const startTime = performance.now();
-
-  try {
-    if (themeConfig.layoutEngine === 'elk') {
-      await ensureElkLayoutRegistered();
+  return enqueueMermaidRender(async () => {
+    const cacheHitInsideLock = getCachedSvgRender(cacheKey);
+    if (cacheHitInsideLock) {
+      return {
+        svg: cacheHitInsideLock.svg,
+        validation: {
+          isValid: true,
+          diagramType: cacheHitInsideLock.diagramType,
+          errorMessage: null,
+          errorLine: null,
+          lastRenderMs: 1,
+        },
+        fromCache: true,
+      };
     }
-    configureMermaidEngine(themeConfig, forceNativeSvgLabels);
 
-    // Apply live UI layout/spacing directive on top of code so sliders never get ignored by stale init blocks
-    const renderCode = prepareCodeWithRuntimeLayout(trimmed, themeConfig, forceNativeSvgLabels);
+    const startTime = performance.now();
+    const sandbox = getOrCreateMermaidOffscreenSandbox();
 
-    // Single-pass render (mermaid.render validates & layouts in one step; parse() runs only on error for exact line numbers)
-    renderCounter += 1;
-    const uniqueRenderId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
-    let svgResult: string;
     try {
-      const rendered = await mermaid.render(uniqueRenderId, renderCode);
-      svgResult = rendered.svg;
-    } catch (renderErr) {
-      if (themeConfig.layoutEngine === 'elk' || themeConfig.look === 'handDrawn') {
-        if (typeof document !== 'undefined') {
-          document.querySelectorAll('[id^="dmermaid-local-svg-"]').forEach((n) => n.remove());
-        }
-        const fallbackConfig: ThemeConfiguration = {
-          ...themeConfig,
-          layoutEngine: 'dagre',
-          look: 'classic',
-        };
-        configureMermaidEngine(fallbackConfig, forceNativeSvgLabels, true);
-        const fallbackRenderCode = prepareCodeWithRuntimeLayout(
-          trimmed,
-          fallbackConfig,
-          forceNativeSvgLabels
-        );
-        renderCounter += 1;
-        const fallbackId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
-        const fallbackRendered = await mermaid.render(fallbackId, fallbackRenderCode);
-        svgResult = fallbackRendered.svg;
-        // Restore active engine signature on next call since fallback mutated Mermaid config
-        lastEngineConfigSignature = null;
-      } else {
-        throw renderErr;
+      if (themeConfig.layoutEngine === 'elk') {
+        await ensureElkLayoutRegistered();
       }
+      configureMermaidEngine(themeConfig, forceNativeSvgLabels);
+
+      // Apply live UI layout/spacing directive on top of code so sliders never get ignored by stale init blocks
+      const renderCode = prepareCodeWithRuntimeLayout(trimmed, themeConfig, forceNativeSvgLabels);
+
+      // Single-pass render inside hidden offscreen sandbox (prevents Mermaid from flashing temp nodes into document.body)
+      renderCounter += 1;
+      const uniqueRenderId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
+      let svgResult: string;
+      try {
+        const rendered = await mermaid.render(uniqueRenderId, renderCode, sandbox);
+        svgResult = rendered.svg;
+      } catch (renderErr) {
+        if (sandbox) sandbox.innerHTML = '';
+        if (themeConfig.layoutEngine === 'elk' || themeConfig.look === 'handDrawn') {
+          if (typeof document !== 'undefined') {
+            document.querySelectorAll('[id^="dmermaid-local-svg-"]').forEach((n) => n.remove());
+          }
+          const fallbackConfig: ThemeConfiguration = {
+            ...themeConfig,
+            layoutEngine: 'dagre',
+            look: 'classic',
+          };
+          configureMermaidEngine(fallbackConfig, forceNativeSvgLabels, true);
+          const fallbackRenderCode = prepareCodeWithRuntimeLayout(
+            trimmed,
+            fallbackConfig,
+            forceNativeSvgLabels
+          );
+          renderCounter += 1;
+          const fallbackId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
+          const fallbackRendered = await mermaid.render(fallbackId, fallbackRenderCode, sandbox);
+          svgResult = fallbackRendered.svg;
+          // Restore active engine signature on next call since fallback mutated Mermaid config
+          lastEngineConfigSignature = null;
+        } else {
+          throw renderErr;
+        }
+      } finally {
+        if (sandbox) sandbox.innerHTML = '';
+      }
+
+      const elapsed = Math.max(1, Math.round(performance.now() - startTime));
+      const normalizedSvg = normalizeSvgIntrinsicDimensions(svgResult);
+      setCachedSvgRender(cacheKey, { svg: normalizedSvg, diagramType });
+
+      return {
+        svg: normalizedSvg,
+        validation: {
+          isValid: true,
+          diagramType,
+          errorMessage: null,
+          errorLine: null,
+          lastRenderMs: elapsed,
+        },
+        fromCache: false,
+      };
+    } catch (err: unknown) {
+      if (sandbox) sandbox.innerHTML = '';
+      const elapsed = Math.max(1, Math.round(performance.now() - startTime));
+      let exactParseErr: unknown = null;
+      try {
+        await mermaid.parse(trimmed, { suppressErrors: false });
+      } catch (parseErr) {
+        exactParseErr = parseErr;
+      }
+
+      const errorSource = exactParseErr ?? err;
+      const rawMsg =
+        errorSource instanceof Error
+          ? errorSource.message
+          : typeof errorSource === 'object' && errorSource !== null && 'str' in errorSource
+          ? String((errorSource as { str: unknown }).str)
+          : String(errorSource);
+
+      if (typeof document !== 'undefined') {
+        const strayErrorNodes = document.querySelectorAll('[id^="dmermaid-local-svg-"]');
+        strayErrorNodes.forEach((node) => node.remove());
+      }
+
+      return {
+        svg: null,
+        validation: {
+          isValid: false,
+          diagramType,
+          errorMessage: rawMsg.trim(),
+          errorLine: extractErrorLine(rawMsg),
+          lastRenderMs: elapsed,
+        },
+        fromCache: false,
+      };
     }
-
-    const elapsed = Math.max(1, Math.round(performance.now() - startTime));
-    const normalizedSvg = normalizeSvgIntrinsicDimensions(svgResult);
-    setCachedSvgRender(cacheKey, { svg: normalizedSvg, diagramType });
-
-    return {
-      svg: normalizedSvg,
-      validation: {
-        isValid: true,
-        diagramType,
-        errorMessage: null,
-        errorLine: null,
-        lastRenderMs: elapsed,
-      },
-      fromCache: false,
-    };
-  } catch (err: unknown) {
-    const elapsed = Math.max(1, Math.round(performance.now() - startTime));
-    let exactParseErr: unknown = null;
-    try {
-      await mermaid.parse(trimmed, { suppressErrors: false });
-    } catch (parseErr) {
-      exactParseErr = parseErr;
-    }
-
-    const errorSource = exactParseErr ?? err;
-    const rawMsg =
-      errorSource instanceof Error
-        ? errorSource.message
-        : typeof errorSource === 'object' && errorSource !== null && 'str' in errorSource
-        ? String((errorSource as { str: unknown }).str)
-        : String(errorSource);
-
-    if (typeof document !== 'undefined') {
-      const strayErrorNodes = document.querySelectorAll('[id^="dmermaid-local-svg-"]');
-      strayErrorNodes.forEach((node) => node.remove());
-    }
-
-    return {
-      svg: null,
-      validation: {
-        isValid: false,
-        diagramType,
-        errorMessage: rawMsg.trim(),
-        errorLine: extractErrorLine(rawMsg),
-        lastRenderMs: elapsed,
-      },
-      fromCache: false,
-    };
-  }
+  });
 }
 
 /**

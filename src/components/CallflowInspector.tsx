@@ -212,7 +212,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
     'all' | 'with-hours' | 'holiday' | 'without-hours'
   >('all');
   const [scheduleSearch, setScheduleSearch] = useState('');
-  const [healthFilter, setHealthFilter] = useState<'all' | 'error' | 'warning'>('all');
+  const [healthFilter, setHealthFilter] = useState<'all' | 'error' | 'warning' | 'info'>('all');
   const [registrySubTab, setRegistrySubTab] = useState<
     'skillsets' | 'announcements' | 'special' | 'variables' | 'crossrefs'
   >('skillsets');
@@ -342,12 +342,19 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
     () => healthFindings.filter((f) => f.severity === 'warning').length,
     [healthFindings]
   );
+  const healthInfoCount = useMemo(
+    () => healthFindings.filter((f) => f.severity === 'info').length,
+    [healthFindings]
+  );
   const filteredHealthFindings = useMemo(() => {
     if (healthFilter === 'error') {
       return healthFindings.filter((f) => f.severity === 'error');
     }
     if (healthFilter === 'warning') {
       return healthFindings.filter((f) => f.severity === 'warning');
+    }
+    if (healthFilter === 'info') {
+      return healthFindings.filter((f) => f.severity === 'info');
     }
     return healthFindings;
   }, [healthFindings, healthFilter]);
@@ -1006,13 +1013,19 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                   ? 'text-rose-400'
                   : healthWarningCount > 0
                   ? 'text-amber-300'
+                  : healthInfoCount > 0
+                  ? 'text-sky-300'
                   : 'text-emerald-400'
               }`}
             >
               {!shouldComputeHealth
                 ? '…'
-                : healthFindings.length > 0
-                ? `${healthFindings.length} Befunde`
+                : healthErrorCount > 0
+                ? `${healthErrorCount} Fehler`
+                : healthWarningCount > 0
+                ? `${healthWarningCount} Warn.`
+                : healthInfoCount > 0
+                ? `${healthInfoCount} Hinw.`
                 : '0 Fehler'}
             </span>
           </button>
@@ -1534,11 +1547,11 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-3 gap-1.5 text-center">
+                <div className="grid grid-cols-4 gap-1 text-center">
                   <button
                     type="button"
                     onClick={() => setHealthFilter('all')}
-                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium tabular-nums transition-colors cursor-pointer ${
+                    className={`py-1.5 px-1.5 rounded-lg border text-[10.5px] font-medium tabular-nums transition-colors cursor-pointer ${
                       healthFilter === 'all'
                         ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-200'
                         : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
@@ -1549,7 +1562,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => setHealthFilter('error')}
-                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium tabular-nums transition-colors cursor-pointer ${
+                    className={`py-1.5 px-1.5 rounded-lg border text-[10.5px] font-medium tabular-nums transition-colors cursor-pointer ${
                       healthFilter === 'error'
                         ? 'bg-rose-950/40 border-rose-500/50 text-rose-200'
                         : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
@@ -1560,13 +1573,24 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                   <button
                     type="button"
                     onClick={() => setHealthFilter('warning')}
-                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-medium tabular-nums transition-colors cursor-pointer ${
+                    className={`py-1.5 px-1.5 rounded-lg border text-[10.5px] font-medium tabular-nums transition-colors cursor-pointer ${
                       healthFilter === 'warning'
                         ? 'bg-amber-950/40 border-amber-500/50 text-amber-200'
                         : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
                     }`}
                   >
-                    Warnungen ({healthWarningCount})
+                    Warn. ({healthWarningCount})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHealthFilter('info')}
+                    className={`py-1.5 px-1.5 rounded-lg border text-[10.5px] font-medium tabular-nums transition-colors cursor-pointer ${
+                      healthFilter === 'info'
+                        ? 'bg-sky-950/40 border-sky-500/50 text-sky-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Hinw. ({healthInfoCount})
                   </button>
                 </div>
 
@@ -1590,7 +1614,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                               ? 'bg-rose-950/20 border-rose-500/40'
                               : isWarn
                               ? 'bg-amber-950/20 border-amber-500/35'
-                              : 'bg-slate-900/90 border-slate-800'
+                              : 'bg-sky-950/20 border-sky-500/35'
                           }`}
                         >
                           <div className="flex items-start justify-between gap-2">
@@ -1601,7 +1625,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                                     ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                                     : isWarn
                                     ? 'bg-amber-500/20 text-amber-200 border border-amber-500/40'
-                                    : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                                    : 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
                                 }`}
                               >
                                 {isErr ? 'Fehler' : isWarn ? 'Warnung' : 'Hinweis'}
@@ -1617,8 +1641,13 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                           </p>
 
                           {finding.cyclePath && finding.cyclePath.length > 0 && (
-                            <div className="px-2 py-1 rounded bg-slate-950/80 border border-slate-800 text-[11px] font-mono text-rose-300 overflow-x-auto">
-                              Zyklus: {finding.cyclePath.join(' → ')}
+                            <div
+                              className={`px-2 py-1 rounded bg-slate-950/80 border border-slate-800 text-[11px] font-mono overflow-x-auto ${
+                                isErr ? 'text-rose-300' : 'text-sky-300'
+                              }`}
+                            >
+                              {isErr ? 'Zyklus: ' : 'Rücksprung: '}
+                              {finding.cyclePath.join(' → ')}
                             </div>
                           )}
 

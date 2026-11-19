@@ -72,7 +72,6 @@ import {
   injectInitDirectiveIntoCode,
   isColorDark,
   prepareStandaloneSvg,
-  rasterizeSvgToGpuProxy,
   renderLocalMermaidDiagram,
   shouldUseNativeSvgLabels,
   triggerLocalDownload,
@@ -213,29 +212,17 @@ const CLARITY_MODE_OPTIONS: Array<{
 ];
 
 const DRAG_THRESHOLD_PX = 7;
-const MAX_CACHED_GPU_PROXIES = 40;
+const MAX_CACHED_RENDERED_VIEWS = 40;
 
 interface PreloadedViewCacheEntry {
   viewKey: string;
-  scriptNumber?: string;
-  label: string;
   mermaidCode: string;
   codeHash: string;
   styleSignature: string;
   rawSvg: string;
   coloredSvg: string;
   logicSummary: LogicAnalysisSummary;
-  proxyUrl: string | null;
   lastUsedAt: number;
-}
-
-interface WorkspacePreloadState {
-  active: boolean;
-  overlayVisible: boolean;
-  completed: number;
-  total: number;
-  currentLabel: string;
-  mode: 'full' | 'incremental';
 }
 
 const SvgHtmlLayer = React.memo(
@@ -250,8 +237,8 @@ const SvgHtmlLayer = React.memo(
 SvgHtmlLayer.displayName = 'SvgHtmlLayer';
 
 const MemoizedSvgStage = React.memo(
-  React.forwardRef<HTMLDivElement, { svgHtml: string; proxyUrl: string | null }>(
-    ({ svgHtml, proxyUrl }, ref) => (
+  React.forwardRef<HTMLDivElement, { svgHtml: string }>(
+    ({ svgHtml }, ref) => (
       <div
         ref={ref}
         style={{ transformOrigin: 'center center' }}
@@ -259,21 +246,11 @@ const MemoizedSvgStage = React.memo(
       >
         <div className="mermaid-stage-frame relative inline-block">
           <SvgHtmlLayer svgHtml={svgHtml} />
-          {proxyUrl && (
-            <img
-              src={proxyUrl}
-              alt=""
-              aria-hidden="true"
-              decoding="sync"
-              draggable={false}
-              className="mermaid-gpu-proxy pointer-events-none select-none absolute inset-0 w-full h-full block"
-            />
-          )}
         </div>
       </div>
     )
   ),
-  (prev, next) => prev.svgHtml === next.svgHtml && prev.proxyUrl === next.proxyUrl
+  (prev, next) => prev.svgHtml === next.svgHtml
 );
 MemoizedSvgStage.displayName = 'MemoizedSvgStage';
 
@@ -579,14 +556,10 @@ function OfflineStudioApp() {
   const [isDownloadingHtml, setIsDownloadingHtml] = useState<boolean>(false);
   const [htmlExportProgress, setHtmlExportProgress] = useState<HtmlExportProgress | null>(null);
   const [htmlExportNotice, setHtmlExportNotice] = useState<string | null>(null);
-  const [preloadState, setPreloadState] = useState<WorkspacePreloadState | null>(null);
-  const [activeGpuProxyUrl, setActiveGpuProxyUrl] = useState<string | null>(null);
 
   // Refs
   const exportAbortControllerRef = useRef<AbortController | null>(null);
-  const preloadAbortRef = useRef<AbortController | null>(null);
   const preloadedViewsRef = useRef<Map<string, PreloadedViewCacheEntry>>(new Map());
-  const dynamicProxyRef = useRef<{ signature: string; url: string } | null>(null);
   const activeViewKeyRef = useRef<string>('master');
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const gutterRef = useRef<HTMLDivElement | null>(null);
@@ -782,50 +755,11 @@ function OfflineStudioApp() {
 
   activeViewKeyRef.current = activeWorkspaceViewKey;
 
-  const isUrlReferencedByAnyPreload = useCallback((url: string): boolean => {
-    for (const entry of preloadedViewsRef.current.values()) {
-      if (entry.proxyUrl === url) return true;
-    }
-    return false;
-  }, []);
-
-  const enforceGpuProxyCacheCap = useCallback(() => {
-    const withProxy = Array.from(preloadedViewsRef.current.values()).filter((e) => e.proxyUrl);
-    if (withProxy.length <= MAX_CACHED_GPU_PROXIES) return;
-    withProxy.sort((a, b) => a.lastUsedAt - b.lastUsedAt);
-    const excess = withProxy.length - MAX_CACHED_GPU_PROXIES;
-    for (let i = 0; i < excess; i++) {
-      const victim = withProxy[i];
-      if (victim.viewKey === activeViewKeyRef.current) continue;
-      const oldUrl = victim.proxyUrl;
-      victim.proxyUrl = null;
-      if (oldUrl && dynamicProxyRef.current?.url !== oldUrl && !isUrlReferencedByAnyPreload(oldUrl)) {
-        URL.revokeObjectURL(oldUrl);
-      }
-    }
-  }, [isUrlReferencedByAnyPreload]);
-
-  const cancelWorkspacePreload = useCallback(() => {
-    if (preloadAbortRef.current) {
-      preloadAbortRef.current.abort();
-      preloadAbortRef.current = null;
-    }
-    setPreloadState(null);
-  }, []);
-
-  // Revoke all proxy object URLs safely on unmount
+  // Clear on-demand view cache on unmount
   useEffect(() => {
     const viewsMap = preloadedViewsRef.current;
     return () => {
-      preloadAbortRef.current?.abort();
-      for (const entry of viewsMap.values()) {
-        if (entry.proxyUrl) URL.revokeObjectURL(entry.proxyUrl);
-      }
       viewsMap.clear();
-      if (dynamicProxyRef.current) {
-        URL.revokeObjectURL(dynamicProxyRef.current.url);
-        dynamicProxyRef.current = null;
-      }
     };
   }, []);
 
@@ -1008,376 +942,58 @@ function OfflineStudioApp() {
     currentStyleSignature,
   ]);
 
-  // Progressive Workspace Preloader (Loading Screen on full load/theme change; silent incremental Script+Master update on edits)
+  // On-Demand View Cache: cache only visited views (no eager background preloading, no blocking overlay, no black-flash proxy swap)
   useEffect(() => {
-    if (scriptWorkspace.modules.length === 0 || isolateSubgraphMode) {
-      if (preloadAbortRef.current) {
-        preloadAbortRef.current.abort();
-        preloadAbortRef.current = null;
-      }
-      setPreloadState(null);
-      if (scriptWorkspace.modules.length === 0 && preloadedViewsRef.current.size > 0) {
-        for (const entry of preloadedViewsRef.current.values()) {
-          if (entry.proxyUrl && dynamicProxyRef.current?.url !== entry.proxyUrl) {
-            URL.revokeObjectURL(entry.proxyUrl);
-          }
-        }
-        preloadedViewsRef.current.clear();
-      }
+    const cache = preloadedViewsRef.current;
+    if (scriptWorkspace.modules.length === 0) {
+      cache.clear();
       return;
     }
-
-    const dir = currentDirection || 'LR';
-    const allSpecs: Array<{
-      viewKey: string;
-      scriptNumber?: string;
-      label: string;
-      mermaidCode: string;
-      codeHash: string;
-    }> = [
-      {
-        viewKey: 'master',
-        label: `Master-Gesamtkarte (${scriptWorkspace.modules.length} Skripte)`,
-        mermaidCode: buildMasterOverviewMermaid(scriptWorkspace, dir),
-        codeHash: '',
-      },
-      ...scriptWorkspace.modules.map((mod) => ({
-        viewKey: `script:${mod.scriptNumber}`,
-        scriptNumber: mod.scriptNumber,
-        label: formatScriptDisplayLabel(mod),
-        mermaidCode: buildScriptDetailMermaid(scriptWorkspace, mod.scriptNumber, dir),
-        codeHash: '',
-      })),
-    ].map((s) => ({ ...s, codeHash: computeFastCacheHash(s.mermaidCode.trim()) }));
-
-    // Prioritize currently active view first, then Master, then Detail scripts
-    const activeKey = activeViewKeyRef.current;
-    allSpecs.sort((a, b) => {
-      if (a.viewKey === activeKey) return -1;
-      if (b.viewKey === activeKey) return 1;
-      if (a.viewKey === 'master') return -1;
-      if (b.viewKey === 'master') return 1;
-      return 0;
-    });
-
-    const validKeySet = new Set(allSpecs.map((s) => s.viewKey));
-    for (const [k, oldEntry] of preloadedViewsRef.current.entries()) {
-      if (!validKeySet.has(k)) {
-        const oldUrl = oldEntry.proxyUrl;
-        preloadedViewsRef.current.delete(k);
-        if (
-          oldUrl &&
-          dynamicProxyRef.current?.url !== oldUrl &&
-          !isUrlReferencedByAnyPreload(oldUrl)
-        ) {
-          URL.revokeObjectURL(oldUrl);
-        }
+    const validKeys = new Set<string>([
+      'master',
+      'standalone',
+      ...scriptWorkspace.modules.map((m) => `script:${m.scriptNumber}`),
+    ]);
+    for (const k of cache.keys()) {
+      if (!validKeys.has(k)) {
+        cache.delete(k);
       }
     }
+  }, [scriptWorkspace.modules]);
 
-    const staleSpecs = allSpecs.filter((s) => {
-      const existing = preloadedViewsRef.current.get(s.viewKey);
-      return (
-        !existing ||
-        existing.codeHash !== s.codeHash ||
-        existing.styleSignature !== currentStyleSignature ||
-        (allSpecs.length <= MAX_CACHED_GPU_PROXIES && !existing.proxyUrl)
-      );
-    });
-
-    if (staleSpecs.length === 0) {
-      setPreloadState(null);
-      return;
-    }
-
-    if (preloadAbortRef.current) {
-      preloadAbortRef.current.abort();
-    }
-    const abortController = new AbortController();
-    preloadAbortRef.current = abortController;
-    const { signal } = abortController;
-
-    const isFullLoad =
-      staleSpecs.length >= 3 || (staleSpecs.length === allSpecs.length && allSpecs.length > 1);
-    const baseCompleted = allSpecs.length - staleSpecs.length;
-
-    const yieldFrame = () =>
-      new Promise<void>((resolve) => {
-        if (typeof requestAnimationFrame === 'function') {
-          requestAnimationFrame(() => resolve());
-        } else {
-          window.setTimeout(resolve, 0);
-        }
-      });
-
-    const timer = window.setTimeout(async () => {
-      if (signal.aborted) return;
-
-      setPreloadState({
-        active: true,
-        overlayVisible: isFullLoad,
-        completed: baseCompleted,
-        total: allSpecs.length,
-        currentLabel: staleSpecs[0].label,
-        mode: isFullLoad ? 'full' : 'incremental',
-      });
-      await yieldFrame();
-
-      for (let i = 0; i < staleSpecs.length; i++) {
-        if (signal.aborted) return;
-        const spec = staleSpecs[i];
-        setPreloadState((prev) =>
-          prev
-            ? {
-                ...prev,
-                completed: baseCompleted + i,
-                total: allSpecs.length,
-                currentLabel: spec.label,
-              }
-            : null
-        );
-
-        const existing = preloadedViewsRef.current.get(spec.viewKey);
-        const alreadyHasSvg =
-          existing &&
-          existing.codeHash === spec.codeHash &&
-          existing.styleSignature === currentStyleSignature;
-
-        let rawSvg = alreadyHasSvg ? existing.rawSvg : '';
-        let effectiveSpecCode = spec.mermaidCode;
-
-        if (!alreadyHasSvg) {
-          let res = await renderLocalMermaidDiagram(
-            spec.mermaidCode,
-            themeConfig,
-            shouldUseNativeSvgLabels(spec.mermaidCode)
-          );
-          if (signal.aborted) return;
-          if (!res.svg && spec.viewKey === 'master') {
-            const fbCode = buildSafeFallbackMasterMermaid(scriptWorkspace, dir);
-            res = await renderLocalMermaidDiagram(
-              fbCode,
-              themeConfig,
-              shouldUseNativeSvgLabels(fbCode)
-            );
-            if (signal.aborted) return;
-            if (res.svg) effectiveSpecCode = fbCode;
-          }
-          if (!res.svg) continue;
-          rawSvg = res.svg;
-        }
-
-        const processed = alreadyHasSvg
-          ? { svg: existing.coloredSvg, summary: existing.logicSummary }
-          : applySmartLogicColoring(
-              rawSvg,
-              effectiveSpecCode,
-              smartColorMode,
-              canvasSurface,
-              themeConfig.lineColor,
-              hiddenSmartNodeTypes,
-              pathColorMode
-            );
-
-        let proxyUrl: string | null = alreadyHasSvg ? existing.proxyUrl : null;
-        if (!proxyUrl && i < MAX_CACHED_GPU_PROXIES) {
-          const parsedGraph = parseCallflowGraph(effectiveSpecCode);
-          const svgForProxy = applyNodeOffsetsToSvg(
-            processed.svg,
-            scriptWorkspace.nodeOffsets,
-            parsedGraph,
-            false
-          );
-          const proxyRes = await rasterizeSvgToGpuProxy(
-            svgForProxy,
-            {
-              code: effectiveSpecCode,
-              themeConfig,
-              smartColorMode,
-              hiddenNodeTypes: hiddenSmartNodeTypes,
-              canvasSurface,
-              pathColorMode,
-            },
-            signal
-          );
-          if (signal.aborted) {
-            if (proxyRes?.objectUrl) URL.revokeObjectURL(proxyRes.objectUrl);
-            return;
-          }
-          proxyUrl = proxyRes?.objectUrl || null;
-        }
-
-        const prevUrl = existing?.proxyUrl || null;
-        preloadedViewsRef.current.set(spec.viewKey, {
-          viewKey: spec.viewKey,
-          scriptNumber: spec.scriptNumber,
-          label: spec.label,
-          mermaidCode: spec.mermaidCode,
-          codeHash: spec.codeHash,
-          styleSignature: currentStyleSignature,
-          rawSvg,
-          coloredSvg: processed.svg,
-          logicSummary: processed.summary,
-          proxyUrl,
-          lastUsedAt: Date.now(),
-        });
-
-        if (
-          prevUrl &&
-          prevUrl !== proxyUrl &&
-          dynamicProxyRef.current?.url !== prevUrl &&
-          !isUrlReferencedByAnyPreload(prevUrl)
-        ) {
-          URL.revokeObjectURL(prevUrl);
-        }
-
-        enforceGpuProxyCacheCap();
-
-        if (spec.viewKey === activeViewKeyRef.current && proxyUrl) {
-          setActiveGpuProxyUrl(proxyUrl);
-        }
-
-        await yieldFrame();
-      }
-
-      if (!signal.aborted) {
-        setPreloadState(null);
-      }
-    }, isFullLoad ? 16 : 160);
-
-    return () => {
-      window.clearTimeout(timer);
-      abortController.abort();
-      if (preloadAbortRef.current === abortController) {
-        preloadAbortRef.current = null;
-      }
-    };
-  }, [
-    scriptWorkspace,
-    currentStyleSignature,
-    currentDirection,
-    isolateSubgraphMode,
-    themeConfig,
-    smartColorMode,
-    pathColorMode,
-    hiddenSmartNodeTypes,
-    canvasSurface,
-    enforceGpuProxyCacheCap,
-    isUrlReferencedByAnyPreload,
-  ]);
-
-  // Keep Active GPU Proxy synced with current SVG (0ms cache reuse in clean state; live DOM refresh after node-drag/spotlight)
   useEffect(() => {
-    const vp = canvasViewportRef.current;
-    if (!baseColoredSvg) {
-      setActiveGpuProxyUrl(null);
-      vp?.removeAttribute('data-has-proxy');
-      return;
-    }
-
-    const isCleanBaseView =
-      !hasCustomNodeOffsets &&
-      !selectedCallflowNodeId &&
-      !selectedCallflowEdge &&
-      !isolateSubgraphMode;
-
-    if (isCleanBaseView) {
-      const cachedHit = preloadedViewsRef.current.get(activeWorkspaceViewKey);
-      if (
-        cachedHit &&
-        cachedHit.rawSvg === baseRenderedSvg &&
-        cachedHit.styleSignature === currentStyleSignature &&
-        cachedHit.proxyUrl
-      ) {
-        cachedHit.lastUsedAt = Date.now();
-        setActiveGpuProxyUrl(cachedHit.proxyUrl);
-        return;
+    if (!baseRenderedSvg || !baseColoredSvg || isolateSubgraphMode) return;
+    const trimmed = effectiveMermaidCode.trim();
+    if (!trimmed) return;
+    const cache = preloadedViewsRef.current;
+    cache.set(activeWorkspaceViewKey, {
+      viewKey: activeWorkspaceViewKey,
+      mermaidCode: effectiveMermaidCode,
+      codeHash: computeFastCacheHash(trimmed),
+      styleSignature: currentStyleSignature,
+      rawSvg: baseRenderedSvg,
+      coloredSvg: baseColoredSvg,
+      logicSummary,
+      lastUsedAt: Date.now(),
+    });
+    if (cache.size > MAX_CACHED_RENDERED_VIEWS) {
+      const oldest = Array.from(cache.entries())
+        .filter(([k]) => k !== activeWorkspaceViewKey && k !== 'master')
+        .sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
+      while (cache.size > MAX_CACHED_RENDERED_VIEWS && oldest.length > 0) {
+        const victim = oldest.shift();
+        if (victim) cache.delete(victim[0]);
       }
     }
-
-    setActiveGpuProxyUrl(null);
-    vp?.removeAttribute('data-has-proxy');
-
-    const abortController = new AbortController();
-    const timer = window.setTimeout(async () => {
-      if (abortController.signal.aborted) return;
-      const liveSvgEl = stageElRef.current?.querySelector('.mermaid-svg-layer svg') || null;
-      const svgSource = liveSvgEl
-        ? new XMLSerializer().serializeToString(liveSvgEl)
-        : baseColoredSvg;
-      const dynSig = `${activeWorkspaceViewKey}:${computeFastCacheHash(svgSource)}`;
-      if (dynamicProxyRef.current && dynamicProxyRef.current.signature === dynSig) {
-        setActiveGpuProxyUrl(dynamicProxyRef.current.url);
-        return;
-      }
-      const proxyRes = await rasterizeSvgToGpuProxy(
-        svgSource,
-        isCleanBaseView
-          ? {
-              code: effectiveMermaidCode,
-              themeConfig,
-              smartColorMode,
-              hiddenNodeTypes: hiddenSmartNodeTypes,
-              canvasSurface,
-              pathColorMode,
-            }
-          : undefined,
-        abortController.signal
-      );
-      if (abortController.signal.aborted || !proxyRes) return;
-
-      const oldDyn = dynamicProxyRef.current;
-      dynamicProxyRef.current = { signature: dynSig, url: proxyRes.objectUrl };
-      if (isCleanBaseView) {
-        const entry = preloadedViewsRef.current.get(activeWorkspaceViewKey);
-        if (entry && entry.styleSignature === currentStyleSignature && !entry.proxyUrl) {
-          entry.proxyUrl = proxyRes.objectUrl;
-          enforceGpuProxyCacheCap();
-        }
-      }
-      setActiveGpuProxyUrl(proxyRes.objectUrl);
-
-      if (
-        oldDyn &&
-        oldDyn.url !== proxyRes.objectUrl &&
-        !isUrlReferencedByAnyPreload(oldDyn.url)
-      ) {
-        URL.revokeObjectURL(oldDyn.url);
-      }
-    }, isCleanBaseView ? 40 : 180);
-
-    return () => {
-      window.clearTimeout(timer);
-      abortController.abort();
-    };
   }, [
-    baseColoredSvg,
     baseRenderedSvg,
+    baseColoredSvg,
+    logicSummary,
+    effectiveMermaidCode,
     activeWorkspaceViewKey,
     currentStyleSignature,
-    hasCustomNodeOffsets,
-    selectedCallflowNodeId,
-    selectedCallflowEdge,
     isolateSubgraphMode,
-    activeNodeOffsets,
-    callflowDirectionFilter,
-    callflowHopDepth,
-    effectiveMermaidCode,
-    themeConfig,
-    smartColorMode,
-    hiddenSmartNodeTypes,
-    canvasSurface,
-    pathColorMode,
-    enforceGpuProxyCacheCap,
-    isUrlReferencedByAnyPreload,
   ]);
-
-  useLayoutEffect(() => {
-    const vp = canvasViewportRef.current;
-    if (!vp) return;
-    if (activeGpuProxyUrl) vp.setAttribute('data-has-proxy', 'true');
-    else vp.removeAttribute('data-has-proxy');
-  }, [activeGpuProxyUrl]);
 
   // Alias for canvas presence checks & intrinsic dimensions (without re-serializing on drag/select)
   const coloredSvg = baseColoredSvg;
@@ -5644,7 +5260,6 @@ function OfflineStudioApp() {
               <MemoizedSvgStage
                 ref={stageElRef}
                 svgHtml={coloredSvg}
-                proxyUrl={activeGpuProxyUrl}
               />
             ) : scriptWorkspace.modules.length > 0 || code.trim().length > 0 ? (
               <div
@@ -5834,127 +5449,6 @@ function OfflineStudioApp() {
                     Vorlagen
                   </button>
                 </div>
-              </div>
-            )}
-
-            {/* Studio Preload Loading Screen Overlay */}
-            {preloadState?.active && preloadState.overlayVisible && (
-              <div
-                data-canvas-ui="true"
-                onMouseDown={(e) => e.stopPropagation()}
-                onTouchStart={(e) => e.stopPropagation()}
-                className={`absolute inset-0 z-40 flex items-center justify-center p-4 backdrop-blur-sm ${
-                  canvasSurface === 'dark' ? 'bg-slate-950/75' : 'bg-slate-100/75'
-                }`}
-              >
-                <div
-                  className={`w-full max-w-md rounded-xl border p-6 shadow-2xl space-y-4 ${
-                    canvasSurface === 'dark'
-                      ? 'bg-slate-900 border-slate-800 text-slate-100'
-                      : 'bg-white border-slate-200 text-slate-900'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="space-y-1 min-w-0">
-                      <h2 className="text-sm font-semibold">
-                        Callflow-Ansichten werden vorgerendert
-                      </h2>
-                      <p
-                        className={`text-xs ${
-                          canvasSurface === 'dark' ? 'text-slate-400' : 'text-slate-600'
-                        }`}
-                      >
-                        Master-Karte, Einzel-Skripte und GPU-Zoom-Cache werden vorbereitet.
-                      </p>
-                    </div>
-                    <span className="font-mono text-xs font-semibold tabular-nums shrink-0 text-indigo-400">
-                      {preloadState.completed} / {preloadState.total}
-                    </span>
-                  </div>
-
-                  <div
-                    className={`h-2 w-full rounded-full overflow-hidden ${
-                      canvasSurface === 'dark' ? 'bg-slate-800' : 'bg-slate-200'
-                    }`}
-                  >
-                    <div
-                      className="h-full bg-indigo-500 transition-[width] duration-150 ease-out"
-                      style={{
-                        width: `${Math.min(
-                          100,
-                          Math.round(
-                            (preloadState.completed / Math.max(1, preloadState.total)) * 100
-                          )
-                        )}%`,
-                      }}
-                    />
-                  </div>
-
-                  <div
-                    className={`text-[11px] font-mono truncate ${
-                      canvasSurface === 'dark' ? 'text-slate-400' : 'text-slate-500'
-                    }`}
-                  >
-                    {preloadState.currentLabel}
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={cancelWorkspacePreload}
-                      className={`px-3.5 py-2 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        canvasSurface === 'dark'
-                          ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200'
-                          : 'bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-700'
-                      }`}
-                    >
-                      Abbrechen
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPreloadState((prev) =>
-                          prev ? { ...prev, overlayVisible: false } : null
-                        )
-                      }
-                      className="px-4 py-2 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                    >
-                      Im Hintergrund fortsetzen
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Subtle Background Preload / Incremental Script+Master Update Strip */}
-            {preloadState?.active && !preloadState.overlayVisible && (
-              <div
-                data-canvas-ui="true"
-                onMouseDown={(e) => e.stopPropagation()}
-                onTouchStart={(e) => e.stopPropagation()}
-                className={`absolute bottom-12 left-3 z-20 px-3 py-1.5 rounded-lg border text-xs flex items-center gap-2.5 shadow-lg max-w-xs ${
-                  canvasSurface === 'dark'
-                    ? 'bg-slate-900/95 border-slate-800 text-slate-200'
-                    : 'bg-white/95 border-slate-200 text-slate-800'
-                }`}
-              >
-                <span className="w-3.5 h-3.5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin shrink-0" />
-                <span className="truncate">
-                  {preloadState.mode === 'incremental'
-                    ? 'Aktualisiere Ansicht…'
-                    : 'Rendere vor…'}
-                </span>
-                <span className="font-mono text-[11px] tabular-nums text-indigo-400 shrink-0">
-                  {preloadState.completed}/{preloadState.total}
-                </span>
-                <button
-                  type="button"
-                  onClick={cancelWorkspacePreload}
-                  title="Hintergrund-Vorrendern abbrechen"
-                  className="text-slate-400 hover:text-rose-400 transition-colors cursor-pointer shrink-0"
-                >
-                  ×
-                </button>
               </div>
             )}
 

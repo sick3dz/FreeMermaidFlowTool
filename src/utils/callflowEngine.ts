@@ -3360,159 +3360,31 @@ export function generateInteractiveCallflowHtml(
       pointer-events: none !important;
       transition: none !important;
     }
-    #canvas-wrap[data-transforming="true"]:not([data-has-proxy="true"]) #svg-stage svg {
+    #canvas-wrap[data-transforming="true"] #svg-stage svg {
       shape-rendering: optimizeSpeed;
     }
     #svg-stage {
-      flex-shrink: 0;
+      flex: 0 0 auto;
+      width: max-content;
+      height: max-content;
       transform-origin: center center;
-      contain: layout style;
       will-change: transform;
-      backface-visibility: hidden;
       padding: 32px;
     }
     #svg-stage-frame {
       position: relative;
       display: inline-block;
+      flex-shrink: 0;
     }
     #svg-layer {
       visibility: visible;
     }
-    #gpu-proxy-img {
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      display: block;
-      object-fit: fill;
-      pointer-events: none;
-      visibility: hidden;
-      will-change: opacity;
-      backface-visibility: hidden;
-      user-select: none;
-      -webkit-user-drag: none;
-    }
-    #canvas-wrap[data-transforming="true"][data-has-proxy="true"] #svg-layer {
-      visibility: hidden;
-      pointer-events: none !important;
-    }
-    #canvas-wrap[data-transforming="true"][data-has-proxy="true"] #gpu-proxy-img {
-      visibility: visible;
-    }
     #svg-stage svg {
       max-width: none !important;
+      max-height: none !important;
+      flex-shrink: 0;
       display: block;
       background: transparent !important;
-    }
-    .preload-overlay {
-      position: absolute;
-      inset: 0;
-      z-index: 40;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 16px;
-      background: rgba(9, 13, 22, 0.78);
-      backdrop-filter: blur(5px);
-    }
-    html.light .preload-overlay {
-      background: rgba(241, 245, 249, 0.82);
-    }
-    .preload-card {
-      width: 100%;
-      max-width: 440px;
-      background: var(--bg-aside);
-      border: 1px solid var(--border-strong);
-      border-radius: 12px;
-      padding: 20px;
-      box-shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .preload-head {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    .preload-title {
-      font-size: 14px;
-      font-weight: 700;
-      color: var(--text-main);
-    }
-    .preload-sub {
-      font-size: 12px;
-      color: var(--text-muted);
-      margin-top: 2px;
-      line-height: 1.4;
-    }
-    .preload-count {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 12px;
-      font-weight: 600;
-      font-variant-numeric: tabular-nums;
-      color: var(--accent-text);
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-    .preload-track {
-      width: 100%;
-      height: 8px;
-      border-radius: 999px;
-      overflow: hidden;
-      background: var(--bg-seg);
-      border: 1px solid var(--border);
-    }
-    .preload-fill {
-      height: 100%;
-      width: 0%;
-      background: var(--accent);
-      transition: width 120ms ease-out;
-    }
-    .preload-label {
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 11px;
-      color: var(--text-muted);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .preload-actions {
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 8px;
-      margin-top: 2px;
-    }
-    .preload-bg-strip {
-      position: absolute;
-      bottom: 12px;
-      left: 12px;
-      z-index: 25;
-      display: none;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
-      border-radius: 8px;
-      background: var(--bg-aside);
-      border: 1px solid var(--border-strong);
-      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
-      font-size: 11px;
-      color: var(--text-main);
-      max-width: 300px;
-    }
-    .preload-spinner {
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      border: 2px solid var(--accent-border);
-      border-top-color: transparent;
-      animation: preloadSpin 0.8s linear infinite;
-      flex-shrink: 0;
-    }
-    @keyframes preloadSpin {
-      to { transform: rotate(360deg); }
     }
     #svg-stage svg g.edgePaths path,
     #svg-stage svg g.edgePath path,
@@ -3928,31 +3800,7 @@ export function generateInteractiveCallflowHtml(
         <div id="svg-stage">
           <div id="svg-stage-frame">
             <div id="svg-layer">${initialSvg}</div>
-            <img id="gpu-proxy-img" alt="" decoding="sync" />
           </div>
-        </div>
-        <div id="preload-overlay" class="preload-overlay" style="display:none;">
-          <div class="preload-card">
-            <div class="preload-head">
-              <div>
-                <div class="preload-title">Callflow wird vorbereitet</div>
-                <div class="preload-sub" id="preload-sub">Alle Ansichten &amp; GPU-Zoom-Cache werden vollständig geladen …</div>
-              </div>
-              <span class="preload-count" id="preload-count">0 / 0</span>
-            </div>
-            <div class="preload-track"><div class="preload-fill" id="preload-fill"></div></div>
-            <div class="preload-label" id="preload-label">Initialisiere …</div>
-            <div class="preload-actions">
-              <button id="btn-preload-skip" title="Vorrendern abbrechen und sofort arbeiten">Überspringen</button>
-              <button id="btn-preload-bg" class="primary" title="Ladescreen schließen und übrige Ansichten im Hintergrund vorbereiten">Im Hintergrund fortsetzen</button>
-            </div>
-          </div>
-        </div>
-        <div id="preload-bg-strip" class="preload-bg-strip">
-          <span class="preload-spinner"></span>
-          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">GPU-Cache wird geladen…</span>
-          <span class="preload-count" id="preload-bg-count">0/0</span>
-          <button id="btn-preload-bg-cancel" style="padding:1px 6px;font-size:11px;border:none;background:transparent;" title="Abbrechen">×</button>
         </div>
       </div>
       <div id="legend-bar"></div>
@@ -4084,15 +3932,7 @@ export function generateInteractiveCallflowHtml(
     const zoomReadoutEl = document.getElementById('zoom-readout');
     const stage = document.getElementById('svg-stage');
     const svgLayer = document.getElementById('svg-layer');
-    const gpuProxyImg = document.getElementById('gpu-proxy-img');
     const wrap = document.getElementById('canvas-wrap');
-    const preloadOverlayEl = document.getElementById('preload-overlay');
-    const preloadSubEl = document.getElementById('preload-sub');
-    const preloadCountEl = document.getElementById('preload-count');
-    const preloadFillEl = document.getElementById('preload-fill');
-    const preloadLabelEl = document.getElementById('preload-label');
-    const preloadBgStripEl = document.getElementById('preload-bg-strip');
-    const preloadBgCountEl = document.getElementById('preload-bg-count');
 
     let activeAsideTab = 'path';
     let activeAnalysisSubtab = 'issues';
@@ -4118,16 +3958,8 @@ export function generateInteractiveCallflowHtml(
     let zoom = 1, panX = 0, panY = 0, isDragging = false, startX = 0, startY = 0, downClientX = 0, downClientY = 0, didDrag = false;
     let initialClusterStyles = new WeakMap();
 
-    const MAX_CLEAN_PROXIES = 60;
     const normalizedSvgCache = new Map(); // viewKey -> SVGElement
     const viewThemeSigCache = new Map(); // viewKey -> string ("dark|semantic")
-    const cleanProxyCache = new Map(); // viewKey -> { sig: string, url: string, lastUsedAt: number }
-    let dynamicProxy = { sig: '', url: '' };
-    let activeGpuProxyUrl = '';
-    let proxyRefreshTimer = null;
-    let proxyGenerationId = 0;
-    let preloadAborted = false;
-    let preloadRunning = false;
 
     function esc(s) {
       return String(s || '')
@@ -4609,11 +4441,15 @@ export function generateInteractiveCallflowHtml(
       const gObj = viewObj.graph;
       const vb = (svgEl.getAttribute('viewBox') || '').trim().split(/[\\s,]+/).map(Number);
       if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) {
-        svgEl.setAttribute('width', Math.ceil(vb[2]) + 'px');
-        svgEl.setAttribute('height', Math.ceil(vb[3]) + 'px');
-        svgEl.style.width = Math.ceil(vb[2]) + 'px';
-        svgEl.style.height = Math.ceil(vb[3]) + 'px';
+        const w = Math.ceil(vb[2]);
+        const h = Math.ceil(vb[3]);
+        svgEl.setAttribute('width', String(w));
+        svgEl.setAttribute('height', String(h));
+        svgEl.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        svgEl.style.width = w + 'px';
+        svgEl.style.height = h + 'px';
         svgEl.style.maxWidth = 'none';
+        svgEl.style.maxHeight = 'none';
       }
       stampMissingNodeMetadata(svgEl, gObj);
       const targetThemeSig = (isDarkSurface ? 'dark' : 'light') + '|' + pathColorMode;
@@ -4665,182 +4501,6 @@ export function generateInteractiveCallflowHtml(
       normalizedSvgCache.set(viewObj.key, svgEl);
       if (syncUi) renderNodeTypeFilters();
       return svgEl;
-    }
-
-    function setActiveGpuProxy(url) {
-      activeGpuProxyUrl = url || '';
-      if (url && gpuProxyImg) {
-        if (gpuProxyImg.src !== url) gpuProxyImg.src = url;
-        wrap.dataset.hasProxy = 'true';
-      } else {
-        if (gpuProxyImg) gpuProxyImg.removeAttribute('src');
-        delete wrap.dataset.hasProxy;
-      }
-    }
-
-    function isViewInCleanOverviewState() {
-      return !activeNodeId && !activeEdge && hiddenNodeTypes.size === 0 && !isolateSubgraph && roleFilter === 'all' && !(searchEl.value || '').trim();
-    }
-
-    function buildCurrentStateProxySig() {
-      const edgeStr = activeEdge ? (activeEdge.from + '->' + activeEdge.to) : '';
-      const hiddenStr = hiddenNodeTypes.size ? Array.from(hiddenNodeTypes).sort().join(',') : '';
-      return [
-        activeViewKey,
-        isDarkSurface ? 'dark' : 'light',
-        pathColorMode,
-        activeNodeId,
-        edgeStr,
-        hiddenStr,
-        isolateSubgraph ? '1' : '0',
-        directionFilter,
-        hopDepth,
-        dimOpacity,
-        roleFilter,
-        (searchEl.value || '').trim(),
-      ].join('|');
-    }
-
-    function isProxyUrlReferencedInCleanCache(url) {
-      for (const entry of cleanProxyCache.values()) {
-        if (entry.url === url) return true;
-      }
-      return false;
-    }
-
-    function enforceCleanProxyCacheCap() {
-      if (cleanProxyCache.size <= MAX_CLEAN_PROXIES) return;
-      const entries = Array.from(cleanProxyCache.entries()).sort((a, b) => a[1].lastUsedAt - b[1].lastUsedAt);
-      for (const [k, entry] of entries) {
-        if (cleanProxyCache.size <= MAX_CLEAN_PROXIES) break;
-        if (k === activeViewKey || k === 'master') continue;
-        cleanProxyCache.delete(k);
-        if (entry.url && entry.url !== activeGpuProxyUrl && dynamicProxy.url !== entry.url) {
-          URL.revokeObjectURL(entry.url);
-        }
-      }
-    }
-
-    function rasterizeSvgElToGpuProxy(svgEl) {
-      if (!svgEl) return Promise.resolve(null);
-      try {
-        const clone = svgEl.cloneNode(true);
-        if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-        const vb = (clone.getAttribute('viewBox') || '').trim().split(/[\\s,]+/).map(Number);
-        let width = parseFloat(clone.getAttribute('width') || '0');
-        let height = parseFloat(clone.getAttribute('height') || '0');
-        if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) {
-          width = Math.ceil(vb[2]);
-          height = Math.ceil(vb[3]);
-          clone.setAttribute('viewBox', vb[0] + ' ' + vb[1] + ' ' + width + ' ' + height);
-        } else {
-          width = Math.max(1, Math.ceil(width || 1200));
-          height = Math.max(1, Math.ceil(height || 800));
-        }
-        clone.setAttribute('width', String(width));
-        clone.setAttribute('height', String(height));
-        clone.style.width = width + 'px';
-        clone.style.height = height + 'px';
-        clone.style.maxWidth = 'none';
-
-        const serialized = new XMLSerializer().serializeToString(clone);
-        const utf8 = new TextEncoder().encode(serialized);
-        let bin = '';
-        for (let i = 0; i < utf8.length; i++) bin += String.fromCharCode(utf8[i]);
-        const dataUrl = 'data:image/svg+xml;base64,' + window.btoa(bin);
-
-        const dpr = Math.min(2, window.devicePixelRatio || 1);
-        const desired = Math.max(1.25, dpr);
-        const maxDim = 4096;
-        const scale = Math.max(0.25, Math.min(desired, maxDim / Math.max(1, width), maxDim / Math.max(1, height)));
-        const tw = Math.max(1, Math.round(width * scale));
-        const th = Math.max(1, Math.round(height * scale));
-
-        return new Promise(resolve => {
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.onload = () => {
-            try {
-              const canvas = document.createElement('canvas');
-              canvas.width = tw;
-              canvas.height = th;
-              const ctx = canvas.getContext('2d');
-              if (!ctx) { resolve(null); return; }
-              ctx.imageSmoothingEnabled = true;
-              ctx.imageSmoothingQuality = 'high';
-              ctx.drawImage(img, 0, 0, tw, th);
-              const handleBlob = blob => {
-                if (!blob) { resolve(null); return; }
-                const objectUrl = URL.createObjectURL(blob);
-                const pre = new Image();
-                pre.src = objectUrl;
-                const finish = () => resolve(objectUrl);
-                if (typeof pre.decode === 'function') pre.decode().then(finish).catch(finish);
-                else finish();
-              };
-              canvas.toBlob(wb => {
-                if (wb) handleBlob(wb);
-                else canvas.toBlob(handleBlob, 'image/png', 0.92);
-              }, 'image/webp', 0.92);
-            } catch {
-              resolve(null);
-            }
-          };
-          img.onerror = () => resolve(null);
-          img.src = dataUrl;
-        });
-      } catch {
-        return Promise.resolve(null);
-      }
-    }
-
-    function scheduleActiveProxySync(delayMs) {
-      if (proxyRefreshTimer !== null) {
-        clearTimeout(proxyRefreshTimer);
-        proxyRefreshTimer = null;
-      }
-      const themeSig = (isDarkSurface ? 'dark' : 'light') + '|' + pathColorMode;
-      if (isViewInCleanOverviewState()) {
-        const hit = cleanProxyCache.get(activeViewKey);
-        if (hit && hit.sig === themeSig && hit.url) {
-          hit.lastUsedAt = Date.now();
-          setActiveGpuProxy(hit.url);
-          return;
-        }
-      }
-      const fullSig = buildCurrentStateProxySig();
-      if (dynamicProxy.sig === fullSig && dynamicProxy.url) {
-        setActiveGpuProxy(dynamicProxy.url);
-        return;
-      }
-
-      setActiveGpuProxy(null);
-      const reqId = ++proxyGenerationId;
-      proxyRefreshTimer = setTimeout(async () => {
-        proxyRefreshTimer = null;
-        const svgEl = svgLayer.querySelector('svg');
-        if (!svgEl) return;
-        const url = await rasterizeSvgElToGpuProxy(svgEl);
-        if (!url) return;
-        if (reqId !== proxyGenerationId || buildCurrentStateProxySig() !== fullSig) {
-          if (!isProxyUrlReferencedInCleanCache(url)) URL.revokeObjectURL(url);
-          return;
-        }
-        const prevDynUrl = dynamicProxy.url;
-        dynamicProxy = { sig: fullSig, url };
-        if (isViewInCleanOverviewState()) {
-          const prevClean = cleanProxyCache.get(activeViewKey);
-          cleanProxyCache.set(activeViewKey, { sig: themeSig, url, lastUsedAt: Date.now() });
-          if (prevClean && prevClean.url && prevClean.url !== url && dynamicProxy.url !== prevClean.url) {
-            URL.revokeObjectURL(prevClean.url);
-          }
-          enforceCleanProxyCacheCap();
-        }
-        setActiveGpuProxy(url);
-        if (prevDynUrl && prevDynUrl !== url && !isProxyUrlReferencedInCleanCache(prevDynUrl)) {
-          URL.revokeObjectURL(prevDynUrl);
-        }
-      }, typeof delayMs === 'number' ? delayMs : 90);
     }
 
     function switchView(nextKey) {
@@ -5273,7 +4933,6 @@ export function generateInteractiveCallflowHtml(
 
     function applyCombinedCanvasState(shouldFocusCamera = false) {
       applyCombinedCanvasStateInner(shouldFocusCamera);
-      scheduleActiveProxySync(isViewInCleanOverviewState() ? 35 : 95);
     }
 
     function applyCombinedCanvasStateInner(shouldFocusCamera = false) {
@@ -6244,8 +5903,6 @@ export function generateInteractiveCallflowHtml(
         viewThemeSigCache.set(activeViewKey, (isDarkSurface ? 'dark' : 'light') + '|' + pathColorMode);
         if (activeNodeId || activeEdge) {
           applyCombinedCanvasState(false);
-        } else {
-          scheduleActiveProxySync(35);
         }
       });
     });
@@ -6311,38 +5968,7 @@ export function generateInteractiveCallflowHtml(
       fitToWindow();
     });
 
-    function closePreloadUi(hideCompletely) {
-      if (preloadOverlayEl) preloadOverlayEl.style.display = 'none';
-      if (hideCompletely && preloadBgStripEl) preloadBgStripEl.style.display = 'none';
-      else if (!hideCompletely && preloadRunning && preloadBgStripEl) preloadBgStripEl.style.display = 'flex';
-    }
-
-    function cancelPreloadPipeline() {
-      preloadAborted = true;
-      preloadRunning = false;
-      closePreloadUi(true);
-    }
-
-    document.getElementById('btn-preload-skip').addEventListener('click', cancelPreloadPipeline);
-    document.getElementById('btn-preload-bg-cancel').addEventListener('click', cancelPreloadPipeline);
-    document.getElementById('btn-preload-bg').addEventListener('click', () => closePreloadUi(false));
-
-    window.addEventListener('beforeunload', () => {
-      for (const entry of cleanProxyCache.values()) {
-        if (entry.url) URL.revokeObjectURL(entry.url);
-      }
-      cleanProxyCache.clear();
-      if (dynamicProxy.url) URL.revokeObjectURL(dynamicProxy.url);
-    });
-
-    function nextPreloadFrame() {
-      return new Promise(resolve => {
-        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
-        else setTimeout(resolve, 0);
-      });
-    }
-
-    async function runInitialPreloadAndBoot() {
+    function bootActiveViewOnDemand() {
       normalizeSvgElement(svgLayer.querySelector('svg'), viewsByKey.get(activeViewKey), true);
       populateViewSelect();
       populateSelect();
@@ -6350,95 +5976,9 @@ export function generateInteractiveCallflowHtml(
       renderAnalysisTab();
       applyCombinedCanvasStateInner(false);
       fitToWindow();
-
-      const orderedViews = [...PAYLOAD.views].sort((a, b) => {
-        if (a.key === activeViewKey) return -1;
-        if (b.key === activeViewKey) return 1;
-        if (a.key === 'master') return -1;
-        if (b.key === 'master') return 1;
-        return 0;
-      });
-
-      if (!orderedViews.length) return;
-      preloadRunning = true;
-      preloadAborted = false;
-      if (preloadSubEl) {
-        preloadSubEl.textContent = orderedViews.length > 1
-          ? ('Alle ' + orderedViews.length + ' Ansichten & GPU-Zoom-Cache werden vollständig vorbereitet …')
-          : 'GPU-Zoom-Cache & Vektor-Bühne werden vorbereitet …';
-      }
-      if (preloadOverlayEl) preloadOverlayEl.style.display = 'flex';
-      if (preloadCountEl) preloadCountEl.textContent = '0 / ' + orderedViews.length;
-      if (preloadBgCountEl) preloadBgCountEl.textContent = '0/' + orderedViews.length;
-      if (preloadFillEl) preloadFillEl.style.width = '0%';
-
-      await nextPreloadFrame();
-
-      const tmpParserHost = document.createElement('div');
-      const curThemeSig = (isDarkSurface ? 'dark' : 'light') + '|' + pathColorMode;
-
-      for (let i = 0; i < orderedViews.length; i++) {
-        if (preloadAborted) return;
-        const view = orderedViews[i];
-        if (preloadCountEl) preloadCountEl.textContent = i + ' / ' + orderedViews.length;
-        if (preloadBgCountEl) preloadBgCountEl.textContent = i + '/' + orderedViews.length;
-        if (preloadLabelEl) preloadLabelEl.textContent = view.label || view.key;
-        if (preloadFillEl) preloadFillEl.style.width = Math.round((i / orderedViews.length) * 100) + '%';
-
-        let svgEl = normalizedSvgCache.get(view.key);
-        if (!svgEl) {
-          tmpParserHost.innerHTML = view.svg;
-          svgEl = tmpParserHost.querySelector('svg');
-          if (svgEl) {
-            normalizeSvgElement(svgEl, view, false);
-          }
-          tmpParserHost.innerHTML = '';
-        }
-
-        if (svgEl && i < MAX_CLEAN_PROXIES) {
-          const isCleanTarget = view.key !== activeViewKey || isViewInCleanOverviewState();
-          const existingProxy = isCleanTarget ? cleanProxyCache.get(view.key) : null;
-          if (!existingProxy || existingProxy.sig !== curThemeSig) {
-            const url = await rasterizeSvgElToGpuProxy(svgEl);
-            if (preloadAborted) {
-              if (url) URL.revokeObjectURL(url);
-              return;
-            }
-            if (url) {
-              if (isCleanTarget) {
-                const oldUrl = existingProxy ? existingProxy.url : '';
-                cleanProxyCache.set(view.key, { sig: curThemeSig, url, lastUsedAt: Date.now() });
-                if (oldUrl && oldUrl !== url && dynamicProxy.url !== oldUrl) {
-                  URL.revokeObjectURL(oldUrl);
-                }
-                enforceCleanProxyCacheCap();
-                if (view.key === activeViewKey) {
-                  setActiveGpuProxy(url);
-                }
-              } else {
-                const oldDynUrl = dynamicProxy.url;
-                dynamicProxy = { sig: buildCurrentStateProxySig(), url };
-                setActiveGpuProxy(url);
-                if (oldDynUrl && oldDynUrl !== url && !isProxyUrlReferencedInCleanCache(oldDynUrl)) {
-                  URL.revokeObjectURL(oldDynUrl);
-                }
-              }
-            }
-          }
-        }
-
-        const doneCount = i + 1;
-        if (preloadCountEl) preloadCountEl.textContent = doneCount + ' / ' + orderedViews.length;
-        if (preloadBgCountEl) preloadBgCountEl.textContent = doneCount + '/' + orderedViews.length;
-        if (preloadFillEl) preloadFillEl.style.width = Math.round((doneCount / orderedViews.length) * 100) + '%';
-        await nextPreloadFrame();
-      }
-
-      preloadRunning = false;
-      closePreloadUi(true);
     }
 
-    runInitialPreloadAndBoot();
+    bootActiveViewOnDemand();
   </script>
 
   <!-- Opening Hours Modal Overlay -->

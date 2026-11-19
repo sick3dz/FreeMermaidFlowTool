@@ -29,15 +29,14 @@
 }
 
 /* Prevent flex containers or preflight rules from shrinking large Mermaid SVGs
-   and maintain a permanent GPU composite layer to avoid re-rasterization stutter */
+   and maintain a smooth GPU composite transform layer without hiding the vector SVG */
 .mermaid-canvas-stage {
-  flex-shrink: 0;
-  contain: layout style;
+  flex: 0 0 auto;
+  width: max-content;
+  height: max-content;
   will-change: transform;
-  backface-visibility: hidden;
 }
 
-/* Dual-layer stage: crisp vector SVG in idle state, pre-decoded GPU bitmap proxy during 60fps pan/zoom */
 .mermaid-svg-layer {
   visibility: visible;
 }
@@ -49,27 +48,12 @@
   display: block;
 }
 
-.mermaid-gpu-proxy {
-  visibility: hidden;
-  will-change: opacity;
-  backface-visibility: hidden;
-}
-
-[data-transforming="true"][data-has-proxy="true"] .mermaid-svg-layer {
-  visibility: hidden;
-  pointer-events: none !important;
-}
-
-[data-transforming="true"][data-has-proxy="true"] .mermaid-gpu-proxy {
-  visibility: visible;
-}
-
 /* Zero-re-render cursor & gesture isolation during canvas pan/wheel/pinch */
 [data-panning="true"] {
   cursor: grabbing !important;
 }
 
-[data-transforming="true"]:not([data-has-proxy="true"]) .mermaid-canvas-stage svg {
+[data-transforming="true"] .mermaid-canvas-stage svg {
   shape-rendering: optimizeSpeed;
 }
 

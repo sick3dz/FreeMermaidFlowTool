@@ -4292,6 +4292,15 @@ export function detectWorkspaceIssues(
     });
   });
 
+  // Precompute workspace-wide SondZeit time definitions so cross-script inherited schedules are recognized
+  const workspaceHasSondZeitDef = modules.some(
+    (m) =>
+      Boolean(m.rawText) &&
+      /\b(?:sondzeit|sys_sondzeit|sonderzeit)\b[\s\S]{0,200}?(?:\d{1,2}\s*:\s*\d{2}|\b\d{4}\s*[-–]\s*\d{4}\b)/i.test(
+        m.rawText || ''
+      )
+  );
+
   // 2. Unclear / incomplete transitions inside scripts or Visio pages
   modules.forEach((mod) => {
     const modKey = canonicalScriptMatchKey(mod.scriptNumber);
@@ -4308,11 +4317,17 @@ export function detectWorkspaceIssues(
         rule.targetNumber ||
           rule.queueTarget ||
           rule.announcement ||
+          rule.treatmentInfo ||
+          rule.hdxAction ||
           rule.isDisconnect ||
+          rule.loopSectionTarget ||
+          rule.waitSeconds !== undefined ||
           rule.choices.length > 0 ||
-          /\bassign\b/i.test(rule.rawLine) ||
+          /\b(?:assign|give|queue|route|disconnect|wait|return|send|readvar|set|open|close|log|end)\b/i.test(
+            rule.rawLine
+          ) ||
           /deaktiviert\s*=\s*0/i.test(`${rule.stepName} ${rule.condition || ''}`) ||
-          /\b(default_skillset|sys_team_skillset|sys_ueberlauf_skillset|sys_musik|skillset|queue|warteschlange)\b/i.test(
+          /\b(?:default_skillset|sys_team_skillset|sys_ueberlauf_skillset|sys_musik|sys_sondstat|sys_sondrouting|sys_besetztgrund|sys_retour_zentrale|sys_ws_[a-z0-9_]+|skillset|queue|warteschlange|inaktiv)\b/i.test(
             `${rule.stepName} ${rule.condition || ''} ${rule.rawLine}`
           )
       );
@@ -4324,14 +4339,16 @@ export function detectWorkspaceIssues(
         `${rule.stepName} ${rule.rawLine}`
       );
       const isTerminalOrInitLabel =
-        /^(?:init\b|ende\b|end\b|abwurf|auflegen|mailbox|ansage|begrüßung|begruessung|willkommen|musik|start|call-men[uü]|men[uü]|menue|auswahl|menu)/i.test(
+        /^(?:init\b|ende\b|end\b|abwurf|auflegen|mailbox|voicemail|fax|ansage|begrüßung|begruessung|willkommen|musik|wartemusik|start|call-men[uü]|men[uü]|menue|auswahl|menu|rücksprung|ruecksprung|routing)/i.test(
           rule.stepName.trim()
         ) ||
-        /\b(?:abwurf|auflegen|mailbox|hangup|disconnect|call-men[uü]|men[uü]|menue|auswahl|menu)\b/i.test(rule.stepName);
+        /\b(?:abwurf|auflegen|mailbox|voicemail|fax|hangup|disconnect|call-men[uü]|men[uü]|menue|auswahl|menu|ansage|musik|wartemusik|begrüßung|willkommen|rücksprung|ruecksprung)\b/i.test(
+          rule.stepName
+        );
 
       const isOverflowRule =
-        /\b(?:überlauf|overflow)\b/i.test(rule.stepName) ||
-        /\b(?:überlauf|overflow)\b/i.test(rule.rawLine) ||
+        /\b(?:überlauf|ueberlauf|overflow)\b/i.test(rule.stepName) ||
+        /\b(?:überlauf|ueberlauf|overflow)\b/i.test(rule.rawLine) ||
         Boolean(rule.queueTarget);
 
       const isVisioLastUnclear =
@@ -4372,13 +4389,15 @@ export function detectWorkspaceIssues(
       const rawSchedule = (rule.schedule || '').trim();
       const usesSondZeitToken =
         /\b(?:sondzeit|sys_sondzeit|sonderzeit)\b/i.test(rawSchedule) &&
-        !/\d{1,2}:\d{2}/.test(rawSchedule);
+        !/(?:\d{1,2}:\d{2}|\b\d{4}\s*[-–]\s*\d{4}\b)/.test(rawSchedule);
       if (usesSondZeitToken) {
         const hasSondZeitDefInMod = Boolean(
           mod.rawText &&
-            /\b(?:sondzeit|sys_sondzeit)\b[\s\S]{0,160}?\d{1,2}\s*:\s*\d{2}/i.test(mod.rawText)
+            /\b(?:sondzeit|sys_sondzeit|sonderzeit)\b[\s\S]{0,200}?(?:\d{1,2}\s*:\s*\d{2}|\b\d{4}\s*[-–]\s*\d{4}\b)/i.test(
+              mod.rawText
+            )
         );
-        if (!hasSondZeitDefInMod) {
+        if (!hasSondZeitDefInMod && !workspaceHasSondZeitDef) {
           const id = `unclear:${modKey}:${rule.id}:sondzeit`;
           const rec = resolvedMap[id];
           if (!issues.some((existing) => existing.id === id)) {
@@ -4402,7 +4421,14 @@ export function detectWorkspaceIssues(
     });
 
     // 3b. Script-level completeness check: If a loaded script has no actionable routing rules at all
-    if (mod.rules.length === 0) {
+    // Skip helper/config/parameter/SondZeit scripts that contain valid Avaya OCL statements in rawText
+    const hasValidAvayaDirectivesInRaw = Boolean(
+      mod.rawText &&
+        /\b(?:assign|give\s+(?:music|ringback|busy|silence|ran|ivr|controlled\s+broadcast)|queue|route|disconnect|wait|return|send|readvar|section|where|sondzeit|sys_sondzeit|holiday)\b/i.test(
+          mod.rawText
+        )
+    );
+    if (mod.rules.length === 0 && !mod.isAnnouncementEndpoint && !hasValidAvayaDirectivesInRaw) {
       const id = `unclear:${modKey}:empty-module`;
       const rec = resolvedMap[id];
       issues.push({
@@ -6072,7 +6098,45 @@ export function analyzeWorkspaceLogicHealth(
     }
   });
 
-  // 1. Detect multi-module cycles (Ping-Pong / Endlosschleifen)
+  // Helper to classify whether a cycle hop is an intentional/guarded return (Sys_Retour_Zentrale, Überlauf, DTMF Menü, or conditional branch)
+  const isCycleHopIntentionalOrGuarded = (fromKey: string, toKey: string): boolean => {
+    const fromMod = moduleByKey.get(fromKey);
+    if (!fromMod) return false;
+    const matchingRules = fromMod.rules.filter((rule) => {
+      const directTargetMatch =
+        rule.targetNumber && canonicalScriptMatchKey(rule.targetNumber) === toKey;
+      const choiceTargetMatch = rule.choices.some(
+        (c) => c.targetNumber && canonicalScriptMatchKey(c.targetNumber) === toKey
+      );
+      return Boolean(directTargetMatch || choiceTargetMatch);
+    });
+    if (matchingRules.length === 0) {
+      // Check rawText for Sys_Retour_Zentrale / Überlauf / DTMF menu return indicators
+      return /\b(?:sys_retour_zentrale|retour|überlauf|ueberlauf|overflow|zurück|zurueck|men[uü]|collect)\b/i.test(
+        fromMod.rawText || ''
+      );
+    }
+    return matchingRules.some((rule) => {
+      const meta = `${rule.stepName} ${rule.condition || ''} ${rule.rawLine || ''}`;
+      const isRetourOrOverflow =
+        /\b(?:sys_retour_zentrale|retour|rücksprung|ruecksprung|überlauf|ueberlauf|overflow)\b/i.test(
+          meta
+        );
+      const isMenuBack =
+        rule.choices.length > 0 ||
+        /\b(?:men[uü]|menue|taste|dtmf|auswahl|zurück|zurueck|hauptmen[uü]|call-men[uü])\b/i.test(
+          meta
+        );
+      const hasExplicitGuard = Boolean(
+        (rule.condition && rule.condition.trim().length > 0) ||
+          (rule.schedule && rule.schedule.trim().length > 0) ||
+          (rule.holiday && rule.holiday.trim().length > 0)
+      );
+      return isRetourOrOverflow || isMenuBack || hasExplicitGuard;
+    });
+  };
+
+  // 1. Detect multi-module cycles (distinguish intentional/guarded returns as 'info' vs unconditional infinite loops as 'error')
   const seenCycles = new Set<string>();
   const visitedGlobal = new Set<string>();
 
@@ -6097,20 +6161,49 @@ export function analyzeWorkspaceLogicHealth(
               (k) => moduleByKey.get(k)?.scriptNumber || k
             );
             const entryMod = moduleByKey.get(cycleKeys[0])!;
-            findings.push({
-              id: `health:cycle:${signature}`,
-              severity: 'error',
-              category: 'cycle',
-              scriptNumber: entryMod.scriptNumber,
-              scriptName: entryMod.scriptName,
-              title: `Zyklische Skript-Schleife (${displayChain.join(' → ')})`,
-              description: `Zwischen den Skripten besteht ein geschlossener Rücksprung-Kreislauf (${displayChain.join(
-                ' → '
-              )}). Ohne Abbruchbedingung oder Zähler droht eine Endlosschleife.`,
-              recommendation:
-                'Prüfen Sie die Rücksprung-Bedingung (z. B. Sys_Retour_Zentrale oder Überlauf) und begrenzen Sie die Wiederholungsanzahl.',
-              cyclePath: displayChain,
-            });
+
+            // Inspect every hop along the cycle: if any hop is a guarded/intentional return, downgrade to 'info'
+            let hasIntentionalReturnHop = false;
+            for (let idx = 0; idx < cycleKeys.length; idx++) {
+              const hopFrom = cycleKeys[idx];
+              const hopTo = cycleKeys[(idx + 1) % cycleKeys.length];
+              if (isCycleHopIntentionalOrGuarded(hopFrom, hopTo)) {
+                hasIntentionalReturnHop = true;
+                break;
+              }
+            }
+
+            if (hasIntentionalReturnHop) {
+              findings.push({
+                id: `health:cycle:${signature}`,
+                severity: 'info',
+                category: 'cycle',
+                scriptNumber: entryMod.scriptNumber,
+                scriptName: entryMod.scriptName,
+                title: `Bewusster Rücksprung-Kreislauf (${displayChain.join(' → ')})`,
+                description: `Zwischen den Skripten existiert ein bedingter oder gewollter Rücksprung (${displayChain.join(
+                  ' → '
+                )}), z. B. über Sys_Retour_Zentrale, Überlauf oder Menü-Zurück. Kein struktureller Fehler.`,
+                recommendation:
+                  'Nur zur Kontrolle: Stellen Sie sicher, dass die Rücksprung-Bedingung (Überlauf, Menü-Taste oder Zähler) wie gewünscht greift.',
+                cyclePath: displayChain,
+              });
+            } else {
+              findings.push({
+                id: `health:cycle:${signature}`,
+                severity: 'error',
+                category: 'cycle',
+                scriptNumber: entryMod.scriptNumber,
+                scriptName: entryMod.scriptName,
+                title: `Unbedingte Skript-Schleife (${displayChain.join(' → ')})`,
+                description: `Zwischen den Skripten besteht ein unbedingter geschlossener Rücksprung-Kreislauf (${displayChain.join(
+                  ' → '
+                )}) ohne erkannte Bedingung, Überlauf-Schwelle oder Menü-Auswahl.`,
+                recommendation:
+                  'Prüfen Sie die Übergänge und ergänzen Sie eine Bedingung, Zeit-/Überlauf-Schwelle oder einen Abbruch-Zähler.',
+                cyclePath: displayChain,
+              });
+            }
           }
         }
       } else if (!visitedGlobal.has(nextKey)) {
@@ -6131,36 +6224,52 @@ export function analyzeWorkspaceLogicHealth(
   }
 
   // 2. Per-module & per-rule checks (focused strictly on genuine structural errors)
-  const isRuleActionable = (rule: ScriptRule): boolean =>
-    Boolean(rule.targetNumber) ||
-    rule.choices.length > 0 ||
-    Boolean(rule.queueTarget) ||
-    Boolean(rule.announcement) ||
-    Boolean(rule.treatmentInfo) ||
-    Boolean(rule.hdxAction) ||
-    Boolean(rule.isDisconnect) ||
-    Boolean(rule.loopSectionTarget) ||
-    rule.waitSeconds !== undefined ||
-    Boolean(rule.schedule) ||
-    Boolean(rule.holiday) ||
-    Boolean(rule.orgaCode || rule.organizationName || rule.brandName || rule.srcRouteNumber) ||
-    /deaktiviert\s*=\s*0/i.test(`${rule.stepName} ${rule.condition || ''}`) ||
-    /\b(?:default_skillset|sys_ueberlauf_skillset|sys_team_skillset|sys_musik|sys_sondstat)\b/i.test(
-      `${rule.stepName} ${rule.condition || ''} ${rule.rawLine || ''}`
-    ) ||
-    /\bassign\b/i.test(rule.rawLine || '') ||
-    /^(?:Init|DNIS-Range|Assign|Überlauf|Ueberlauf|Overflow)/i.test(rule.stepName);
+  const isRuleActionable = (rule: ScriptRule): boolean => {
+    const combinedText = `${rule.stepName} ${rule.condition || ''} ${rule.rawLine || ''}`;
+    return (
+      Boolean(rule.targetNumber) ||
+      rule.choices.length > 0 ||
+      Boolean(rule.queueTarget) ||
+      Boolean(rule.announcement) ||
+      Boolean(rule.treatmentInfo) ||
+      Boolean(rule.hdxAction) ||
+      Boolean(rule.isDisconnect) ||
+      Boolean(rule.loopSectionTarget) ||
+      rule.waitSeconds !== undefined ||
+      Boolean(rule.schedule) ||
+      Boolean(rule.holiday) ||
+      Boolean(rule.orgaCode || rule.organizationName || rule.brandName || rule.srcRouteNumber) ||
+      /deaktiviert\s*=\s*0/i.test(combinedText) ||
+      /\b(?:inaktiv|default_skillset|sys_ueberlauf_skillset|sys_team_skillset|sys_musik|sys_sondstat|sys_sondrouting|sys_besetztgrund|sys_retour_zentrale|sys_ws_[a-z0-9_]+|sys_[a-z0-9_]+)\b/i.test(
+        combinedText
+      ) ||
+      /\b(?:assign|give\s+(?:music|ringback|busy|silence|ran|ivr|controlled\s+broadcast)|return|send|readvar|set|open|close|log|end|route|queue|wait|disconnect)\b/i.test(
+        rule.rawLine || ''
+      ) ||
+      /\b(?:call-men[uü]|men[uü]|menue|auswahl|abwurf|auflegen|mailbox|voicemail|fax|ansage|musik|begrüßung|begruessung|willkommen|wartemusik|rücksprung|ruecksprung|routing)\b/i.test(
+        `${rule.stepName} ${rule.condition || ''}`
+      ) ||
+      /^(?:Init|DNIS-Range|Assign|Überlauf|Ueberlauf|Overflow)/i.test(rule.stepName)
+    );
+  };
 
   for (const mod of modules) {
     const modKey = canonicalScriptMatchKey(mod.scriptNumber);
 
     // 2a. Genuine dead-end module check:
     // Announcement endpoints, Disconnect/Route-End scripts, Broadcast/Treatment/IVR endpoints,
-    // CTI/Wait steps, Queues, and outgoing targets are all valid Callflow terminations.
+    // CTI/Wait steps, Queues, helper/config OCL scripts, and outgoing targets are all valid Callflow terminations.
+    const hasRawAvayaDirectives = Boolean(
+      mod.rawText &&
+        /\b(?:assign|give|queue|route|disconnect|wait|return|send|readvar|section|where|sondzeit|sys_sondzeit|holiday)\b/i.test(
+          mod.rawText
+        )
+    );
     const hasAnyActionableStep =
       Boolean(mod.isAnnouncementEndpoint) ||
       mod.outgoingNumbers.length > 0 ||
       mod.rules.some(isRuleActionable) ||
+      hasRawAvayaDirectives ||
       (workspace.manualLinks || []).some(
         (l) => canonicalScriptMatchKey(l.fromScriptNumber) === modKey
       );
@@ -6204,19 +6313,22 @@ export function analyzeWorkspaceLogicHealth(
     }
 
     for (const [prio, rulesWithPrio] of prioMap.entries()) {
-      if (rulesWithPrio.length > 1) {
-        // Sequential steps in OCL/WHERE/VALUE blocks execute deterministically in line order — never warn on those.
-        const allFromOclOrSameBranch = rulesWithPrio.every((r) =>
-          /\b(?:execute|queue|give|route|wait|disconnect|readvar|send|assign|section|where|if|when|value)\b/i.test(
+      const activeRulesWithPrio = rulesWithPrio.filter(
+        (r) => !/deaktiviert\s*=\s*0/i.test(`${r.stepName} ${r.condition || ''}`)
+      );
+      if (activeRulesWithPrio.length > 1) {
+        // Sequential steps in OCL/WHERE/VALUE/CASE blocks execute deterministically in line order — never warn on those.
+        const allFromOclOrSameBranch = activeRulesWithPrio.every((r) =>
+          /\b(?:execute|queue|give|route|wait|disconnect|readvar|send|assign|section|where|if|when|value|case|otherwise|default|end|open|close|print|return)\b/i.test(
             r.rawLine || ''
           )
         );
         if (allFromOclOrSameBranch) continue;
 
         const distinctConditions = new Set(
-          rulesWithPrio.map((r) => (r.condition || '').trim()).filter(Boolean)
+          activeRulesWithPrio.map((r) => (r.condition || '').trim()).filter(Boolean)
         );
-        if (distinctConditions.size < rulesWithPrio.length) {
+        if (distinctConditions.size < activeRulesWithPrio.length) {
           findings.push({
             id: `health:dup-prio:${modKey}:${prio}`,
             severity: 'warning',
@@ -6225,7 +6337,7 @@ export function analyzeWorkspaceLogicHealth(
             scriptName: mod.scriptName,
             prio,
             title: `Doppelte Priorität ${prio} in [${mod.scriptNumber}]`,
-            description: `${rulesWithPrio.length} Regeln in [${mod.scriptNumber}] verwenden dieselbe explizite Prioritätsstufe ${prio} (${rulesWithPrio
+            description: `${activeRulesWithPrio.length} Regeln in [${mod.scriptNumber}] verwenden dieselbe explizite Prioritätsstufe ${prio} (${activeRulesWithPrio
               .map((r) => r.stepName)
               .join(', ')}).`,
             recommendation:
