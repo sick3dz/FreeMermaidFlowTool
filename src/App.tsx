@@ -1921,6 +1921,31 @@ function OfflineStudioApp() {
     }
   }, [scriptWorkspace.modules.length]);
 
+  const [lastIndexRecomputedAt, setLastIndexRecomputedAt] = useState<number | null>(null);
+
+  const handleRecomputeWorkspaceIndex = useCallback(() => {
+    if (scriptWorkspace.modules.length === 0) return;
+    const upgraded = rehydrateAndUpgradeWorkspace(scriptWorkspace);
+    const stampedWorkspace: ScriptWorkspace = {
+      ...upgraded,
+      updatedAt: Date.now(),
+    };
+    setScriptWorkspace(stampedWorkspace);
+    const activeDir = getDiagramDirection(code) || 'LR';
+    if (callflowViewLevel.level === 'detail' && callflowViewLevel.scriptNumber) {
+      setCode(
+        buildScriptDetailMermaid(
+          stampedWorkspace,
+          callflowViewLevel.scriptNumber,
+          activeDir
+        )
+      );
+    } else {
+      setCode(buildMasterOverviewMermaid(stampedWorkspace, activeDir));
+    }
+    setLastIndexRecomputedAt(Date.now());
+  }, [scriptWorkspace, code, callflowViewLevel]);
+
   const handleOpenNodeEditor = useCallback(
     (nodeId: string) => {
       if (!nodeId || !callflowGraph.nodes.has(nodeId)) return;
@@ -6144,6 +6169,8 @@ function OfflineStudioApp() {
               onAssignFolderAndAutoResolve={handleAssignFolderAndAutoResolve}
               onSelectStartScriptFromAssignedFolder={handleSelectStartScriptFromAssignedFolder}
               onClearAssignedFolder={handleClearAssignedFolder}
+              onRecomputeWorkspaceIndex={handleRecomputeWorkspaceIndex}
+              lastRecomputedAt={lastIndexRecomputedAt}
             />
           </div>
         )}
@@ -6252,6 +6279,8 @@ function OfflineStudioApp() {
                   onAssignFolderAndAutoResolve={handleAssignFolderAndAutoResolve}
                   onSelectStartScriptFromAssignedFolder={handleSelectStartScriptFromAssignedFolder}
                   onClearAssignedFolder={handleClearAssignedFolder}
+                  onRecomputeWorkspaceIndex={handleRecomputeWorkspaceIndex}
+                  lastRecomputedAt={lastIndexRecomputedAt}
                 />
               ) : (
                 <ThemeConfigurator

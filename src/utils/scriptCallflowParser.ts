@@ -4311,10 +4311,15 @@ export function detectWorkspaceIssues(
           rule.isDisconnect ||
           rule.choices.length > 0 ||
           /\bassign\b/i.test(rule.rawLine) ||
-          /\b(sys_team_skillset|sys_ueberlauf_skillset|sys_musik|skillset|queue|warteschlange)\b/i.test(`${rule.stepName} ${rule.rawLine}`)
+          /deaktiviert\s*=\s*0/i.test(`${rule.stepName} ${rule.condition || ''}`) ||
+          /\b(default_skillset|sys_team_skillset|sys_ueberlauf_skillset|sys_musik|skillset|queue|warteschlange)\b/i.test(
+            `${rule.stepName} ${rule.condition || ''} ${rule.rawLine}`
+          )
       );
       const isDeactivatedOverflow =
-        /\(deaktiviert\s*=\s*0\)/i.test(rule.stepName) && !rule.targetNumber && !rule.queueTarget;
+        /deaktiviert\s*=\s*0/i.test(`${rule.stepName} ${rule.condition || ''}`) &&
+        !rule.targetNumber &&
+        !rule.queueTarget;
       const hasExplicitTodoMarker = /(?:\?\?\?|\b(?:TODO|TBD|OFFEN|UNKLAR|KLÄREN)\b)/i.test(
         `${rule.stepName} ${rule.rawLine}`
       );
@@ -5575,6 +5580,9 @@ export function rehydrateAndUpgradeWorkspace(rawWorkspace: ScriptWorkspace): Scr
         upgradedModules.push({
           ...rm,
           cdnAlias: rm.cdnAlias || (reparsed.length === 1 ? mod.cdnAlias : undefined),
+          entryOrganizationName:
+            rm.entryOrganizationName ||
+            (reparsed.length === 1 ? mod.entryOrganizationName : undefined),
         });
       }
     } else {
@@ -6136,7 +6144,12 @@ export function analyzeWorkspaceLogicHealth(
     Boolean(rule.schedule) ||
     Boolean(rule.holiday) ||
     Boolean(rule.orgaCode || rule.organizationName || rule.brandName || rule.srcRouteNumber) ||
-    /^(?:Init|DNIS-Range|Assign)/i.test(rule.stepName);
+    /deaktiviert\s*=\s*0/i.test(`${rule.stepName} ${rule.condition || ''}`) ||
+    /\b(?:default_skillset|sys_ueberlauf_skillset|sys_team_skillset|sys_musik|sys_sondstat)\b/i.test(
+      `${rule.stepName} ${rule.condition || ''} ${rule.rawLine || ''}`
+    ) ||
+    /\bassign\b/i.test(rule.rawLine || '') ||
+    /^(?:Init|DNIS-Range|Assign|Überlauf|Ueberlauf|Overflow)/i.test(rule.stepName);
 
   for (const mod of modules) {
     const modKey = canonicalScriptMatchKey(mod.scriptNumber);

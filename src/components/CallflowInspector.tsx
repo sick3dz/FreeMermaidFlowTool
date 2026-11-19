@@ -125,6 +125,8 @@ interface CallflowInspectorProps {
   onAssignFolderAndAutoResolve?: (files: FileList | File[]) => Promise<void>;
   onSelectStartScriptFromAssignedFolder?: (entry: FolderScriptFileEntry) => Promise<void>;
   onClearAssignedFolder?: () => void;
+  onRecomputeWorkspaceIndex?: () => void;
+  lastRecomputedAt?: number | null;
 }
 
 const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
@@ -174,6 +176,8 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
   onAssignFolderAndAutoResolve,
   onSelectStartScriptFromAssignedFolder,
   onClearAssignedFolder,
+  onRecomputeWorkspaceIndex,
+  lastRecomputedAt = null,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [issueFilterTab, setIssueFilterTab] = useState<'open' | 'resolved'>('open');
@@ -1484,17 +1488,45 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
         {((workspaceMode === 'free' && inspectorTab === 'health') ||
           (workspaceMode === 'guided' && guidedStep === 3)) && (
           <section className="space-y-3 bg-slate-950/80 border border-slate-800 rounded-xl p-3.5">
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 min-w-0">
                 <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
                 <span className="text-xs font-semibold text-slate-100 truncate">
                   Automatische Logik-Prüfung
                 </span>
               </div>
-              <span className="text-[11px] font-mono text-slate-400 tabular-nums shrink-0">
-                {healthFindings.length} {healthFindings.length === 1 ? 'Befund' : 'Befunde'}
-              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-[11px] font-mono text-slate-400 tabular-nums shrink-0">
+                  {healthFindings.length} {healthFindings.length === 1 ? 'Befund' : 'Befunde'}
+                </span>
+                {onRecomputeWorkspaceIndex && scriptWorkspace.modules.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={onRecomputeWorkspaceIndex}
+                    title="Alle gecachten Skripte mit der aktuellen Parser-Logik neu einlesen und den Prüf-Index aktualisieren"
+                    className="px-2 py-1 text-[11px] font-medium text-emerald-200 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 rounded-md transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3 h-3 shrink-0" />
+                    <span>Index neu berechnen</span>
+                  </button>
+                )}
+              </div>
             </div>
+
+            {lastRecomputedAt && scriptWorkspace.modules.length > 0 && (
+              <div className="px-2.5 py-1.5 rounded-lg bg-emerald-950/30 border border-emerald-500/30 text-[11px] font-mono text-emerald-300 flex items-center justify-between gap-2 tabular-nums">
+                <span>
+                  ✓ Index &amp; Logik aus Roh-Skripten neu berechnet ({scriptWorkspace.modules.length} Skripte)
+                </span>
+                <span className="text-emerald-400/90 shrink-0">
+                  {new Date(lastRecomputedAt).toLocaleTimeString('de-DE', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                  })}
+                </span>
+              </div>
+            )}
 
             {scriptWorkspace.modules.length === 0 ? (
               <div className="text-[11px] text-slate-400 py-2 leading-relaxed">
