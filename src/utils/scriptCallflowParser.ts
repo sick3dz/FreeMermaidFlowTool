@@ -138,7 +138,7 @@ export function normalizeScriptRef(raw: string): string {
 }
 
 export function canonicalScriptMatchKey(ref: string): string {
-  return normalizeScriptRef(ref).toLowerCase();
+  return normalizeScriptRef(ref).replace(/\.s$/i, '').toLowerCase();
 }
 
 export function toMermaidNodeSuffix(ref: string): string {
@@ -3373,9 +3373,11 @@ export function parseScriptTextBundle(
         t.match(
           /^[=\-*#\s]*(?:master(?:callflow|script)?|skript|script|modul)\s*(?:nr\.?|nummer)?\s*[:#]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?(?:\s*[-:|]\s*|\s+)?([^=\-*]*?)[=\-*\s]*$/i
         );
-      const bareFramed = t.match(
-        /^[=\-*#]{2,}\s*(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\s*[=\-*#]{2,}$/
-      );
+      const bareFramed = !/(?:->|=>|→|\|)/.test(t)
+        ? t.match(
+            /^[=\-*#]{2,}\s*(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.\s-]{1,78}?)\s*[=\-*#]{2,}$/
+          )
+        : null;
 
       let matchedSec: { num: string; name: string; isMaster: boolean } | null = null;
       if (
@@ -3644,9 +3646,11 @@ export function parseScriptTextBundle(
     }
 
     // Bare `=== Schaltung1 ===`, `=== 550 ===`, or `=== Main ===` header line wrapped with === / --- / #
-    const bareFramedHeader = line.match(
-      /^[=\-*#]{2,}\s*(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\s*[=\-*#]{2,}$/
-    );
+    const bareFramedHeader = !/(?:->|=>|→|\||;)/.test(line)
+      ? line.match(
+          /^[=\-*#]{2,}\s*(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.\s-]{1,78}?)\s*[=\-*#]{2,}$/
+        )
+      : null;
     if (bareFramedHeader && isValidScriptRef(bareFramedHeader[1])) {
       flushPendingRule();
       currentHeaderNumber = normalizeScriptRef(bareFramedHeader[1]);
@@ -3732,6 +3736,10 @@ export function parseScriptTextBundle(
 
     // If delimiter line or explicit new Prio/StepName/SourceNumber -> start new rule
     flushPendingRule();
+
+    if (/^[=\-*#]{2,}\s*.*?\s*[=\-*#]{2,}$/.test(line) && !/(?:->|=>|→|\||;)/.test(line)) {
+      continue;
+    }
 
     const bareTargetToken =
       !parsedLine.targetNumber &&
@@ -3892,14 +3900,27 @@ export function parseCallflowTextWithFallback(
     .map((l) => l.trim())
     .filter((l) => {
       if (!l) return false;
-      const lineKey = canonicalScriptMatchKey(l);
-      if (lineKey === defaultKey || /^main$/i.test(l) || /^master(?:script)?$/i.test(l)) {
+      const isPureFramedBanner =
+        /^[=\-*#]{2,}\s*.*?\s*[=\-*#]{2,}$/.test(l) &&
+        !/(?:->|=>|→|\||;)/.test(l);
+      if (isPureFramedBanner) return false;
+      const bareInner = l.replace(/^[=\-*#]{2,}\s*|\s*[=\-*#]{2,}$/g, '').trim();
+      const lineKey = canonicalScriptMatchKey(bareInner);
+      if (
+        !lineKey ||
+        lineKey === defaultKey ||
+        lineKey === rawCandidateKey ||
+        /^main$/i.test(bareInner) ||
+        /^master(?:script)?$/i.test(bareInner)
+      ) {
         return false;
       }
       return true;
     });
 
-  if (cleanedLines.length === 0) return [];
+  if (cleanedLines.length === 0) {
+    return structured.length > 0 ? structured : [];
+  }
 
   const outMap = new Map<string, string>();
   const rules: ScriptRule[] = cleanedLines.map((line, idx) => {
@@ -5654,13 +5675,43 @@ export function buildSafeFallbackMasterMermaid(
  */
 export function rehydrateAndUpgradeWorkspace(rawWorkspace: ScriptWorkspace): ScriptWorkspace {
   const upgradedModules: ScriptModule[] = [];
+  const isFramedHeaderJunkRule = (rule: ScriptRule): boolean => {
+    const hasRoutingData = Boolean(
+      rule.targetNumber ||
+        rule.choices.length > 0 ||
+        rule.queueTarget ||
+        rule.announcement ||
+        rule.treatmentInfo ||
+        rule.hdxAction ||
+        rule.condition ||
+        rule.schedule ||
+        rule.holiday ||
+        rule.isDisconnect ||
+        rule.loopSectionTarget ||
+        rule.waitSeconds !== undefined ||
+        (rule.valueNumbers && rule.valueNumbers.length > 0)
+    );
+    if (hasRoutingData) return false;
+    const stepTrim = (rule.stepName || '').trim();
+    const rawTrim = (rule.rawLine || '').trim();
+    return (
+      (/^[=\-*#]{2,}\s*.*?\s*[=\-*#]{2,}$/.test(stepTrim) && !/(?:->|=>|→|\||;)/.test(stepTrim)) ||
+      (/^[=\-*#]{2,}\s*.*?\s*[=\-*#]{2,}$/.test(rawTrim) && !/(?:->|=>|→|\||;)/.test(rawTrim))
+    );
+  };
+
   for (const mod of rawWorkspace.modules || []) {
+    const strippedLegacyRules = (mod.rules || []).filter((r) => !isFramedHeaderJunkRule(r));
     if (mod.origin === 'visio-new' || !mod.rawText || !mod.rawText.trim()) {
-      const cleaned =
-        canonicalScriptMatchKey(mod.scriptNumber) === 'main' ||
-        mod.scriptName === 'Main (Masterscript)'
-          ? { ...mod, scriptNumber: 'Main', scriptName: 'Main', isMaster: true }
+      const cleanedBase =
+        strippedLegacyRules.length !== (mod.rules || []).length
+          ? { ...mod, rules: strippedLegacyRules }
           : mod;
+      const cleaned =
+        canonicalScriptMatchKey(cleanedBase.scriptNumber) === 'main' ||
+        cleanedBase.scriptName === 'Main (Masterscript)'
+          ? { ...cleanedBase, scriptNumber: 'Main', scriptName: 'Main', isMaster: true }
+          : cleanedBase;
       upgradedModules.push(cleaned);
       continue;
     }
@@ -5677,8 +5728,10 @@ export function rehydrateAndUpgradeWorkspace(rawWorkspace: ScriptWorkspace): Scr
     });
     if (reparsed.length > 0) {
       for (const rm of reparsed) {
+        const cleanRules = (rm.rules || []).filter((r) => !isFramedHeaderJunkRule(r));
         upgradedModules.push({
           ...rm,
+          rules: cleanRules,
           cdnAlias: rm.cdnAlias || (reparsed.length === 1 ? mod.cdnAlias : undefined),
           entryOrganizationName:
             rm.entryOrganizationName ||
@@ -5686,7 +5739,11 @@ export function rehydrateAndUpgradeWorkspace(rawWorkspace: ScriptWorkspace): Scr
         });
       }
     } else {
-      upgradedModules.push(mod);
+      upgradedModules.push(
+        strippedLegacyRules.length !== (mod.rules || []).length
+          ? { ...mod, rules: strippedLegacyRules }
+          : mod
+      );
     }
   }
 
@@ -6089,6 +6146,14 @@ export function buildScriptDetailMermaid(
       );
     });
 
+  if (sortedRules.length === 0 && queueNodes.size === 0) {
+    const emptyBodyNodeId = `BODY_INFO_${modSuffix}`;
+    lines.push(
+      `        ${emptyBodyNodeId}(["✓ ${mod.isAnnouncementEndpoint ? 'Endpunkt / Ansage' : 'Hilfs-/Prüfskript (keine Sub-Regeln)'}"])`
+    );
+    lines.push(`        ${entryId} --> ${emptyBodyNodeId}`);
+  }
+
   if (queueNodes.size > 0) {
     for (const q of queueNodes.values()) {
       lines.push(`        ${q.id}[("${q.label}")]`);
@@ -6140,10 +6205,20 @@ export function analyzeWorkspaceLogicHealth(
   const aliasToPrimaryKey = new Map<string, string>();
   const registerModuleAlias = (alias: string | undefined, primaryKey: string) => {
     if (!alias) return;
-    const key = canonicalScriptMatchKey(alias);
-    if (key && !aliasToPrimaryKey.has(key)) {
-      aliasToPrimaryKey.set(key, primaryKey);
-    }
+    const trimmed = alias.trim();
+    if (!trimmed) return;
+    const candidates = [
+      trimmed,
+      trimmed.replace(/\.s$/i, ''),
+      trimmed.replace(/\s+/g, '_'),
+      trimmed.replace(/_/g, ' '),
+    ];
+    candidates.forEach((cand) => {
+      const key = canonicalScriptMatchKey(cand);
+      if (key && !aliasToPrimaryKey.has(key)) {
+        aliasToPrimaryKey.set(key, primaryKey);
+      }
+    });
   };
 
   modules.forEach((m) => {
@@ -6151,12 +6226,12 @@ export function analyzeWorkspaceLogicHealth(
     if (!primaryKey) return;
     moduleByKey.set(primaryKey, m);
     aliasToPrimaryKey.set(primaryKey, primaryKey);
+    registerModuleAlias(m.scriptNumber, primaryKey);
     registerModuleAlias(toMermaidNodeSuffix(m.scriptNumber), primaryKey);
     registerModuleAlias(m.cdnAlias, primaryKey);
     const trimmedName = (m.scriptName || '').trim();
     if (trimmedName.length >= 3 && !/^(?:main|start)$/i.test(trimmedName)) {
       registerModuleAlias(trimmedName, primaryKey);
-      registerModuleAlias(trimmedName.replace(/\s+/g, '_'), primaryKey);
     }
     if (m.visioPageName && m.visioPageName.trim().length >= 3) {
       registerModuleAlias(m.visioPageName, primaryKey);
@@ -6178,6 +6253,7 @@ export function analyzeWorkspaceLogicHealth(
   // Build adjacency map (including rule targets, choices, manual links, masterChecklist & resolvedIssues)
   const adjacency = new Map<string, Set<string>>();
   const callersByTarget = new Map<string, Set<string>>();
+  const checklistConnectedKeys = new Set<string>();
   const recordEdge = (fromRef: string | undefined, toRef: string | undefined) => {
     const fromKey = resolveModuleKey(fromRef);
     const toKey = resolveModuleKey(toRef);
@@ -6211,6 +6287,10 @@ export function analyzeWorkspaceLogicHealth(
     const targetRef = item.matchedModuleNumber || item.refKey;
     if (callerRef && targetRef) {
       recordEdge(callerRef, targetRef);
+    }
+    if (item.status === 'present' && targetRef) {
+      const targetKey = resolveModuleKey(targetRef);
+      if (targetKey) checklistConnectedKeys.add(targetKey);
     }
   });
 
@@ -6434,6 +6514,18 @@ export function analyzeWorkspaceLogicHealth(
       (modHasAttachedScriptModule && stepTrim.length > 0);
 
     const isCommentOnlyRawLine = /^\s*(?:\/\*|\/\/|--|#|rem\b)/i.test(rule.rawLine || '');
+    const isFramedBannerRule =
+      (/^[=\-*#]{2,}\s*.*?\s*[=\-*#]{2,}$/.test(stepTrim) && !/(?:->|=>|→|\||;)/.test(stepTrim)) ||
+      (/^[=\-*#]{2,}\s*.*?\s*[=\-*#]{2,}$/.test((rule.rawLine || '').trim()) &&
+        !/(?:->|=>|→|\||;)/.test(rule.rawLine || ''));
+    const strippedBannerKey = canonicalScriptMatchKey(
+      stepTrim.replace(/^[=\-*#\s]+|[=\-*#\s]+$/g, '')
+    );
+    const isSelfHeaderRule =
+      Boolean(strippedBannerKey) &&
+      (strippedBannerKey === modKey ||
+        (mod.scriptName ? strippedBannerKey === canonicalScriptMatchKey(mod.scriptName) : false) ||
+        (mod.cdnAlias ? strippedBannerKey === canonicalScriptMatchKey(mod.cdnAlias) : false));
     const hasArrowOrAssignmentInRaw = /(?:->|=>|→)/.test(rule.rawLine || '');
 
     return (
@@ -6454,6 +6546,8 @@ export function analyzeWorkspaceLogicHealth(
       isDecisionOrFlowRule(rule) ||
       hasConnectedFlowForward ||
       isCommentOnlyRawLine ||
+      isFramedBannerRule ||
+      isSelfHeaderRule ||
       hasArrowOrAssignmentInRaw ||
       Boolean(mod.isAnnouncementEndpoint && stepTrim.length > 0) ||
       /deaktiviert\s*=\s*0|0\s*=\s*aus/i.test(combinedText) ||
@@ -6472,13 +6566,51 @@ export function analyzeWorkspaceLogicHealth(
     );
   };
 
-  // Precompute all known script module tokens to detect direct module references inside rawText
-  const otherModuleTokens = modules.map((m) => ({
-    key: canonicalScriptMatchKey(m.scriptNumber),
-    tokens: [m.scriptNumber, m.cdnAlias, m.scriptName]
-      .filter((t): t is string => Boolean(t && t.trim().length >= 3))
-      .map((t) => t.trim().toLowerCase()),
-  }));
+  // Precompute all known script module tokens to detect direct module references inside rawText & rules
+  const otherModuleTokens = modules.map((m) => {
+    const rawCands = [
+      m.scriptNumber,
+      m.cdnAlias,
+      m.scriptName,
+      m.sourceFilename ? m.sourceFilename.replace(/\.[^.]+$/, '') : undefined,
+      m.visioPageName,
+    ].filter((t): t is string => Boolean(t && t.trim().length >= 3));
+    const expanded = new Set<string>();
+    rawCands.forEach((cand) => {
+      const lower = cand.trim().toLowerCase();
+      if (lower.length >= 3 && lower !== 'main' && lower !== 'start') {
+        expanded.add(lower);
+        expanded.add(lower.replace(/\.s$/i, ''));
+        expanded.add(lower.replace(/\s+/g, '_'));
+        expanded.add(lower.replace(/_/g, ' '));
+      }
+    });
+    return {
+      key: canonicalScriptMatchKey(m.scriptNumber),
+      tokens: Array.from(expanded).filter((t) => t.length >= 3),
+    };
+  });
+
+  const moduleSerializedRuleSearchText = new Map<string, string>();
+  modules.forEach((m) => {
+    const k = canonicalScriptMatchKey(m.scriptNumber);
+    const parts: string[] = [];
+    if (m.rawText) parts.push(m.rawText);
+    m.outgoingNumbers.forEach((o) => parts.push(o));
+    m.rules.forEach((r) => {
+      parts.push(r.stepName);
+      if (r.targetNumber) parts.push(r.targetNumber);
+      if (r.condition) parts.push(r.condition);
+      if (r.hdxAction) parts.push(r.hdxAction);
+      if (r.treatmentInfo) parts.push(r.treatmentInfo);
+      if (r.rawLine) parts.push(r.rawLine);
+      r.choices.forEach((c) => {
+        if (c.targetNumber) parts.push(c.targetNumber);
+        if (c.label) parts.push(c.label);
+      });
+    });
+    moduleSerializedRuleSearchText.set(k, parts.join(' ').toLowerCase());
+  });
 
   for (const mod of modules) {
     const modKey = canonicalScriptMatchKey(mod.scriptNumber);
@@ -6486,7 +6618,7 @@ export function analyzeWorkspaceLogicHealth(
 
     // 2a. Genuine dead-end module check:
     // Any module with an attached incoming/outgoing script module (outgoingNumbers, rule targets/choices,
-    // manualLinks, masterChecklist, resolvedIssues, callersByTarget, or direct rawText script reference),
+    // manualLinks, masterChecklist, resolvedIssues, callersByTarget, or direct rawText/rule script reference),
     // announcement/external endpoint, Avaya directives, or actionable rules is a valid Callflow element.
     const hasRawAvayaDirectives = Boolean(
       mod.rawText &&
@@ -6505,25 +6637,28 @@ export function analyzeWorkspaceLogicHealth(
       sortedRules.some(
         (r) => Boolean(r.targetNumber) || r.choices.some((c) => Boolean(c.targetNumber))
       );
-    const hasIncomingCaller = (callersByTarget.get(modKey)?.size || 0) > 0;
+    const hasIncomingCaller =
+      (callersByTarget.get(modKey)?.size || 0) > 0 ||
+      checklistConnectedKeys.has(modKey);
     const hasResolvedIssue = resolvedIssueKeys.has(modKey);
     const isConfirmedExternal = externalEndpointKeys.has(modKey);
 
-    const lowerRaw = (mod.rawText || '').toLowerCase();
+    const lowerSearchSelf = moduleSerializedRuleSearchText.get(modKey) || '';
     const referencesAnotherLoadedModuleInRaw =
-      lowerRaw.length > 0 &&
+      lowerSearchSelf.length > 0 &&
       otherModuleTokens.some(
         (entry) =>
           entry.key !== modKey &&
-          entry.tokens.some((tok) => lowerRaw.includes(tok))
+          entry.tokens.some((tok) => lowerSearchSelf.includes(tok))
       );
     const ownTokens = otherModuleTokens.find((entry) => entry.key === modKey)?.tokens || [];
     const referencedByAnotherModuleInRaw =
       ownTokens.length > 0 &&
       modules.some((other) => {
-        if (canonicalScriptMatchKey(other.scriptNumber) === modKey) return false;
-        const otherRaw = (other.rawText || '').toLowerCase();
-        return otherRaw.length > 0 && ownTokens.some((tok) => otherRaw.includes(tok));
+        const otherKey = canonicalScriptMatchKey(other.scriptNumber);
+        if (otherKey === modKey) return false;
+        const otherText = moduleSerializedRuleSearchText.get(otherKey) || '';
+        return otherText.length > 0 && ownTokens.some((tok) => otherText.includes(tok));
       });
 
     const hasAttachedScriptModule =

@@ -196,7 +196,7 @@ export default function OnlineProjectLanding() {
           {/* Zone 3: Version & Direct Project Offline Download */}
           <div className="flex items-center gap-3 shrink-0">
             <span className="text-[11px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
-              Version 1.0
+              Version 1.0.1
             </span>
             <button
               type="button"
@@ -222,7 +222,7 @@ export default function OnlineProjectLanding() {
           <div className="lg:col-span-7 space-y-6">
             <div className="space-y-3">
               <p className="text-xs font-mono uppercase tracking-wider text-emerald-400 tabular-nums">
-                Version 1.0 · Offline-First Bereitstellung · Lokale Einzeldatei
+                Version 1.0.1 · Offline-First Bereitstellung · Lokale Einzeldatei
               </p>
               <h1 className="text-3xl sm:text-4xl lg:text-[42px] font-semibold tracking-tight text-slate-50 leading-[1.12]">
                 Projekt offline laden und lokal mit dem Builder starten
