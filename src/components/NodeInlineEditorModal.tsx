@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowDownLeft,
+  ArrowLeft,
   ArrowRight,
   ArrowUpRight,
   BookOpen,
@@ -63,6 +64,10 @@ interface NodeInlineEditorModalProps {
   onJumpToScript?: (scriptNumber: string) => void;
   onSelectGraphNode?: (nodeId: string) => void;
   onOpenOpeningHours?: (initialSearch?: string) => void;
+  canGoBack?: boolean;
+  previousNodeTitle?: string;
+  onGoBack?: () => void;
+  onNavigateNeighborInPopup?: (refOrId: string, label?: string) => boolean;
 }
 
 const BLOCK_TYPE_OPTIONS: Array<{
@@ -123,6 +128,10 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
   onJumpToScript,
   onSelectGraphNode,
   onOpenOpeningHours,
+  canGoBack = false,
+  previousNodeTitle,
+  onGoBack,
+  onNavigateNeighborInPopup,
 }) => {
   const [viewMode, setViewMode] = useState<ModalViewMode>('layperson');
   const [scriptNumber, setScriptNumber] = useState('');
@@ -139,11 +148,27 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
   const [activeSearchMatchIdx, setActiveSearchMatchIdx] = useState(0);
   const highlightLineRef = useRef<HTMLDivElement | null>(null);
   const activeMatchLineRef = useRef<HTMLDivElement | null>(null);
+  const wasOpenRef = useRef<boolean>(false);
+  const bodyScrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (!wasOpenRef.current) {
+      // Fresh open from canvas: always start in Layperson view first
+      setViewMode('layperson');
+      wasOpenRef.current = true;
+    } else {
+      // Switching to a neighbor while popup stays open: preserve Laie / IT-Profi / Original-Skript,
+      // but exit Edit mode so users do not accidentally edit a different node.
+      setViewMode((prev) => (prev === 'edit' ? 'pro' : prev));
+    }
+  }, [isOpen, snapshot?.nodeId]);
 
   useEffect(() => {
     if (!snapshot) return;
-    // Confirmed default: always start in Layperson view on open so non-technical users understand immediately.
-    setViewMode('layperson');
     setScriptNumber(snapshot.scriptNumber);
     setTitle(snapshot.title);
     setBlockType(snapshot.blockType);
@@ -156,6 +181,9 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
     setCopiedFullScript(false);
     setScriptSearchQuery('');
     setActiveSearchMatchIdx(0);
+    if (bodyScrollContainerRef.current) {
+      bodyScrollContainerRef.current.scrollTop = 0;
+    }
   }, [snapshot]);
 
   useEffect(() => {
@@ -313,6 +341,10 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
     const cleanRef = (refOrId || '').trim();
     const cleanLabel = (label || '').trim();
     if (!cleanRef && !cleanLabel) return;
+    if (onNavigateNeighborInPopup) {
+      const handled = onNavigateNeighborInPopup(cleanRef, cleanLabel);
+      if (handled) return;
+    }
     if (graph && onSelectGraphNode) {
       if (cleanRef && graph.nodes.has(cleanRef)) {
         onClose();
@@ -381,45 +413,62 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
       aria-labelledby="node-info-modal-title"
       data-canvas-ui="true"
       onClick={onClose}
-      className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5"
+      className="fixed inset-0 z-50 bg-slate-950/60 lg:bg-slate-950/20 flex items-center justify-center lg:items-stretch lg:justify-end p-3 sm:p-5 lg:p-3.5"
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[88vh]"
+        className="w-full max-w-2xl lg:max-w-[560px] bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[88vh] lg:max-h-none lg:h-full"
       >
-        {/* Header: Title, unboxed metadata trail, and primary script jump */}
-        <div className="px-5 py-4 border-b border-slate-800 bg-slate-950 flex items-start justify-between gap-4 shrink-0">
-          <div className="min-w-0 space-y-1">
-            <h3
-              id="node-info-modal-title"
-              className="text-base font-semibold text-slate-100 truncate"
-            >
-              {snapshot.title || snapshot.scriptNumber}
-            </h3>
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400">
-              <span className="text-slate-200 font-medium">{explanation.archetypeLabel}</span>
-              {snapshot.scriptNumber && !isRawMermaid && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono text-indigo-300 tabular-nums">
-                    Skript [{snapshot.scriptNumber}]
-                  </span>
-                </>
-              )}
-              {isStepMode && snapshot.prio !== undefined && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono tabular-nums">Prio {snapshot.prio}</span>
-                </>
-              )}
-              {rulesPreview.length > 0 && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono tabular-nums">
-                    {rulesPreview.length} {rulesPreview.length === 1 ? 'Regel' : 'Regeln'}
-                  </span>
-                </>
-              )}
+        {/* Header: Optional Back history button, Title, unboxed metadata trail, and primary script jump */}
+        <div className="px-5 py-4 border-b border-slate-800 bg-slate-950 flex items-start justify-between gap-3 shrink-0">
+          <div className="flex items-start gap-2.5 min-w-0 flex-1">
+            {canGoBack && onGoBack && (
+              <button
+                type="button"
+                onClick={onGoBack}
+                title={
+                  previousNodeTitle
+                    ? `Zurück zu: ${previousNodeTitle}`
+                    : 'Zum vorherigen Knoten'
+                }
+                className="mt-0.5 px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 hover:border-slate-600 text-slate-200 text-xs font-semibold flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Zurück</span>
+              </button>
+            )}
+            <div className="min-w-0 space-y-1 flex-1">
+              <h3
+                id="node-info-modal-title"
+                className="text-base font-semibold text-slate-100 truncate"
+              >
+                {snapshot.title || snapshot.scriptNumber}
+              </h3>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400">
+                <span className="text-slate-200 font-medium">{explanation.archetypeLabel}</span>
+                {snapshot.scriptNumber && !isRawMermaid && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono text-indigo-300 tabular-nums">
+                      Skript [{snapshot.scriptNumber}]
+                    </span>
+                  </>
+                )}
+                {isStepMode && snapshot.prio !== undefined && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">Prio {snapshot.prio}</span>
+                  </>
+                )}
+                {rulesPreview.length > 0 && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span className="font-mono tabular-nums">
+                      {rulesPreview.length} {rulesPreview.length === 1 ? 'Regel' : 'Regeln'}
+                    </span>
+                  </>
+                )}
+              </div>
             </div>
           </div>
 
@@ -530,7 +579,7 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
 
         {/* VIEW 1: LAIE (DEFAULT — EASY TO UNDERSTAND FOR EVERYONE) */}
         {viewMode === 'layperson' && (
-          <div className="p-5 space-y-5 overflow-y-auto flex-1">
+          <div ref={bodyScrollContainerRef} className="p-5 space-y-5 overflow-y-auto flex-1">
             {/* Block 1: What is this building block? */}
             <section className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-2">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -705,7 +754,7 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
 
         {/* VIEW 2: IT-PROFI (TECHNICAL SPECS, PARAMETERS, RULES, FINDINGS, RAW CODE) */}
         {viewMode === 'pro' && (
-          <div className="p-5 space-y-5 overflow-y-auto flex-1">
+          <div ref={bodyScrollContainerRef} className="p-5 space-y-5 overflow-y-auto flex-1">
             {/* Technical Summary Line */}
             <div className="rounded-lg border border-slate-800 bg-slate-950 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
               <div className="font-mono text-slate-300 tabular-nums break-all">

@@ -564,6 +564,14 @@ function OfflineStudioApp() {
   >({});
   const [editingNodeSnapshot, setEditingNodeSnapshot] =
     useState<EditableCallflowNodeSnapshot | null>(null);
+  const [nodeInfoHistory, setNodeInfoHistory] = useState<
+    Array<{ viewLevel: CallflowViewLevel; nodeId: string; title: string }>
+  >([]);
+  const pendingPopupTargetRef = useRef<{
+    preferredNodeId?: string;
+    preferredLabel?: string;
+    scriptNumber?: string;
+  } | null>(null);
   const [activeWirePreview, setActiveWirePreview] = useState<{
     fromNodeId: string;
     fromLabel: string;
@@ -1709,9 +1717,20 @@ function OfflineStudioApp() {
     return () => cancelAnimationFrame(frameId);
   }, [coloredSvg, preloadProgress?.active, handleFitToViewport]);
 
+  // Compute horizontal overlap caused by the right-docked Node Info Panel on desktop
+  const getRightInfoPanelOcclusionPx = useCallback((): number => {
+    if (typeof window === 'undefined' || window.innerWidth < 1024) return 0;
+    const vpEl = canvasViewportRef.current;
+    if (!vpEl) return 0;
+    const vpRect = vpEl.getBoundingClientRect();
+    const panelLeft = window.innerWidth - 574; // 560px panel + 14px margin
+    const overlap = Math.max(0, vpRect.right - panelLeft + 12);
+    return Math.min(vpRect.width * 0.65, overlap);
+  }, []);
+
   // Center and zoom camera directly onto a specific Callflow node in readable 1:1+ scale
   const handleFocusNodeOnCanvas = useCallback(
-    (nodeId: string, desiredMinZoom = 1.2) => {
+    (nodeId: string, desiredMinZoom = 1.2, rightOcclusionPx = 0) => {
       if (!canvasViewportRef.current) return;
       requestAnimationFrame(() => {
         if (!canvasViewportRef.current) return;
@@ -1751,7 +1770,9 @@ function OfflineStudioApp() {
         const nextZoom = Number(
           Math.min(20.0, Math.max(desiredMinZoom, curCam.zoom < 0.95 ? 1.25 : curCam.zoom)).toFixed(2)
         );
-        const nextPanX = Math.round(-unscaledOffsetX * nextZoom);
+        const effectiveRightOcclusion =
+          rightOcclusionPx > 0 ? Math.min(vpRect.width * 0.65, rightOcclusionPx) : 0;
+        const nextPanX = Math.round(-unscaledOffsetX * nextZoom - effectiveRightOcclusion / 2);
         const nextPanY = Math.round(-unscaledOffsetY * nextZoom);
         applyCameraToDom(nextPanX, nextPanY, nextZoom, false);
         setZoom(nextZoom);
@@ -2150,9 +2171,19 @@ function OfflineStudioApp() {
         nodeId,
         callflowGraph
       );
+      setNodeInfoHistory([]);
+      setSelectedCallflowEdge(null);
+      setSelectedCallflowNodeId(nodeId);
       setEditingNodeSnapshot(snap);
+      handleFocusNodeOnCanvas(nodeId, 1.2, getRightInfoPanelOcclusionPx());
     },
-    [scriptWorkspace, callflowViewLevel, callflowGraph]
+    [
+      scriptWorkspace,
+      callflowViewLevel,
+      callflowGraph,
+      handleFocusNodeOnCanvas,
+      getRightInfoPanelOcclusionPx,
+    ]
   );
 
   const toggleNodeSelectionClean = useCallback(
@@ -2862,6 +2893,174 @@ function OfflineStudioApp() {
     },
     [scriptWorkspace, currentDirection, masterDensityMode, handleReturnToWelcomeScreen]
   );
+
+  // In-popup Woher / Wohin navigation: keep popup open, record history, jump canvas & highlight target
+  const handleNavigateNeighborInPopup = useCallback(
+    (refOrId: string, label?: string): boolean => {
+      const cleanRef = (refOrId || '').trim();
+      const cleanLabel = (label || '').trim();
+      if (!cleanRef && !cleanLabel) return false;
+
+      let targetNodeId = '';
+      if (cleanRef && callflowGraph.nodes.has(cleanRef)) {
+        targetNodeId = cleanRef;
+      } else {
+        const refLower = cleanRef.toLowerCase();
+        const lblLower = cleanLabel.toLowerCase();
+        const match = Array.from(callflowGraph.nodes.values()).find(
+          (n) =>
+            (refLower && n.id.toLowerCase() === refLower) ||
+            (refLower && n.label.toLowerCase().includes(refLower)) ||
+            (lblLower && n.label.toLowerCase() === lblLower)
+        );
+        if (match) targetNodeId = match.id;
+      }
+
+      const pushCurrentToHistory = () => {
+        if (!editingNodeSnapshot) return;
+        setNodeInfoHistory((prev) => [
+          ...prev,
+          {
+            viewLevel: callflowViewLevel,
+            nodeId: editingNodeSnapshot.nodeId,
+            title: editingNodeSnapshot.title || editingNodeSnapshot.scriptNumber,
+          },
+        ]);
+      };
+
+      if (targetNodeId) {
+        if (editingNodeSnapshot && editingNodeSnapshot.nodeId !== targetNodeId) {
+          pushCurrentToHistory();
+        }
+        const nextSnap = inspectWorkspaceNodeForEdit(
+          scriptWorkspace,
+          callflowViewLevel,
+          targetNodeId,
+          callflowGraph
+        );
+        setSelectedCallflowEdge(null);
+        setSelectedCallflowNodeId(targetNodeId);
+        setEditingNodeSnapshot(nextSnap);
+        handleFocusNodeOnCanvas(targetNodeId, 1.25, getRightInfoPanelOcclusionPx());
+        return true;
+      }
+
+      if (cleanRef) {
+        const refKey = canonicalScriptMatchKey(cleanRef);
+        const targetMod = scriptWorkspace.modules.find(
+          (m) => canonicalScriptMatchKey(m.scriptNumber) === refKey
+        );
+        if (targetMod) {
+          pushCurrentToHistory();
+          pendingPopupTargetRef.current = {
+            scriptNumber: targetMod.scriptNumber,
+            preferredLabel: cleanLabel || cleanRef,
+          };
+          handleSwitchCallflowViewLevel({
+            level: 'detail',
+            scriptNumber: targetMod.scriptNumber,
+          });
+          return true;
+        }
+      }
+
+      return false;
+    },
+    [
+      callflowGraph,
+      editingNodeSnapshot,
+      callflowViewLevel,
+      scriptWorkspace,
+      handleFocusNodeOnCanvas,
+      getRightInfoPanelOcclusionPx,
+      handleSwitchCallflowViewLevel,
+    ]
+  );
+
+  const handleGoBackNodeInfoHistory = useCallback(() => {
+    if (nodeInfoHistory.length === 0) return;
+    const prevEntry = nodeInfoHistory[nodeInfoHistory.length - 1];
+    setNodeInfoHistory((prev) => prev.slice(0, -1));
+
+    const sameView =
+      prevEntry.viewLevel.level === callflowViewLevel.level &&
+      (prevEntry.viewLevel.level !== 'detail' ||
+        (callflowViewLevel.level === 'detail' &&
+          canonicalScriptMatchKey(prevEntry.viewLevel.scriptNumber) ===
+            canonicalScriptMatchKey(callflowViewLevel.scriptNumber)));
+
+    if (sameView && callflowGraph.nodes.has(prevEntry.nodeId)) {
+      const nextSnap = inspectWorkspaceNodeForEdit(
+        scriptWorkspace,
+        callflowViewLevel,
+        prevEntry.nodeId,
+        callflowGraph
+      );
+      setSelectedCallflowEdge(null);
+      setSelectedCallflowNodeId(prevEntry.nodeId);
+      setEditingNodeSnapshot(nextSnap);
+      handleFocusNodeOnCanvas(prevEntry.nodeId, 1.25, getRightInfoPanelOcclusionPx());
+      return;
+    }
+
+    pendingPopupTargetRef.current = { preferredNodeId: prevEntry.nodeId };
+    handleSwitchCallflowViewLevel(prevEntry.viewLevel);
+  }, [
+    nodeInfoHistory,
+    callflowViewLevel,
+    callflowGraph,
+    scriptWorkspace,
+    handleFocusNodeOnCanvas,
+    getRightInfoPanelOcclusionPx,
+    handleSwitchCallflowViewLevel,
+  ]);
+
+  // Complete cross-script in-popup navigation once the target view's SVG & graph are rendered
+  useEffect(() => {
+    const pending = pendingPopupTargetRef.current;
+    if (!pending || !coloredSvg || callflowGraph.nodes.size === 0) return;
+
+    let targetNodeId = '';
+    if (pending.preferredNodeId && callflowGraph.nodes.has(pending.preferredNodeId)) {
+      targetNodeId = pending.preferredNodeId;
+    }
+    if (!targetNodeId && pending.preferredLabel) {
+      const q = pending.preferredLabel.toLowerCase();
+      const matched = Array.from(callflowGraph.nodes.values()).find(
+        (n) => n.id.toLowerCase() === q || n.label.toLowerCase().includes(q)
+      );
+      if (matched) targetNodeId = matched.id;
+    }
+    if (!targetNodeId) {
+      const allNodes = Array.from(callflowGraph.nodes.values());
+      const entryNode = allNodes.find((n) => n.inDegree === 0) || allNodes[0];
+      if (entryNode) targetNodeId = entryNode.id;
+    }
+
+    if (!targetNodeId) return;
+    pendingPopupTargetRef.current = null;
+    pendingAutoFitRef.current = false;
+
+    const nextSnap = inspectWorkspaceNodeForEdit(
+      scriptWorkspace,
+      callflowViewLevel,
+      targetNodeId,
+      callflowGraph
+    );
+    setSelectedCallflowEdge(null);
+    setSelectedCallflowNodeId(targetNodeId);
+    setEditingNodeSnapshot(nextSnap);
+    window.requestAnimationFrame(() => {
+      handleFocusNodeOnCanvas(targetNodeId, 1.25, getRightInfoPanelOcclusionPx());
+    });
+  }, [
+    coloredSvg,
+    callflowGraph,
+    callflowViewLevel,
+    scriptWorkspace,
+    handleFocusNodeOnCanvas,
+    getRightInfoPanelOcclusionPx,
+  ]);
 
   const refreshDiagramFromWorkspace = useCallback(
     (nextWs: ScriptWorkspace, levelOverride?: CallflowViewLevel) => {
@@ -7887,24 +8086,39 @@ function OfflineStudioApp() {
             (Math.abs(activeNodeOffsets[editingNodeSnapshot.nodeId].dx) > 0.5 ||
               Math.abs(activeNodeOffsets[editingNodeSnapshot.nodeId].dy) > 0.5)
         )}
-        onClose={() => setEditingNodeSnapshot(null)}
+        onClose={() => {
+          setEditingNodeSnapshot(null);
+          setNodeInfoHistory([]);
+          pendingPopupTargetRef.current = null;
+        }}
         onSave={handleSaveNodeInlineEdits}
         onResetPositionOffset={(nodeId) => commitNodePositionOffset(nodeId, null)}
         onDeleteNode={handleDeleteNodeFromCanvas}
         onJumpToScript={(scriptNumber) => {
           setEditingNodeSnapshot(null);
+          setNodeInfoHistory([]);
           handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber });
         }}
         onSelectGraphNode={(nodeId) => {
           setEditingNodeSnapshot(null);
+          setNodeInfoHistory([]);
           setSelectedCallflowNodeId(nodeId);
           handleFocusNodeOnCanvas(nodeId, 1.25);
         }}
         onOpenOpeningHours={(initialSearch) => {
           setEditingNodeSnapshot(null);
+          setNodeInfoHistory([]);
           setOpeningHoursInitialSearch(initialSearch || '');
           setIsOpeningHoursModalOpen(true);
         }}
+        canGoBack={nodeInfoHistory.length > 0}
+        previousNodeTitle={
+          nodeInfoHistory.length > 0
+            ? nodeInfoHistory[nodeInfoHistory.length - 1].title
+            : undefined
+        }
+        onGoBack={handleGoBackNodeInfoHistory}
+        onNavigateNeighborInPopup={handleNavigateNeighborInPopup}
       />
     </div>
   );

@@ -2913,6 +2913,14 @@ export function applyLiveSpotlightToDom(
 ): void {
   const isDark = canvasSurface === 'dark';
 
+  // Always clear previous selected-node element highlighters cleanly
+  index.svgEl
+    .querySelectorAll('.cf-selected-highlighter-layer')
+    .forEach((el) => el.remove());
+  index.nodes.forEach((node) => {
+    node.groupEl.removeAttribute('data-selected-node');
+  });
+
   if (!trace) {
     if (selectedEdge) {
       // Highlight the clicked edge and its two connected endpoint nodes cleanly
@@ -2992,8 +3000,9 @@ export function applyLiveSpotlightToDom(
     let border = isDark ? '#818cf8' : '#4f46e5';
     let text = isDark ? '#ffffff' : '#0f172a';
     let strokeWidth = '2.5px';
+    const isSelectedNode = matchedId === trace.selectedNode.id;
 
-    if (matchedId === trace.selectedNode.id) {
+    if (isSelectedNode) {
       fill = isDark ? '#78350f' : '#fef3c7';
       border = isDark ? '#fbbf24' : '#d97706';
       text = isDark ? '#fffbeb' : '#78350f';
@@ -3023,6 +3032,50 @@ export function applyLiveSpotlightToDom(
       el.style.fill = text;
       el.setAttribute('fill', text);
     });
+
+    if (isSelectedNode) {
+      node.groupEl.setAttribute('data-selected-node', 'true');
+      try {
+        const bbox = node.groupEl.getBBox();
+        if (bbox && bbox.width > 0 && bbox.height > 0) {
+          const svgNs = 'http://www.w3.org/2000/svg';
+          const pad = 7;
+          const layer = document.createElementNS(svgNs, 'g');
+          layer.setAttribute('class', 'cf-selected-highlighter-layer');
+          layer.setAttribute('pointer-events', 'none');
+
+          const outerRect = document.createElementNS(svgNs, 'rect');
+          outerRect.setAttribute('class', 'cf-selected-highlighter-outer');
+          outerRect.setAttribute('x', String(bbox.x - pad - 2));
+          outerRect.setAttribute('y', String(bbox.y - pad - 2));
+          outerRect.setAttribute('width', String(bbox.width + (pad + 2) * 2));
+          outerRect.setAttribute('height', String(bbox.height + (pad + 2) * 2));
+          outerRect.setAttribute('rx', '12');
+          outerRect.setAttribute('ry', '12');
+          outerRect.setAttribute('fill', 'none');
+          outerRect.setAttribute('stroke', isDark ? 'rgba(251, 191, 36, 0.38)' : 'rgba(217, 119, 6, 0.34)');
+          outerRect.setAttribute('stroke-width', '7');
+
+          const innerRect = document.createElementNS(svgNs, 'rect');
+          innerRect.setAttribute('class', 'cf-selected-highlighter-rect');
+          innerRect.setAttribute('x', String(bbox.x - pad));
+          innerRect.setAttribute('y', String(bbox.y - pad));
+          innerRect.setAttribute('width', String(bbox.width + pad * 2));
+          innerRect.setAttribute('height', String(bbox.height + pad * 2));
+          innerRect.setAttribute('rx', '10');
+          innerRect.setAttribute('ry', '10');
+          innerRect.setAttribute('fill', isDark ? 'rgba(251, 191, 36, 0.12)' : 'rgba(245, 158, 11, 0.14)');
+          innerRect.setAttribute('stroke', isDark ? '#fbbf24' : '#d97706');
+          innerRect.setAttribute('stroke-width', '3');
+
+          layer.appendChild(outerRect);
+          layer.appendChild(innerRect);
+          node.groupEl.insertBefore(layer, node.groupEl.firstChild);
+        }
+      } catch {
+        // Fallback: CSS drop-shadow on [data-selected-node="true"] still highlights the node cleanly
+      }
+    }
     node.htmlEls.forEach((el) => {
       el.style.color = text;
       el.style.fontWeight = '700';
@@ -4196,6 +4249,49 @@ export function generateInteractiveCallflowHtml(
       flex-direction: column;
       box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
       overflow: hidden;
+    }
+    /* Right-docked non-obscuring Node Info Panel on desktop so background jump & highlighter stay visible */
+    #node-info-modal-overlay {
+      background: rgba(2, 6, 23, 0.56);
+      backdrop-filter: none;
+    }
+    @media (min-width: 1024px) {
+      #node-info-modal-overlay {
+        justify-content: flex-end;
+        align-items: stretch;
+        padding: 14px;
+        background: rgba(2, 6, 23, 0.16);
+        backdrop-filter: none;
+      }
+      #node-info-modal-overlay .modal-shell {
+        max-width: 560px !important;
+        width: min(560px, 44vw);
+        height: calc(100vh - 28px);
+        max-height: calc(100vh - 28px);
+        box-shadow: -12px 0 42px rgba(0, 0, 0, 0.42);
+      }
+    }
+    /* Unmistakable Element Highlighter around selected SVG node */
+    @keyframes cfExportHighlighterPulse {
+      0%, 100% { stroke-opacity: 0.96; }
+      50% { stroke-opacity: 0.56; }
+    }
+    svg g.node[data-selected-node="true"],
+    svg g.actor[data-selected-node="true"],
+    svg g.statediagram-state[data-selected-node="true"] {
+      filter: drop-shadow(0 0 10px rgba(251, 191, 36, 0.78)) drop-shadow(0 0 22px rgba(245, 158, 11, 0.36));
+    }
+    html.light svg g.node[data-selected-node="true"],
+    html.light svg g.actor[data-selected-node="true"],
+    html.light svg g.statediagram-state[data-selected-node="true"] {
+      filter: drop-shadow(0 0 8px rgba(217, 119, 6, 0.66)) drop-shadow(0 0 18px rgba(245, 158, 11, 0.32));
+    }
+    svg .cf-selected-highlighter-rect {
+      pointer-events: none;
+      animation: cfExportHighlighterPulse 2s ease-in-out infinite;
+    }
+    svg .cf-selected-highlighter-outer {
+      pointer-events: none;
     }
     .modal-header {
       padding: 14px 18px;
@@ -5395,11 +5491,14 @@ export function generateInteractiveCallflowHtml(
   <div id="node-info-modal-overlay" class="modal-backdrop">
     <div class="modal-shell" style="max-width:780px;">
       <div class="modal-header">
-        <div style="min-width:0;">
-          <h2 id="node-info-title" style="margin:0;font-size:15px;color:var(--text-main);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Element-Details</h2>
-          <div id="node-info-subtitle" style="font-size:11.5px;color:var(--text-muted);margin-top:2px;"></div>
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;flex:1;">
+          <button type="button" id="btn-node-info-back" style="display:none;flex-shrink:0;padding:5px 9px;border-radius:6px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text-main);font-size:11.5px;font-weight:600;cursor:pointer;white-space:nowrap;" title="Zum vorherigen Knoten im Info-Fenster">← Zurück</button>
+          <div style="min-width:0;flex:1;">
+            <h2 id="node-info-title" style="margin:0;font-size:15px;color:var(--text-main);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Element-Details</h2>
+            <div id="node-info-subtitle" style="font-size:11.5px;color:var(--text-muted);margin-top:2px;"></div>
+          </div>
         </div>
-        <button type="button" id="btn-close-node-info" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:4px 8px;" title="Schließen (Esc)">✕</button>
+        <button type="button" id="btn-close-node-info" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:4px 8px;flex-shrink:0;" title="Schließen (Esc)">✕</button>
       </div>
       <div class="audience-bar">
         <div class="audience-switch" id="node-info-tabs" role="tablist" aria-label="Ansichtsmodus">
@@ -6763,8 +6862,19 @@ export function generateInteractiveCallflowHtml(
       const unscaledX = (nodeCenterX - (vpCenterX + panX)) / Math.max(0.05, zoom);
       const unscaledY = (nodeCenterY - (vpCenterY + panY)) / Math.max(0.05, zoom);
       const nextZoom = Math.min(20, Math.max(1.15, zoom < 0.9 ? 1.2 : zoom));
+      let rightOcclusion = 0;
+      const infoOverlay = document.getElementById('node-info-modal-overlay');
+      if (infoOverlay && infoOverlay.style.display === 'flex' && window.innerWidth >= 1024) {
+        const panelShell = infoOverlay.querySelector('.modal-shell');
+        if (panelShell) {
+          const panelRect = panelShell.getBoundingClientRect();
+          if (panelRect.width > 0 && vpRect.right > panelRect.left) {
+            rightOcclusion = Math.min(vpRect.width * 0.65, Math.max(0, vpRect.right - panelRect.left + 12));
+          }
+        }
+      }
       zoom = nextZoom;
-      panX = Math.round(-unscaledX * nextZoom);
+      panX = Math.round(-unscaledX * nextZoom - rightOcclusion / 2);
       panY = Math.round(-unscaledY * nextZoom);
       updateTransform(false);
     }
@@ -7089,6 +7199,54 @@ export function generateInteractiveCallflowHtml(
       syncGpuProxyState(false);
     }
 
+    function applyExportSelectedNodeHighlighter(svgEl, activeGroupEl) {
+      if (!svgEl) return;
+      svgEl.querySelectorAll('.cf-selected-highlighter-layer').forEach(el => el.remove());
+      svgEl.querySelectorAll('[data-selected-node="true"]').forEach(el => el.removeAttribute('data-selected-node'));
+      if (!activeGroupEl) return;
+      activeGroupEl.setAttribute('data-selected-node', 'true');
+      try {
+        const bbox = activeGroupEl.getBBox();
+        if (bbox && bbox.width > 0 && bbox.height > 0) {
+          const svgNs = 'http://www.w3.org/2000/svg';
+          const pad = 7;
+          const layer = document.createElementNS(svgNs, 'g');
+          layer.setAttribute('class', 'cf-selected-highlighter-layer');
+          layer.setAttribute('pointer-events', 'none');
+
+          const outerRect = document.createElementNS(svgNs, 'rect');
+          outerRect.setAttribute('class', 'cf-selected-highlighter-outer');
+          outerRect.setAttribute('x', String(bbox.x - pad - 2));
+          outerRect.setAttribute('y', String(bbox.y - pad - 2));
+          outerRect.setAttribute('width', String(bbox.width + (pad + 2) * 2));
+          outerRect.setAttribute('height', String(bbox.height + (pad + 2) * 2));
+          outerRect.setAttribute('rx', '12');
+          outerRect.setAttribute('ry', '12');
+          outerRect.setAttribute('fill', 'none');
+          outerRect.setAttribute('stroke', isDarkSurface ? 'rgba(251, 191, 36, 0.38)' : 'rgba(217, 119, 6, 0.34)');
+          outerRect.setAttribute('stroke-width', '7');
+
+          const innerRect = document.createElementNS(svgNs, 'rect');
+          innerRect.setAttribute('class', 'cf-selected-highlighter-rect');
+          innerRect.setAttribute('x', String(bbox.x - pad));
+          innerRect.setAttribute('y', String(bbox.y - pad));
+          innerRect.setAttribute('width', String(bbox.width + pad * 2));
+          innerRect.setAttribute('height', String(bbox.height + pad * 2));
+          innerRect.setAttribute('rx', '10');
+          innerRect.setAttribute('ry', '10');
+          innerRect.setAttribute('fill', isDarkSurface ? 'rgba(251, 191, 36, 0.12)' : 'rgba(245, 158, 11, 0.14)');
+          innerRect.setAttribute('stroke', isDarkSurface ? '#fbbf24' : '#d97706');
+          innerRect.setAttribute('stroke-width', '3');
+
+          layer.appendChild(outerRect);
+          layer.appendChild(innerRect);
+          activeGroupEl.insertBefore(layer, activeGroupEl.firstChild);
+        }
+      } catch {
+        // CSS drop-shadow fallback remains active via data-selected-node
+      }
+    }
+
     function applyCombinedCanvasStateInner(shouldFocusCamera = false) {
       const allSvgNodes = Array.from(stage.querySelectorAll('g.node, g.actor, g.statediagram-state'));
       const allSvgEdges = Array.from(stage.querySelectorAll('g.edgePaths > *, g.edgePath, path.flowchart-link'));
@@ -7098,6 +7256,7 @@ export function generateInteractiveCallflowHtml(
       const cycleList = document.getElementById('list-cycles');
       const svgElRef = stage.querySelector('svg');
 
+      applyExportSelectedNodeHighlighter(svgElRef, null);
       allSvgEdges.forEach(restoreEdgeDefaults);
       renderEdgeDetailCard();
 
@@ -7336,6 +7495,7 @@ export function generateInteractiveCallflowHtml(
       const downVisibleEdges = visibleEdges.filter(e => !cycleOnlyEdges.some(ce => ce.from === e.from && ce.to === e.to) && downEdgeKeySet.has(e.from + '->' + e.to));
 
       const visibleSvgNodes = [];
+      let activeSvgNodeEl = null;
       allSvgNodes.forEach(g => {
         const nt = g.getAttribute('data-node-type') || 'core-service';
         if (hiddenNodeTypes.has(nt)) {
@@ -7350,8 +7510,12 @@ export function generateInteractiveCallflowHtml(
           g.style.display = '';
           g.style.opacity = inSpot ? '1' : dimOpacity;
           if (inSpot) visibleSvgNodes.push(g);
+          if (nid === activeNodeId) activeSvgNodeEl = g;
         }
       });
+      if (activeSvgNodeEl) {
+        applyExportSelectedNodeHighlighter(svgElRef, activeSvgNodeEl);
+      }
 
       const activeIdx = new Set();
       const hiddenEdgeIdx = new Set();
@@ -7505,7 +7669,7 @@ export function generateInteractiveCallflowHtml(
       }
     }
 
-    function jumpToScriptOrNode(scriptRef, preferredNodeTextOrId) {
+    function jumpToScriptOrNode(scriptRef, preferredNodeTextOrId, forceFocusCamera = false) {
       let targetViewKey = activeViewKey === 'welcome' ? getActiveMasterViewKey() : activeViewKey;
       if (scriptRef && PAYLOAD.viewKeyByScriptNumber) {
         const vk = PAYLOAD.viewKeyByScriptNumber[scriptRef] || PAYLOAD.viewKeyByScriptNumber[String(scriptRef).toLowerCase()];
@@ -7527,6 +7691,9 @@ export function generateInteractiveCallflowHtml(
         const sq = String(scriptRef).toLowerCase();
         hitNode = GRAPH.nodes.find(n => n.id.toLowerCase().includes(sq) || n.label.toLowerCase().includes(sq));
       }
+      if (!hitNode && GRAPH.nodes.length > 0) {
+        hitNode = GRAPH.nodes.find(n => n.inDegree === 0) || GRAPH.nodes[0];
+      }
       switchAsideTab('path');
       if (hitNode) {
         // Ensure node type isn't blocking our jump target
@@ -7539,8 +7706,13 @@ export function generateInteractiveCallflowHtml(
             renderNodeTypeFilters();
           }
         }
-        selectNode(hitNode.id, true);
+        selectNode(hitNode.id, !forceFocusCamera);
+        if (forceFocusCamera) {
+          requestAnimationFrame(() => focusNodeCamera(hitNode.id));
+        }
+        return hitNode.id;
       }
+      return '';
     }
 
     function computeFallbackDiagnostics() {
@@ -8068,7 +8240,8 @@ export function generateInteractiveCallflowHtml(
 
     // === DUAL-AUDIENCE KNOTEN-INFO-BOX (LAIE | IT-PROFI) ===
     let activeInfoModalNodeId = '';
-    let activeInfoModalMode = 'layperson'; // 'layperson' | 'pro'
+    let activeInfoModalMode = 'layperson'; // 'layperson' | 'pro' | 'script'
+    let infoModalHistory = [];
 
     function buildFallbackExplanation(snap) {
       const nObj = nodeMap.get(snap.nodeId);
@@ -8214,21 +8387,106 @@ export function generateInteractiveCallflowHtml(
       };
     }
 
-    function openNodeInfoModal(nodeId) {
+    function openNodeInfoModal(nodeId, preserveHistory = false) {
       if (!nodeId) return;
+      if (!preserveHistory) {
+        infoModalHistory = [];
+        // Confirmed default: Layperson view first on fresh open, IT-Profi / Original-Skript in 1 click
+        activeInfoModalMode = 'layperson';
+      }
       activeInfoModalNodeId = nodeId;
-      // Confirmed default: Layperson view first, IT-Profi in 1 click
-      activeInfoModalMode = 'layperson';
       const overlay = document.getElementById('node-info-modal-overlay');
       if (!overlay) return;
       overlay.style.display = 'flex';
+      // Ensure selected node is highlighted and smoothly centered beside the right-docked panel
+      selectNode(nodeId, false);
       renderNodeInfoModal();
+      requestAnimationFrame(() => focusNodeCamera(nodeId));
     }
 
     function closeNodeInfoModal() {
       const overlay = document.getElementById('node-info-modal-overlay');
       if (overlay) overlay.style.display = 'none';
       activeInfoModalNodeId = '';
+      infoModalHistory = [];
+    }
+
+    function navigateNodeInfoInPlace(ref, lbl) {
+      const cleanRef = (ref || '').trim();
+      const cleanLbl = (lbl || '').trim();
+      if (!cleanRef && !cleanLbl) return;
+
+      const currentSnap = activeInfoModalNodeId ? resolveNodeInfoSnapshot(activeInfoModalNodeId) : null;
+      const pushHistory = () => {
+        if (!activeInfoModalNodeId) return;
+        infoModalHistory.push({
+          viewKey: activeViewKey,
+          nodeId: activeInfoModalNodeId,
+          title: (currentSnap && currentSnap.title) ? currentSnap.title : activeInfoModalNodeId
+        });
+      };
+
+      let targetId = '';
+      if (cleanRef && nodeMap.has(cleanRef)) {
+        targetId = cleanRef;
+      } else {
+        const refLower = cleanRef.toLowerCase();
+        const lblLower = cleanLbl.toLowerCase();
+        const matchByLabel = GRAPH.nodes.find(n =>
+          (refLower && n.id.toLowerCase() === refLower) ||
+          (refLower && n.label.toLowerCase().includes(refLower)) ||
+          (lblLower && n.label.toLowerCase() === lblLower)
+        );
+        if (matchByLabel) targetId = matchByLabel.id;
+      }
+
+      if (targetId) {
+        if (targetId !== activeInfoModalNodeId) {
+          pushHistory();
+        }
+        // Make sure hidden node-type filter does not conceal the target
+        const svgNode = Array.from(stage.querySelectorAll('g.node, g.actor, g.statediagram-state')).find(g => resolveNodeId(g) === targetId);
+        if (svgNode) {
+          const nt = svgNode.getAttribute('data-node-type');
+          if (nt && hiddenNodeTypes.has(nt)) {
+            hiddenNodeTypes.delete(nt);
+            syncFilterBadge();
+            renderNodeTypeFilters();
+          }
+        }
+        activeInfoModalNodeId = targetId;
+        selectNode(targetId, false);
+        renderNodeInfoModal();
+        requestAnimationFrame(() => focusNodeCamera(targetId));
+        return;
+      }
+
+      if (cleanRef) {
+        const vk = PAYLOAD.viewKeyByScriptNumber
+          ? (PAYLOAD.viewKeyByScriptNumber[cleanRef] || PAYLOAD.viewKeyByScriptNumber[cleanRef.toLowerCase()])
+          : '';
+        if (vk && viewsByKey.has(vk)) {
+          pushHistory();
+          const nextNodeId = jumpToScriptOrNode(cleanRef, cleanLbl, true);
+          if (nextNodeId) {
+            activeInfoModalNodeId = nextNodeId;
+            renderNodeInfoModal();
+          }
+        }
+      }
+    }
+
+    function goBackNodeInfoHistory() {
+      if (!infoModalHistory.length) return;
+      const prev = infoModalHistory.pop();
+      if (!prev || !prev.nodeId) return;
+      if (prev.viewKey && prev.viewKey !== activeViewKey && viewsByKey.has(prev.viewKey)) {
+        switchView(prev.viewKey);
+      }
+      activeInfoModalNodeId = prev.nodeId;
+      selectNode(prev.nodeId, false);
+      renderNodeInfoModal();
+      requestAnimationFrame(() => focusNodeCamera(prev.nodeId));
     }
 
     function wireInfoConnectionButtons(container) {
@@ -8237,25 +8495,7 @@ export function generateInteractiveCallflowHtml(
           const ref = (btn.getAttribute('data-ref') || '').trim();
           const lbl = (btn.getAttribute('data-label') || '').trim();
           if (!ref && !lbl) return;
-          closeNodeInfoModal();
-          if (ref && nodeMap.has(ref)) {
-            selectNode(ref, true);
-            return;
-          }
-          const refLower = ref.toLowerCase();
-          const lblLower = lbl.toLowerCase();
-          const matchByLabel = GRAPH.nodes.find(n =>
-            (refLower && n.id.toLowerCase() === refLower) ||
-            (refLower && n.label.toLowerCase().includes(refLower)) ||
-            (lblLower && n.label.toLowerCase() === lblLower)
-          );
-          if (matchByLabel) {
-            selectNode(matchByLabel.id, true);
-            return;
-          }
-          if (ref) {
-            jumpToScriptOrNode(ref, lbl);
-          }
+          navigateNodeInfoInPlace(ref, lbl);
         });
       });
     }
@@ -8269,8 +8509,20 @@ export function generateInteractiveCallflowHtml(
       const subtitleEl = document.getElementById('node-info-subtitle');
       const modeHintEl = document.getElementById('node-info-mode-hint');
       const bodyEl = document.getElementById('node-info-body');
+      const backBtn = document.getElementById('btn-node-info-back');
       const jumpBtn = document.getElementById('btn-node-info-jump');
       const schedBtn = document.getElementById('btn-node-info-schedules');
+
+      if (backBtn) {
+        if (infoModalHistory.length > 0) {
+          const prevEntry = infoModalHistory[infoModalHistory.length - 1];
+          backBtn.style.display = 'inline-flex';
+          backBtn.title = prevEntry && prevEntry.title ? ('Zurück zu: ' + prevEntry.title) : 'Zum vorherigen Knoten';
+        } else {
+          backBtn.style.display = 'none';
+        }
+      }
+      if (bodyEl) bodyEl.scrollTop = 0;
 
       if (titleEl) titleEl.textContent = snap.title || snap.nodeId;
       if (subtitleEl) {
@@ -8832,8 +9084,10 @@ export function generateInteractiveCallflowHtml(
     }
 
     const nodeInfoOverlay = document.getElementById('node-info-modal-overlay');
+    const btnNodeInfoBack = document.getElementById('btn-node-info-back');
     const btnCloseNodeInfo = document.getElementById('btn-close-node-info');
     const btnCloseNodeInfoFooter = document.getElementById('btn-close-node-info-footer');
+    if (btnNodeInfoBack) btnNodeInfoBack.addEventListener('click', goBackNodeInfoHistory);
     if (btnCloseNodeInfo) btnCloseNodeInfo.addEventListener('click', closeNodeInfoModal);
     if (btnCloseNodeInfoFooter) btnCloseNodeInfoFooter.addEventListener('click', closeNodeInfoModal);
     if (nodeInfoOverlay) {

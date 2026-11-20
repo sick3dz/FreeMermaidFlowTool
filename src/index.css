@@ -239,3 +239,35 @@
   stroke: #fecdd3;
 }
 
+/* Crisp Element Highlighter around selected Callflow node (Dark & Light parity) */
+@keyframes cfSelectedHighlighterPulse {
+  0%, 100% {
+    stroke-opacity: 0.95;
+  }
+  50% {
+    stroke-opacity: 0.55;
+  }
+}
+
+.mermaid-canvas-stage svg g.node[data-selected-node="true"],
+.mermaid-canvas-stage svg g.actor[data-selected-node="true"],
+.mermaid-canvas-stage svg g.statediagram-state[data-selected-node="true"],
+.mermaid-canvas-stage svg g.classGroup[data-selected-node="true"] {
+  filter: drop-shadow(0 0 10px rgba(251, 191, 36, 0.78)) drop-shadow(0 0 22px rgba(245, 158, 11, 0.36));
+}
+
+.canvas-grid-light .mermaid-canvas-stage svg g.node[data-selected-node="true"],
+.canvas-grid-light .mermaid-canvas-stage svg g.actor[data-selected-node="true"],
+.canvas-grid-light .mermaid-canvas-stage svg g.statediagram-state[data-selected-node="true"],
+.canvas-grid-light .mermaid-canvas-stage svg g.classGroup[data-selected-node="true"] {
+  filter: drop-shadow(0 0 8px rgba(217, 119, 6, 0.65)) drop-shadow(0 0 18px rgba(245, 158, 11, 0.34));
+}
+
+.mermaid-canvas-stage svg .cf-selected-highlighter-rect {
+  pointer-events: none;
+  animation: cfSelectedHighlighterPulse 2s ease-in-out infinite;
+}
+
+.mermaid-canvas-stage svg .cf-selected-highlighter-outer {
+  pointer-events: none;
+}
