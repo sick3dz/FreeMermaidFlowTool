@@ -35,6 +35,7 @@ import {
   RotateCcw,
   Scan,
   Search,
+  ShieldCheck,
   Sun,
   Trash2,
   Unlink,
@@ -628,6 +629,8 @@ function OfflineStudioApp() {
   >(null);
   const [isDownloadingPng, setIsDownloadingPng] = useState<boolean>(false);
   const [isDownloadingHtml, setIsDownloadingHtml] = useState<boolean>(false);
+  const [isQuickHtmlPromptOpen, setIsQuickHtmlPromptOpen] = useState<boolean>(false);
+  const [lastQuickHtmlIncludeScripts, setLastQuickHtmlIncludeScripts] = useState<boolean>(true);
   const [htmlExportProgress, setHtmlExportProgress] = useState<HtmlExportProgress | null>(null);
   const [htmlExportNotice, setHtmlExportNotice] = useState<string | null>(null);
   const [preloadProgress, setPreloadProgress] = useState<WorkspacePreloadProgress | null>(null);
@@ -1329,6 +1332,10 @@ function OfflineStudioApp() {
           setActiveWirePreview(null);
           return;
         }
+        if (isQuickHtmlPromptOpen) {
+          setIsQuickHtmlPromptOpen(false);
+          return;
+        }
         if (editingNodeSnapshot) {
           setEditingNodeSnapshot(null);
           return;
@@ -1399,6 +1406,7 @@ function OfflineStudioApp() {
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [
+    isQuickHtmlPromptOpen,
     editingNodeSnapshot,
     showDiagramLegend,
     selectedCallflowNodeId,
@@ -4519,58 +4527,84 @@ function OfflineStudioApp() {
     ]
   );
 
-  const handleQuickDownloadInteractiveHtml = useCallback(async () => {
-    if (
-      (scriptWorkspace.modules.length === 0 && !code.trim()) ||
-      isDownloadingHtml ||
-      htmlExportProgress?.active
-    ) {
-      return;
-    }
-    setIsDownloadingHtml(true);
-    try {
-      const { html: htmlContent, aborted, fallbackCount, errorMessage } =
-        await buildInteractiveHtmlForSurface(canvasSurface);
-      if (aborted) return;
-      if (!htmlContent) {
-        if (errorMessage) {
-          setHtmlExportNotice(errorMessage);
-        }
+  const handleQuickDownloadInteractiveHtml = useCallback(
+    async (includeOriginalScriptsChoice?: boolean) => {
+      if (
+        (scriptWorkspace.modules.length === 0 && !code.trim()) ||
+        isDownloadingHtml ||
+        htmlExportProgress?.active
+      ) {
         return;
       }
-      const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
-      triggerLocalDownload(blob, 'Callflow.html');
-      setQuickDownloadFeedback('html');
-      if (fallbackCount && fallbackCount > 0) {
-        setHtmlExportNotice(
-          `Callflow.html gespeichert (${fallbackCount} Ansicht(en) per Zeitlimit-Fallback erstellt).`
-        );
-        window.setTimeout(() => setHtmlExportNotice(null), 4500);
+      const hasRawScriptsInWorkspace = scriptWorkspace.modules.some(
+        (m) => Boolean(m.rawText && m.rawText.trim())
+      );
+      if (includeOriginalScriptsChoice === undefined && hasRawScriptsInWorkspace) {
+        setIsQuickHtmlPromptOpen(true);
+        return;
       }
-      setTimeout(() => setQuickDownloadFeedback(null), 2200);
-    } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Fehler beim Speichern der Callflow.html.';
-      setHtmlExportProgress({
-        active: true,
-        phase: 'error',
-        current: 0,
-        total: Math.max(1, scriptWorkspace.modules.length),
-        currentLabel: 'Download fehlgeschlagen',
-        cacheHits: 0,
-        errorMessage: msg,
-      });
-    } finally {
-      setIsDownloadingHtml(false);
-    }
-  }, [
-    scriptWorkspace.modules.length,
-    code,
-    isDownloadingHtml,
-    htmlExportProgress?.active,
-    buildInteractiveHtmlForSurface,
-    canvasSurface,
-  ]);
+      const effectiveIncludeOriginalScripts = Boolean(
+        includeOriginalScriptsChoice && hasRawScriptsInWorkspace
+      );
+      setIsQuickHtmlPromptOpen(false);
+      setLastQuickHtmlIncludeScripts(effectiveIncludeOriginalScripts);
+      setIsDownloadingHtml(true);
+      try {
+        const { html: htmlContent, aborted, fallbackCount, errorMessage } =
+          await buildInteractiveHtmlForSurface(
+            canvasSurface,
+            undefined,
+            effectiveIncludeOriginalScripts
+          );
+        if (aborted) return;
+        if (!htmlContent) {
+          if (errorMessage) {
+            setHtmlExportNotice(errorMessage);
+          }
+          return;
+        }
+        const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+        triggerLocalDownload(blob, 'Callflow.html');
+        setQuickDownloadFeedback('html');
+        if (fallbackCount && fallbackCount > 0) {
+          setHtmlExportNotice(
+            `Callflow.html gespeichert (${fallbackCount} Ansicht(en) per Zeitlimit-Fallback erstellt).`
+          );
+          window.setTimeout(() => setHtmlExportNotice(null), 4500);
+        } else if (hasRawScriptsInWorkspace) {
+          setHtmlExportNotice(
+            effectiveIncludeOriginalScripts
+              ? 'Callflow.html mit Original-Skripten (3. Reiter aktiv) gespeichert.'
+              : 'Callflow.html ohne Original-Skripte (Datenschutz, 0 Byte Roh-Code) gespeichert.'
+          );
+          window.setTimeout(() => setHtmlExportNotice(null), 4000);
+        }
+        setTimeout(() => setQuickDownloadFeedback(null), 2200);
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : 'Fehler beim Speichern der Callflow.html.';
+        setHtmlExportProgress({
+          active: true,
+          phase: 'error',
+          current: 0,
+          total: Math.max(1, scriptWorkspace.modules.length),
+          currentLabel: 'Download fehlgeschlagen',
+          cacheHits: 0,
+          errorMessage: msg,
+        });
+      } finally {
+        setIsDownloadingHtml(false);
+      }
+    },
+    [
+      scriptWorkspace.modules,
+      code,
+      isDownloadingHtml,
+      htmlExportProgress?.active,
+      buildInteractiveHtmlForSurface,
+      canvasSurface,
+    ]
+  );
 
   const handleClearWorkspace = () => {
     skipAutoConvertRef.current = false;
@@ -7459,6 +7493,92 @@ function OfflineStudioApp() {
         }
       />
 
+      {/* Explicit Original-Skript Inclusion Prompt before Direct Callflow.html Export */}
+      {isQuickHtmlPromptOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="quick-html-prompt-title"
+          onClick={() => setIsQuickHtmlPromptOpen(false)}
+          className="fixed inset-0 z-[105] bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden"
+          >
+            <div className="px-5 py-4 border-b border-slate-800 bg-slate-950 flex items-start justify-between gap-3">
+              <div className="min-w-0 space-y-1">
+                <h3
+                  id="quick-html-prompt-title"
+                  className="text-sm font-semibold text-slate-100 flex items-center gap-2"
+                >
+                  <Globe className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Original-Skripte in Callflow.html einbetten?</span>
+                </h3>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Wählen Sie vor dem Export, ob der vollständige `.s`-Quelltext als 3. Reiter in der Datei enthalten sein soll.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsQuickHtmlPromptOpen(false)}
+                aria-label="Auswahl schließen"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-2.5">
+              <button
+                type="button"
+                onClick={() => void handleQuickDownloadInteractiveHtml(true)}
+                className="w-full p-3.5 rounded-xl bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-indigo-500/60 text-left transition-colors flex items-start gap-3 group cursor-pointer"
+              >
+                <Code2 className="w-4 h-4 text-indigo-400 mt-0.5 shrink-0" />
+                <div className="min-w-0 space-y-0.5">
+                  <div className="text-xs font-semibold text-slate-100 group-hover:text-indigo-200">
+                    Mit Original-Skripten exportieren
+                  </div>
+                  <div className="text-[11px] text-slate-400 leading-relaxed">
+                    Aktiviert den 3. Reiter „Original-Skript“ mit Zeilennummern, markierter Knoten-Stelle, Suche und Kopier-Button (ideal für interne IT &amp; Abnahme).
+                  </div>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => void handleQuickDownloadInteractiveHtml(false)}
+                className="w-full p-3.5 rounded-xl bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-emerald-500/60 text-left transition-colors flex items-start gap-3 group cursor-pointer"
+              >
+                <ShieldCheck className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
+                <div className="min-w-0 space-y-0.5">
+                  <div className="text-xs font-semibold text-slate-100 group-hover:text-emerald-200">
+                    Ohne Original-Skripte exportieren (Datenschutz)
+                  </div>
+                  <div className="text-[11px] text-slate-400 leading-relaxed">
+                    Enthält 0 Bytes Roh-Skripte oder Code-Auszüge — nur „Laie“ &amp; „IT-Profi“ (ideal für Fachbereiche und externe Weitergabe).
+                  </div>
+                </div>
+              </button>
+            </div>
+
+            <div className="px-5 py-3 border-t border-slate-800 bg-slate-950/60 flex items-center justify-between gap-2">
+              <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                {scriptWorkspace.modules.length} Skripte geladen
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsQuickHtmlPromptOpen(false)}
+                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-300 transition-colors cursor-pointer"
+              >
+                Abbrechen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Dedicated Full-Screen Opaque Pre-Render Cover: hides all background UI completely until ready */}
       {preloadProgress?.active && !htmlExportProgress?.active && !isExportModalOpen && (
         <div
@@ -7682,7 +7802,7 @@ function OfflineStudioApp() {
                     onClick={() => {
                       setHtmlExportProgress(null);
                       window.setTimeout(() => {
-                        void handleQuickDownloadInteractiveHtml();
+                        void handleQuickDownloadInteractiveHtml(lastQuickHtmlIncludeScripts);
                       }, 40);
                     }}
                     className="px-3.5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
