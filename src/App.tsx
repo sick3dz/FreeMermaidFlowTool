@@ -4205,7 +4205,7 @@ function OfflineStudioApp() {
       };
 
       const totalEstimatedViews = scriptWorkspace.modules.length + 2;
-      const VIEW_TIMEOUT_MS = 7000;
+      const VIEW_TIMEOUT_MS = 5000;
 
       try {
         // 1. Open Status Popup immediately BEFORE any heavy workspace computation
@@ -4241,8 +4241,17 @@ function OfflineStudioApp() {
         if (signal.aborted) return { html: null, aborted: true };
 
         const healthFindings = analyzeWorkspaceLogicHealth(scriptWorkspace);
+        await yieldMicroTick();
+        if (signal.aborted) return { html: null, aborted: true };
+
         const scheduleRows = buildWorkspaceScheduleOverview(scriptWorkspace);
+        await yieldMicroTick();
+        if (signal.aborted) return { html: null, aborted: true };
+
         const routingMatrixRows = buildWorkspaceRoutingMatrix(scriptWorkspace);
+        await yieldMicroTick();
+        if (signal.aborted) return { html: null, aborted: true };
+
         const inspectContext = createWorkspaceInspectContext(
           scriptWorkspace,
           healthFindings,
@@ -4371,6 +4380,8 @@ function OfflineStudioApp() {
             ? preloadedViewsRef.current.get(preloadLookupKey)
             : undefined;
 
+          const specEdgeCount = (trimmedSpecCode.match(/-->|-.->|==>/g) || []).length;
+
           if (
             canReuseActiveCanvasSvg &&
             baseRenderedSvg &&
@@ -4385,7 +4396,10 @@ function OfflineStudioApp() {
           ) {
             rawSvg = preloadedHit.rawSvg;
             wasCacheHit = true;
-          } else if (spec.key === 'master:detailed' && trimmedSpecCode.length > 45000) {
+          } else if (
+            spec.key === 'master:detailed' &&
+            (trimmedSpecCode.length > 45000 || specEdgeCount > 260)
+          ) {
             const compactView = views.find((v) => v.key === 'master');
             if (compactView) {
               rawSvg = compactView.svg;
@@ -4394,6 +4408,17 @@ function OfflineStudioApp() {
                 'Voll-Detail-Karte bei Großprojekt durch Kompakt-Master ersetzt';
               await yieldFrame();
             }
+          } else if (
+            spec.key.startsWith('script:') &&
+            (trimmedSpecCode.length > 55000 || specEdgeCount > 320)
+          ) {
+            rawSvg = buildFallbackViewSvg(
+              spec.label,
+              `Großskript (${specEdgeCount} Übergänge) — zur Stabilisierung als Platzhalter exportiert`
+            );
+            usedFallback = true;
+            lastWarning = `${spec.label}: Großskript als Schutz-Platzhalter exportiert`;
+            await yieldFrame();
           }
 
           if (!rawSvg) {
@@ -4401,22 +4426,35 @@ function OfflineStudioApp() {
             await yieldFrame();
             if (signal.aborted) return { html: null, aborted: true };
 
+            const preferFastDagreForLargeSpec =
+              (spec.key.startsWith('script:') || spec.key === 'master:detailed') &&
+              (trimmedSpecCode.length > 14000 || specEdgeCount > 110) &&
+              (exportThemeConfig.layoutEngine !== 'dagre' || exportThemeConfig.look !== 'classic');
+            const initialRenderTheme = preferFastDagreForLargeSpec
+              ? dagreFallbackTheme
+              : exportThemeConfig;
+
             const res = await renderLocalMermaidDiagram(
               spec.mermaidCode,
-              exportThemeConfig,
+              initialRenderTheme,
               shouldUseNativeSvgLabels(spec.mermaidCode),
               { timeoutMs: VIEW_TIMEOUT_MS, skipParseDiagnostics: true, signal }
             );
             rawSvg = res.svg;
             wasCacheHit = Boolean(res.fromCache);
+            if (rawSvg && preferFastDagreForLargeSpec) {
+              usedFallback = true;
+              lastWarning = `${spec.label} im schnellen Dagre-Modus gerendert`;
+            }
 
             if (!rawSvg && !signal.aborted) {
               if (res.timedOut) {
                 resetMermaidRenderQueue();
               }
               if (
-                exportThemeConfig.layoutEngine !== 'dagre' ||
-                exportThemeConfig.look !== 'classic'
+                !preferFastDagreForLargeSpec &&
+                (exportThemeConfig.layoutEngine !== 'dagre' ||
+                  exportThemeConfig.look !== 'classic')
               ) {
                 setHtmlExportProgress((prev) =>
                   prev
@@ -4431,7 +4469,7 @@ function OfflineStudioApp() {
                   spec.mermaidCode,
                   dagreFallbackTheme,
                   shouldUseNativeSvgLabels(spec.mermaidCode),
-                  { timeoutMs: 4500, skipParseDiagnostics: true, signal }
+                  { timeoutMs: 3500, skipParseDiagnostics: true, signal }
                 );
                 if (fallbackRes.timedOut) {
                   resetMermaidRenderQueue();
@@ -4510,10 +4548,15 @@ function OfflineStudioApp() {
               lastWarning = `${spec.label}: SVG-Nachbearbeitung vereinfacht`;
             }
 
-            // Precompute structured Element Info snapshots using O(1) WorkspaceInspectContext
+            // Precompute structured Element Info snapshots in chunked async slices using O(1) WorkspaceInspectContext
             const nodeDetails: Record<string, InteractiveCallflowHtmlNodeDetail> = {};
             try {
-              parsedGraph.nodes.forEach((node) => {
+              const graphNodes = Array.from(parsedGraph.nodes.values());
+              for (let nIdx = 0; nIdx < graphNodes.length; nIdx++) {
+                if (signal.aborted) {
+                  return { html: null, aborted: true };
+                }
+                const node = graphNodes[nIdx];
                 const snap = inspectWorkspaceNodeForEdit(
                   scriptWorkspace,
                   spec.viewLevel,
@@ -4556,7 +4599,10 @@ function OfflineStudioApp() {
                     exportScriptLabelMap
                   ),
                 };
-              });
+                if ((nIdx + 1) % 25 === 0) {
+                  await yieldMicroTick();
+                }
+              }
             } catch {
               // Keep rendered SVG even if optional node detail precomputation hits an unexpected edge case
             }

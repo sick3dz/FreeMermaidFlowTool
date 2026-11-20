@@ -601,6 +601,21 @@ export async function renderLocalMermaidDiagram(
 
     const startTime = performance.now();
     const sandbox = getOrCreateMermaidOffscreenSandbox();
+    const createIsolatedRenderSlot = (slotKey: string): HTMLDivElement | undefined => {
+      if (!sandbox || typeof document === 'undefined') return undefined;
+      const slot = document.createElement('div');
+      slot.id = `mermaid-slot-${slotKey}`;
+      sandbox.appendChild(slot);
+      return slot;
+    };
+    const cleanupRenderSlot = (slot: HTMLDivElement | undefined, renderId?: string) => {
+      if (slot && slot.parentNode) {
+        slot.parentNode.removeChild(slot);
+      }
+      if (renderId && typeof document !== 'undefined') {
+        document.getElementById(`d${renderId}`)?.remove();
+      }
+    };
 
     const runWithOptionalTimeout = async <T,>(
       work: Promise<T>,
@@ -625,6 +640,9 @@ export async function renderLocalMermaidDiagram(
       }
     };
 
+    let activeSlot: HTMLDivElement | undefined;
+    let activeRenderId: string | undefined;
+
     try {
       if (themeConfig.layoutEngine === 'elk') {
         await runWithOptionalTimeout(ensureElkLayoutRegistered());
@@ -634,26 +652,26 @@ export async function renderLocalMermaidDiagram(
       // Apply live UI layout/spacing directive on top of code so sliders never get ignored by stale init blocks
       const renderCode = prepareCodeWithRuntimeLayout(trimmed, themeConfig, forceNativeSvgLabels);
 
-      // Single-pass render inside hidden offscreen sandbox (prevents Mermaid from flashing temp nodes into document.body)
+      // Single-pass render inside an isolated child slot of the hidden offscreen sandbox
       renderCounter += 1;
       const uniqueRenderId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
+      activeRenderId = uniqueRenderId;
+      activeSlot = createIsolatedRenderSlot(String(renderCounter));
       let svgResult: string;
       try {
         const rendered = await runWithOptionalTimeout(
-          mermaid.render(uniqueRenderId, renderCode, sandbox)
+          mermaid.render(uniqueRenderId, renderCode, activeSlot || sandbox)
         );
         svgResult = rendered.svg;
       } catch (renderErr) {
-        if (sandbox) sandbox.innerHTML = '';
+        cleanupRenderSlot(activeSlot, uniqueRenderId);
+        activeSlot = undefined;
         const isTimeoutErr =
           renderErr instanceof Error && renderErr.message.startsWith('RENDER_TIMEOUT_');
         if (
           !isTimeoutErr &&
           (themeConfig.layoutEngine === 'elk' || themeConfig.look === 'handDrawn')
         ) {
-          if (typeof document !== 'undefined') {
-            document.querySelectorAll('[id^="dmermaid-local-svg-"]').forEach((n) => n.remove());
-          }
           const fallbackConfig: ThemeConfiguration = {
             ...themeConfig,
             layoutEngine: 'dagre',
@@ -667,8 +685,10 @@ export async function renderLocalMermaidDiagram(
           );
           renderCounter += 1;
           const fallbackId = `mermaid-local-svg-${Date.now()}-${renderCounter}`;
+          activeRenderId = fallbackId;
+          activeSlot = createIsolatedRenderSlot(String(renderCounter));
           const fallbackRendered = await runWithOptionalTimeout(
-            mermaid.render(fallbackId, fallbackRenderCode, sandbox)
+            mermaid.render(fallbackId, fallbackRenderCode, activeSlot || sandbox)
           );
           svgResult = fallbackRendered.svg;
           // Restore active engine signature on next call since fallback mutated Mermaid config
@@ -677,7 +697,8 @@ export async function renderLocalMermaidDiagram(
           throw renderErr;
         }
       } finally {
-        if (sandbox) sandbox.innerHTML = '';
+        cleanupRenderSlot(activeSlot, activeRenderId);
+        activeSlot = undefined;
       }
 
       const elapsed = Math.max(1, Math.round(performance.now() - startTime));
@@ -696,12 +717,13 @@ export async function renderLocalMermaidDiagram(
         fromCache: false,
       };
     } catch (err: unknown) {
-      if (sandbox) sandbox.innerHTML = '';
+      cleanupRenderSlot(activeSlot, activeRenderId);
+      activeSlot = undefined;
       lastEngineConfigSignature = null;
       const elapsed = Math.max(1, Math.round(performance.now() - startTime));
       const isTimeoutErr = err instanceof Error && err.message.startsWith('RENDER_TIMEOUT_');
 
-      if (typeof document !== 'undefined') {
+      if (!isTimeoutErr && typeof document !== 'undefined') {
         const strayErrorNodes = document.querySelectorAll(
           '[id^="dmermaid-local-svg-"], body > [id^="mermaid-local-svg-"]'
         );
