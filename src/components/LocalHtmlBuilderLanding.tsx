@@ -6,7 +6,6 @@ import {
   Copy,
   Download,
   FolderUp,
-  HardDriveDownload,
   Loader2,
   PlayCircle,
   ShieldCheck,
@@ -556,7 +555,6 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
   );
   const [defaultSmartColorMode, setDefaultSmartColorMode] =
     useState<SmartColorMode>('semantic');
-  const [isBuildingProject, setIsBuildingProject] = useState<boolean>(false);
   const [isBuilding, setIsBuilding] = useState<boolean>(false);
   const [buildResult, setBuildResult] = useState<{
     filename: string;
@@ -626,64 +624,6 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
     setActiveView(target);
     if (typeof window !== 'undefined') {
       window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-  };
-
-  const handleDownloadProjectOffline = async () => {
-    if (isBuildingProject) return;
-    setIsBuildingProject(true);
-    setBuildError(null);
-
-    try {
-      const shouldEmbedProject = Boolean(effectiveSeedSource) && embedCachedProject;
-      const baseProjectSeed = shouldEmbedProject && effectiveSeedSource
-        ? {
-            ...effectiveSeedSource,
-            smartColorMode: defaultSmartColorMode,
-            canvasSurface: defaultCanvasSurface,
-            workspaceMode: defaultWorkspaceMode,
-          }
-        : {
-            diagramTitle: 'Neuer Callflow',
-            code: '',
-            themeConfig: DEFAULT_THEME_CONFIG,
-            smartColorMode: defaultSmartColorMode,
-            hiddenSmartNodeTypes: [],
-            canvasSurface: defaultCanvasSurface,
-            workspaceMode: defaultWorkspaceMode,
-            scriptWorkspace: buildScriptWorkspace([]),
-            savedDiagrams: [],
-          };
-
-      const result = await buildAndDownloadOfflineApp({
-        includeWorkspaceSeed: true,
-        seed: {
-          initialShellView: 'builder',
-          ...baseProjectSeed,
-        },
-        filename: 'MermaidFree2UseOpen_Projekt_Offline.html',
-      });
-
-      const sizeMb = (result.byteSize / (1024 * 1024)).toFixed(2);
-      const nowStr = new Date().toLocaleTimeString('de-DE', {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
-
-      setBuildResult({
-        filename: result.filename,
-        sizeMb,
-        timestamp: nowStr,
-      });
-    } catch (err) {
-      setBuildError(
-        err instanceof Error
-          ? err.message
-          : 'Das lokale Projekt-Paket konnte nicht generiert werden.'
-      );
-    } finally {
-      setIsBuildingProject(false);
     }
   };
 
@@ -827,26 +767,11 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
             })}
           </nav>
 
-          {/* Zone 3: Version & Project Offline Download */}
+          {/* Zone 3: Version */}
           <div className="flex items-center gap-3 shrink-0">
             <span className="text-[11px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
-              Version 1.1.2
+              Version 1.1.3
             </span>
-            <button
-              type="button"
-              disabled={isBuildingProject}
-              onClick={handleDownloadProjectOffline}
-              title="Hauptseite inklusive Offline-HTML-Builder für den lokalen Betrieb (file://) herunterladen"
-              className="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              {isBuildingProject ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <HardDriveDownload className="w-3.5 h-3.5" />
-              )}
-              <span className="hidden sm:inline">Projekt offline laden</span>
-              <span className="sm:hidden">Projekt laden</span>
-            </button>
           </div>
         </div>
 
@@ -887,7 +812,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
           <div className="lg:col-span-7 space-y-5">
             <div className="space-y-2.5">
               <p className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 tabular-nums">
-                Version 1.1.2 · Reine Offline-Anwendung · file:// Einzeldatei · 0 Byte Netzwerkverkehr
+                Version 1.1.3 · Reine Offline-Anwendung · file:// Einzeldatei · 0 Byte Netzwerkverkehr
               </p>
               <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-50 leading-tight">
                 Offline-Callflow-Studio für Avaya-.s-Skripte, Visio &amp; Mermaid
