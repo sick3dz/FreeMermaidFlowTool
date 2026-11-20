@@ -6,6 +6,7 @@ import {
 } from '../types/mermaidStudio';
 import {
   canonicalScriptMatchKey,
+  extractReadableScheduleAndHolidayFromText,
   isPlausibleNamedScriptTarget,
   isValidScriptRef,
   normalizeScriptRef,
@@ -331,6 +332,7 @@ function convertExtractedShapesToModule(params: {
       queueTarget = txt.slice(0, 42);
     }
 
+    const parsedVisioTime = extractReadableScheduleAndHolidayFromText(txt);
     rules.push({
       id: `${scriptNumber}-visio-${idx + 1}`,
       prio: idx + 1,
@@ -338,10 +340,11 @@ function convertExtractedShapesToModule(params: {
       sourceNumber: scriptNumber,
       targetNumber,
       choices,
-      schedule: isSchedule ? txt.slice(0, 48) : undefined,
-      holiday: isHoliday ? txt.slice(0, 48) : undefined,
-      announcement: isAnnouncement ? txt.slice(0, 48) : undefined,
-      condition: isCondition ? txt.slice(0, 60) : propEntries || undefined,
+      schedule:
+        parsedVisioTime.schedule || (isSchedule ? txt.slice(0, 160) : undefined),
+      holiday: parsedVisioTime.holiday || (isHoliday ? txt.slice(0, 80) : undefined),
+      announcement: isAnnouncement ? txt.slice(0, 80) : undefined,
+      condition: isCondition ? txt.slice(0, 90) : propEntries || undefined,
       queueTarget,
       rawLine: `[Visio: ${visioPageName}] ${txt}${outEdges.length > 0 ? ` (Ausgänge: ${outEdges.length})` : ''}`,
     });

@@ -5666,10 +5666,72 @@ export function generateInteractiveCallflowHtml(
 
     function escapeCsvCell(val) {
       const str = String(val == null ? '' : val).replace(/\\r?\\n/g, ' ');
-      if (/[;"\\t]/.test(str)) {
+      if (/[;,"\\t]/.test(str)) {
         return '"' + str.replace(/"/g, '""') + '"';
       }
       return str;
+    }
+
+    const SCHEDULE_CSV_HEADERS = [
+      'Skript-Nr.',
+      'Skript-Name',
+      'Prio',
+      'Schritt / Regel',
+      'Wochentage',
+      'Uhrzeiten',
+      'Öffnungszeiten (Gesamt)',
+      'SondZeit / Zeitplan-Ref',
+      'Feiertag / Sonderzeit',
+      'Aktion / Überlauf / Ziel',
+      'Status',
+    ];
+
+    function buildScheduleCsvRow(r) {
+      const cleanHours = String(r.openingHours || '').replace(/(\\d{1,2})\\s*:\\s*(\\d{2})(?::\\d{2})?/g, '$1:$2').replace(/\\s+/g, ' ').trim();
+      const is247 = !r.hasSchedule && /24\\/7|keine\\s+zeitbeschr/i.test(cleanHours);
+      let weekdays = r.weekdays || '';
+      let clockTimes = r.clockTimes || '';
+      let source = r.scheduleSource || '';
+      if (!clockTimes) {
+        if (is247) {
+          weekdays = weekdays || 'Mo–So (24/7)';
+          clockTimes = '00:00–24:00 (24/7)';
+          source = source || '24/7 (Keine Zeitbegrenzung)';
+        } else if (r.hasSchedule) {
+          const pm = cleanHours.match(/^(.*?)\\s*\\(([A-Za-z0-9_.-]+)\\)$/);
+          const core = pm ? pm[1].trim() : cleanHours;
+          if (!source) source = pm ? pm[2] : 'Direkt im Skript';
+          const times = core.match(/\\b\\d{1,2}:\\d{2}\\s*[–-]\\s*\\d{1,2}:\\d{2}\\b/g);
+          clockTimes = times && times.length ? times.join(', ') : (/\\b24\\/7\\b/i.test(core) ? '00:00–24:00 (24/7)' : '—');
+          if (!weekdays) {
+            const dm = core.match(/\\b(?:Mo|Di|Mi|Do|Fr|Sa|So)(?:[–-](?:Mo|Di|Mi|Do|Fr|Sa|So))?\\b/gi);
+            weekdays = dm && dm.length ? Array.from(new Set(dm)).join(', ') : (clockTimes !== '—' ? 'Täglich / Alle Tage' : '—');
+          }
+        } else {
+          weekdays = weekdays || '—';
+          clockTimes = '—';
+          source = source || '—';
+        }
+      }
+      return [
+        r.scriptNumber,
+        r.scriptName,
+        r.prio ?? '—',
+        r.stepName,
+        weekdays || '—',
+        clockTimes || '—',
+        cleanHours || '—',
+        source || '—',
+        r.holidayAndSpecial || '—',
+        r.closedOrOverflowAction || '—',
+        r.hasSchedule && r.hasHoliday
+          ? 'Öffnungszeiten + Feiertag'
+          : r.hasSchedule
+          ? 'Öffnungszeiten hinterlegt'
+          : r.hasHoliday
+          ? 'Feiertag / Sonderzeit'
+          : 'Ohne Zeitangabe (24/7)',
+      ];
     }
 
     function downloadUtf8Csv(filename, headers, rows) {
@@ -7854,11 +7916,8 @@ export function generateInteractiveCallflowHtml(
         ctrl.querySelector('#btn-csv-schedules').addEventListener('click', () => {
           downloadUtf8Csv(
             'callflow-oeffnungszeiten.csv',
-            ['Skript-Nr.', 'Skript-Name', 'Prio', 'Schritt / Regel', 'Öffnungszeiten', 'Feiertag / Sonderzeit', 'Aktion / Überlauf / Ziel', 'Status'],
-            rows.map(r => [
-              r.scriptNumber, r.scriptName, r.prio ?? '—', r.stepName, r.openingHours, r.holidayAndSpecial, r.closedOrOverflowAction,
-              r.hasSchedule && r.hasHoliday ? 'Öffnungszeiten + Feiertag' : r.hasSchedule ? 'Öffnungszeiten hinterlegt' : r.hasHoliday ? 'Feiertag / Sonderzeit' : 'Ohne Zeitangabe (24/7)'
-            ])
+            SCHEDULE_CSV_HEADERS,
+            rows.map(buildScheduleCsvRow)
           );
         });
 
@@ -9083,11 +9142,8 @@ export function generateInteractiveCallflowHtml(
         const rows = getFilteredScheduleRowsForModal();
         downloadUtf8Csv(
           'callflow-oeffnungszeiten.csv',
-          ['Skript-Nr.', 'Skript-Name', 'Prio', 'Schritt / Regel', 'Öffnungszeiten', 'Feiertag / Sonderzeit', 'Aktion / Überlauf / Ziel', 'Status'],
-          rows.map(r => [
-            r.scriptNumber, r.scriptName, r.prio ?? '—', r.stepName, r.openingHours, r.holidayAndSpecial, r.closedOrOverflowAction,
-            r.hasSchedule && r.hasHoliday ? 'Öffnungszeiten + Feiertag' : r.hasSchedule ? 'Öffnungszeiten hinterlegt' : r.hasHoliday ? 'Feiertag / Sonderzeit' : 'Ohne Zeitangabe (24/7)'
-          ])
+          SCHEDULE_CSV_HEADERS,
+          rows.map(buildScheduleCsvRow)
         );
       });
     }

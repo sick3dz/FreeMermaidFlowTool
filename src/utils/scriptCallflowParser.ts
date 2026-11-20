@@ -1346,84 +1346,251 @@ function normalizeDayToken(raw: string): string {
 }
 
 function normalizeClockToken(raw: string): string {
-  const m = raw.trim().match(/^(\d{1,2})(?:[:.](\d{2}))?$/);
-  if (!m) return raw.trim();
-  const hh = m[1].padStart(2, '0');
+  const cleaned = raw.trim().replace(/\s*:\s*/g, ':');
+  // 4-digit HHMM (e.g. 0800 -> 08:00, 1730 -> 17:30)
+  const fourDigit = cleaned.match(/^([0-2]\d)([0-5]\d)$/);
+  if (fourDigit) {
+    const h = parseInt(fourDigit[1], 10);
+    if (h >= 0 && h <= 24) return `${fourDigit[1]}:${fourDigit[2]}`;
+  }
+  // HH:MM or HH:MM:SS or HH.MM or H
+  const m = cleaned.match(/^(\d{1,2})(?:[:.](\d{2})(?::\d{2})?)?$/);
+  if (!m) return cleaned;
+  const h = parseInt(m[1], 10);
+  if (isNaN(h) || h < 0 || h > 24) return cleaned;
+  const hh = String(h).padStart(2, '0');
   const mm = m[2] || '00';
   return `${hh}:${mm}`;
+}
+
+export function cleanOpeningHoursDisplayText(raw: string): string {
+  return String(raw || '')
+    .replace(/(\d{1,2})\s*:\s*(\d{2})(?::\d{2})?/g, '$1:$2')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const PURE_WEEKDAY_ONLY_REGEX =
+  /^(?:(?:Mo|Di|Mi|Do|Fr|Sa|So|Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Werktags?|Wochenende)(?:\s*(?:-|–|\.\.|bis|to|,|und|&)\s*(?:Mo|Di|Mi|Do|Fr|Sa|So|Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Werktags?|Wochenende))*)$/i;
+
+function isWeekdayOnlyLabel(text: string): boolean {
+  const t = text.trim();
+  return Boolean(t && PURE_WEEKDAY_ONLY_REGEX.test(t));
+}
+
+function extractDayExpressionsFromText(text: string): string[] {
+  const results: string[] = [];
+  const pushUnique = (val: string) => {
+    const c = val.trim();
+    if (c && !results.includes(c)) results.push(c);
+  };
+
+  // 1. AACC `DAY OF WEEK` ranges / lists (e.g. `DAY OF WEEK EQUALS MONDAY..FRIDAY` or `DAY OF WEEK IN (MONDAY, TUESDAY)`)
+  const dowRangeRegex =
+    /\bday\s+of\s+week\s*(?:equals|is|in|=|:)?\s*\(?\s*([A-Za-zÄÖÜäöüß]+)\s*(?:\.\.|to|bis|-|–)\s*([A-Za-zÄÖÜäöüß]+)\s*\)?/gi;
+  let m: RegExpExecArray | null;
+  while ((m = dowRangeRegex.exec(text)) !== null) {
+    const d1 = normalizeDayToken(m[1]);
+    const d2 = normalizeDayToken(m[2]);
+    if (DAY_TOKEN_MAP[m[1].toLowerCase()] && DAY_TOKEN_MAP[m[2].toLowerCase()]) {
+      pushUnique(`${d1}–${d2}`);
+    }
+  }
+
+  if (results.length === 0) {
+    const dowListRegex =
+      /\bday\s+of\s+week\s*(?:equals|is|in|=|:)?\s*\(?\s*([A-Za-zÄÖÜäöüß]+(?:\s*(?:,|or|oder|&|\+)\s*[A-Za-zÄÖÜäöüß]+)*)\s*\)?/gi;
+    while ((m = dowListRegex.exec(text)) !== null) {
+      const days = m[1]
+        .split(/\s*(?:,|or|oder|&|\+)\s*/i)
+        .filter((tok) => Boolean(DAY_TOKEN_MAP[tok.trim().toLowerCase()]))
+        .map(normalizeDayToken);
+      if (days.length > 0) pushUnique(days.join(', '));
+    }
+  }
+
+  // 2. General day ranges (`Mo-Fr`, `Mo - Do`, `Montag bis Freitag`, `MONDAY..FRIDAY`, `Sa-So`)
+  if (results.length === 0) {
+    const dayRangeRegex =
+      /\b(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun|Mo|Di|Mi|Do|Fr|Sa|So)\.?[\s]*(?:-+|–|—|\.\.|bis|to)[\s]*(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun|Mo|Di|Mi|Do|Fr|Sa|So)\b/gi;
+    while ((m = dayRangeRegex.exec(text)) !== null) {
+      pushUnique(`${normalizeDayToken(m[1])}–${normalizeDayToken(m[2])}`);
+    }
+  }
+
+  // 3. Explicit German/English single day names or `Werktags` / `Wochenende`
+  if (results.length === 0) {
+    if (/\bwerktags?\b/i.test(text)) {
+      pushUnique('Mo–Fr');
+    } else if (/\bwochenende\b/i.test(text)) {
+      pushUnique('Sa–So');
+    } else {
+      const singleDayRegex =
+        /\b(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b/gi;
+      const singles: string[] = [];
+      while ((m = singleDayRegex.exec(text)) !== null) {
+        const norm = normalizeDayToken(m[1]);
+        if (!singles.includes(norm)) singles.push(norm);
+      }
+      if (singles.length > 0) {
+        pushUnique(singles.join(', '));
+      } else {
+        const shortDayRegex = /(?:^|[\s,;(·])(Mo|Di|Mi|Do|Fr|Sa|So)(?=\s*(?:,|&|\+|·|\/|\||-|\d{1,2}\s*[:.]|ab|vor|au[sß]erhalb|$))/gi;
+        const shortSingles: string[] = [];
+        while ((m = shortDayRegex.exec(text)) !== null) {
+          const norm = normalizeDayToken(m[1]);
+          if (!shortSingles.includes(norm)) shortSingles.push(norm);
+        }
+        if (shortSingles.length > 0) pushUnique(shortSingles.join(', '));
+      }
+    }
+  }
+
+  return results;
+}
+
+function extractClockRangesFromSingleClause(text: string): string[] {
+  // Normalize stray whitespace around clock colons (`08 : 00` -> `08:00`) and strip seconds (`08:00:00` -> `08:00`)
+  const norm = text
+    .replace(/\b([0-2]?\d)\s*:\s*([0-5]\d)(?::[0-5]\d)?\b/g, '$1:$2')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const ranges: string[] = [];
+  const pushUnique = (val: string) => {
+    const c = val.trim();
+    if (c && !ranges.includes(c)) ranges.push(c);
+  };
+
+  // Skip pure date strings (`12.03.2024`) from being misread as HH.MM by neutralizing DD.MM.YYYY
+  const safeNorm = norm.replace(/\b\d{1,2}\.\d{2}\.\d{2,4}\b/g, ' ');
+
+  // 1. Explicit `TIME OF DAY BETWEEN T1 AND T2`
+  const betweenRegex =
+    /\btime\s+of\s+day\s+(?:not\s+)?between\s+(\d{1,2}[:.]\d{2}|[0-2]\d[0-5]\d)\s+and\s+(\d{1,2}[:.]\d{2}|[0-2]\d[0-5]\d)\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = betweenRegex.exec(safeNorm)) !== null) {
+    const isNeg = /\bnot\s+between\b/i.test(m[0]);
+    const pair = `${normalizeClockToken(m[1])}–${normalizeClockToken(m[2])}`;
+    pushUnique(isNeg ? `Außerhalb ${pair}` : pair);
+  }
+
+  // 2. Paired comparison bounds:
+  //    a) `TIME OF DAY >= 08:00 AND TIME OF DAY <= 17:00` (open window)
+  //    b) `TIME OF DAY < 08:00 OR TIME OF DAY >= 17:00` (closed guard outside open window)
+  const pairedAndRegex =
+    /\btime\s+of\s+day\s*(>=|>|after)\s*(\d{1,2}[:.]\d{2}|[0-2]\d[0-5]\d)\s+and\s+(?:time\s+of\s+day\s*)?(<=|<|before)\s*(\d{1,2}[:.]\d{2}|[0-2]\d[0-5]\d)\b/gi;
+  while ((m = pairedAndRegex.exec(safeNorm)) !== null) {
+    pushUnique(`${normalizeClockToken(m[2])}–${normalizeClockToken(m[4])}`);
+  }
+
+  const pairedAndRevRegex =
+    /\btime\s+of\s+day\s*(<=|<|before)\s*(\d{1,2}[:.]\d{2}|[0-2]\d[0-5]\d)\s+and\s+(?:time\s+of\s+day\s*)?(>=|>|after)\s*(\d{1,2}[:.]\d{2}|[0-2]\d[0-5]\d)\b/gi;
+  while ((m = pairedAndRevRegex.exec(safeNorm)) !== null) {
+    pushUnique(`${normalizeClockToken(m[4])}–${normalizeClockToken(m[2])}`);
+  }
+
+  const pairedOrClosedRegex =
+    /\btime\s+of\s+day\s*(<=|<|before)\s*(\d{1,2}[:.]\d{2}|[0-2]\d[0-5]\d)\s+or\s+(?:time\s+of\s+day\s*)?(>=|>|after)\s*(\d{1,2}[:.]\d{2}|[0-2]\d[0-5]\d)\b/gi;
+  while ((m = pairedOrClosedRegex.exec(safeNorm)) !== null) {
+    pushUnique(`Außerhalb ${normalizeClockToken(m[2])}–${normalizeClockToken(m[4])}`);
+  }
+
+  const pairedOrClosedRevRegex =
+    /\btime\s+of\s+day\s*(>=|>|after)\s*(\d{1,2}[:.]\d{2}|[0-2]\d[0-5]\d)\s+or\s+(?:time\s+of\s+day\s*)?(<=|<|before)\s*(\d{1,2}[:.]\d{2}|[0-2]\d[0-5]\d)\b/gi;
+  while ((m = pairedOrClosedRevRegex.exec(safeNorm)) !== null) {
+    pushUnique(`Außerhalb ${normalizeClockToken(m[4])}–${normalizeClockToken(m[2])}`);
+  }
+
+  // 3. Explicit clock ranges (`08:00..17:00`, `08:00 TO 18:00`, `08:00-17:00`, `08:00 Uhr bis 17:00 Uhr`, `Außerhalb 08:00–17:00`)
+  const clockRangeRegex =
+    /(?:(\bnot\s+(?:in\s+)?|\bau[sß]erhalb\s+)|\btime\s+of\s+day\s*(?:not\s+in|equals|is|in|=|:)?\s*)?(\d{1,2}[:.]\d{2})(?:\s*Uhr)?\s*(?:\.\.|to|bis|-+|–|—)\s*(\d{1,2}[:.]\d{2})(?:\s*Uhr)?/gi;
+  while ((m = clockRangeRegex.exec(safeNorm)) !== null) {
+    const t1 = normalizeClockToken(m[2]);
+    const t2 = normalizeClockToken(m[3]);
+    const isNeg = /\b(?:not|au[sß]erhalb)\b/i.test(m[0]);
+    pushUnique(isNeg ? `Außerhalb ${t1}–${t2}` : `${t1}–${t2}`);
+  }
+
+  // 4. AACC 4-digit `TIME OF DAY = 0800..1700`
+  if (ranges.length === 0) {
+    const tod4Regex =
+      /\btime\s+of\s+day\s*(?:not\s+in|equals|is|in|=|:)?\s*([0-2]\d[0-5]\d)\s*(?:\.\.|to|bis|-+|–)\s*([0-2]\d[0-5]\d)\b/gi;
+    while ((m = tod4Regex.exec(safeNorm)) !== null) {
+      const pair = `${normalizeClockToken(m[1])}–${normalizeClockToken(m[2])}`;
+      pushUnique(/\bnot\b/i.test(m[0]) ? `Außerhalb ${pair}` : pair);
+    }
+  }
+
+  // 5. Short German hour range (`8-17 Uhr`, `8 bis 18 Uhr`)
+  if (ranges.length === 0) {
+    const shortUhrRegex = /\b(\d{1,2})(?:\s*Uhr)?\s*(?:-+|–|bis)\s*(\d{1,2})\s*Uhr\b/gi;
+    while ((m = shortUhrRegex.exec(safeNorm)) !== null) {
+      const h1 = parseInt(m[1], 10);
+      const h2 = parseInt(m[2], 10);
+      if (h1 >= 0 && h1 <= 24 && h2 >= 0 && h2 <= 24) {
+        pushUnique(`${normalizeClockToken(m[1])}–${normalizeClockToken(m[2])}`);
+      }
+    }
+  }
+
+  // 6. Single comparison (`TIME OF DAY < 08:00`, `TIME OF DAY >= 18:00`)
+  if (ranges.length === 0) {
+    const todCompareRegex =
+      /\btime\s+of\s+day\s*(<=|<|>=|>|before|after)\s*(\d{1,2}(?:[:.]\d{2})?|[0-2]\d[0-5]\d)/gi;
+    while ((m = todCompareRegex.exec(safeNorm)) !== null) {
+      const op = m[1].toLowerCase();
+      const prefix = op === 'before' || op === '<' || op === '<=' ? 'vor ' : 'ab ';
+      pushUnique(`${prefix}${normalizeClockToken(m[2])} Uhr`);
+    }
+  }
+
+  return ranges;
 }
 
 /**
  * Extracts human-readable opening hours (`schedule`) and holiday/special state (`holiday`)
  * from Avaya OCL conditions (`DAY OF WEEK`, `TIME OF DAY`, `HOLIDAY`, `Sys_SondZeit`) or German prose.
+ * Supports multiple weekday/time segments (e.g. `Mo–Do 08:00–17:00, Fr 08:00–15:00`) and all AACC OCL clock forms.
  */
 export function extractReadableScheduleAndHolidayFromText(rawText: string): {
   schedule?: string;
   holiday?: string;
 } {
   if (!rawText) return {};
-  const text = rawText.replace(/\s+/g, ' ').trim();
+  const text = rawText
+    .replace(/\b([0-2]?\d)\s*:\s*([0-5]\d)(?::[0-5]\d)?\b/g, '$1:$2')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (!text) return {};
 
   const scheduleParts: string[] = [];
   const holidayParts: string[] = [];
 
-  // 1. AACC `DAY OF WEEK` ranges / lists (e.g. `DAY OF WEEK EQUALS MONDAY..FRIDAY` or `DAY OF WEEK IN SATURDAY, SUNDAY`)
-  const dowRangeMatch = text.match(
-    /\bday\s+of\s+week\s*(?:equals|is|in|=|:)?\s*([A-Za-zÄÖÜäöüß]+)\s*(?:\.\.|to|bis|-|–)\s*([A-Za-zÄÖÜäöüß]+)/i
-  );
-  if (dowRangeMatch) {
-    scheduleParts.push(
-      `${normalizeDayToken(dowRangeMatch[1])}–${normalizeDayToken(dowRangeMatch[2])}`
-    );
-  } else {
-    const dowSingleMatch = text.match(
-      /\bday\s+of\s+week\s*(?:equals|is|in|=|:)?\s*([A-Za-zÄÖÜäöüß]+(?:\s*(?:,|or|oder)\s*[A-Za-zÄÖÜäöüß]+)*)/i
-    );
-    if (dowSingleMatch) {
-      const days = dowSingleMatch[1]
-        .split(/\s*(?:,|or|oder)\s*/i)
-        .map(normalizeDayToken)
-        .filter(Boolean);
-      if (days.length > 0) scheduleParts.push(days.join(', '));
+  // 0. Check multi-segment German/prose schedules like `Mo-Do 08:00-17:00, Fr 08:00-15:00` or `Mo-Fr 08:00-12:00 / 13:00-17:00`
+  const multiDayTimeRegex =
+    /\b((?:Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mo|Di|Mi|Do|Fr|Sa|So)\.?(?:\s*(?:-|–|—|\.\.|bis|to)\s*(?:Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mo|Di|Mi|Do|Fr|Sa|So)\.?)?)\s*:?\s*(\d{1,2}[:.]\d{2}(?:\s*Uhr)?\s*(?:\.\.|to|bis|-+|–|—)\s*\d{1,2}[:.]\d{2}(?:\s*Uhr)?(?:\s*(?:,|\/|und|&)\s*\d{1,2}[:.]\d{2}(?:\s*Uhr)?\s*(?:\.\.|to|bis|-+|–|—)\s*\d{1,2}[:.]\d{2}(?:\s*Uhr)?)*)/gi;
+  const multiSegments: string[] = [];
+  let segMatch: RegExpExecArray | null;
+  while ((segMatch = multiDayTimeRegex.exec(text)) !== null) {
+    const days = extractDayExpressionsFromText(segMatch[1]);
+    const times = extractClockRangesFromSingleClause(segMatch[2]);
+    if (days.length > 0 && times.length > 0) {
+      const seg = `${days[0]} ${times.join(', ')}`;
+      if (!multiSegments.includes(seg)) multiSegments.push(seg);
     }
   }
 
-  // 2. German day ranges (e.g. `Mo-Fr`, `Mo - Do`, `Montag bis Freitag`, `Sa-So`)
-  if (scheduleParts.length === 0) {
-    const deDayRange = text.match(
-      /\b(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Mo|Di|Mi|Do|Fr|Sa|So)\.?[\s]*(?:-+|–|\.\.|bis|to)[\s]*(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag|Mo|Di|Mi|Do|Fr|Sa|So)\b/i
-    );
-    if (deDayRange) {
-      scheduleParts.push(`${normalizeDayToken(deDayRange[1])}–${normalizeDayToken(deDayRange[2])}`);
-    }
-  }
-
-  // 3. AACC `TIME OF DAY` or general clock range (`08:00..17:00`, `08:00 TO 18:00`, `08:00-17:00`)
-  const todRangeMatch = text.match(
-    /\b(?:time\s+of\s+day\s*(?:equals|is|in|=|:)?\s*)?(\d{1,2}[:.]\d{2})\s*(?:\.\.|to|bis|-|–)\s*(\d{1,2}[:.]\d{2})(?:\s*Uhr)?/i
-  );
-  if (todRangeMatch) {
-    scheduleParts.push(
-      `${normalizeClockToken(todRangeMatch[1])}–${normalizeClockToken(todRangeMatch[2])}`
-    );
+  if (multiSegments.length > 1) {
+    scheduleParts.push(multiSegments.join(', '));
   } else {
-    const todCompareMatch = text.match(
-      /\btime\s+of\s+day\s*(<=|<|>=|>|before|after)\s*(\d{1,2}(?:[:.]\d{2})?)/i
-    );
-    if (todCompareMatch) {
-      const op = todCompareMatch[1].toLowerCase();
-      const prefix = op === 'before' || op === '<' || op === '<=' ? 'vor ' : 'ab ';
-      scheduleParts.push(`${prefix}${normalizeClockToken(todCompareMatch[2])} Uhr`);
-    } else {
-      const shortUhrRange = text.match(
-        /\b(\d{1,2})\s*(?:-+|–|bis)\s*(\d{1,2})\s*Uhr\b/i
-      );
-      if (shortUhrRange) {
-        scheduleParts.push(
-          `${normalizeClockToken(shortUhrRange[1])}–${normalizeClockToken(shortUhrRange[2])}`
-        );
-      }
+    const days = extractDayExpressionsFromText(text);
+    const clocks = extractClockRangesFromSingleClause(text);
+    if (days.length > 0 && clocks.length > 0) {
+      scheduleParts.push(`${days[0]} ${clocks.join(', ')}`);
+    } else if (clocks.length > 0) {
+      scheduleParts.push(clocks.join(', '));
+    } else if (days.length > 0) {
+      scheduleParts.push(days.join(', '));
     }
   }
 
@@ -1471,14 +1638,269 @@ export function extractReadableScheduleAndHolidayFromText(rawText: string): {
   }
 
   return {
-    schedule: scheduleParts.length > 0 ? scheduleParts.join(' ') : undefined,
+    schedule: scheduleParts.length > 0 ? cleanOpeningHoursDisplayText(scheduleParts.join(' ')) : undefined,
     holiday: holidayParts.length > 0 ? holidayParts.join(' · ') : undefined,
   };
 }
 
 /**
+ * Walks an entire script text line-by-line (tracking IF / ELSE / WHERE / VALUE blocks)
+ * to extract ALL concrete weekday + clock-time windows, including blocks that only contain
+ * variable assignments (e.g. `IF TIME OF DAY = 08:00..17:00 THEN assign 1 to gv_open`)
+ * as well as `assign 08:00 to ...start` / `assign 17:00 to ...end` pairs.
+ */
+export function extractStructuredSchedulesFromScriptText(rawText: string): string | null {
+  if (!rawText) return null;
+  const lines = rawText.split(/\r?\n/);
+
+  interface TimeFrame {
+    kind: 'if' | 'where' | 'value';
+    whereKind?: 'day' | 'time' | 'other';
+    day?: string;
+    clocks: string[];
+  }
+
+  const stack: TimeFrame[] = [];
+  const entries: Array<{ day?: string; clock: string }> = [];
+  const seenKeys = new Set<string>();
+
+  const recordClockWindows = (clocks: string[], explicitDay?: string) => {
+    const activeDay =
+      explicitDay ||
+      [...stack]
+        .reverse()
+        .find((f) => Boolean(f.day))?.day;
+    for (const clk of clocks) {
+      const cleanClk = cleanOpeningHoursDisplayText(clk);
+      if (!cleanClk) continue;
+      const key = `${(activeDay || '').toLowerCase()}|${cleanClk.toLowerCase()}`;
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        entries.push({ day: activeDay, clock: cleanClk });
+      }
+    }
+  };
+
+  let assignedStartTime: string | null = null;
+  let assignedEndTime: string | null = null;
+
+  for (const rawLine of lines) {
+    const t = rawLine.trim();
+    if (!t) continue;
+
+    // Track END IF / END WHERE
+    if (/^(?:end\s*if|endif)\b/i.test(t)) {
+      for (let i = stack.length - 1; i >= 0; i--) {
+        if (stack[i].kind === 'if') {
+          stack.splice(i, 1);
+          break;
+        }
+      }
+      continue;
+    }
+    if (/^end\s+(?:where|select|case)\b/i.test(t)) {
+      while (stack.length > 0) {
+        const popped = stack.pop();
+        if (popped?.kind === 'where') break;
+      }
+      continue;
+    }
+
+    // Track WHERE DAY OF WEEK / WHERE TIME OF DAY
+    const whereMatch = t.match(/^(?:where|select|case)\s+(.+?)(?:\s+(?:equals|is|in)\b(.*))?$/i);
+    if (whereMatch && !/\bexecute\b/i.test(t)) {
+      const body = `${whereMatch[1]} ${whereMatch[2] || ''}`;
+      const whereKind: TimeFrame['whereKind'] = /\bday\s+of\s+week\b/i.test(body)
+        ? 'day'
+        : /\btime\s+of\s+day\b/i.test(body)
+        ? 'time'
+        : 'other';
+      stack.push({ kind: 'where', whereKind, clocks: [] });
+      continue;
+    }
+
+    // Track VALUE ... : (protecting clock colons like 08:00..17:00)
+    const valMatch = t.match(/^(?:VALUE\s+((?:[^:]|:\d{2})+?)|(DEFAULT|OTHERWISE))\s*:\s*(.*)$/i);
+    if (valMatch) {
+      while (stack.length > 0 && stack[stack.length - 1].kind === 'value') {
+        stack.pop();
+      }
+      const rawVal = (valMatch[1] || valMatch[2] || '').trim();
+      const afterVal = (valMatch[3] || '').trim();
+      const parentWhere = [...stack].reverse().find((f) => f.kind === 'where');
+      const isDefault = /^(?:default|otherwise)$/i.test(rawVal);
+
+      if (!isDefault) {
+        const days =
+          parentWhere?.whereKind === 'day' || /\b(?:mon|tue|wed|thu|fri|sat|sun|mo|di|mi|do|fr|sa|so|montag|freitag)\b/i.test(rawVal)
+            ? extractDayExpressionsFromText(rawVal)
+            : [];
+        const clocks = extractClockRangesFromSingleClause(
+          parentWhere?.whereKind === 'time' ? `TIME OF DAY = ${rawVal}` : rawVal
+        );
+        if (clocks.length > 0) {
+          recordClockWindows(clocks, days[0]);
+        }
+        if (afterVal) {
+          const inlineClocks = extractClockRangesFromSingleClause(afterVal);
+          const inlineDays = extractDayExpressionsFromText(afterVal);
+          if (inlineClocks.length > 0) {
+            recordClockWindows(inlineClocks, inlineDays[0] || days[0]);
+          }
+        } else {
+          stack.push({
+            kind: 'value',
+            day: days[0],
+            clocks,
+          });
+        }
+      }
+      continue;
+    }
+
+    // Track IF / ELSE IF / ELSE
+    const ifMatch = t.match(/^(?:else\s+)?if\s+(.+?)\s+then(?:\s+(.*))?$/i);
+    if (ifMatch) {
+      if (/^else\s+if\b/i.test(t) && stack.length > 0 && stack[stack.length - 1].kind === 'if') {
+        stack.pop();
+      }
+      const cond = ifMatch[1];
+      const inlineBody = ifMatch[2] || '';
+      const hasInlineEnd = /\b(?:end\s*if|endif)\b/i.test(inlineBody);
+
+      const days = extractDayExpressionsFromText(cond);
+      const clocks = extractClockRangesFromSingleClause(cond);
+      if (clocks.length > 0) {
+        recordClockWindows(clocks, days[0]);
+      }
+      if (!hasInlineEnd) {
+        stack.push({ kind: 'if', day: days[0], clocks });
+      }
+      continue;
+    }
+
+    if (/^else\b/i.test(t)) {
+      if (stack.length > 0 && stack[stack.length - 1].kind === 'if') {
+        stack.pop();
+      }
+      if (!/\b(?:end\s*if|endif)\b/i.test(t)) {
+        stack.push({ kind: 'if', clocks: [] });
+      }
+      continue;
+    }
+
+    // Track explicit `assign <time> to <var>` or `Zeitplan: ...` lines
+    const assignMatch = t.match(
+      /\bassign\s+["']?([^"'\r\n;]+?)["']?\s+to\s+([A-Za-z0-9_]+)\b/i
+    );
+    if (assignMatch) {
+      const val = assignMatch[1].trim();
+      const varName = assignMatch[2].trim();
+      const valClocks = extractClockRangesFromSingleClause(val);
+      const valDays = extractDayExpressionsFromText(val);
+      if (valClocks.length > 0) {
+        recordClockWindows(valClocks, valDays[0]);
+      } else if (/^\d{1,2}[:.]\d{2}(?::\d{2})?$/.test(val)) {
+        if (/(?:start|von|from|begin|open|anfang)/i.test(varName)) {
+          assignedStartTime = normalizeClockToken(val);
+        } else if (/(?:end|bis|to|close|ende|stop)/i.test(varName)) {
+          assignedEndTime = normalizeClockToken(val);
+        }
+      }
+      continue;
+    }
+
+    // Catch standalone German/prose schedule lines (`Zeitplan: ...`, `Öffnungszeiten: ...`)
+    if (/\b(?:zeitplan|[oö]ffnungszeit(?:en)?|gesch[aä]ftszeit(?:en)?|servicezeit(?:en)?|time\s+of\s+day)\b/i.test(t)) {
+      const clocks = extractClockRangesFromSingleClause(t);
+      const days = extractDayExpressionsFromText(t);
+      if (clocks.length > 0) {
+        recordClockWindows(clocks, days[0]);
+      }
+    }
+  }
+
+  if (entries.length === 0 && assignedStartTime && assignedEndTime) {
+    entries.push({ clock: `${assignedStartTime}–${assignedEndTime}` });
+  }
+
+  if (entries.length === 0) return null;
+
+  // Group entries by day so `Mo–Fr 08:00–12:00` + `Mo–Fr 13:00–17:00` becomes `Mo–Fr 08:00–12:00, 13:00–17:00`
+  const byDay = new Map<string, string[]>();
+  const dayOrder: string[] = [];
+  for (const e of entries) {
+    const dk = e.day || '';
+    if (!byDay.has(dk)) {
+      byDay.set(dk, []);
+      dayOrder.push(dk);
+    }
+    const list = byDay.get(dk)!;
+    if (!list.includes(e.clock)) list.push(e.clock);
+  }
+
+  // If we have both day-scoped entries and an identical un-scoped clock entry, drop the redundant un-scoped copy
+  const dayScopedClocks = new Set<string>();
+  for (const [dk, list] of byDay.entries()) {
+    if (dk) list.forEach((c) => dayScopedClocks.add(c));
+  }
+
+  const formattedSegments: string[] = [];
+  for (const dk of dayOrder) {
+    let list = byDay.get(dk) || [];
+    if (!dk && dayScopedClocks.size > 0) {
+      list = list.filter((c) => !dayScopedClocks.has(c));
+    }
+    if (list.length === 0) continue;
+    formattedSegments.push(dk ? `${dk} ${list.join(', ')}` : list.join(', '));
+  }
+
+  return formattedSegments.length > 0
+    ? cleanOpeningHoursDisplayText(formattedSegments.join(', '))
+    : null;
+}
+
+/**
+ * Safely extracts an opening-hours hint from explicit header/documentation comments in the
+ * original script text (used ONLY as a last-resort fallback when active code contains no clock times).
+ */
+function extractCommentScheduleHint(originalRawText: string): string | null {
+  if (!originalRawText) return null;
+  const commentBlocks: string[] = [];
+  const blockRegex = /\/\*([\s\S]*?)\*\/|\(\*([\s\S]*?)\*\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = blockRegex.exec(originalRawText)) !== null) {
+    commentBlocks.push(m[1] || m[2] || '');
+  }
+  const lineCommentRegex = /(?:^|\s)(?:\/\/|--|#)([^\r\n]+)/gm;
+  while ((m = lineCommentRegex.exec(originalRawText)) !== null) {
+    commentBlocks.push(m[1] || '');
+  }
+
+  const collected: string[] = [];
+  for (const block of commentBlocks) {
+    for (const line of block.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || isMetadataOrChangelogLine(t)) continue;
+      // Ignore changelog timestamps like `12.03.2024 14:30` unless line clearly describes opening hours
+      const hasScheduleKeyword =
+        /\b(?:[oö]ffnungszeit(?:en)?|gesch[aä]ftszeit(?:en)?|servicezeit(?:en)?|erreichbar(?:keit)?|arbeitszeit(?:en)?|sprechzeit(?:en)?|zeitplan|sondzeit|werktags?|mo\s*[-–]\s*(?:fr|do|sa|so)|montag\s*(?:bis|-|–)\s*(?:freitag|donnerstag|samstag))\b/i.test(
+          t
+        );
+      if (!hasScheduleKeyword) continue;
+      const det = extractReadableScheduleAndHolidayFromText(t);
+      if (det.schedule && /\b\d{1,2}:\d{2}\b/.test(det.schedule)) {
+        if (!collected.includes(det.schedule)) collected.push(det.schedule);
+      }
+    }
+  }
+  return collected.length > 0 ? cleanOpeningHoursDisplayText(collected.join(', ')) : null;
+}
+
+/**
  * Extracts opening days and clock times from a script or variable name
- * (e.g., `SondZeit_08_17`, `SondZeit_MoFr_0800_1630`, `SondZeit_0730_1800`, `SondZeit_Mo_Fr_8bis18`, `SondZeit_24_7`).
+ * (e.g., `SondZeit_08_17`, `SondZeit_MoFr_0800_1630`, `SondZeit_07_30_18_00`, `SondZeit_08001700`,
+ * `SondZeit_MoDo_0800_1700_Fr_0800_1500`, `SondZeit_Mo_Fr_8bis18`, `SondZeit_24_7`).
  */
 export function extractScheduleFromSondZeitName(rawName: string): string | null {
   if (!rawName) return null;
@@ -1490,12 +1912,12 @@ export function extractScheduleFromSondZeitName(rawName: string): string | null 
     return '24/7 (Rund um die Uhr)';
   }
 
-  // 2. Multi-block detection, e.g., `Mo_Do_08_17_Fr_08_15`
-  const multiBlockSplit = clean.split(/(?=[_.-](?:Fr|Sa|So)[_.-])/i);
+  // 2. Multi-block detection, e.g., `Mo_Do_08_17_Fr_08_15` or `MoDo_0800_1700_Fr_0800_1400`
+  const multiBlockSplit = clean.split(/(?=[_.-](?:Di|Mi|Do|Fr|Sa|So)(?:[_.-]|\d))/i);
   if (multiBlockSplit.length > 1) {
     const parsedSub = multiBlockSplit
       .map((sub) => extractScheduleFromSondZeitName(sub))
-      .filter(Boolean);
+      .filter((x): x is string => Boolean(x));
     if (parsedSub.length > 1) {
       return parsedSub.join(', ');
     }
@@ -1509,9 +1931,9 @@ export function extractScheduleFromSondZeitName(rawName: string): string | null 
     dayPrefix = 'Sa–So ';
   } else {
     const dayTokensRegex =
-      /(?:^|[_\-.])(Mo(?:ntag)?|Di(?:enstag)?|Mi(?:ttwoch)?|Do(?:nnerstag)?|Fr(?:eitag)?|Sa(?:mstag)?|So(?:nntag)?)[_\-.]*(?:bis|to|[_\-.])?[_\-.]*(Mo(?:ntag)?|Di(?:enstag)?|Mi(?:ttwoch)?|Do(?:nnerstag)?|Fr(?:eitag)?|Sa(?:mstag)?|So(?:nntag)?)(?:[_\-.]|$)/i;
+      /(?:^|[_\-.])(Mo(?:ntag)?|Di(?:enstag)?|Mi(?:ttwoch)?|Do(?:nnerstag)?|Fr(?:eitag)?|Sa(?:mstag)?|So(?:nntag)?)[_\-.]*(?:bis|to|[_\-.])?[_\-.]*(Mo(?:ntag)?|Di(?:enstag)?|Mi(?:ttwoch)?|Do(?:nnerstag)?|Fr(?:eitag)?|Sa(?:mstag)?|So(?:nntag)?)(?:[_\-.]|(?=\d)|$)/i;
     const singleDayRegex =
-      /(?:^|[_\-.])(Mo(?:ntag)?|Di(?:enstag)?|Mi(?:ttwoch)?|Do(?:nnerstag)?|Fr(?:eitag)?|Sa(?:mstag)?|So(?:nntag)?)(?:[_\-.]|$)/i;
+      /(?:^|[_\-.])(Mo(?:ntag)?|Di(?:enstag)?|Mi(?:ttwoch)?|Do(?:nnerstag)?|Fr(?:eitag)?|Sa(?:mstag)?|So(?:nntag)?)(?:[_\-.]|(?=\d)|$)/i;
 
     const rangeMatch = clean.match(dayTokensRegex);
     if (rangeMatch) {
@@ -1524,7 +1946,17 @@ export function extractScheduleFromSondZeitName(rawName: string): string | null 
     }
   }
 
-  // 3. 4-digit time pairs, e.g. 0800_1700 or 0730_1830 or 0800-1630 or 0800bis1700
+  // 3. 8-digit contiguous time pair, e.g. `SondZeit_08001700`
+  const eightDigitMatch = clean.match(/(?:^|[_\-.a-zA-Z])([0-2]\d)([0-5]\d)([0-2]\d)([0-5]\d)(?:[_\-.a-zA-Z]|$)/);
+  if (eightDigitMatch) {
+    const h1 = parseInt(eightDigitMatch[1], 10);
+    const h2 = parseInt(eightDigitMatch[3], 10);
+    if (h1 <= 24 && h2 <= 24 && (h1 < h2 || (h1 === h2 && eightDigitMatch[2] < eightDigitMatch[4]))) {
+      return `${dayPrefix}${eightDigitMatch[1]}:${eightDigitMatch[2]}–${eightDigitMatch[3]}:${eightDigitMatch[4]}`.trim();
+    }
+  }
+
+  // 4. 4-digit time pairs, e.g. `0800_1700`, `0730_1830`, `0800-1630`, `0800bis1700`
   const fourDigitMatch = clean.match(
     /(?:^|[_\-.a-zA-Z])([0-2]\d[0-5]\d)[_\-.]*(?:bis|to|[_\-.])+[_\-.]*([0-2]\d[0-5]\d)(?:[_\-.a-zA-Z]|$)/i
   );
@@ -1533,12 +1965,30 @@ export function extractScheduleFromSondZeitName(rawName: string): string | null 
     const sM = fourDigitMatch[1].slice(2);
     const eH = fourDigitMatch[2].slice(0, 2);
     const eM = fourDigitMatch[2].slice(2);
-    return `${dayPrefix}${sH}:${sM}–${eH}:${eM}`.trim();
+    const h1 = parseInt(sH, 10);
+    const h2 = parseInt(eH, 10);
+    if (h1 <= 24 && h2 <= 24 && (h1 < h2 || (h1 === h2 && sM < eM))) {
+      return `${dayPrefix}${sH}:${sM}–${eH}:${eM}`.trim();
+    }
   }
 
-  // 4. 1-2 digit hour pairs, e.g. 08_17, 8_18, 08-18, 8bis17, 0800_17
+  // 5. 4-part separated HH_MM_HH_MM pairs, e.g. `SondZeit_07_30_18_00` or `SZ_8_30_bis_17_30`
+  const fourPartMatch = clean.match(
+    /(?:^|[_\-.a-zA-Z])([0-2]?\d)[_.:]([0-5]\d)[_\-.]*(?:bis|to|[_\-.])+[_\-.]*([0-2]?\d)[_.:]([0-5]\d)(?:[_\-.a-zA-Z]|$)/i
+  );
+  if (fourPartMatch) {
+    const h1 = parseInt(fourPartMatch[1], 10);
+    const m1 = fourPartMatch[2];
+    const h2 = parseInt(fourPartMatch[3], 10);
+    const m2 = fourPartMatch[4];
+    if (h1 >= 0 && h1 <= 24 && h2 >= 0 && h2 <= 24 && (h1 < h2 || (h1 === h2 && m1 < m2))) {
+      return `${dayPrefix}${String(h1).padStart(2, '0')}:${m1}–${String(h2).padStart(2, '0')}:${m2}`.trim();
+    }
+  }
+
+  // 6. 1-2 digit hour pairs, e.g. `08_17`, `8_18`, `08-18`, `8bis17`
   const hourMatch = clean.match(
-    /(?:^|[_\-.a-zA-Z])([0-2]?\d)(?:[:.]?([0-5]\d))?[_\-.]*(?:bis|to|[_\-.])+[_\-.]*([0-2]?\d)(?:[:.]?([0-5]\d))?(?:[_\-.a-zA-Z]|$)/i
+    /(?:^|[_\-.a-zA-Z])([0-2]?\d)(?:[:.]([0-5]\d))?[_\-.]*(?:bis|to|[_\-.])+[_\-.]*([0-2]?\d)(?:[:.]([0-5]\d))?(?:[_\-.a-zA-Z]|$)/i
   );
   if (hourMatch) {
     const h1 = parseInt(hourMatch[1], 10);
@@ -1564,12 +2014,68 @@ export function extractScheduleFromSondZeitName(rawName: string): string | null 
 }
 
 /**
+ * Searches workspace modules for a central `WHERE Sys_SondZeit` / `IF Sys_SondZeit = <ref>` branch
+ * matching `sondRef` and extracts the clock times defined inside that branch.
+ */
+function lookupSondZeitInCentralModules(
+  sondRef: string,
+  workspace: ScriptWorkspace,
+  currentMod?: ScriptModule
+): string | null {
+  const cleanRef = sondRef.replace(/^['"]|['"]$/g, '').trim();
+  if (!cleanRef || cleanRef.length < 2) return null;
+  const escaped = cleanRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const branchTriggerRegex = new RegExp(
+    `(?:^|\\b)(?:VALUE\\s+["']?${escaped}["']?\\s*:|IF\\b[^\\r\\n]*\\b(?:Sys_SondZeit|SondZeit|Zeitplan)\\b[^\\r\\n]*["']?${escaped}["']?|CASE\\s+["']?${escaped}["']?)`,
+    'i'
+  );
+
+  for (const mod of workspace.modules) {
+    if (mod === currentMod || !mod.rawText) continue;
+    if (!mod.rawText.toLowerCase().includes(cleanRef.toLowerCase())) continue;
+
+    const lines = mod.rawText.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      if (!branchTriggerRegex.test(lines[i])) continue;
+
+      // Capture this branch slice until the next sibling VALUE / DEFAULT / ELSE / END WHERE / END SECTION
+      const slice: string[] = [lines[i]];
+      let depth = 0;
+      for (let j = i + 1; j < Math.min(lines.length, i + 45); j++) {
+        const lt = lines[j].trim();
+        if (depth === 0 && /^(?:VALUE\b|DEFAULT\s*:|OTHERWISE\s*:|END\s+WHERE\b|END\s+SECTION\b|ELSE\b)/i.test(lt)) {
+          break;
+        }
+        if (/^if\b.*\bthen\b/i.test(lt) && !/\b(?:end\s*if|endif)\b/i.test(lt)) depth++;
+        if (/^(?:end\s*if|endif)\b/i.test(lt)) {
+          if (depth === 0) break;
+          depth--;
+        }
+        slice.push(lines[j]);
+      }
+
+      const branchText = slice.join('\n');
+      const structured = extractStructuredSchedulesFromScriptText(branchText);
+      if (structured && /\b\d{1,2}:\d{2}\b/.test(structured)) {
+        return structured;
+      }
+      const simple = extractReadableScheduleAndHolidayFromText(branchText);
+      if (simple.schedule && /\b\d{1,2}:\d{2}\b/.test(simple.schedule)) {
+        return simple.schedule;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Resolves a schedule string or SondZeit script reference to concrete human-readable clock times.
- * Follows the 3-step hierarchy confirmed by user:
- * 1. Current script's internal TIME OF DAY / DAY OF WEEK rules or prose.
- * 2. Lookup of the referenced SondZeit module within the workspace.
+ * Follows the hierarchy:
+ * 1. Current script's internal TIME OF DAY / DAY OF WEEK rules or structured rawText blocks.
+ * 2. Lookup of the referenced SondZeit module (or central SondZeit switch / called time-check sub-script) within the workspace.
  * 3. Pattern extraction from the SondZeit script/variable name (e.g. `_08_17` -> `08:00–17:00`).
- * 4. Fallback to clean script reference if no times can be derived.
+ * 4. Header/comment schedule hint fallback (if documented in script comments).
+ * 5. Fallback to clean script reference if no times can be derived.
  *
  * Formats result as: `[Wochentage] [Uhrzeiten] ([SondZeit-Referenz])`
  */
@@ -1584,26 +2090,29 @@ export function resolveScheduleWithSondZeit(
   scriptReference?: string;
   pureTimes?: string;
 } {
-  const schedStr = (rawSchedule || '').trim().replace(/^['"]|['"]$/g, '');
+  const schedStr = cleanOpeningHoursDisplayText((rawSchedule || '').trim().replace(/^['"]|['"]$/g, ''));
 
   // Guard: if already resolved and formatted like `Mo–Fr 08:00–17:00 (SondZeit_...)`, return directly
   const alreadyResolvedMatch = schedStr.match(/^(.*?)\s*\(([A-Za-z0-9_.-]+)\)$/);
   if (alreadyResolvedMatch && /\b(?:\d{1,2}[:.]\d{2}|24\/7)\b/i.test(alreadyResolvedMatch[1])) {
+    const cleanPure = cleanOpeningHoursDisplayText(alreadyResolvedMatch[1]);
     return {
-      displayText: schedStr,
+      displayText: `${cleanPure} (${alreadyResolvedMatch[2]})`,
       hasSchedule: true,
       hasConcreteTimes: true,
       scriptReference: alreadyResolvedMatch[2],
-      pureTimes: alreadyResolvedMatch[1].trim(),
+      pureTimes: cleanPure,
     };
   }
 
   const hasClockTime = /\b(?:\d{1,2}[:.]\d{2}|vor\s+\d{1,2}|ab\s+\d{1,2}|24\/7)\b/i.test(schedStr);
+  const schedIsDayOnly = isWeekdayOnlyLabel(schedStr);
   const isSondZeitRef =
     /\b(?:sondzeit|sondstat|sondrouting|zeitplan|sonderzeit)\b/i.test(schedStr) ||
     (!hasClockTime &&
+      !schedIsDayOnly &&
       schedStr.length > 0 &&
-      !/\b(?:wochenende|nachtschaltung|feiertag|keine\s+zeit)\b/i.test(schedStr));
+      !/\b(?:wochenende|nachtschaltung|feiertag|keine\s+zeit|au[sß]erhalb)\b/i.test(schedStr));
 
   // If it already has clock times and does NOT mention a raw SondZeit placeholder, return as-is
   if (hasClockTime && !isSondZeitRef) {
@@ -1615,11 +2124,14 @@ export function resolveScheduleWithSondZeit(
     };
   }
 
-  // Identify candidate SondZeit reference
-  let sondRef = schedStr;
+  // Identify candidate SondZeit reference (never treat a pure weekday like `Mo–Fr` as a SondZeit script name!)
+  let sondRef = schedIsDayOnly ? '' : schedStr;
   if (!sondRef && currentMod) {
     const ruleSond = currentMod.rules.find(
-      (r) => r.schedule && !/\b\d{1,2}[:.]\d{2}\b/.test(r.schedule)
+      (r) =>
+        r.schedule &&
+        !/\b\d{1,2}[:.]\d{2}\b/.test(r.schedule) &&
+        !isWeekdayOnlyLabel(r.schedule)
     )?.schedule;
     if (ruleSond) {
       sondRef = ruleSond.trim().replace(/^['"]|['"]$/g, '');
@@ -1637,29 +2149,47 @@ export function resolveScheduleWithSondZeit(
     }
   }
 
-  // 1. Current Script Direct Check: Check if currentMod contains concrete times in any of its rules or in rawText
+  // Helper to extract ALL concrete times from a ScriptModule
+  const extractAllTimesFromModule = (mod: ScriptModule): string | null => {
+    if (mod.rawText) {
+      const structured = extractStructuredSchedulesFromScriptText(mod.rawText);
+      if (structured && /\b\d{1,2}:\d{2}\b/.test(structured)) {
+        return structured;
+      }
+    }
+    const collectedFromRules: string[] = [];
+    for (const r of mod.rules) {
+      if (r.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(r.schedule)) {
+        const clean = cleanOpeningHoursDisplayText(r.schedule);
+        if (!collectedFromRules.includes(clean)) collectedFromRules.push(clean);
+      } else {
+        const det = extractReadableScheduleAndHolidayFromText(
+          `${r.condition || ''} ${r.rawLine || ''}`
+        );
+        if (det.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(det.schedule)) {
+          if (!collectedFromRules.includes(det.schedule)) collectedFromRules.push(det.schedule);
+        }
+      }
+    }
+    if (collectedFromRules.length > 0) {
+      return collectedFromRules.join(', ');
+    }
+    if (mod.rawText) {
+      const fromText = extractReadableScheduleAndHolidayFromText(mod.rawText);
+      if (fromText.schedule && /\b\d{1,2}:\d{2}\b/.test(fromText.schedule)) {
+        return fromText.schedule;
+      }
+    }
+    return null;
+  };
+
+  // 1. Current Script Direct Check: Check if currentMod contains concrete times
   let directTimes: string | null = null;
   if (currentMod) {
-    for (const r of currentMod.rules) {
-      if (r.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(r.schedule)) {
-        directTimes = r.schedule.trim();
-        break;
-      }
-      const det = extractReadableScheduleAndHolidayFromText(r.condition || '');
-      if (det.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(det.schedule)) {
-        directTimes = det.schedule.trim();
-        break;
-      }
-    }
-    if (!directTimes && currentMod.rawText) {
-      const fromText = extractReadableScheduleAndHolidayFromText(currentMod.rawText);
-      if (fromText.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(fromText.schedule)) {
-        directTimes = fromText.schedule.trim();
-      }
-    }
+    directTimes = extractAllTimesFromModule(currentMod);
   }
 
-  // 2. Referenced SondZeit Module Lookup in Workspace
+  // 2. Referenced SondZeit Module / Central Switch / Called Time-Check Sub-Script Lookup in Workspace
   let targetModTimes: string | null = null;
   let targetModFound: ScriptModule | null = null;
 
@@ -1672,31 +2202,50 @@ export function resolveScheduleWithSondZeit(
         if (m === currentMod) return false;
         const mNumKey = canonicalScriptMatchKey(m.scriptNumber);
         const mNameKey = canonicalScriptMatchKey(m.scriptName);
-        if (mNumKey === targetKey || mNameKey === targetKey) return true;
+        const mCdnKey = m.cdnAlias ? canonicalScriptMatchKey(m.cdnAlias) : '';
+        if (mNumKey === targetKey || mNameKey === targetKey || (mCdnKey && mCdnKey === targetKey)) {
+          return true;
+        }
         if (cleanRef.length >= 3) {
-          if (m.scriptNumber.toLowerCase() === cleanRef.toLowerCase()) return true;
-          if (m.scriptName.toLowerCase().includes(cleanRef.toLowerCase())) return true;
-          if (cleanRef.toLowerCase().includes(m.scriptNumber.toLowerCase())) return true;
+          const refLow = cleanRef.toLowerCase();
+          if (m.scriptNumber.toLowerCase() === refLow) return true;
+          if (m.scriptName.toLowerCase().includes(refLow)) return true;
+          if (m.scriptNumber.length >= 3 && refLow.includes(m.scriptNumber.toLowerCase())) return true;
         }
         return false;
       }) || null;
 
     if (targetModFound) {
-      for (const r of targetModFound.rules) {
-        if (r.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(r.schedule)) {
-          targetModTimes = r.schedule.trim();
+      targetModTimes = extractAllTimesFromModule(targetModFound);
+    }
+
+    // 2b. Central SondZeit switch lookup (e.g. `WHERE Sys_SondZeit` -> `VALUE "<sondRef>":`)
+    if (!targetModTimes) {
+      targetModTimes = lookupSondZeitInCentralModules(cleanRef, workspace, currentMod);
+    }
+  }
+
+  // 2c. If still no times and currentMod calls a helper time-check sub-script directly, check it
+  if (!directTimes && !targetModTimes && workspace && currentMod && currentMod.outgoingNumbers.length > 0) {
+    for (const outNum of currentMod.outgoingNumbers) {
+      const outKey = canonicalScriptMatchKey(outNum);
+      const outMod = workspace.modules.find(
+        (m) =>
+          m !== currentMod &&
+          (canonicalScriptMatchKey(m.scriptNumber) === outKey ||
+            (m.cdnAlias && canonicalScriptMatchKey(m.cdnAlias) === outKey))
+      );
+      if (
+        outMod &&
+        /(?:zeit|sondzeit|[oö]ffn|open|schedule|hours|time)/i.test(
+          `${outMod.scriptNumber} ${outMod.scriptName}`
+        )
+      ) {
+        const subTimes = extractAllTimesFromModule(outMod);
+        if (subTimes) {
+          targetModTimes = subTimes;
+          if (!targetModFound) targetModFound = outMod;
           break;
-        }
-        const det = extractReadableScheduleAndHolidayFromText(r.condition || '');
-        if (det.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(det.schedule)) {
-          targetModTimes = det.schedule.trim();
-          break;
-        }
-      }
-      if (!targetModTimes && targetModFound.rawText) {
-        const fromText = extractReadableScheduleAndHolidayFromText(targetModFound.rawText);
-        if (fromText.schedule && /\b\d{1,2}[:.]\d{2}\b/.test(fromText.schedule)) {
-          targetModTimes = fromText.schedule.trim();
         }
       }
     }
@@ -1708,27 +2257,35 @@ export function resolveScheduleWithSondZeit(
     (targetModFound ? extractScheduleFromSondZeitName(targetModFound.scriptName) : null) ||
     (targetModFound ? extractScheduleFromSondZeitName(targetModFound.scriptNumber) : null);
 
-  // Precedence: Direct Script Times > Target Module Times > Name Pattern Times
-  const resolvedTimes = directTimes || targetModTimes || nameTimes;
+  // 4. Last-resort header/comment schedule hint fallback
+  const commentTimes =
+    currentMod?.commentScheduleHint || targetModFound?.commentScheduleHint || null;
+
+  // Precedence: Direct Script Times > Target Module / Central Switch Times > Name Pattern Times > Comment Hint
+  let resolvedTimes = directTimes || targetModTimes || nameTimes || commentTimes;
+
+  // If the original schedule was weekday-only (e.g. `Mo–Fr`) and resolvedTimes has clock times without weekdays, combine them cleanly!
+  if (schedIsDayOnly && resolvedTimes && !extractDayExpressionsFromText(resolvedTimes).length) {
+    resolvedTimes = `${schedStr} ${resolvedTimes}`;
+  }
 
   if (resolvedTimes) {
+    const cleanResolved = cleanOpeningHoursDisplayText(resolvedTimes);
     const refLabel =
       sondRef ||
       (targetModFound ? targetModFound.scriptName || targetModFound.scriptNumber : '');
-    const refTag = refLabel ? ` (${refLabel})` : '';
-    const formatted = resolvedTimes.includes(refLabel)
-      ? resolvedTimes
-      : `${resolvedTimes}${refTag}`;
+    const refTag = refLabel && !cleanResolved.includes(refLabel) ? ` (${refLabel})` : '';
+    const formatted = `${cleanResolved}${refTag}`;
     return {
       displayText: formatted,
       hasSchedule: true,
       hasConcreteTimes: true,
       scriptReference: refLabel || undefined,
-      pureTimes: resolvedTimes,
+      pureTimes: cleanResolved,
     };
   }
 
-  // 4. Pure Name Fallback if no times could be determined anywhere
+  // 5. Pure Name Fallback if no times could be determined anywhere
   if (sondRef) {
     return {
       displayText: sondRef,
@@ -1742,6 +2299,7 @@ export function resolveScheduleWithSondZeit(
     displayText: schedStr,
     hasSchedule: Boolean(schedStr),
     hasConcreteTimes: hasClockTime,
+    pureTimes: hasClockTime ? schedStr : undefined,
   };
 }
 
@@ -2165,7 +2723,7 @@ function parseAaccScriptBlocks(
     }
 
     interface ConditionFrame {
-      kind: 'if' | 'where' | 'event';
+      kind: 'if' | 'where' | 'value' | 'event';
       condText: string;
       orga: AaccOrgaContext;
       isFaxCond: boolean;
@@ -2329,6 +2887,11 @@ function parseAaccScriptBlocks(
         return nonEventFrames.map((f) => f.condText).slice(-2).join(' · ');
       }
       return undefined;
+    };
+
+    const getFullActiveScheduleConditionText = (): string => {
+      const nonEventFrames = conditionStack.filter((f) => f.kind !== 'event');
+      return nonEventFrames.map((f) => f.condText).join(' · ');
     };
 
     const getActiveIntrinsics = (): string[] => {
@@ -2719,8 +3282,9 @@ function parseAaccScriptBlocks(
           ? 'Voice-Prompt'
           : 'Ansage / RAN';
 
+        const fullStackCond = getFullActiveScheduleConditionText();
         const detectedTime = extractReadableScheduleAndHolidayFromText(
-          `${stackCond || ''} ${caseLabel || ''} ${rawLine}`
+          `${fullStackCond || stackCond || ''} ${caseLabel || ''} ${rawLine}`
         );
 
         const nextPrio = Math.max(
@@ -2852,7 +3416,12 @@ function parseAaccScriptBlocks(
       // Handle END WHERE / END SELECT
       if (/^end\s+(?:where|select|case)\b/i.test(t)) {
         for (let idx = conditionStack.length - 1; idx >= 0; idx--) {
-          if (conditionStack[idx].kind === 'where') {
+          const kind = conditionStack[idx].kind;
+          if (kind === 'value') {
+            conditionStack.splice(idx, 1);
+            continue;
+          }
+          if (kind === 'where') {
             conditionStack.splice(idx, 1);
             break;
           }
@@ -3023,9 +3592,16 @@ function parseAaccScriptBlocks(
         continue;
       }
 
-      // Handle `VALUE <val> : <action>` & `DEFAULT:` / `OTHERWISE:` (numeric DNIS, DTMF choices, or WHERE cases)
-      const valueMatch = t.match(/^(?:VALUE\s+(.+?)|(DEFAULT|OTHERWISE))\s*:\s*(.*)$/i);
+      // Handle `VALUE <val> : <action>` & `DEFAULT:` / `OTHERWISE:` (numeric DNIS, DTMF choices, clock ranges like `08:00..17:00`, or WHERE cases)
+      const valueMatch = t.match(/^(?:VALUE\s+((?:[^:]|:\d{2})+?)|(DEFAULT|OTHERWISE))\s*:\s*(.*)$/i);
       if (valueMatch) {
+        // Close any previous sibling `value` frame inside the same WHERE block
+        while (
+          conditionStack.length > 0 &&
+          conditionStack[conditionStack.length - 1].kind === 'value'
+        ) {
+          conditionStack.pop();
+        }
         const rawVals = (valueMatch[1] || valueMatch[2] || '').trim();
         const afterColon = (valueMatch[3] || '').trim();
         const valueNums = valueMatch[1] ? parseValueTriggerNumbers(rawVals) : [];
@@ -3054,8 +3630,9 @@ function parseAaccScriptBlocks(
         const isFaxVal =
           /\bfax(?:routing)?\b/i.test(t) ||
           valueNums.some((v) => /^\d{4}$/.test(v));
+        const cleanValLabel = rawVals.replace(/^['"]|['"]$/g, '');
         const caseLabel =
-          valueNums.length === 0 ? `Wert: ${rawVals.replace(/^['"]|['"]$/g, '')}` : undefined;
+          valueNums.length === 0 ? `Wert: ${cleanValLabel}` : undefined;
 
         if (!afterColon) {
           pendingValueTrigger = {
@@ -3065,6 +3642,21 @@ function parseAaccScriptBlocks(
             isFax: isFaxVal,
             caseLabel,
           };
+          // Preserve weekday/time VALUE blocks across multi-line nested IFs inside WHERE
+          if (
+            valueMatch[1] &&
+            (extractDayExpressionsFromText(cleanValLabel).length > 0 ||
+              extractClockRangesFromSingleClause(cleanValLabel).length > 0)
+          ) {
+            conditionStack.push({
+              kind: 'value',
+              condText: cleanValLabel,
+              orga: orgaFromVal,
+              isFaxCond: isFaxVal,
+              hadInlineRules: false,
+              intrinsics: [],
+            });
+          }
           continue;
         }
 
@@ -3255,6 +3847,9 @@ function parseAaccScriptBlocks(
           isAnnouncementOrEndpointTargetName(scriptName) ||
           rules.some((r) => Boolean(r.announcement || r.isDisconnect)));
 
+      const commentScheduleHint =
+        chunks.length === 1 ? extractCommentScheduleHint(rawText) || undefined : undefined;
+
       modules.push({
         scriptNumber,
         scriptName,
@@ -3267,6 +3862,7 @@ function parseAaccScriptBlocks(
         origin: options?.origin || 'legacy-text',
         sourceFilename: options?.sourceFilename,
         rawText: trimmedChunk,
+        commentScheduleHint,
         rules,
         outgoingNumbers: Array.from(outSet),
       });
@@ -7705,6 +8301,107 @@ export function exportMigrationDocumentationMarkdown(
 }
 
 /**
+ * Splits a resolved opening-hours string into structured CSV/UI components:
+ * `weekdays` (e.g. `Mo–Fr`, `Mo–Do, Fr`), `clockTimes` (concrete Uhrzeiten like `08:00–17:00`),
+ * and `scheduleSource` (e.g. `SondZeit_Standard` or `Direkt im Skript`).
+ */
+export function splitOpeningHoursComponents(
+  openingHours: string,
+  hasSchedule: boolean,
+  scriptReference?: string,
+  pureTimes?: string
+): {
+  openingHours: string;
+  weekdays: string;
+  clockTimes: string;
+  scheduleSource: string;
+} {
+  const cleanFull = cleanOpeningHoursDisplayText(openingHours || '');
+
+  if (!hasSchedule) {
+    const is247 = /24\/7|keine\s+zeitbeschr/i.test(cleanFull);
+    return {
+      openingHours: cleanFull || 'Keine Zeitbeschränkung (24/7)',
+      weekdays: is247 ? 'Mo–So (24/7)' : '—',
+      clockTimes: is247 ? '00:00–24:00 (24/7)' : '—',
+      scheduleSource: is247 ? '24/7 (Keine Zeitbegrenzung)' : '—',
+    };
+  }
+
+  // Extract trailing `(SondZeit_Ref)` if not explicitly provided
+  let ref = (scriptReference || '').trim();
+  let core = cleanOpeningHoursDisplayText(pureTimes || cleanFull);
+  const parenMatch = cleanFull.match(/^(.*?)\s*\(([A-Za-z0-9_.-]+)\)$/);
+  if (parenMatch) {
+    if (!ref) ref = parenMatch[2];
+    if (!pureTimes) core = cleanOpeningHoursDisplayText(parenMatch[1]);
+  }
+
+  // 24/7 explicit schedule (e.g. `24/7 (Rund um die Uhr)`)
+  if (/\b24\/7\b/i.test(core)) {
+    return {
+      openingHours: cleanFull,
+      weekdays: 'Mo–So (24/7)',
+      clockTimes: '00:00–24:00 (24/7)',
+      scheduleSource: ref || 'Direkt im Skript',
+    };
+  }
+
+  // Check if core has multi-day/multi-window segments like `Mo–Do 08:00–17:00, Fr 08:00–15:00`
+  const segments = core
+    .split(/\s*,\s*(?=(?:Mo|Di|Mi|Do|Fr|Sa|So|Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag)\b)/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const dayList: string[] = [];
+  const clockList: string[] = [];
+
+  for (const seg of segments) {
+    const segDays = extractDayExpressionsFromText(seg);
+    const segClocks = extractClockRangesFromSingleClause(seg);
+    segDays.forEach((d) => {
+      if (!dayList.includes(d)) dayList.push(d);
+    });
+    if (segClocks.length > 0) {
+      if (segments.length > 1 && segDays.length > 0) {
+        const entry = `${segDays[0]} ${segClocks.join(', ')}`;
+        if (!clockList.includes(entry)) clockList.push(entry);
+      } else {
+        segClocks.forEach((c) => {
+          if (!clockList.includes(c)) clockList.push(c);
+        });
+      }
+    }
+  }
+
+  // Also preserve explicit single clock comparisons like `vor 08:00 Uhr` or `ab 18:00 Uhr`
+  if (clockList.length === 0) {
+    const cmpMatch = core.match(/\b(?:vor|ab)\s+\d{1,2}:\d{2}\s*Uhr\b/gi);
+    if (cmpMatch) {
+      cmpMatch.forEach((c) => {
+        if (!clockList.includes(c)) clockList.push(c);
+      });
+    }
+  }
+
+  const weekdays = dayList.length > 0 ? dayList.join(', ') : clockList.length > 0 ? 'Täglich / Alle Tage' : '—';
+  const clockTimes =
+    clockList.length > 0
+      ? clockList.join(', ')
+      : ref
+      ? `Nicht im Skript definiert (CCMA-Tabelle: ${ref})`
+      : '—';
+  const scheduleSource = ref || (clockList.length > 0 || dayList.length > 0 ? 'Direkt im Skript' : '—');
+
+  return {
+    openingHours: cleanFull,
+    weekdays,
+    clockTimes,
+    scheduleSource,
+  };
+}
+
+/**
  * Erstellt die strukturierte Öffnungszeiten- und Feiertags-Übersichtsliste über alle Skripte im Callflow.
  */
 export function buildWorkspaceScheduleOverview(
@@ -7719,26 +8416,70 @@ export function buildWorkspaceScheduleOverview(
       rule: ScriptRule;
       scheduleText: string;
       holidayText: string;
+      scriptReference?: string;
+      pureTimes?: string;
     }> = [];
 
     for (const r of sortedRules) {
-      const det = extractReadableScheduleAndHolidayFromText(r.condition || '');
-      const rawSched = (r.schedule || det.schedule || '').trim();
+      const det = extractReadableScheduleAndHolidayFromText(
+        `${r.condition || ''} ${r.rawLine || ''} ${r.stepName || ''}`
+      );
+      const rawSched = cleanOpeningHoursDisplayText((r.schedule || det.schedule || '').trim());
       const hol = (r.holiday || det.holiday || '').trim();
-      const resolved = resolveScheduleWithSondZeit(rawSched, mod, workspace);
-      const sched = resolved.displayText || rawSched;
+
+      if (!rawSched && !hol) {
+        continue;
+      }
+
+      const resolved = rawSched
+        ? resolveScheduleWithSondZeit(rawSched, mod, workspace)
+        : {
+            displayText: '',
+            hasSchedule: false,
+            hasConcreteTimes: false,
+            scriptReference: undefined,
+            pureTimes: undefined,
+          };
+
+      const sched = cleanOpeningHoursDisplayText(resolved.displayText || rawSched);
       if (sched || hol) {
         matchingRules.push({
           rule: r,
           scheduleText: sched,
           holidayText: hol,
+          scriptReference: resolved.scriptReference,
+          pureTimes: resolved.pureTimes,
         });
       }
     }
 
     if (matchingRules.length > 0) {
+      // If module rawText has concrete multi-window clock times (e.g. from pure `assign` blocks)
+      // and none of the matching rules captured concrete clock times yet, enrich them cleanly.
+      const anyRuleHasConcreteTimes = matchingRules.some(
+        (m) => /\b(?:\d{1,2}:\d{2}|24\/7)\b/i.test(m.scheduleText)
+      );
+      const moduleFallback = !anyRuleHasConcreteTimes
+        ? resolveScheduleWithSondZeit('', mod, workspace)
+        : null;
+
       for (const item of matchingRules) {
-        const { rule, scheduleText, holidayText } = item;
+        const { rule, holidayText } = item;
+        let scheduleText = item.scheduleText;
+        let scriptReference = item.scriptReference;
+        let pureTimes = item.pureTimes;
+
+        if (
+          !scheduleText &&
+          moduleFallback?.hasConcreteTimes &&
+          moduleFallback.displayText &&
+          /init|sonderpr[uü]fung/i.test(rule.stepName || '')
+        ) {
+          scheduleText = moduleFallback.displayText;
+          scriptReference = moduleFallback.scriptReference;
+          pureTimes = moduleFallback.pureTimes;
+        }
+
         const targets: string[] = [];
         if (rule.targetNumber) targets.push(rule.targetNumber);
         rule.choices.forEach((c) => {
@@ -7753,6 +8494,14 @@ export function buildWorkspaceScheduleOverview(
         if (targets.length > 0) actionBits.push(`Wohin: ${targets.join(', ')}`);
         if (rule.isDisconnect) actionBits.push('Anruf trennen');
 
+        const hasSched = Boolean(scheduleText);
+        const parts = splitOpeningHoursComponents(
+          scheduleText || '— (nur Feiertag/Sonderstatus)',
+          hasSched,
+          scriptReference,
+          pureTimes
+        );
+
         rows.push({
           id: `${mod.scriptNumber}:${rule.id}`,
           scriptNumber: mod.scriptNumber,
@@ -7761,11 +8510,14 @@ export function buildWorkspaceScheduleOverview(
           prio: rule.prio,
           ruleId: rule.id,
           stepName: rule.stepName || 'Zeit- / Feiertagsregel',
-          openingHours: scheduleText || '— (nur Feiertag/Sonderstatus)',
+          openingHours: parts.openingHours,
+          weekdays: parts.weekdays,
+          clockTimes: parts.clockTimes,
+          scheduleSource: parts.scheduleSource,
           holidayAndSpecial: holidayText || '—',
           closedOrOverflowAction: actionBits.join(' · ') || 'Standard-Folgeschritt',
           targetNumbers: targets,
-          hasSchedule: Boolean(scheduleText),
+          hasSchedule: hasSched,
           hasHoliday: Boolean(holidayText),
         });
       }
@@ -7785,6 +8537,15 @@ export function buildWorkspaceScheduleOverview(
           (fallbackResolved.hasConcreteTimes || fallbackResolved.scriptReference)
       );
 
+      const parts = splitOpeningHoursComponents(
+        hasFallbackSched
+          ? fallbackResolved.displayText
+          : 'Keine Zeitbeschränkung (24/7)',
+        hasFallbackSched,
+        fallbackResolved.scriptReference,
+        fallbackResolved.pureTimes
+      );
+
       rows.push({
         id: `${mod.scriptNumber}:module`,
         scriptNumber: mod.scriptNumber,
@@ -7793,9 +8554,10 @@ export function buildWorkspaceScheduleOverview(
         prio: firstRule?.prio,
         ruleId: firstRule?.id,
         stepName: firstRule?.stepName || mod.scriptName,
-        openingHours: hasFallbackSched
-          ? fallbackResolved.displayText
-          : 'Keine Zeitbeschränkung (24/7)',
+        openingHours: parts.openingHours,
+        weekdays: parts.weekdays,
+        clockTimes: parts.clockTimes,
+        scheduleSource: parts.scheduleSource,
         holidayAndSpecial: '—',
         closedOrOverflowAction: actionBits.join(' · ') || '—',
         targetNumbers: targets,
@@ -7809,13 +8571,14 @@ export function buildWorkspaceScheduleOverview(
 }
 
 /**
- * Exportiert die Öffnungszeiten- und Feiertags-Übersicht als UTF-8 CSV (mit BOM für Excel).
+ * Exportiert die Öffnungszeiten- und Feiertags-Übersicht als UTF-8 CSV (mit BOM für Excel)
+ * inkl. expliziter Spalten für Wochentage, Uhrzeiten und SondZeit-Referenz.
  */
 export function exportOpeningHoursCsv(workspace: ScriptWorkspace): string {
   const rows = buildWorkspaceScheduleOverview(workspace);
   const escapeCsvCell = (val: string | number): string => {
     const str = String(val ?? '').replace(/\r?\n/g, ' ');
-    if (/[;"\t]/.test(str)) {
+    if (/[;,"\t]/.test(str)) {
       return `"${str.replace(/"/g, '""')}"`;
     }
     return str;
@@ -7826,7 +8589,10 @@ export function exportOpeningHoursCsv(workspace: ScriptWorkspace): string {
     'Skript-Name',
     'Prio',
     'Schritt / Regel',
-    'Öffnungszeiten',
+    'Wochentage',
+    'Uhrzeiten',
+    'Öffnungszeiten (Gesamt)',
+    'SondZeit / Zeitplan-Ref',
     'Feiertag / Sonderzeit',
     'Aktion / Überlauf / Ziel',
     'Status',
@@ -7834,13 +8600,25 @@ export function exportOpeningHoursCsv(workspace: ScriptWorkspace): string {
 
   const lines = [
     headers.map(escapeCsvCell).join(';'),
-    ...rows.map((r) =>
-      [
+    ...rows.map((r) => {
+      const fallbackParts =
+        r.weekdays && r.clockTimes
+          ? {
+              openingHours: r.openingHours,
+              weekdays: r.weekdays,
+              clockTimes: r.clockTimes,
+              scheduleSource: r.scheduleSource || '—',
+            }
+          : splitOpeningHoursComponents(r.openingHours, r.hasSchedule);
+      return [
         r.scriptNumber,
         r.scriptName,
         r.prio ?? '—',
         r.stepName,
-        r.openingHours,
+        fallbackParts.weekdays,
+        fallbackParts.clockTimes,
+        fallbackParts.openingHours,
+        fallbackParts.scheduleSource,
         r.holidayAndSpecial,
         r.closedOrOverflowAction,
         r.hasSchedule && r.hasHoliday
@@ -7852,8 +8630,8 @@ export function exportOpeningHoursCsv(workspace: ScriptWorkspace): string {
           : 'Ohne Zeitangabe (24/7)',
       ]
         .map(escapeCsvCell)
-        .join(';')
-    ),
+        .join(';');
+    }),
   ];
 
   return `\uFEFF${lines.join('\r\n')}`;

@@ -770,7 +770,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
           {/* Zone 3: Version */}
           <div className="flex items-center gap-3 shrink-0">
             <span className="text-[11px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
-              Version 1.1.4
+              Version 1.1.5
             </span>
           </div>
         </div>
@@ -812,7 +812,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
           <div className="lg:col-span-7 space-y-5">
             <div className="space-y-2.5">
               <p className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 tabular-nums">
-                Version 1.1.4 · Reine Offline-Anwendung · file:// Einzeldatei · 0 Byte Netzwerkverkehr
+                Version 1.1.5 · Reine Offline-Anwendung · file:// Einzeldatei · 0 Byte Netzwerkverkehr
               </p>
               <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-50 leading-tight">
                 Offline-Callflow-Studio für Avaya-.s-Skripte, Visio &amp; Mermaid

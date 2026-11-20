@@ -144,6 +144,7 @@ export interface ScriptModule {
   visioPageName?: string;
   sourceFilename?: string;
   rawText: string;
+  commentScheduleHint?: string;
   rules: ScriptRule[];
   outgoingNumbers: string[];
 }
@@ -420,6 +421,9 @@ export interface CallflowScheduleSummaryRow {
   ruleId?: string;
   stepName: string;
   openingHours: string;
+  weekdays?: string;
+  clockTimes?: string;
+  scheduleSource?: string;
   holidayAndSpecial: string;
   closedOrOverflowAction: string;
   targetNumbers: string[];

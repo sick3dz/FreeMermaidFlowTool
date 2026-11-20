@@ -191,11 +191,11 @@ export const OpeningHoursModal: React.FC<OpeningHoursModalProps> = ({
   const handleCopyMarkdown = useCallback(() => {
     if (allRows.length === 0) return;
     const header =
-      '| Skript | Name | Prio / Schritt | Öffnungszeiten (SondZeit) | Feiertag / Sonderstatus | Aktion / Überlauf |\n|---|---|---|---|---|---|';
+      '| Skript | Name | Prio / Schritt | Wochentage | Uhrzeiten | Öffnungszeiten (SondZeit) | Feiertag / Sonderstatus | Aktion / Überlauf |\n|---|---|---|---|---|---|---|---|';
     const lines = allRows.map((r) => {
       const escCell = (s: string) => (s || '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
       const cleanHours = (r.openingHours || '').replace(/:\s+/g, ':');
-      return `| ${escCell(r.scriptNumber)} | ${escCell(r.scriptName)} | ${r.prio ? `Prio ${r.prio}: ` : ''}${escCell(r.stepName)} | ${escCell(cleanHours)} | ${escCell(r.holidayAndSpecial)} | ${escCell(r.closedOrOverflowAction)} |`;
+      return `| ${escCell(r.scriptNumber)} | ${escCell(r.scriptName)} | ${r.prio ? `Prio ${r.prio}: ` : ''}${escCell(r.stepName)} | ${escCell(r.weekdays || '—')} | ${escCell(r.clockTimes || '—')} | ${escCell(cleanHours)} | ${escCell(r.holidayAndSpecial)} | ${escCell(r.closedOrOverflowAction)} |`;
     });
     const md = [header, ...lines].join('\n');
     navigator.clipboard.writeText(md).then(() => {
