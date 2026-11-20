@@ -3854,7 +3854,8 @@ function OfflineStudioApp() {
   const buildInteractiveHtmlForSurface = useCallback(
     async (
       targetSurface: 'dark' | 'light',
-      preferredInitialView?: PreferredInitialHtmlView
+      preferredInitialView?: PreferredInitialHtmlView,
+      includeOriginalScripts = true
     ): Promise<{ html: string | null; aborted?: boolean; fallbackCount?: number; errorMessage?: string }> => {
       const exportThemeConfig: ThemeConfiguration =
         targetSurface === 'dark'
@@ -4329,7 +4330,9 @@ function OfflineStudioApp() {
                   moduleRulesPreview: snap.moduleRulesPreview,
                   specialParameters: snap.specialParameters,
                   relatedFindings: snap.relatedFindings,
-                  rawLineSnippet: snap.rawLineSnippet,
+                  rawLineSnippet: includeOriginalScripts ? snap.rawLineSnippet : undefined,
+                  highlightStartLine: includeOriginalScripts ? snap.highlightStartLine : undefined,
+                  highlightEndLine: includeOriginalScripts ? snap.highlightEndLine : undefined,
                   explanation: buildDualAudienceNodeExplanation(
                     snap,
                     parsedGraph,
@@ -4429,6 +4432,17 @@ function OfflineStudioApp() {
             ? preferredMasterKey
             : views[0].key;
 
+        const rawScriptsByNumber: Record<string, string> = {};
+        if (includeOriginalScripts) {
+          for (const mod of scriptWorkspace.modules) {
+            if (mod.scriptNumber && mod.rawText && mod.rawText.trim()) {
+              rawScriptsByNumber[mod.scriptNumber] = mod.rawText;
+            }
+          }
+        }
+        const hasAnyRawScripts =
+          includeOriginalScripts && Object.keys(rawScriptsByNumber).length > 0;
+
         return {
           html: generateInteractiveCallflowHtml(
             'Callflow',
@@ -4445,6 +4459,8 @@ function OfflineStudioApp() {
               analysis: analysisPayload,
               globalSearchIndex: globalSearchEntries,
               simulationModel: callflowSimulationModel,
+              includeOriginalScripts: hasAnyRawScripts,
+              rawScriptsByNumber: hasAnyRawScripts ? rawScriptsByNumber : undefined,
             }
           ),
           fallbackCount,

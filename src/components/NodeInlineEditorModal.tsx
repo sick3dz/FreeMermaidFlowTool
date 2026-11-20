@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowDownLeft,
@@ -7,10 +7,14 @@ import {
   BookOpen,
   Calendar,
   Check,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Copy,
+  Crosshair,
   Edit3,
   ExternalLink,
+  FileCode,
   GitBranch,
   Hash,
   Layers,
@@ -18,6 +22,7 @@ import {
   Plus,
   RotateCcw,
   Save,
+  Search,
   Sliders,
   Terminal,
   Trash2,
@@ -73,7 +78,37 @@ const BLOCK_TYPE_OPTIONS: Array<{
   { id: 'external', label: 'Externes Ziel', hint: 'Externe Rufnummer / Abwurf' },
 ];
 
-type ModalViewMode = 'layperson' | 'pro' | 'edit';
+type ModalViewMode = 'layperson' | 'pro' | 'script' | 'edit';
+
+function renderHighlightedScriptLine(lineText: string, query: string): React.ReactNode {
+  const q = query.trim();
+  if (!q) return lineText || ' ';
+  const lower = lineText.toLowerCase();
+  const qLower = q.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  let matchIdx = lower.indexOf(qLower, cursor);
+  let keyIdx = 0;
+  while (matchIdx !== -1) {
+    if (matchIdx > cursor) {
+      parts.push(lineText.slice(cursor, matchIdx));
+    }
+    parts.push(
+      <mark
+        key={`m-${keyIdx++}`}
+        className="bg-amber-400/35 text-amber-100 rounded-xs px-0.5"
+      >
+        {lineText.slice(matchIdx, matchIdx + q.length)}
+      </mark>
+    );
+    cursor = matchIdx + q.length;
+    matchIdx = lower.indexOf(qLower, cursor);
+  }
+  if (cursor < lineText.length) {
+    parts.push(lineText.slice(cursor));
+  }
+  return parts.length > 0 ? parts : ' ';
+}
 
 export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
   isOpen,
@@ -99,7 +134,11 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
   const [condition, setCondition] = useState('');
   const [outgoingConnections, setOutgoingConnections] = useState<EditableNodeConnectionItem[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [copiedSnippet, setCopiedSnippet] = useState(false);
+  const [copiedFullScript, setCopiedFullScript] = useState(false);
+  const [scriptSearchQuery, setScriptSearchQuery] = useState('');
+  const [activeSearchMatchIdx, setActiveSearchMatchIdx] = useState(0);
+  const highlightLineRef = useRef<HTMLDivElement | null>(null);
+  const activeMatchLineRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -114,7 +153,9 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
     setCondition(snapshot.condition);
     setOutgoingConnections(snapshot.outgoingConnections.map((c) => ({ ...c })));
     setConfirmDelete(false);
-    setCopiedSnippet(false);
+    setCopiedFullScript(false);
+    setScriptSearchQuery('');
+    setActiveSearchMatchIdx(0);
   }, [snapshot]);
 
   useEffect(() => {
@@ -141,6 +182,69 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
     if (!snapshot) return null;
     return buildDualAudienceNodeExplanation(snapshot, graph, scriptLabelMap);
   }, [snapshot, graph, scriptLabelMap]);
+
+  const effectiveScriptText = useMemo(() => {
+    if (!snapshot) return '';
+    if (snapshot.fullScriptText && snapshot.fullScriptText.trim()) {
+      return snapshot.fullScriptText.replace(/\r\n?/g, '\n');
+    }
+    if (snapshot.rawLineSnippet && snapshot.rawLineSnippet.trim()) {
+      return snapshot.rawLineSnippet.replace(/\r\n?/g, '\n');
+    }
+    return '';
+  }, [snapshot]);
+
+  const scriptLines = useMemo(() => {
+    if (!effectiveScriptText) return [] as string[];
+    return effectiveScriptText.split('\n');
+  }, [effectiveScriptText]);
+
+  const effectiveHighlightStart =
+    snapshot?.fullScriptText && snapshot.highlightStartLine ? snapshot.highlightStartLine : undefined;
+  const effectiveHighlightEnd =
+    effectiveHighlightStart !== undefined
+      ? Math.max(effectiveHighlightStart, snapshot?.highlightEndLine ?? effectiveHighlightStart)
+      : undefined;
+
+  const scriptSearchMatches = useMemo(() => {
+    const q = scriptSearchQuery.trim().toLowerCase();
+    if (!q || scriptLines.length === 0) return [] as number[];
+    const hits: number[] = [];
+    for (let i = 0; i < scriptLines.length; i++) {
+      if (scriptLines[i].toLowerCase().includes(q)) {
+        hits.push(i + 1);
+      }
+    }
+    return hits;
+  }, [scriptLines, scriptSearchQuery]);
+
+  const activeSearchMatchLine =
+    scriptSearchMatches.length > 0
+      ? scriptSearchMatches[
+          ((activeSearchMatchIdx % scriptSearchMatches.length) + scriptSearchMatches.length) %
+            scriptSearchMatches.length
+        ]
+      : undefined;
+
+  useEffect(() => {
+    if (!isOpen || viewMode !== 'script') return;
+    const raf = window.requestAnimationFrame(() => {
+      if (highlightLineRef.current) {
+        highlightLineRef.current.scrollIntoView({ block: 'center', behavior: 'auto' });
+      }
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [isOpen, viewMode, snapshot?.nodeId]);
+
+  useEffect(() => {
+    if (!isOpen || viewMode !== 'script' || activeSearchMatchLine === undefined) return;
+    const raf = window.requestAnimationFrame(() => {
+      if (activeMatchLineRef.current) {
+        activeMatchLineRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [isOpen, viewMode, activeSearchMatchLine, activeSearchMatchIdx]);
 
   if (!isOpen || !snapshot || !explanation) return null;
 
@@ -234,14 +338,14 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
     }
   };
 
-  const handleCopySnippet = async () => {
-    if (!snapshot.rawLineSnippet) return;
+  const handleCopyFullScript = async () => {
+    if (!effectiveScriptText) return;
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(snapshot.rawLineSnippet);
+        await navigator.clipboard.writeText(effectiveScriptText);
       } else {
         const ta = document.createElement('textarea');
-        ta.value = snapshot.rawLineSnippet;
+        ta.value = effectiveScriptText;
         ta.style.position = 'fixed';
         ta.style.opacity = '0';
         document.body.appendChild(ta);
@@ -249,11 +353,25 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
         document.execCommand('copy');
         document.body.removeChild(ta);
       }
-      setCopiedSnippet(true);
-      window.setTimeout(() => setCopiedSnippet(false), 1800);
+      setCopiedFullScript(true);
+      window.setTimeout(() => setCopiedFullScript(false), 1800);
     } catch {
       // Ignore clipboard permission errors in restricted contexts
     }
+  };
+
+  const handleJumpToHighlightedLine = () => {
+    if (highlightLineRef.current) {
+      highlightLineRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  };
+
+  const handleStepSearchMatch = (delta: number) => {
+    if (scriptSearchMatches.length === 0) return;
+    setActiveSearchMatchIdx((prev) => {
+      const len = scriptSearchMatches.length;
+      return ((prev + delta) % len + len) % len;
+    });
   };
 
   return (
@@ -364,6 +482,20 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
               >
                 <Terminal className="w-3.5 h-3.5" />
                 <span>IT-Profi</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === 'script'}
+                onClick={() => setViewMode('script')}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  viewMode === 'script'
+                    ? 'bg-slate-700 text-white'
+                    : 'text-slate-400 hover:text-slate-100'
+                }`}
+              >
+                <FileCode className="w-3.5 h-3.5" />
+                <span>Original-Skript</span>
               </button>
             </div>
 
@@ -930,40 +1062,19 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
               </section>
             )}
 
-            {/* Raw Source Snippet with Copy Button */}
-            {snapshot.rawLineSnippet && (
-              <section className="space-y-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs font-semibold text-slate-300">
-                    Original-Skript-Auszug
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleCopySnippet}
-                    className="px-2.5 py-1 rounded-md border border-slate-800 bg-slate-950 hover:bg-slate-800 text-[11px] font-medium text-slate-300 flex items-center gap-1 transition-colors cursor-pointer"
-                  >
-                    {copiedSnippet ? (
-                      <>
-                        <Check className="w-3 h-3 text-emerald-400" />
-                        <span className="text-emerald-300">Kopiert</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3 h-3 text-slate-400" />
-                        <span>Kopieren</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-                <pre className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-[11px] font-mono text-slate-200 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-40">
-                  {snapshot.rawLineSnippet}
-                </pre>
-              </section>
-            )}
-
             {/* IT-Profi Footer Actions */}
             <div className="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {effectiveScriptText && (
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('script')}
+                    className="px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-200 text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <FileCode className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Im Original-Skript prüfen</span>
+                  </button>
+                )}
                 {hasCustomPositionOffset && (
                   <button
                     type="button"
@@ -995,6 +1106,224 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                   Schließen
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* VIEW 3: ORIGINAL-SKRIPT (FULL SOURCE WITH LINE NUMBERS, NODE HIGHLIGHT, SEARCH & COPY) */}
+        {viewMode === 'script' && (
+          <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
+            {scriptLines.length === 0 ? (
+              <div className="p-6 flex-1 flex flex-col items-center justify-center text-center space-y-2">
+                <FileCode className="w-7 h-7 text-slate-600" />
+                <div className="text-sm font-medium text-slate-200">
+                  Kein Original-Skript hinterlegt
+                </div>
+                <p className="text-xs text-slate-400 max-w-md leading-relaxed">
+                  Für dieses Element liegt kein eingelesener `.s`-Quelltext vor (z. B. externes Ziel, manuell angelegter Baustein oder reines Mermaid-Diagramm).
+                </p>
+              </div>
+            ) : (
+              <>
+                {/* Script Toolbar: Metadata, Search, Jump to Node, Copy */}
+                <div className="px-4 py-2.5 border-b border-slate-800 bg-slate-950/80 flex flex-col gap-2 shrink-0">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-slate-400 font-mono tabular-nums">
+                      <span className="text-slate-200 font-semibold">
+                        {snapshot.scriptNumber ? `Skript ${snapshot.scriptNumber}` : 'Original-Quelltext'}
+                      </span>
+                      <span aria-hidden="true">·</span>
+                      <span>{scriptLines.length} Zeilen</span>
+                      {effectiveHighlightStart !== undefined && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-amber-300">
+                            Knoten-Stelle:{' '}
+                            {effectiveHighlightEnd && effectiveHighlightEnd > effectiveHighlightStart
+                              ? `Zeilen ${effectiveHighlightStart}–${effectiveHighlightEnd}`
+                              : `Zeile ${effectiveHighlightStart}`}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {effectiveHighlightStart !== undefined && (
+                        <button
+                          type="button"
+                          onClick={handleJumpToHighlightedLine}
+                          className="px-2.5 py-1 rounded-md border border-slate-800 bg-slate-900 hover:bg-slate-800 text-[11px] font-medium text-amber-300 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          title="Zur markierten Knoten-Zeile springen"
+                        >
+                          <Crosshair className="w-3 h-3" />
+                          <span>Zur Knoten-Stelle</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleCopyFullScript}
+                        className="px-2.5 py-1 rounded-md border border-slate-800 bg-slate-900 hover:bg-slate-800 text-[11px] font-medium text-slate-200 flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        {copiedFullScript ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-400" />
+                            <span className="text-emerald-300">Kopiert</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3 text-slate-400" />
+                            <span>Skript kopieren</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Live In-Script Search Bar */}
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1 min-w-0">
+                      <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={scriptSearchQuery}
+                        onChange={(e) => {
+                          setScriptSearchQuery(e.target.value);
+                          setActiveSearchMatchIdx(0);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleStepSearchMatch(e.shiftKey ? -1 : 1);
+                          }
+                        }}
+                        placeholder="Im Original-Skript suchen (z. B. GIVE RAN, QUEUE, IF, Rufnummer)…"
+                        className="w-full pl-8 pr-7 py-1.5 bg-slate-900 border border-slate-800 rounded-md text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                      />
+                      {scriptSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScriptSearchQuery('');
+                            setActiveSearchMatchIdx(0);
+                          }}
+                          aria-label="Suche leeren"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    {scriptSearchQuery.trim() && (
+                      <div className="flex items-center gap-1 shrink-0">
+                        <span className="text-[11px] font-mono text-slate-400 tabular-nums px-1.5">
+                          {scriptSearchMatches.length > 0
+                            ? `${
+                                (((activeSearchMatchIdx % scriptSearchMatches.length) +
+                                  scriptSearchMatches.length) %
+                                  scriptSearchMatches.length) +
+                                1
+                              } / ${scriptSearchMatches.length}`
+                            : '0 Treffer'}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={scriptSearchMatches.length === 0}
+                          onClick={() => handleStepSearchMatch(-1)}
+                          title="Vorheriger Treffer (Shift+Enter)"
+                          className="p-1 rounded-md border border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-300 disabled:opacity-40 cursor-pointer"
+                        >
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          disabled={scriptSearchMatches.length === 0}
+                          onClick={() => handleStepSearchMatch(1)}
+                          title="Nächster Treffer (Enter)"
+                          className="p-1 rounded-md border border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-300 disabled:opacity-40 cursor-pointer"
+                        >
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Numbered Monospace Script Viewport */}
+                <div className="flex-1 overflow-auto bg-slate-950 py-2 font-mono text-[11.5px] leading-relaxed">
+                  {scriptLines.map((lineText, idx) => {
+                    const lineNo = idx + 1;
+                    const isNodeLine =
+                      effectiveHighlightStart !== undefined &&
+                      effectiveHighlightEnd !== undefined &&
+                      lineNo >= effectiveHighlightStart &&
+                      lineNo <= effectiveHighlightEnd;
+                    const isFirstNodeLine =
+                      effectiveHighlightStart !== undefined && lineNo === effectiveHighlightStart;
+                    const isSearchActive = activeSearchMatchLine === lineNo;
+                    const isSearchHit =
+                      !isSearchActive &&
+                      scriptSearchQuery.trim().length > 0 &&
+                      scriptSearchMatches.includes(lineNo);
+
+                    const rowBg = isSearchActive
+                      ? 'bg-indigo-500/25 text-slate-50'
+                      : isNodeLine
+                      ? 'bg-amber-500/12 text-amber-100'
+                      : isSearchHit
+                      ? 'bg-indigo-500/10 text-slate-100'
+                      : 'text-slate-300 hover:bg-slate-900/80';
+
+                    return (
+                      <div
+                        key={lineNo}
+                        ref={(el) => {
+                          if (isFirstNodeLine) highlightLineRef.current = el;
+                          if (isSearchActive) activeMatchLineRef.current = el;
+                        }}
+                        className={`px-3 py-0.5 flex items-start gap-3 ${rowBg}`}
+                      >
+                        <span
+                          className={`w-10 shrink-0 text-right select-none tabular-nums ${
+                            isNodeLine
+                              ? 'text-amber-300 font-semibold'
+                              : isSearchActive
+                              ? 'text-indigo-300 font-semibold'
+                              : 'text-slate-600'
+                          }`}
+                        >
+                          {lineNo}
+                        </span>
+                        <span className="whitespace-pre-wrap break-all flex-1 min-w-0">
+                          {renderHighlightedScriptLine(lineText, scriptSearchQuery)}
+                        </span>
+                        {isFirstNodeLine && (
+                          <span className="text-[10px] font-sans font-medium text-amber-300/90 shrink-0 select-none pl-2">
+                            Knoten-Stelle
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {/* Footer */}
+            <div className="px-5 py-3 border-t border-slate-800 bg-slate-900 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setViewMode('pro')}
+                className="px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-indigo-300 text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Terminal className="w-3.5 h-3.5" />
+                <span>Zurück zu IT-Profi</span>
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Schließen
+              </button>
             </div>
           </div>
         )}

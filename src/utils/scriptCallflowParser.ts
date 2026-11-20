@@ -7920,6 +7920,91 @@ export interface EditableCallflowNodeSnapshot {
     recommendation: string;
   }>;
   rawLineSnippet?: string;
+  fullScriptText?: string;
+  highlightStartLine?: number;
+  highlightEndLine?: number;
+}
+
+/**
+ * Locates the 1-indexed start/end line numbers of a Callflow node inside its
+ * full Avaya/CCaaS `.s` script source text using ordered candidate fragments.
+ */
+export function locateNodeLinesInScript(
+  fullText: string | undefined,
+  candidates: Array<string | undefined | null>
+): { startLine: number; endLine: number } | undefined {
+  if (!fullText) return undefined;
+  const rawLines = fullText.replace(/\r\n?/g, '\n').split('\n');
+  if (rawLines.length === 0) return undefined;
+
+  const trimmedLines = rawLines.map((l) => l.trim());
+  const normalizedLines = rawLines.map((l) => l.trim().replace(/\s+/g, ' ').toLowerCase());
+
+  const cleanCandidates = candidates
+    .map((c) => (typeof c === 'string' ? c.replace(/\r\n?/g, '\n').trim() : ''))
+    .filter((c) => c.length >= 2);
+
+  // Pass 1: Multi-line block match (e.g. multi-line rule.rawLine)
+  for (const cand of cleanCandidates) {
+    if (!cand.includes('\n')) continue;
+    const candLines = cand
+      .split('\n')
+      .map((l) => l.trim().replace(/\s+/g, ' ').toLowerCase())
+      .filter((l) => l.length > 0);
+    if (candLines.length < 2) continue;
+    for (let i = 0; i < normalizedLines.length; i++) {
+      if (normalizedLines[i] !== candLines[0] && !normalizedLines[i].includes(candLines[0])) {
+        continue;
+      }
+      let matchedAll = true;
+      let endIdx = i;
+      for (let j = 1; j < candLines.length; j++) {
+        let foundNext = false;
+        const maxLookahead = Math.min(normalizedLines.length - 1, endIdx + 3);
+        for (let k = endIdx + 1; k <= maxLookahead; k++) {
+          if (normalizedLines[k] === candLines[j] || normalizedLines[k].includes(candLines[j])) {
+            endIdx = k;
+            foundNext = true;
+            break;
+          }
+        }
+        if (!foundNext) {
+          matchedAll = false;
+          break;
+        }
+      }
+      if (matchedAll) {
+        return { startLine: i + 1, endLine: endIdx + 1 };
+      }
+    }
+  }
+
+  // Pass 2: Exact normalized single-line match
+  for (const cand of cleanCandidates) {
+    const firstLine = cand.split('\n')[0].trim().replace(/\s+/g, ' ').toLowerCase();
+    if (firstLine.length < 2) continue;
+    const exactIdx = normalizedLines.findIndex((ln) => ln === firstLine);
+    if (exactIdx >= 0) {
+      return { startLine: exactIdx + 1, endLine: exactIdx + 1 };
+    }
+  }
+
+  // Pass 3: Substring match on normalized line (prefer longer, more specific candidates first)
+  for (const cand of cleanCandidates) {
+    const firstLine = cand.split('\n')[0].trim().replace(/\s+/g, ' ').toLowerCase();
+    if (firstLine.length < 3) continue;
+    const subIdx = normalizedLines.findIndex((ln) => ln.includes(firstLine));
+    if (subIdx >= 0) {
+      return { startLine: subIdx + 1, endLine: subIdx + 1 };
+    }
+  }
+
+  // Fallback: first non-empty line in the script if any line has content
+  const firstNonEmpty = trimmedLines.findIndex((ln) => ln.length > 0);
+  if (firstNonEmpty >= 0) {
+    return { startLine: firstNonEmpty + 1, endLine: firstNonEmpty + 1 };
+  }
+  return undefined;
 }
 
 export interface WorkspaceInspectContext {
@@ -8255,6 +8340,15 @@ export function inspectWorkspaceNodeForEdit(
         : undefined;
 
       const graphIn = collectGraphIncoming();
+      const locatedLines = locateNodeLinesInScript(mod.rawText, [
+        rule.rawLine,
+        rule.condition,
+        rule.announcement,
+        rule.queueTarget,
+        rule.targetNumber,
+        rule.schedule,
+        rule.stepName,
+      ]);
 
       return {
         nodeId,
@@ -8289,6 +8383,9 @@ export function inspectWorkspaceNodeForEdit(
         specialParameters: getCachedSpecialParameters(mod).slice(0, 10),
         relatedFindings: collectFindingsForMod(modKey, rule.id),
         rawLineSnippet: rule.rawLine?.trim() || undefined,
+        fullScriptText: mod.rawText?.trim() ? mod.rawText : undefined,
+        highlightStartLine: locatedLines?.startLine,
+        highlightEndLine: locatedLines?.endLine,
       };
     }
   }
@@ -8359,6 +8456,12 @@ export function inspectWorkspaceNodeForEdit(
       viewLevel.level !== 'detail' ||
       canonicalScriptMatchKey(viewLevel.scriptNumber) !== targetKey;
 
+    const locatedModuleLines = locateNodeLinesInScript(mod.rawText, [
+      mod.scriptName,
+      mod.scriptNumber,
+      primaryRule?.rawLine,
+    ]);
+
     return {
       nodeId,
       mode: 'workspace-module',
@@ -8387,6 +8490,9 @@ export function inspectWorkspaceNodeForEdit(
       specialParameters: getCachedSpecialParameters(mod).slice(0, 12),
       relatedFindings: collectFindingsForMod(targetKey),
       rawLineSnippet: mod.rawText ? mod.rawText.trim().split('\n').slice(0, 8).join('\n') : undefined,
+      fullScriptText: mod.rawText?.trim() ? mod.rawText : undefined,
+      highlightStartLine: locatedModuleLines?.startLine,
+      highlightEndLine: locatedModuleLines?.endLine,
     };
   }
 

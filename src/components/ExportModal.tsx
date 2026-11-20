@@ -48,7 +48,8 @@ interface ExportModalProps {
   defaultMasterCompact?: boolean;
   buildInteractiveHtml?: (
     targetSurface: 'dark' | 'light',
-    preferredInitialView?: PreferredInitialHtmlView
+    preferredInitialView?: PreferredInitialHtmlView,
+    includeOriginalScripts?: boolean
   ) => Promise<{
     html: string | null;
     aborted?: boolean;
@@ -89,6 +90,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [preferredHtmlView, setPreferredHtmlView] = useState<PreferredInitialHtmlView>(
     defaultMasterCompact ? 'master-compact' : 'master-detailed'
   );
+  const [includeOriginalScripts, setIncludeOriginalScripts] = useState<boolean>(scriptCount > 0);
   const [isExportingPng, setIsExportingPng] = useState(false);
   const [isExportingHtml, setIsExportingHtml] = useState(false);
   const [copiedType, setCopiedType] = useState<'svg' | 'mmd' | 'md' | null>(null);
@@ -97,7 +99,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   React.useEffect(() => {
     setBgMode(defaultBackground);
     setPreferredHtmlView(defaultMasterCompact ? 'master-compact' : 'master-detailed');
-  }, [defaultBackground, defaultMasterCompact, isOpen]);
+    if (scriptCount === 0) {
+      setIncludeOriginalScripts(false);
+    }
+  }, [defaultBackground, defaultMasterCompact, isOpen, scriptCount]);
 
   const baseDimensions = useMemo(() => {
     if (!svgContent) return { width: 1200, height: 800 };
@@ -184,7 +189,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       let fallbackCount = 0;
       let buildErrorMessage: string | undefined;
       if (buildInteractiveHtml) {
-        const res = await buildInteractiveHtml(targetSurface, preferredHtmlView);
+        const res = await buildInteractiveHtml(
+          targetSurface,
+          preferredHtmlView,
+          includeOriginalScripts
+        );
         htmlContent = res.html;
         wasAborted = Boolean(res.aborted);
         fallbackCount = res.fallbackCount ?? 0;
@@ -379,6 +388,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   </button>
                 ))}
               </div>
+              <label className="mt-2.5 flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-slate-700 transition-colors cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includeOriginalScripts}
+                  onChange={(e) => setIncludeOriginalScripts(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-600 bg-slate-900 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-0 cursor-pointer"
+                />
+                <div className="min-w-0 space-y-0.5">
+                  <div className="text-xs font-medium text-slate-200">
+                    Original-Skript-Text einbetten (3. Reiter in Knoten-Info)
+                  </div>
+                  <div className="text-[11px] text-slate-400 leading-relaxed">
+                    Ermöglicht den Reiter „Original-Skript“ mit Zeilennummern, Suche und Kopier-Button in Callflow.html. Bei externer Weitergabe deaktivieren, um alle Roh-Skripte vollständig auszuschließen.
+                  </div>
+                </div>
+              </label>
             </div>
           )}
 

@@ -3275,6 +3275,8 @@ export interface InteractiveCallflowHtmlNodeDetail {
     recommendation: string;
   }>;
   rawLineSnippet?: string;
+  highlightStartLine?: number;
+  highlightEndLine?: number;
   explanation?: DualAudienceNodeExplanation;
 }
 
@@ -3332,6 +3334,8 @@ export function generateInteractiveCallflowHtml(
     analysis?: InteractiveCallflowHtmlAnalysisPayload | null;
     globalSearchIndex?: GlobalSearchEntry[] | null;
     simulationModel?: CallflowSimulationModel | null;
+    includeOriginalScripts?: boolean;
+    rawScriptsByNumber?: Record<string, string>;
   }
 ): string {
   const effectiveViews: InteractiveCallflowHtmlView[] =
@@ -3368,18 +3372,43 @@ export function generateInteractiveCallflowHtml(
         /^(?:main|start|master(?:script)?)$/i.test(v.scriptNumber.trim())
     ) || effectiveViews.find((v) => /Main \(Einstiegsskript\)/i.test(v.label));
 
-  const serializedViews = effectiveViews.map((v) => ({
-    key: v.key,
-    label: v.label,
-    scriptNumber: v.scriptNumber || null,
-    masterViewVariant: v.masterViewVariant || null,
-    svg: v.svg,
-    graph: {
-      nodes: Array.from(v.graph.nodes.values()),
-      edges: v.graph.edges,
-    },
-    nodeDetails: v.nodeDetails || null,
-  }));
+  const hasOriginalScriptsEnabled = Boolean(
+    options?.includeOriginalScripts &&
+      options?.rawScriptsByNumber &&
+      Object.keys(options.rawScriptsByNumber).length > 0
+  );
+
+  const sanitizedRawScriptsByNumber = hasOriginalScriptsEnabled
+    ? options?.rawScriptsByNumber || {}
+    : null;
+
+  const serializedViews = effectiveViews.map((v) => {
+    let serializedNodeDetails: Record<string, InteractiveCallflowHtmlNodeDetail> | null = null;
+    if (v.nodeDetails) {
+      if (hasOriginalScriptsEnabled) {
+        serializedNodeDetails = v.nodeDetails;
+      } else {
+        serializedNodeDetails = {};
+        for (const [nid, det] of Object.entries(v.nodeDetails)) {
+          const { rawLineSnippet: _r, highlightStartLine: _hs, highlightEndLine: _he, ...cleanDet } =
+            det;
+          serializedNodeDetails[nid] = cleanDet;
+        }
+      }
+    }
+    return {
+      key: v.key,
+      label: v.label,
+      scriptNumber: v.scriptNumber || null,
+      masterViewVariant: v.masterViewVariant || null,
+      svg: v.svg,
+      graph: {
+        nodes: Array.from(v.graph.nodes.values()),
+        edges: v.graph.edges,
+      },
+      nodeDetails: serializedNodeDetails,
+    };
+  });
 
   const drillTargetsByNodeId: Record<string, { viewKey: string; scriptRef: string }> = {};
   const viewKeyByScriptNumber: Record<string, string> = {};
@@ -3421,6 +3450,8 @@ export function generateInteractiveCallflowHtml(
     analysis: options?.analysis || null,
     globalSearchIndex: options?.globalSearchIndex || [],
     simulationModel: options?.simulationModel || { scripts: [], dnisEntries: [] },
+    includeOriginalScripts: hasOriginalScriptsEnabled,
+    rawScriptsByNumber: sanitizedRawScriptsByNumber,
   }).replace(/<\/script>/gi, '<\\/script>');
 
   const hasMultiViews = effectiveViews.length > 1;
@@ -4152,6 +4183,9 @@ export function generateInteractiveCallflowHtml(
       justify-content: center;
       padding: 16px;
     }
+    .modal-backdrop.open {
+      display: flex;
+    }
     .modal-shell {
       background: var(--bg-card);
       border: 1px solid var(--border-strong);
@@ -4486,6 +4520,161 @@ export function generateInteractiveCallflowHtml(
       background: var(--accent);
       color: #ffffff;
     }
+    .audience-btn.active-script {
+      background: #475569;
+      color: #ffffff;
+    }
+    html.light .audience-btn.active-script {
+      background: #334155;
+      color: #ffffff;
+    }
+    .script-panel {
+      display: flex;
+      flex-direction: column;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--bg-seg);
+    }
+    .script-toolbar {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-header);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .script-toolbar-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 11.5px;
+    }
+    .script-meta {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .script-meta strong {
+      color: var(--text-main);
+    }
+    .script-meta-hl {
+      color: var(--amber-text);
+      font-weight: 600;
+    }
+    .script-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .script-search-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .script-search-input {
+      flex: 1;
+      min-width: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px;
+      padding: 5px 8px;
+    }
+    .script-search-nav {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .script-search-count {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 0 4px;
+      white-space: nowrap;
+    }
+    .script-viewer {
+      max-height: 50vh;
+      overflow: auto;
+      padding: 6px 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px;
+      line-height: 1.55;
+      background: var(--bg-seg);
+    }
+    .script-line {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 1px 12px;
+      color: var(--text-main);
+    }
+    .script-line:hover {
+      background: var(--bg-hover);
+    }
+    .script-line.is-node-highlight {
+      background: rgba(245, 158, 11, 0.14);
+    }
+    html.light .script-line.is-node-highlight {
+      background: rgba(245, 158, 11, 0.16);
+    }
+    .script-line.is-search-match {
+      background: rgba(99, 102, 241, 0.12);
+    }
+    .script-line.is-search-active {
+      background: rgba(99, 102, 241, 0.28);
+    }
+    .script-ln {
+      width: 38px;
+      flex-shrink: 0;
+      text-align: right;
+      user-select: none;
+      color: var(--text-dim);
+      font-variant-numeric: tabular-nums;
+    }
+    .script-line.is-node-highlight .script-ln {
+      color: var(--amber-text);
+      font-weight: 700;
+    }
+    .script-line.is-search-active .script-ln {
+      color: var(--accent-text);
+      font-weight: 700;
+    }
+    .script-code {
+      flex: 1;
+      min-width: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .script-node-tag {
+      flex-shrink: 0;
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--amber-text);
+      user-select: none;
+      padding-left: 8px;
+    }
+    mark.script-mark {
+      background: rgba(251, 191, 36, 0.35);
+      color: inherit;
+      border-radius: 2px;
+      padding: 0 2px;
+    }
+    .script-empty {
+      padding: 28px 18px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
     .layperson-hero {
       padding: 14px 16px;
       border-radius: 10px;
@@ -4588,42 +4777,107 @@ export function generateInteractiveCallflowHtml(
       flex-direction: column;
       background: var(--bg-header);
       border: 1px solid var(--border-strong);
-      border-radius: 8px;
-      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+      border-radius: 10px;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
       overflow: hidden;
       user-select: none;
     }
     #minimap-box.open {
       display: flex;
     }
+    #minimap-resize-handle {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 16px;
+      height: 16px;
+      cursor: nwse-resize;
+      z-index: 6;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-dim);
+      font-size: 10px;
+      line-height: 1;
+      border-bottom-right-radius: 4px;
+    }
+    #minimap-resize-handle:hover {
+      color: var(--accent-text);
+      background: var(--bg-hover);
+    }
     .minimap-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 8px;
-      padding: 4px 8px;
-      font-size: 10px;
+      gap: 6px;
+      padding: 4px 8px 4px 18px;
+      font-size: 10.5px;
       font-weight: 600;
       color: var(--text-muted);
       border-bottom: 1px solid var(--border);
       font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
+    }
+    .minimap-head-controls {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+    .minimap-size-btn {
+      padding: 1px 5px;
+      font-size: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-muted);
+      cursor: pointer;
+      line-height: 1.3;
+    }
+    .minimap-size-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-main);
+    }
+    .minimap-size-btn.active {
+      background: var(--accent);
+      border-color: var(--accent-border);
+      color: #ffffff;
     }
     #minimap-area {
       position: relative;
       margin: 6px;
-      border-radius: 4px;
+      border-radius: 6px;
       border: 1px solid var(--border);
       background: var(--bg-canvas);
       overflow: hidden;
       cursor: crosshair;
+      flex: 1;
+      min-height: 70px;
     }
-    #minimap-img {
+    #minimap-svg-host {
+      position: absolute;
+      inset: 0;
       width: 100%;
       height: 100%;
-      object-fit: contain;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    #minimap-svg-host svg {
+      width: 100%;
+      height: 100%;
       display: block;
       pointer-events: none;
-      opacity: 0.88;
+    }
+    .minimap-empty {
+      font-size: 10.5px;
+      color: var(--text-muted);
+      text-align: center;
+      padding: 8px;
+      line-height: 1.4;
     }
     #minimap-viewport {
       position: absolute;
@@ -4634,6 +4888,7 @@ export function generateInteractiveCallflowHtml(
       border-radius: 2px;
       pointer-events: none;
       will-change: transform;
+      display: none;
     }
     .gsearch-row {
       width: 100%;
@@ -5014,12 +5269,18 @@ export function generateInteractiveCallflowHtml(
         </div>
         <div id="welcome-overlay" class="open" aria-label="Schnellstart Willkommensseite"></div>
         <div id="minimap-box" aria-label="Diagramm-Minimap">
+          <div id="minimap-resize-handle" title="Ecke ziehen zum freien Skalieren">⤢</div>
           <div class="minimap-head">
-            <span id="minimap-zoom-label">Minimap</span>
-            <button type="button" id="btn-close-minimap" style="padding:1px 5px;font-size:10px;border:none;background:transparent;color:var(--text-muted);cursor:pointer;" title="Schließen (M)">✕</button>
+            <span id="minimap-zoom-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Minimap</span>
+            <div class="minimap-head-controls">
+              <button type="button" class="minimap-size-btn active" data-msize="sm" title="Kompakt (S)">S</button>
+              <button type="button" class="minimap-size-btn" data-msize="md" title="Mittel (M)">M</button>
+              <button type="button" class="minimap-size-btn" data-msize="lg" title="Groß (L)">L</button>
+              <button type="button" id="btn-close-minimap" style="padding:1px 5px;font-size:10.5px;border:none;background:transparent;color:var(--text-muted);cursor:pointer;" title="Schließen (M)">✕</button>
+            </div>
           </div>
           <div id="minimap-area">
-            <img id="minimap-img" alt="Übersicht" draggable="false" />
+            <div id="minimap-svg-host"></div>
             <div id="minimap-viewport"></div>
           </div>
         </div>
@@ -5143,7 +5404,7 @@ export function generateInteractiveCallflowHtml(
       <div class="audience-bar">
         <div class="audience-switch" id="node-info-tabs" role="tablist" aria-label="Ansichtsmodus">
           <button type="button" class="audience-btn active-layperson" data-nmode="layperson" role="tab" aria-selected="true">Laie</button>
-          <button type="button" class="audience-btn" data-nmode="pro" role="tab" aria-selected="false">IT-Profi</button>
+          <button type="button" class="audience-btn" data-nmode="pro" role="tab" aria-selected="false">IT-Profi</button>${hasOriginalScriptsEnabled ? '\n          <button type="button" class="audience-btn" data-nmode="script" role="tab" aria-selected="false">Original-Skript</button>' : ''}
         </div>
         <span id="node-info-mode-hint" style="font-size:11px;color:var(--text-muted);">Verständlich erklärt für Fachbereich &amp; Projekt</span>
       </div>
@@ -5293,6 +5554,9 @@ export function generateInteractiveCallflowHtml(
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+    }
+    function escapeHtml(s) {
+      return esc(s);
     }
 
     function escapeCsvCell(val) {
@@ -5628,6 +5892,7 @@ export function generateInteractiveCallflowHtml(
         applySvgSurfaceTheme(activeSvg, GRAPH, true);
         viewThemeSigCache.set(activeViewKey, getCurrentThemeSig());
         ensureGpuProxyForView(activeViewKey, activeSvg);
+        if (minimapOpen) renderMinimapSvg(true);
       }
       applyCombinedCanvasState(false);
     }
@@ -5643,6 +5908,17 @@ export function generateInteractiveCallflowHtml(
       { id: 'error-alert', label: 'Offene Punkte & Warnungen', desc: 'Fehlende Zielskripte, Außer-Betrieb oder Abbruch.', color: '#fb7185' },
     ];
 
+    function classifyLegendNodeFallback(n) {
+      const lbl = String((n && n.label) || '').toLowerCase();
+      if (/fehler|nicht gefunden|fehlt|error|abbruch|disconnect|warnung|außer betrieb/.test(lbl)) return 'error-alert';
+      if (/ansage|ran|music|musik|prompt|begrüß/.test(lbl)) return 'announcement';
+      if (/queue|skill|warteschlange|team|agent/.test(lbl)) return 'queue';
+      if (/hdx|datenbank|db|extern|abwurf|transfer|outpulse/.test(lbl)) return 'storage';
+      if (/zeit|feiertag|sondzeit|öffnungs|if |bedingung|taste|dtmf|weiche|menü/.test(lbl)) return 'decision';
+      if (n && n.role === 'entry') return 'start-actor';
+      return 'core-service';
+    }
+
     function renderDiagramLegendPopover() {
       const pop = document.getElementById('diagram-legend-popover');
       const body = document.getElementById('diagram-legend-body');
@@ -5653,9 +5929,15 @@ export function generateInteractiveCallflowHtml(
       if (!diagramLegendOpen) return;
 
       const typeCounts = {};
-      if (GRAPH && Array.isArray(GRAPH.nodes)) {
+      const liveSvgNodes = svgLayer ? Array.from(svgLayer.querySelectorAll('g.node')) : [];
+      if (liveSvgNodes.length > 0) {
+        liveSvgNodes.forEach(g => {
+          const nt = g.getAttribute('data-node-type') || 'core-service';
+          typeCounts[nt] = (typeCounts[nt] || 0) + 1;
+        });
+      } else if (GRAPH && Array.isArray(GRAPH.nodes) && GRAPH.nodes.length > 0) {
         GRAPH.nodes.forEach(n => {
-          const t = classifyNodeTypeForFilter(n);
+          const t = classifyLegendNodeFallback(n);
           typeCounts[t] = (typeCounts[t] || 0) + 1;
         });
       }
@@ -5681,6 +5963,8 @@ export function generateInteractiveCallflowHtml(
             '</div>'
           ).join('') +
         '</div></div>';
+      } else {
+        html += '<div style="padding-top:8px;border-top:1px solid var(--border);font-size:11px;color:var(--text-muted);line-height:1.45;">Öffnen Sie eine Diagramm-Ansicht, um zusätzlich die exakten Knoten-Zähler und Linienfarben der aktuellen Ebene zu sehen.</div>';
       }
 
       body.innerHTML = html;
@@ -6202,7 +6486,6 @@ export function generateInteractiveCallflowHtml(
           } else {
             applyProxyImgElement(null);
           }
-          syncMinimapImage(existing);
         }
         return;
       }
@@ -6245,7 +6528,6 @@ export function generateInteractiveCallflowHtml(
                     applyProxyImgElement(entry);
                     syncGpuProxyState(false);
                   }
-                  syncMinimapImage(entry);
                 }
               }, 'image/png');
               return;
@@ -6283,6 +6565,7 @@ export function generateInteractiveCallflowHtml(
         populateSelect();
         renderNodeTypeFilters();
         applyCombinedCanvasState(false);
+        if (minimapOpen) renderMinimapSvg(true);
         updateMinimapViewport();
         return;
       }
@@ -6321,6 +6604,8 @@ export function generateInteractiveCallflowHtml(
       populateSelect();
       applyCombinedCanvasState(false);
       fitToWindow();
+      if (minimapOpen) renderMinimapSvg(true);
+      if (diagramLegendOpen) renderDiagramLegendPopover();
     }
 
     function populateSelect() {
@@ -7998,7 +8283,9 @@ export function generateInteractiveCallflowHtml(
       if (modeHintEl) {
         modeHintEl.textContent = activeInfoModalMode === 'layperson'
           ? 'Verständlich erklärt für Fachbereich & Projekt'
-          : 'Technische Kennwerte, Regeln, Parameter & Quelltext';
+          : activeInfoModalMode === 'script'
+          ? 'Vollständiger Skript-Quelltext mit markierter Knoten-Stelle'
+          : 'Technische Kennwerte, Regeln & Parameter';
       }
 
       const targetScriptRef = snap.detailTargetScriptNumber || (snap.canJumpToDetailScript ? snap.scriptNumber : '');
@@ -8029,10 +8316,31 @@ export function generateInteractiveCallflowHtml(
         const isAct = modeVal === activeInfoModalMode;
         btn.classList.toggle('active-layperson', isAct && modeVal === 'layperson');
         btn.classList.toggle('active-pro', isAct && modeVal === 'pro');
+        btn.classList.toggle('active-script', isAct && modeVal === 'script');
         btn.setAttribute('aria-selected', isAct ? 'true' : 'false');
       });
 
       if (!bodyEl) return;
+
+      function resolveFullScriptForSnap(sObj) {
+        if (!PAYLOAD.includeOriginalScripts) return '';
+        const map = PAYLOAD.rawScriptsByNumber;
+        if (map && sObj && sObj.scriptNumber) {
+          const rawKey = String(sObj.scriptNumber).trim();
+          if (map[rawKey]) return map[rawKey];
+          const lower = rawKey.toLowerCase();
+          const stripped = lower.replace(/^s_/, '').replace(/\.s$/i, '');
+          const keys = Object.keys(map);
+          for (let i = 0; i < keys.length; i++) {
+            const k = keys[i];
+            const kl = k.toLowerCase();
+            if (kl === lower || kl.replace(/^s_/, '').replace(/\.s$/i, '') === stripped) {
+              return map[k];
+            }
+          }
+        }
+        return (sObj && sObj.rawLineSnippet) ? String(sObj.rawLineSnippet) : '';
+      }
 
       const inc = snap.incomingConnections || [];
       const out = snap.outgoingConnections || [];
@@ -8112,7 +8420,7 @@ export function generateInteractiveCallflowHtml(
             renderNodeInfoModal();
           });
         }
-      } else {
+      } else if (activeInfoModalMode === 'pro') {
         // IT-PROFI VIEW
         const nObj = nodeMap.get(snap.nodeId);
         const facts = [];
@@ -8227,28 +8535,190 @@ export function generateInteractiveCallflowHtml(
           '</div></div>';
         }
 
-        if (snap.rawLineSnippet) {
-          html += '<div>' +
-            '<div class="section-title"><span>Original-Skript-Auszug</span><button type="button" id="btn-copy-node-snippet" class="copy-snippet-btn">Kopieren</button></div>' +
-            '<pre class="raw-snippet">' + esc(snap.rawLineSnippet) + '</pre>' +
+        const resolvedRawForPro = resolveFullScriptForSnap(snap);
+        if (PAYLOAD.includeOriginalScripts && resolvedRawForPro) {
+          html += '<div style="display:flex;justify-content:flex-start;padding-top:4px;">' +
+            '<button type="button" id="btn-inline-switch-script" style="font-size:11.5px;padding:6px 11px;">Im Original-Skript prüfen →</button>' +
           '</div>';
         }
 
         bodyEl.innerHTML = html;
         wireInfoConnectionButtons(bodyEl);
-        const copyBtn = document.getElementById('btn-copy-node-snippet');
-        if (copyBtn && snap.rawLineSnippet) {
-          copyBtn.addEventListener('click', () => {
-            const text = snap.rawLineSnippet;
+        const switchScriptBtn = document.getElementById('btn-inline-switch-script');
+        if (switchScriptBtn) {
+          switchScriptBtn.addEventListener('click', () => {
+            activeInfoModalMode = 'script';
+            renderNodeInfoModal();
+          });
+        }
+      }
+
+      if (activeInfoModalMode === 'script') {
+        const rawText = resolveFullScriptForSnap(snap);
+        if (!rawText || !rawText.trim()) {
+          bodyEl.innerHTML =
+            '<div class="script-panel"><div class="script-empty">' +
+              '<div style="font-weight:600;color:var(--text-main);margin-bottom:4px;">Kein Original-Skript hinterlegt</div>' +
+              'Für dieses Element liegt kein eingelesener .s-Quelltext vor (z. B. externes Ziel oder manuelles Diagramm-Element).' +
+            '</div></div>';
+          return;
+        }
+        const scriptLines = rawText.replace(/\\r\\n?/g, '\\n').split('\\n');
+        const hlStart = snap.highlightStartLine ? Number(snap.highlightStartLine) : 0;
+        const hlEnd = hlStart > 0 ? Math.max(hlStart, Number(snap.highlightEndLine || hlStart)) : 0;
+        const hlText = hlStart > 0
+          ? (hlEnd > hlStart ? 'Zeilen ' + hlStart + '–' + hlEnd : 'Zeile ' + hlStart)
+          : '';
+
+        bodyEl.innerHTML =
+          '<div class="script-panel">' +
+            '<div class="script-toolbar">' +
+              '<div class="script-toolbar-top">' +
+                '<div class="script-meta">' +
+                  '<strong>' + esc(snap.scriptNumber ? 'Skript ' + snap.scriptNumber : 'Original-Quelltext') + '</strong>' +
+                  '<span>·</span><span>' + scriptLines.length + ' Zeilen</span>' +
+                  (hlText ? '<span>·</span><span class="script-meta-hl">Knoten-Stelle: ' + esc(hlText) + '</span>' : '') +
+                '</div>' +
+                '<div class="script-actions">' +
+                  (hlStart > 0 ? '<button type="button" id="btn-script-jump-hl" class="copy-snippet-btn" title="Zur markierten Knoten-Zeile springen">Zur Knoten-Stelle</button>' : '') +
+                  '<button type="button" id="btn-script-copy-all" class="copy-snippet-btn">Skript kopieren</button>' +
+                '</div>' +
+              '</div>' +
+              '<div class="script-search-row">' +
+                '<input type="text" id="script-modal-search" class="script-search-input" placeholder="Im Original-Skript suchen (z. B. GIVE RAN, QUEUE, IF, Rufnummer)…" />' +
+                '<div class="script-search-nav" id="script-search-nav" style="display:none;">' +
+                  '<span class="script-search-count" id="script-search-count">0 Treffer</span>' +
+                  '<button type="button" id="btn-script-prev" class="copy-snippet-btn" title="Vorheriger Treffer (Shift+Enter)">↑</button>' +
+                  '<button type="button" id="btn-script-next" class="copy-snippet-btn" title="Nächster Treffer (Enter)">↓</button>' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="script-viewer" id="script-modal-viewer"></div>' +
+          '</div>';
+
+        const viewerEl = document.getElementById('script-modal-viewer');
+        const searchInput = document.getElementById('script-modal-search');
+        const navWrap = document.getElementById('script-search-nav');
+        const countEl = document.getElementById('script-search-count');
+        const btnPrev = document.getElementById('btn-script-prev');
+        const btnNext = document.getElementById('btn-script-next');
+        const btnJumpHl = document.getElementById('btn-script-jump-hl');
+        const btnCopyAll = document.getElementById('btn-script-copy-all');
+
+        let matchLines = [];
+        let activeMatchIdx = 0;
+
+        function highlightQueryHtml(lineStr, q) {
+          if (!q) return esc(lineStr || ' ');
+          const lower = lineStr.toLowerCase();
+          const qLower = q.toLowerCase();
+          let out = '';
+          let cur = 0;
+          let pos = lower.indexOf(qLower, cur);
+          while (pos !== -1) {
+            if (pos > cur) out += esc(lineStr.slice(cur, pos));
+            out += '<mark class="script-mark">' + esc(lineStr.slice(pos, pos + q.length)) + '</mark>';
+            cur = pos + q.length;
+            pos = lower.indexOf(qLower, cur);
+          }
+          if (cur < lineStr.length) out += esc(lineStr.slice(cur));
+          return out || ' ';
+        }
+
+        function renderScriptLines(scrollTarget) {
+          if (!viewerEl) return;
+          const q = searchInput ? searchInput.value.trim() : '';
+          matchLines = [];
+          if (q) {
+            const qLower = q.toLowerCase();
+            for (let i = 0; i < scriptLines.length; i++) {
+              if (scriptLines[i].toLowerCase().includes(qLower)) matchLines.push(i + 1);
+            }
+          }
+          const activeLineNo = matchLines.length > 0
+            ? matchLines[((activeMatchIdx % matchLines.length) + matchLines.length) % matchLines.length]
+            : 0;
+          if (navWrap) navWrap.style.display = q ? 'inline-flex' : 'none';
+          if (countEl) {
+            countEl.textContent = matchLines.length > 0
+              ? ((((activeMatchIdx % matchLines.length) + matchLines.length) % matchLines.length) + 1) + ' / ' + matchLines.length
+              : '0 Treffer';
+          }
+          const matchSet = new Set(matchLines);
+          let linesHtml = '';
+          for (let i = 0; i < scriptLines.length; i++) {
+            const ln = i + 1;
+            const isHl = hlStart > 0 && ln >= hlStart && ln <= hlEnd;
+            const isFirstHl = hlStart > 0 && ln === hlStart;
+            const isAct = activeLineNo === ln;
+            const isHit = !isAct && matchSet.has(ln);
+            const cls = 'script-line' + (isAct ? ' is-search-active' : (isHl ? ' is-node-highlight' : (isHit ? ' is-search-match' : '')));
+            linesHtml += '<div class="' + cls + '" data-ln="' + ln + '">' +
+              '<span class="script-ln">' + ln + '</span>' +
+              '<span class="script-code">' + highlightQueryHtml(scriptLines[i], q) + '</span>' +
+              (isFirstHl ? '<span class="script-node-tag">Knoten-Stelle</span>' : '') +
+            '</div>';
+          }
+          viewerEl.innerHTML = linesHtml;
+          if (scrollTarget === 'hl' && hlStart > 0) {
+            const targetRow = viewerEl.querySelector('.script-line[data-ln="' + hlStart + '"]');
+            if (targetRow && targetRow.scrollIntoView) {
+              requestAnimationFrame(() => targetRow.scrollIntoView({ block: 'center', behavior: 'auto' }));
+            }
+          } else if (scrollTarget === 'match' && activeLineNo > 0) {
+            const targetRow = viewerEl.querySelector('.script-line[data-ln="' + activeLineNo + '"]');
+            if (targetRow && targetRow.scrollIntoView) {
+              requestAnimationFrame(() => targetRow.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+            }
+          }
+        }
+
+        renderScriptLines('hl');
+
+        if (searchInput) {
+          searchInput.addEventListener('input', () => {
+            activeMatchIdx = 0;
+            renderScriptLines('match');
+          });
+          searchInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && matchLines.length > 0) {
+              e.preventDefault();
+              activeMatchIdx += e.shiftKey ? -1 : 1;
+              renderScriptLines('match');
+            }
+          });
+        }
+        if (btnPrev) {
+          btnPrev.addEventListener('click', () => {
+            if (!matchLines.length) return;
+            activeMatchIdx -= 1;
+            renderScriptLines('match');
+          });
+        }
+        if (btnNext) {
+          btnNext.addEventListener('click', () => {
+            if (!matchLines.length) return;
+            activeMatchIdx += 1;
+            renderScriptLines('match');
+          });
+        }
+        if (btnJumpHl && hlStart > 0) {
+          btnJumpHl.addEventListener('click', () => {
+            const row = viewerEl && viewerEl.querySelector('.script-line[data-ln="' + hlStart + '"]');
+            if (row && row.scrollIntoView) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          });
+        }
+        if (btnCopyAll) {
+          btnCopyAll.addEventListener('click', () => {
             const done = () => {
-              copyBtn.textContent = 'Kopiert';
-              setTimeout(() => { copyBtn.textContent = 'Kopieren'; }, 1600);
+              btnCopyAll.textContent = 'Kopiert';
+              setTimeout(() => { btnCopyAll.textContent = 'Skript kopieren'; }, 1600);
             };
             if (navigator.clipboard && navigator.clipboard.writeText) {
-              navigator.clipboard.writeText(text).then(done).catch(() => {});
+              navigator.clipboard.writeText(rawText).then(done).catch(() => {});
             } else {
               const ta = document.createElement('textarea');
-              ta.value = text;
+              ta.value = rawText;
               ta.style.position = 'fixed';
               ta.style.opacity = '0';
               document.body.appendChild(ta);
@@ -8373,7 +8843,14 @@ export function generateInteractiveCallflowHtml(
     }
     document.querySelectorAll('#node-info-tabs .audience-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        activeInfoModalMode = btn.getAttribute('data-nmode') === 'pro' ? 'pro' : 'layperson';
+        const nextMode = btn.getAttribute('data-nmode');
+        if (nextMode === 'script' && PAYLOAD.includeOriginalScripts) {
+          activeInfoModalMode = 'script';
+        } else if (nextMode === 'pro') {
+          activeInfoModalMode = 'pro';
+        } else {
+          activeInfoModalMode = 'layperson';
+        }
         renderNodeInfoModal();
       });
     });
@@ -8543,72 +9020,147 @@ export function generateInteractiveCallflowHtml(
     });
 
     // =========================================================================
-    // MINIMAP, COLLAPSIBLE SIDEBAR & FULLSCREEN
+    // MINIMAP (CRISP VECTOR SVG + FREE CORNER RESIZE + S/M/L PRESETS)
     // =========================================================================
     const mainLayoutEl = document.getElementById('main-layout');
     const minimapBoxEl = document.getElementById('minimap-box');
     const minimapAreaEl = document.getElementById('minimap-area');
-    const minimapImgEl = document.getElementById('minimap-img');
+    const minimapSvgHostEl = document.getElementById('minimap-svg-host');
     const minimapVpEl = document.getElementById('minimap-viewport');
     const minimapZoomLabelEl = document.getElementById('minimap-zoom-label');
+    const minimapResizeHandleEl = document.getElementById('minimap-resize-handle');
     const btnMinimap = document.getElementById('btn-minimap');
     const btnCloseMinimap = document.getElementById('btn-close-minimap');
     const btnToggleSidebar = document.getElementById('btn-toggle-sidebar');
     const btnFullscreen = document.getElementById('btn-fullscreen');
 
+    const MINIMAP_PRESETS = {
+      sm: { w: 224, h: 158 },
+      md: { w: 320, h: 220 },
+      lg: { w: 460, h: 310 },
+    };
     let minimapOpen = false;
     let minimapDragging = false;
-    let minimapDims = { mapW: 196, mapH: 120, scale: 0.1, svgW: 1200, svgH: 800 };
+    let minimapResizing = false;
+    let minimapResizeStart = { x: 0, y: 0, w: 224, h: 158 };
+    let minimapBoxSize = { w: 224, h: 158 };
+    let minimapActivePreset = 'sm';
+    let minimapRenderedSig = '';
+    let minimapDims = { availW: 210, availH: 120, drawW: 210, drawH: 120, offsetX: 0, offsetY: 0, scale: 0.1, svgW: 1200, svgH: 800, hasSvg: false };
 
-    function syncMinimapImage(proxyEntry) {
-      if (!minimapImgEl) return;
-      if (proxyEntry && proxyEntry.url) {
-        minimapImgEl.src = proxyEntry.url;
-        minimapImgEl.style.visibility = 'visible';
-      } else {
-        minimapImgEl.removeAttribute('src');
-        minimapImgEl.style.visibility = 'hidden';
+    function clampMinimapSize(w, h) {
+      const wrapRect = wrap ? wrap.getBoundingClientRect() : { width: 1000, height: 700 };
+      const maxW = Math.max(240, Math.min(680, Math.round((wrapRect.width || 1000) * 0.72)));
+      const maxH = Math.max(170, Math.min(520, Math.round((wrapRect.height || 700) * 0.68)));
+      return {
+        w: Math.max(176, Math.min(maxW, Math.round(w))),
+        h: Math.max(124, Math.min(maxH, Math.round(h))),
+      };
+    }
+
+    function applyMinimapBoxSize(presetKey) {
+      if (!minimapBoxEl) return;
+      minimapBoxSize = clampMinimapSize(minimapBoxSize.w, minimapBoxSize.h);
+      minimapBoxEl.style.width = minimapBoxSize.w + 'px';
+      minimapBoxEl.style.height = minimapBoxSize.h + 'px';
+      if (presetKey !== undefined) minimapActivePreset = presetKey;
+      minimapBoxEl.querySelectorAll('.minimap-size-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.getAttribute('data-msize') === minimapActivePreset);
+      });
+      updateMinimapViewport();
+    }
+
+    function renderMinimapSvg(forceRefresh) {
+      if (!minimapSvgHostEl) return;
+      const activeSvg = svgLayer ? svgLayer.querySelector('svg') : null;
+      const sig = activeViewKey + '|' + getCurrentThemeSig() + '|' + (activeSvg ? 'svg' : 'none');
+      if (!forceRefresh && minimapRenderedSig === sig && minimapSvgHostEl.childNodes.length > 0) {
+        updateMinimapViewport();
+        return;
+      }
+      minimapRenderedSig = sig;
+      minimapSvgHostEl.replaceChildren();
+      if (!activeSvg || activeViewKey === 'welcome') {
+        const empty = document.createElement('div');
+        empty.className = 'minimap-empty';
+        empty.textContent = 'Diagramm-Ansicht wählen für Live-Übersicht';
+        minimapSvgHostEl.appendChild(empty);
+        updateMinimapViewport();
+        return;
+      }
+      try {
+        const w = Math.max(100, parseFloat(activeSvg.getAttribute('width') || '1200'));
+        const h = Math.max(100, parseFloat(activeSvg.getAttribute('height') || '800'));
+        const clone = activeSvg.cloneNode(true);
+        const existingVb = activeSvg.getAttribute('viewBox');
+        clone.setAttribute('viewBox', existingVb || ('0 0 ' + w + ' ' + h));
+        clone.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+        clone.removeAttribute('width');
+        clone.removeAttribute('height');
+        clone.removeAttribute('id');
+        clone.style.width = '100%';
+        clone.style.height = '100%';
+        clone.style.maxWidth = 'none';
+        clone.style.maxHeight = 'none';
+        clone.style.pointerEvents = 'none';
+        minimapSvgHostEl.appendChild(clone);
+      } catch {
+        const fallback = document.createElement('div');
+        fallback.className = 'minimap-empty';
+        fallback.textContent = 'Übersicht wird vorbereitet…';
+        minimapSvgHostEl.appendChild(fallback);
       }
       updateMinimapViewport();
     }
 
     function updateMinimapViewport() {
       if (!minimapOpen || !minimapAreaEl || !minimapVpEl) return;
-      const svgEl = svgLayer.querySelector('svg');
-      const svgW = Math.max(100, parseFloat((svgEl && svgEl.getAttribute('width')) || '1200'));
-      const svgH = Math.max(100, parseFloat((svgEl && svgEl.getAttribute('height')) || '800'));
-      const scale = Math.min(216 / svgW, 144 / svgH);
-      const mapW = Math.max(88, Math.round(svgW * scale));
-      const mapH = Math.max(58, Math.round(svgH * scale));
-      minimapDims = { mapW, mapH, scale, svgW, svgH };
-      minimapAreaEl.style.width = mapW + 'px';
-      minimapAreaEl.style.height = mapH + 'px';
+      const svgEl = svgLayer ? svgLayer.querySelector('svg') : null;
+      const safeZoom = Math.max(0.05, zoom);
+      if (minimapZoomLabelEl) minimapZoomLabelEl.textContent = 'Minimap · ' + Math.round(safeZoom * 100) + '%';
+      if (!svgEl || activeViewKey === 'welcome') {
+        minimapDims.hasSvg = false;
+        minimapVpEl.style.display = 'none';
+        return;
+      }
+      const svgW = Math.max(100, parseFloat(svgEl.getAttribute('width') || '1200'));
+      const svgH = Math.max(100, parseFloat(svgEl.getAttribute('height') || '800'));
+      const areaRect = minimapAreaEl.getBoundingClientRect();
+      const availW = Math.max(80, areaRect.width || (minimapBoxSize.w - 14));
+      const availH = Math.max(60, areaRect.height || (minimapBoxSize.h - 42));
+      const scale = Math.min(availW / svgW, availH / svgH);
+      const drawW = svgW * scale;
+      const drawH = svgH * scale;
+      const offsetX = (availW - drawW) / 2;
+      const offsetY = (availH - drawH) / 2;
+      minimapDims = { availW, availH, drawW, drawH, offsetX, offsetY, scale, svgW, svgH, hasSvg: true };
 
       const rect = wrap.getBoundingClientRect();
-      const safeZoom = Math.max(0.05, zoom);
       const visW = Math.max(100, rect.width) / safeZoom;
       const visH = Math.max(100, rect.height) / safeZoom;
       const worldCx = svgW / 2 - panX / safeZoom;
       const worldCy = svgH / 2 - panY / safeZoom;
 
-      const boxW = Math.min(mapW, Math.max(14, visW * scale));
-      const boxH = Math.min(mapH, Math.max(10, visH * scale));
-      const boxL = Math.max(0, Math.min(mapW - boxW, (worldCx - visW / 2) * scale));
-      const boxT = Math.max(0, Math.min(mapH - boxH, (worldCy - visH / 2) * scale));
+      const boxW = Math.min(drawW, Math.max(14, visW * scale));
+      const boxH = Math.min(drawH, Math.max(10, visH * scale));
+      const relL = Math.max(0, Math.min(drawW - boxW, (worldCx - visW / 2) * scale));
+      const relT = Math.max(0, Math.min(drawH - boxH, (worldCy - visH / 2) * scale));
 
+      minimapVpEl.style.display = 'block';
       minimapVpEl.style.width = boxW + 'px';
       minimapVpEl.style.height = boxH + 'px';
-      minimapVpEl.style.transform = 'translate3d(' + boxL + 'px,' + boxT + 'px,0)';
-      if (minimapZoomLabelEl) minimapZoomLabelEl.textContent = 'Minimap · ' + Math.round(safeZoom * 100) + '%';
+      minimapVpEl.style.transform = 'translate3d(' + (offsetX + relL) + 'px,' + (offsetY + relT) + 'px,0)';
     }
 
     function panFromMinimapPoint(clientX, clientY) {
-      if (!minimapAreaEl) return;
+      if (!minimapAreaEl || !minimapDims.hasSvg) return;
       const r = minimapAreaEl.getBoundingClientRect();
-      const relX = Math.max(0, Math.min(r.width, clientX - r.left));
-      const relY = Math.max(0, Math.min(r.height, clientY - r.top));
-      const targetWorldX = relX / minimapDims.scale;
-      const targetWorldY = relY / minimapDims.scale;
+      const localX = clientX - r.left - minimapDims.offsetX;
+      const localY = clientY - r.top - minimapDims.offsetY;
+      const clampedX = Math.max(0, Math.min(minimapDims.drawW, localX));
+      const clampedY = Math.max(0, Math.min(minimapDims.drawH, localY));
+      const targetWorldX = clampedX / minimapDims.scale;
+      const targetWorldY = clampedY / minimapDims.scale;
       const safeZoom = Math.max(0.05, zoom);
       panX = (minimapDims.svgW / 2 - targetWorldX) * safeZoom;
       panY = (minimapDims.svgH / 2 - targetWorldY) * safeZoom;
@@ -8620,33 +9172,65 @@ export function generateInteractiveCallflowHtml(
       if (minimapBoxEl) minimapBoxEl.classList.toggle('open', minimapOpen);
       if (btnMinimap) btnMinimap.classList.toggle('btn-active', minimapOpen);
       if (minimapOpen) {
-        const activeSvg = svgLayer.querySelector('svg');
-        ensureGpuProxyForView(activeViewKey, activeSvg, true);
-        updateMinimapViewport();
+        applyMinimapBoxSize(minimapActivePreset);
+        renderMinimapSvg(true);
       }
     }
 
     if (btnMinimap) btnMinimap.addEventListener('click', () => setMinimapOpen(!minimapOpen));
     if (btnCloseMinimap) btnCloseMinimap.addEventListener('click', () => setMinimapOpen(false));
+    if (minimapBoxEl) {
+      minimapBoxEl.querySelectorAll('.minimap-size-btn').forEach(btn => {
+        btn.addEventListener('click', e => {
+          e.stopPropagation();
+          const key = btn.getAttribute('data-msize') || 'sm';
+          const preset = MINIMAP_PRESETS[key] || MINIMAP_PRESETS.sm;
+          minimapBoxSize = { w: preset.w, h: preset.h };
+          applyMinimapBoxSize(key);
+        });
+      });
+    }
+    if (minimapResizeHandleEl) {
+      minimapResizeHandleEl.addEventListener('mousedown', e => {
+        e.stopPropagation();
+        e.preventDefault();
+        minimapResizing = true;
+        minimapResizeStart = { x: e.clientX, y: e.clientY, w: minimapBoxSize.w, h: minimapBoxSize.h };
+      });
+    }
     if (minimapAreaEl) {
       minimapAreaEl.addEventListener('mousedown', e => {
         e.stopPropagation();
         e.preventDefault();
+        if (!minimapDims.hasSvg) return;
         minimapDragging = true;
         panFromMinimapPoint(e.clientX, e.clientY);
       });
     }
     window.addEventListener('mousemove', e => {
+      if (minimapResizing) {
+        const dx = minimapResizeStart.x - e.clientX;
+        const dy = minimapResizeStart.y - e.clientY;
+        minimapBoxSize = { w: minimapResizeStart.w + dx, h: minimapResizeStart.h + dy };
+        applyMinimapBoxSize('');
+        return;
+      }
       if (!minimapDragging) return;
       panFromMinimapPoint(e.clientX, e.clientY);
     });
     window.addEventListener('mouseup', () => {
+      if (minimapResizing) {
+        minimapResizing = false;
+        updateMinimapViewport();
+      }
       if (minimapDragging) {
         minimapDragging = false;
         updateTransform(false);
       }
     });
-    window.addEventListener('resize', () => updateMinimapViewport());
+    window.addEventListener('resize', () => {
+      if (minimapOpen) applyMinimapBoxSize(minimapActivePreset);
+    });
 
     function toggleSidebar() {
       if (!mainLayoutEl) return;
