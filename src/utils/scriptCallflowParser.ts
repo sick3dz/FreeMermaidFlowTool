@@ -7929,16 +7929,34 @@ export interface EditableCallflowNodeSnapshot {
  * Locates the 1-indexed start/end line numbers of a Callflow node inside its
  * full Avaya/CCaaS `.s` script source text using ordered candidate fragments.
  */
+export interface PreparsedScriptLines {
+  trimmedLines: string[];
+  normalizedLines: string[];
+}
+
+export function preparseScriptLines(fullText: string | undefined): PreparsedScriptLines | null {
+  if (!fullText) return null;
+  const rawLines = fullText.replace(/\r\n?/g, '\n').split('\n');
+  if (rawLines.length === 0) return null;
+  const trimmedLines = new Array<string>(rawLines.length);
+  const normalizedLines = new Array<string>(rawLines.length);
+  for (let i = 0; i < rawLines.length; i++) {
+    const t = rawLines[i].trim();
+    trimmedLines[i] = t;
+    normalizedLines[i] = t.replace(/\s+/g, ' ').toLowerCase();
+  }
+  return { trimmedLines, normalizedLines };
+}
+
 export function locateNodeLinesInScript(
   fullText: string | undefined,
-  candidates: Array<string | undefined | null>
+  candidates: Array<string | undefined | null>,
+  preparsed?: PreparsedScriptLines | null
 ): { startLine: number; endLine: number } | undefined {
-  if (!fullText) return undefined;
-  const rawLines = fullText.replace(/\r\n?/g, '\n').split('\n');
-  if (rawLines.length === 0) return undefined;
+  const linesData = preparsed ?? preparseScriptLines(fullText);
+  if (!linesData || linesData.normalizedLines.length === 0) return undefined;
 
-  const trimmedLines = rawLines.map((l) => l.trim());
-  const normalizedLines = rawLines.map((l) => l.trim().replace(/\s+/g, ' ').toLowerCase());
+  const { trimmedLines, normalizedLines } = linesData;
 
   const cleanCandidates = candidates
     .map((c) => (typeof c === 'string' ? c.replace(/\r\n?/g, '\n').trim() : ''))
@@ -8014,6 +8032,8 @@ export interface WorkspaceInspectContext {
   incomingByModKey: Map<string, EditableNodeIncomingItem[]>;
   hoursSummaryByModKey: Map<string, ReturnType<typeof getModuleOpeningHoursSummary>>;
   rulesPreviewByModKey: Map<string, EditableNodeRulePreviewItem[]>;
+  scriptLinesByModKey: Map<string, PreparsedScriptLines | null>;
+  includeOriginalScriptLines: boolean;
 }
 
 /**
@@ -8024,7 +8044,8 @@ export interface WorkspaceInspectContext {
 export function createWorkspaceInspectContext(
   workspace: ScriptWorkspace,
   precomputedFindings?: CallflowHealthFinding[],
-  precomputedParametersByScript?: Record<string, CallflowScriptParameterItem[]>
+  precomputedParametersByScript?: Record<string, CallflowScriptParameterItem[]>,
+  includeOriginalScriptLines = true
 ): WorkspaceInspectContext {
   const moduleByKey = new Map<string, ScriptModule>();
   for (const m of workspace.modules || []) {
@@ -8112,6 +8133,8 @@ export function createWorkspaceInspectContext(
     incomingByModKey,
     hoursSummaryByModKey: new Map(),
     rulesPreviewByModKey: new Map(),
+    scriptLinesByModKey: new Map(),
+    includeOriginalScriptLines,
   };
 }
 
@@ -8260,6 +8283,26 @@ export function inspectWorkspaceNodeForEdit(
     return extractScriptSpecialParameters(mod, workspace);
   };
 
+  const locateCachedModuleLines = (
+    mod: ScriptModule,
+    candidates: Array<string | undefined | null>
+  ): { startLine: number; endLine: number } | undefined => {
+    if (inspectCtx && !inspectCtx.includeOriginalScriptLines) {
+      return undefined;
+    }
+    if (!mod.rawText || !mod.rawText.trim()) return undefined;
+    if (inspectCtx) {
+      const mKey = canonicalScriptMatchKey(mod.scriptNumber);
+      let cachedLines = inspectCtx.scriptLinesByModKey.get(mKey);
+      if (cachedLines === undefined) {
+        cachedLines = preparseScriptLines(mod.rawText);
+        inspectCtx.scriptLinesByModKey.set(mKey, cachedLines);
+      }
+      return locateNodeLinesInScript(mod.rawText, candidates, cachedLines);
+    }
+    return locateNodeLinesInScript(mod.rawText, candidates);
+  };
+
   const collectFindingsForMod = (modKey: string, ruleId?: string) => {
     const modFindings = inspectCtx
       ? inspectCtx.findingsByModKey.get(modKey) || []
@@ -8340,7 +8383,7 @@ export function inspectWorkspaceNodeForEdit(
         : undefined;
 
       const graphIn = collectGraphIncoming();
-      const locatedLines = locateNodeLinesInScript(mod.rawText, [
+      const locatedLines = locateCachedModuleLines(mod, [
         rule.rawLine,
         rule.condition,
         rule.announcement,
@@ -8456,7 +8499,7 @@ export function inspectWorkspaceNodeForEdit(
       viewLevel.level !== 'detail' ||
       canonicalScriptMatchKey(viewLevel.scriptNumber) !== targetKey;
 
-    const locatedModuleLines = locateNodeLinesInScript(mod.rawText, [
+    const locatedModuleLines = locateCachedModuleLines(mod, [
       mod.scriptName,
       mod.scriptNumber,
       primaryRule?.rawLine,

@@ -80,6 +80,7 @@ import {
   prepareStandaloneSvg,
   rasterizeSvgToGpuProxy,
   renderLocalMermaidDiagram,
+  resetMermaidRenderQueue,
   shouldUseNativeSvgLabels,
   SvgGpuProxyResult,
   triggerLocalDownload,
@@ -4048,6 +4049,7 @@ function OfflineStudioApp() {
     if (exportAbortControllerRef.current) {
       exportAbortControllerRef.current.abort();
     }
+    resetMermaidRenderQueue();
     setHtmlExportProgress(null);
     setIsDownloadingHtml(false);
     setHtmlExportNotice('Interaktiver HTML-Export abgebrochen.');
@@ -4152,12 +4154,13 @@ function OfflineStudioApp() {
         };
       }
 
-      // Pause any background workspace preloader immediately so the render mutex is free
+      // Pause any background workspace preloader immediately and clear any stale render queue state
       if (preloadAbortControllerRef.current) {
         preloadAbortControllerRef.current.abort();
         preloadAbortControllerRef.current = null;
       }
       setPreloadProgress(null);
+      resetMermaidRenderQueue();
 
       const abortController = new AbortController();
       exportAbortControllerRef.current = abortController;
@@ -4202,7 +4205,7 @@ function OfflineStudioApp() {
       };
 
       const totalEstimatedViews = scriptWorkspace.modules.length + 2;
-      const VIEW_TIMEOUT_MS = 10000;
+      const VIEW_TIMEOUT_MS = 7000;
 
       try {
         // 1. Open Status Popup immediately BEFORE any heavy workspace computation
@@ -4243,7 +4246,8 @@ function OfflineStudioApp() {
         const inspectContext = createWorkspaceInspectContext(
           scriptWorkspace,
           healthFindings,
-          registry.parametersByScript
+          registry.parametersByScript,
+          includeOriginalScripts
         );
         const analysisPayload: InteractiveCallflowHtmlAnalysisPayload = {
           openIssues: scriptWorkspace.issues || [],
@@ -4330,6 +4334,13 @@ function OfflineStudioApp() {
           layoutEngine: 'dagre',
           look: 'classic',
         };
+        const exportScriptLabelMap: Record<string, string> = {};
+        scriptWorkspace.modules.forEach((mod) => {
+          if (!mod.scriptNumber || !mod.scriptName) return;
+          exportScriptLabelMap[mod.scriptNumber] = mod.scriptName;
+          exportScriptLabelMap[mod.scriptNumber.toLowerCase()] = mod.scriptName;
+          exportScriptLabelMap[canonicalScriptMatchKey(mod.scriptNumber)] = mod.scriptName;
+        });
 
         const views: InteractiveCallflowHtmlView[] = [];
         for (let idx = 0; idx < viewSpecs.length; idx++) {
@@ -4394,12 +4405,15 @@ function OfflineStudioApp() {
               spec.mermaidCode,
               exportThemeConfig,
               shouldUseNativeSvgLabels(spec.mermaidCode),
-              { timeoutMs: VIEW_TIMEOUT_MS }
+              { timeoutMs: VIEW_TIMEOUT_MS, skipParseDiagnostics: true, signal }
             );
             rawSvg = res.svg;
             wasCacheHit = Boolean(res.fromCache);
 
             if (!rawSvg && !signal.aborted) {
+              if (res.timedOut) {
+                resetMermaidRenderQueue();
+              }
               if (
                 exportThemeConfig.layoutEngine !== 'dagre' ||
                 exportThemeConfig.look !== 'classic'
@@ -4417,8 +4431,11 @@ function OfflineStudioApp() {
                   spec.mermaidCode,
                   dagreFallbackTheme,
                   shouldUseNativeSvgLabels(spec.mermaidCode),
-                  { timeoutMs: 6500 }
+                  { timeoutMs: 4500, skipParseDiagnostics: true, signal }
                 );
+                if (fallbackRes.timedOut) {
+                  resetMermaidRenderQueue();
+                }
                 rawSvg = fallbackRes.svg;
                 if (rawSvg) {
                   usedFallback = true;
@@ -4494,13 +4511,6 @@ function OfflineStudioApp() {
             }
 
             // Precompute structured Element Info snapshots using O(1) WorkspaceInspectContext
-            const exportScriptLabelMap: Record<string, string> = {};
-            scriptWorkspace.modules.forEach((mod) => {
-              if (!mod.scriptNumber || !mod.scriptName) return;
-              exportScriptLabelMap[mod.scriptNumber] = mod.scriptName;
-              exportScriptLabelMap[mod.scriptNumber.toLowerCase()] = mod.scriptName;
-              exportScriptLabelMap[canonicalScriptMatchKey(mod.scriptNumber)] = mod.scriptName;
-            });
             const nodeDetails: Record<string, InteractiveCallflowHtmlNodeDetail> = {};
             try {
               parsedGraph.nodes.forEach((node) => {
@@ -4563,11 +4573,13 @@ function OfflineStudioApp() {
           }
 
           if (wasCacheHit) {
-            if (idx === 0 || (idx + 1) % 3 === 0) {
+            if (idx === 0 || (idx + 1) % 2 === 0) {
               await yieldFrame();
             } else {
               await yieldMicroTick();
             }
+          } else {
+            await yieldMicroTick();
           }
         }
 

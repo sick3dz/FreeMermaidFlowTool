@@ -47,6 +47,23 @@ function enqueueMermaidRender<T>(task: () => Promise<T>): Promise<T> {
   return next;
 }
 
+/**
+ * Resets the internal Mermaid render queue and clears any stuck offscreen DOM remnants.
+ * Used as a safety valve before batch exports or after a stalled/timed-out render so
+ * subsequent diagrams never block behind a hung Promise.
+ */
+export function resetMermaidRenderQueue(): void {
+  mermaidRenderMutex = Promise.resolve();
+  lastEngineConfigSignature = null;
+  if (typeof document !== 'undefined') {
+    const sandbox = document.getElementById('mermaid-offscreen-sandbox');
+    if (sandbox) sandbox.innerHTML = '';
+    document
+      .querySelectorAll('[id^="dmermaid-local-svg-"], body > [id^="mermaid-local-svg-"]')
+      .forEach((node) => node.remove());
+  }
+}
+
 const MAX_SVG_RENDER_CACHE = 320;
 const svgRenderCache = new Map<
   string,
@@ -488,6 +505,8 @@ export async function renderLocalMermaidDiagram(
   forceNativeSvgLabels = false,
   options?: {
     timeoutMs?: number;
+    skipParseDiagnostics?: boolean;
+    signal?: AbortSignal;
   }
 ): Promise<{
   svg: string | null;
@@ -503,6 +522,22 @@ export async function renderLocalMermaidDiagram(
       : options.timeoutMs > 0
       ? options.timeoutMs
       : 0;
+  const skipParseDiagnostics = Boolean(options?.skipParseDiagnostics);
+  const abortSignal = options?.signal;
+
+  if (abortSignal?.aborted) {
+    return {
+      svg: null,
+      validation: {
+        isValid: false,
+        diagramType,
+        errorMessage: 'Render abgebrochen.',
+        errorLine: null,
+        lastRenderMs: 0,
+      },
+      fromCache: false,
+    };
+  }
 
   if (!trimmed) {
     return {
@@ -535,6 +570,20 @@ export async function renderLocalMermaidDiagram(
   }
 
   const runRenderPromise = enqueueMermaidRender(async () => {
+    if (abortSignal?.aborted) {
+      return {
+        svg: null,
+        validation: {
+          isValid: false,
+          diagramType,
+          errorMessage: 'Render abgebrochen.',
+          errorLine: null,
+          lastRenderMs: 0,
+        },
+        fromCache: false,
+      };
+    }
+
     const cacheHitInsideLock = getCachedSvgRender(cacheKey);
     if (cacheHitInsideLock) {
       return {
@@ -553,16 +602,20 @@ export async function renderLocalMermaidDiagram(
     const startTime = performance.now();
     const sandbox = getOrCreateMermaidOffscreenSandbox();
 
-    const runWithOptionalTimeout = async <T,>(work: Promise<T>): Promise<T> => {
-      if (!timeoutMs) return work;
+    const runWithOptionalTimeout = async <T,>(
+      work: Promise<T>,
+      customTimeoutMs?: number
+    ): Promise<T> => {
+      const limit = customTimeoutMs !== undefined ? customTimeoutMs : timeoutMs;
+      if (!limit) return work;
       let timerId: number | undefined;
       try {
         return await Promise.race([
           work,
           new Promise<T>((_resolve, reject) => {
             timerId = window.setTimeout(() => {
-              reject(new Error(`RENDER_TIMEOUT_${timeoutMs}`));
-            }, timeoutMs);
+              reject(new Error(`RENDER_TIMEOUT_${limit}`));
+            }, limit);
           }),
         ]);
       } finally {
@@ -673,10 +726,15 @@ export async function renderLocalMermaidDiagram(
       }
 
       let exactParseErr: unknown = null;
-      try {
-        await mermaid.parse(trimmed, { suppressErrors: false });
-      } catch (parseErr) {
-        exactParseErr = parseErr;
+      if (!skipParseDiagnostics) {
+        try {
+          await runWithOptionalTimeout(
+            Promise.resolve(mermaid.parse(trimmed, { suppressErrors: false })),
+            Math.min(2000, timeoutMs || 2000)
+          );
+        } catch (parseErr) {
+          exactParseErr = parseErr;
+        }
       }
 
       const errorSource = exactParseErr ?? err;
@@ -705,7 +763,7 @@ export async function renderLocalMermaidDiagram(
     return runRenderPromise;
   }
 
-  // Outer race ensures caller unblocks even if an upstream queued task inside the mutex is slow
+  // Outer race ensures caller unblocks AND resets a wedged mutex if an upstream queued task stalled
   let outerTimer: number | undefined;
   try {
     return await Promise.race([
@@ -717,6 +775,7 @@ export async function renderLocalMermaidDiagram(
         timedOut: true;
       }>((resolve) => {
         outerTimer = window.setTimeout(() => {
+          resetMermaidRenderQueue();
           resolve({
             svg: null,
             validation: {
@@ -731,7 +790,7 @@ export async function renderLocalMermaidDiagram(
             fromCache: false,
             timedOut: true,
           });
-        }, timeoutMs + 1500);
+        }, timeoutMs + 1200);
       }),
     ]);
   } finally {
