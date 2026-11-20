@@ -4031,12 +4031,12 @@ export function generateInteractiveCallflowHtml(
       background: var(--bg-input);
       border: 1px solid var(--border);
       color: var(--text-main);
-      padding: 3px 8px;
+      padding: 4px 10px;
       border-radius: 6px;
-      font-size: 11.5px;
+      font-size: 12px;
       font-family: inherit;
       cursor: pointer;
-      max-width: 250px;
+      max-width: 320px;
       box-sizing: border-box;
     }
     .script-dropdown-btn:hover {
@@ -4046,30 +4046,32 @@ export function generateInteractiveCallflowHtml(
       position: absolute;
       top: calc(100% + 4px);
       left: 0;
-      width: 310px;
-      max-height: 380px;
+      width: min(540px, calc(100vw - 24px));
+      min-width: 340px;
+      max-height: min(560px, calc(100vh - 80px));
       background: var(--bg-card);
       border: 1px solid var(--border-strong);
-      border-radius: 8px;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+      border-radius: 10px;
+      box-shadow: 0 14px 36px rgba(0,0,0,0.45);
       z-index: 1000;
       display: flex;
       flex-direction: column;
       overflow: hidden;
     }
     .script-dropdown-search-bar {
-      padding: 8px;
+      padding: 10px;
       border-bottom: 1px solid var(--border);
       background: var(--bg-header);
+      flex-shrink: 0;
     }
     .script-dropdown-search-bar input {
       width: 100%;
       background: var(--bg-input);
       border: 1px solid var(--border);
       color: var(--text-main);
-      padding: 5px 8px;
+      padding: 7px 10px;
       border-radius: 6px;
-      font-size: 11px;
+      font-size: 12.5px;
       font-family: inherit;
       outline: none;
       box-sizing: border-box;
@@ -4079,19 +4081,23 @@ export function generateInteractiveCallflowHtml(
     }
     .script-dropdown-list {
       overflow-y: auto;
-      max-height: 280px;
-      padding: 4px;
+      flex: 1;
+      max-height: min(480px, calc(100vh - 150px));
+      padding: 6px;
     }
     .script-dropdown-item {
-      padding: 6px 8px;
+      padding: 8px 10px;
       border-radius: 6px;
       cursor: pointer;
-      font-size: 11.5px;
+      font-size: 12.5px;
+      line-height: 1.38;
       color: var(--text-main);
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
-      gap: 6px;
+      gap: 8px;
+      white-space: normal;
+      word-break: break-word;
     }
     .script-dropdown-item:hover, .script-dropdown-item.highlighted {
       background: var(--bg-hover);
@@ -6250,29 +6256,32 @@ export function generateInteractiveCallflowHtml(
 
       const activeView = viewsByKey.get(activeViewKey);
       if (scriptDropdownLabel) {
-        if (activeViewKey === 'welcome') {
-          scriptDropdownLabel.textContent = 'Startseite · Ansicht wählen';
-        } else if (activeView) {
-          scriptDropdownLabel.textContent = isMasterViewKey(activeView.key)
+        let btnLabelText = 'Startseite · Ansicht wählen';
+        if (activeViewKey !== 'welcome' && activeView) {
+          btnLabelText = isMasterViewKey(activeView.key)
             ? activeView.label.replace(/\\s*\\((?:Kompakt|Voll-Detail)\\)$/i, '')
             : activeView.label;
         }
+        scriptDropdownLabel.textContent = btnLabelText;
+        if (scriptDropdownBtn) scriptDropdownBtn.title = btnLabelText + ' — Skript oder Ebene wählen';
       }
 
       if (filtered.length === 0) {
         const emptyEl = document.createElement('div');
-        emptyEl.style.cssText = 'padding:10px;text-align:center;color:var(--text-muted);font-size:11px;';
+        emptyEl.style.cssText = 'padding:12px;text-align:center;color:var(--text-muted);font-size:12px;';
         emptyEl.textContent = 'Kein Skript gefunden für „' + q + '“';
         scriptDropdownItems.appendChild(emptyEl);
       } else {
         filtered.forEach(v => {
           const isMasterItem = isMasterViewKey(v.key);
           const isSelected = isMasterItem ? isMasterViewKey(activeViewKey) : v.key === activeViewKey;
-          const itemEl = document.createElement('div');
-          itemEl.className = 'script-dropdown-item' + (isSelected ? ' selected' : '');
-          itemEl.textContent = isMasterItem
+          const labelText = isMasterItem
             ? v.label.replace(/\\s*\\((?:Kompakt|Voll-Detail)\\)$/i, '')
             : v.label;
+          const itemEl = document.createElement('div');
+          itemEl.className = 'script-dropdown-item' + (isSelected ? ' selected' : '');
+          itemEl.textContent = labelText;
+          itemEl.title = labelText;
           itemEl.addEventListener('click', () => {
             switchView(isMasterItem ? getActiveMasterViewKey() : v.key);
             if (scriptDropdownPopover) scriptDropdownPopover.style.display = 'none';

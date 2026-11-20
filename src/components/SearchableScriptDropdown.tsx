@@ -166,35 +166,32 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
     const viewportH = window.innerHeight;
     const gutter = 8;
 
-    const desiredWidth =
-      variant === 'full'
-        ? Math.max(rect.width, 280)
-        : Math.min(368, Math.max(280, rect.width));
-    const width = Math.min(desiredWidth, Math.max(240, viewportW - gutter * 2));
+    const desiredWidth = Math.min(540, Math.max(460, rect.width));
+    const width = Math.min(desiredWidth, Math.max(260, viewportW - gutter * 2));
 
     const rawLeft = align === 'right' ? rect.right - width : rect.left;
     const left = Math.max(gutter, Math.min(rawLeft, viewportW - width - gutter));
 
     const spaceBelow = viewportH - rect.bottom - gutter;
     const spaceAbove = rect.top - gutter;
-    const openUpward = spaceBelow < 260 && spaceAbove > spaceBelow;
+    const openUpward = spaceBelow < 280 && spaceAbove > spaceBelow;
 
     if (openUpward) {
       setPopoverCoords({
         left,
         bottom: viewportH - rect.top + 6,
         width,
-        maxHeight: Math.min(420, Math.max(200, spaceAbove - 6)),
+        maxHeight: Math.min(540, Math.max(240, spaceAbove - 6)),
       });
     } else {
       setPopoverCoords({
         left,
         top: rect.bottom + 6,
         width,
-        maxHeight: Math.min(420, Math.max(200, spaceBelow - 6)),
+        maxHeight: Math.min(540, Math.max(240, spaceBelow - 6)),
       });
     }
-  }, [align, variant]);
+  }, [align]);
 
   useLayoutEffect(() => {
     if (!isOpen) {
@@ -311,9 +308,9 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
         className="rounded-xl bg-slate-900 border border-slate-700 shadow-2xl backdrop-blur-md overflow-hidden flex flex-col"
       >
         {/* Search Header */}
-        <div className="p-2 border-b border-slate-800 bg-slate-950/70 shrink-0">
+        <div className="p-2.5 border-b border-slate-800 bg-slate-950/70 shrink-0">
             <div className="relative flex items-center">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 pointer-events-none" />
+              <Search className="w-4 h-4 text-slate-400 absolute left-2.5 pointer-events-none" />
               <input
                 ref={searchInputRef}
                 type="text"
@@ -324,7 +321,7 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
                 }}
                 placeholder={placeholder}
                 aria-label="Skripte durchsuchen"
-                className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-900 border border-slate-700 focus:border-indigo-500 rounded-lg text-slate-100 placeholder:text-slate-500 focus:outline-none font-mono"
+                className="w-full pl-9 pr-7 py-2 text-[13px] bg-slate-900 border border-slate-700 focus:border-indigo-500 rounded-lg text-slate-100 placeholder:text-slate-500 focus:outline-none font-mono"
               />
               {searchQuery && (
                 <button
@@ -431,18 +428,25 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
                 cleanName !== `Skript ${mod.scriptNumber}` &&
                 cleanName !== 'Main (Masterscript)';
 
+              const displayTitle = isMainMod
+                ? 'Main (Einstiegsskript)'
+                : hasDistinctName
+                ? cleanName
+                : `Skript ${mod.scriptNumber}`;
+
               return (
                 <div
                   key={mod.scriptNumber}
                   role="option"
                   aria-selected={isSelected}
                   data-option-index={optionIndex}
+                  title={`[${mod.scriptNumber}] ${displayTitle}${mod.cdnAlias ? ` (${mod.cdnAlias})` : ''}${mod.entryOrganizationName ? ` · ${mod.entryOrganizationName}` : ''}`}
                   onClick={() => {
                     onSwitchViewLevel({ level: 'detail', scriptNumber: mod.scriptNumber });
                     setIsOpen(false);
                   }}
                   onMouseEnter={() => setHighlightedIndex(optionIndex)}
-                  className={`flex items-center justify-between p-2 rounded-lg cursor-pointer transition-colors text-xs font-mono select-none ${
+                  className={`flex items-start justify-between px-2.5 py-2 rounded-lg cursor-pointer transition-colors text-xs font-mono select-none ${
                     isSelected
                       ? 'bg-amber-950/60 text-amber-100 border border-amber-500/40'
                       : isHighlighted
@@ -450,9 +454,9 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
                       : 'text-slate-300 hover:bg-slate-800/60 border border-transparent'
                   }`}
                 >
-                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <div className="flex items-start gap-2.5 min-w-0 flex-1">
                     <div
-                      className={`p-1 rounded-md shrink-0 ${
+                      className={`p-1 mt-0.5 rounded-md shrink-0 ${
                         isSelected
                           ? 'bg-amber-600 text-white'
                           : isMainMod
@@ -464,9 +468,9 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
                     </div>
 
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5 truncate">
+                      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 leading-snug">
                         <span
-                          className={`font-semibold shrink-0 px-1 py-0.5 rounded text-[10px] ${
+                          className={`font-semibold shrink-0 px-1.5 py-0.5 rounded text-[11px] tabular-nums ${
                             isMainMod
                               ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
                               : 'bg-slate-800 text-slate-200 border border-slate-700'
@@ -474,18 +478,14 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
                         >
                           [{mod.scriptNumber}]
                         </span>
-                        <span className="font-medium text-slate-200 truncate">
-                          {isMainMod
-                            ? 'Main (Einstiegsskript)'
-                            : hasDistinctName
-                            ? cleanName
-                            : `Skript ${mod.scriptNumber}`}
+                        <span className="font-medium text-[12.5px] text-slate-100 break-words">
+                          {displayTitle}
                         </span>
 
                         {isSondZeit && (
                           <span
                             title="Öffnungszeiten / SondZeit Skript"
-                            className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0"
+                            className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0"
                           >
                             <Clock className="w-2.5 h-2.5" />
                             <span>Zeit</span>
@@ -495,14 +495,14 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
                         {mod.cdnAlias && (
                           <span
                             title={`CDN Alias: ${mod.cdnAlias}`}
-                            className="text-[9px] text-slate-400 font-normal truncate"
+                            className="text-[10.5px] text-slate-400 font-normal break-words"
                           >
                             ({mod.cdnAlias})
                           </span>
                         )}
                       </div>
 
-                      <div className="text-[10px] text-slate-400 truncate flex items-center gap-2 mt-0.5">
+                      <div className="text-[11px] text-slate-400 flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-1">
                         <span>{mod.rules?.length || 0} Regeln</span>
                         {mod.outgoingNumbers?.length > 0 && (
                           <>
@@ -513,7 +513,7 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
                         {mod.entryOrganizationName && (
                           <>
                             <span className="text-slate-600">·</span>
-                            <span className="text-slate-300 truncate">
+                            <span className="text-slate-300 break-words">
                               {mod.entryOrganizationName}
                             </span>
                           </>
@@ -522,7 +522,7 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
                     </div>
                   </div>
 
-                  {isSelected && <Check className="w-4 h-4 text-amber-400 shrink-0 ml-2" />}
+                  {isSelected && <Check className="w-4 h-4 text-amber-400 shrink-0 ml-2 mt-0.5" />}
                 </div>
               );
             })}
@@ -580,7 +580,7 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
     <div
       ref={containerRef}
       className={`relative inline-block text-left min-w-0 ${
-        variant === 'full' ? 'w-full' : 'max-w-[230px] sm:max-w-[260px]'
+        variant === 'full' ? 'w-full' : 'max-w-[260px] sm:max-w-[320px]'
       } ${className}`}
       onKeyDown={handleKeyDown}
     >
@@ -590,7 +590,7 @@ export const SearchableScriptDropdown: React.FC<SearchableScriptDropdownProps> =
         aria-haspopup="listbox"
         aria-expanded={isOpen}
         onClick={() => setIsOpen((prev) => !prev)}
-        title="Skript oder Ebene wählen (mit Suche)"
+        title={`${currentSelectionLabel} — Skript oder Ebene wählen (mit Suche)`}
         className={`flex items-center justify-between gap-1.5 transition-colors cursor-pointer select-none font-mono ${
           variant === 'full'
             ? 'w-full px-2.5 py-1.5 text-xs bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-slate-600 rounded-lg text-slate-100 shadow-sm'
