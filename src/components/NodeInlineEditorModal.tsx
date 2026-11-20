@@ -126,10 +126,21 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
     return () => window.removeEventListener('keydown', handleKey);
   }, [isOpen, onClose]);
 
+  const scriptLabelMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    availableTargetRefs.forEach((ref) => {
+      if (!ref.scriptNumber || !ref.scriptName) return;
+      map[ref.scriptNumber] = ref.scriptName;
+      map[ref.scriptNumber.toLowerCase()] = ref.scriptName;
+      map[canonicalScriptMatchKey(ref.scriptNumber)] = ref.scriptName;
+    });
+    return map;
+  }, [availableTargetRefs]);
+
   const explanation = useMemo(() => {
     if (!snapshot) return null;
-    return buildDualAudienceNodeExplanation(snapshot, graph);
-  }, [snapshot, graph]);
+    return buildDualAudienceNodeExplanation(snapshot, graph, scriptLabelMap);
+  }, [snapshot, graph, scriptLabelMap]);
 
   if (!isOpen || !snapshot || !explanation) return null;
 
@@ -195,17 +206,20 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
   };
 
   const handleNavigateNeighbor = (refOrId: string, label?: string) => {
+    const cleanRef = (refOrId || '').trim();
+    const cleanLabel = (label || '').trim();
+    if (!cleanRef && !cleanLabel) return;
     if (graph && onSelectGraphNode) {
-      if (graph.nodes.has(refOrId)) {
+      if (cleanRef && graph.nodes.has(cleanRef)) {
         onClose();
-        onSelectGraphNode(refOrId);
+        onSelectGraphNode(cleanRef);
         return;
       }
-      const refLower = refOrId.trim().toLowerCase();
-      const lblLower = (label || '').trim().toLowerCase();
+      const refLower = cleanRef.toLowerCase();
+      const lblLower = cleanLabel.toLowerCase();
       const match = Array.from(graph.nodes.values()).find(
         (n) =>
-          n.id.toLowerCase() === refLower ||
+          (refLower && n.id.toLowerCase() === refLower) ||
           (refLower && n.label.toLowerCase().includes(refLower)) ||
           (lblLower && n.label.toLowerCase() === lblLower)
       );
@@ -215,8 +229,8 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
         return;
       }
     }
-    if (onJumpToScript && knownTargetKeySet.has(canonicalScriptMatchKey(refOrId))) {
-      handleJump(refOrId);
+    if (cleanRef && onJumpToScript && knownTargetKeySet.has(canonicalScriptMatchKey(cleanRef))) {
+      handleJump(cleanRef);
     }
   };
 
@@ -471,7 +485,10 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                         >
                           <div className="min-w-0">
                             <div className="text-slate-100 font-medium truncate">
-                              {inc.fromLabel || inc.fromScriptNumber}
+                              {(inc.fromScriptNumber &&
+                                explanation.friendlyTargetLabels?.[inc.fromScriptNumber.trim()]) ||
+                                inc.fromLabel ||
+                                inc.fromScriptNumber}
                             </div>
                             {inc.edgeLabel && (
                               <div className="text-[11px] text-slate-400 truncate">
@@ -514,7 +531,9 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                         >
                           <div className="min-w-0">
                             <div className="text-emerald-300 font-medium truncate">
-                              {conn.toTargetNumber}
+                              {(conn.toTargetNumber &&
+                                explanation.friendlyTargetLabels?.[conn.toTargetNumber.trim()]) ||
+                                conn.toTargetNumber}
                             </div>
                             {conn.label && (
                               <div className="text-[11px] text-slate-400 truncate">

@@ -4349,6 +4349,99 @@ export function generateInteractiveCallflowHtml(
     #canvas-node-info-btn:hover .cnib-icon {
       background: rgba(255, 255, 255, 0.22);
     }
+    #diagram-legend-popover {
+      position: absolute;
+      left: 12px;
+      bottom: 12px;
+      z-index: 27;
+      width: 320px;
+      max-width: calc(100% - 24px);
+      max-height: min(62vh, 460px);
+      display: none;
+      flex-direction: column;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--bg-header);
+      color: var(--text-main);
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.35);
+      overflow: hidden;
+    }
+    #diagram-legend-popover.open {
+      display: flex;
+    }
+    .dleg-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 9px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-card);
+    }
+    .dleg-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .dleg-body {
+      padding: 10px 12px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .dleg-section-title {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: var(--text-muted);
+      margin-bottom: 5px;
+    }
+    .dleg-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .dleg-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 11.5px;
+      line-height: 1.35;
+    }
+    .dleg-swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      margin-top: 2px;
+      flex-shrink: 0;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+    }
+    .dleg-line-swatch {
+      width: 18px;
+      height: 0;
+      border-top: 2.5px solid var(--accent);
+      margin-top: 7px;
+      flex-shrink: 0;
+    }
+    .dleg-row-text {
+      min-width: 0;
+      flex: 1;
+    }
+    .dleg-row-name {
+      font-weight: 600;
+      color: var(--text-main);
+    }
+    .dleg-row-desc {
+      font-size: 10.5px;
+      color: var(--text-muted);
+    }
+    .dleg-count {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10.5px;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
     .audience-bar {
       display: flex;
       align-items: center;
@@ -4894,6 +4987,7 @@ export function generateInteractiveCallflowHtml(
       </div>
       <button id="btn-fit" title="Gesamtes Diagramm einpassen">Fit</button>
       <button id="btn-100" class="primary" title="Echte 1:1 Originalgröße">1:1</button>
+      <button id="btn-diagram-legend" title="Farb- und Bauteil-Legende ein-/ausblenden (L)">Legende</button>
       <button id="btn-minimap" title="Übersichts-Minimap ein-/ausblenden (M)">Minimap</button>
       <button id="btn-toggle-sidebar" title="Rechte Seitenleiste ein-/ausklappen (B)">Leiste</button>
       <button id="btn-fullscreen" title="Vollbild umschalten (F)">Vollbild</button>
@@ -4911,6 +5005,13 @@ export function generateInteractiveCallflowHtml(
           </div>
         </div>
         <button type="button" id="canvas-node-info-btn" title="Knoten-Info öffnen (Laie / IT-Profi)" aria-label="Knoten-Info öffnen"><span class="cnib-icon">i</span><span>Info</span></button>
+        <div id="diagram-legend-popover" aria-label="Farb- und Bauteil-Legende">
+          <div class="dleg-head">
+            <span class="dleg-title">Farb- &amp; Bauteil-Legende</span>
+            <button type="button" id="btn-close-diagram-legend" style="padding:1px 6px;font-size:11px;border:none;background:transparent;color:var(--text-muted);cursor:pointer;" title="Schließen (L / Esc)">✕</button>
+          </div>
+          <div class="dleg-body" id="diagram-legend-body"></div>
+        </div>
         <div id="welcome-overlay" class="open" aria-label="Schnellstart Willkommensseite"></div>
         <div id="minimap-box" aria-label="Diagramm-Minimap">
           <div class="minimap-head">
@@ -5531,11 +5632,71 @@ export function generateInteractiveCallflowHtml(
       applyCombinedCanvasState(false);
     }
 
+    let diagramLegendOpen = false;
+    const DIAGRAM_LEGEND_NODE_TYPES = [
+      { id: 'start-actor', label: 'Einstieg & Akteure', desc: 'Hier kommen Anrufe über gewählte Rufnummern zuerst an.', color: '#38bdf8' },
+      { id: 'core-service', label: 'Teil-Abläufe & Skripte', desc: 'Eigenständige Bausteine für Fachbereiche oder Themen.', color: '#818cf8' },
+      { id: 'decision', label: 'Zeit- & Regelweichen', desc: 'Prüfen Öffnungszeiten, Feiertage oder Bedingungen.', color: '#fbbf24' },
+      { id: 'announcement', label: 'Sprachansagen & Musik', desc: 'Spielen Begrüßungen, Hinweise oder Wartemusik ab.', color: '#14b8a6' },
+      { id: 'queue', label: 'Warteschlangen / Teams', desc: 'Verbinden Anrufer mit der zuständigen Mitarbeiter-Gruppe.', color: '#a78bfa' },
+      { id: 'storage', label: 'Datenbank & Externe Ziele', desc: 'IT-Abfragen (HDX/DB) oder Weiterleitung nach außen.', color: '#34d399' },
+      { id: 'error-alert', label: 'Offene Punkte & Warnungen', desc: 'Fehlende Zielskripte, Außer-Betrieb oder Abbruch.', color: '#fb7185' },
+    ];
+
+    function renderDiagramLegendPopover() {
+      const pop = document.getElementById('diagram-legend-popover');
+      const body = document.getElementById('diagram-legend-body');
+      const btn = document.getElementById('btn-diagram-legend');
+      if (btn) btn.classList.toggle('btn-active', diagramLegendOpen);
+      if (!pop || !body) return;
+      pop.classList.toggle('open', diagramLegendOpen);
+      if (!diagramLegendOpen) return;
+
+      const typeCounts = {};
+      if (GRAPH && Array.isArray(GRAPH.nodes)) {
+        GRAPH.nodes.forEach(n => {
+          const t = classifyNodeTypeForFilter(n);
+          typeCounts[t] = (typeCounts[t] || 0) + 1;
+        });
+      }
+
+      let html = '<div><div class="dleg-section-title">Bauteil-Farben (Was bedeutet was?)</div><div class="dleg-list">' +
+        DIAGRAM_LEGEND_NODE_TYPES.map(item => {
+          const cnt = typeCounts[item.id] || 0;
+          return '<div class="dleg-row">' +
+            '<span class="dleg-swatch" style="background:' + item.color + ';"></span>' +
+            '<div class="dleg-row-text"><div class="dleg-row-name">' + esc(item.label) + '</div><div class="dleg-row-desc">' + esc(item.desc) + '</div></div>' +
+            (cnt > 0 ? '<span class="dleg-count">' + cnt + '</span>' : '') +
+          '</div>';
+        }).join('') +
+      '</div></div>';
+
+      if (currentEdgeLegend && currentEdgeLegend.length > 0) {
+        html += '<div style="padding-top:8px;border-top:1px solid var(--border);"><div class="dleg-section-title">Verbindungs-Linien (' + (pathColorMode === 'branches' ? 'Modus B: Verzweigung' : 'Modus A: Semantik') + ')</div><div class="dleg-list">' +
+          currentEdgeLegend.map(it =>
+            '<div class="dleg-row">' +
+              '<span class="dleg-line-swatch" style="border-top-color:' + it.color + ';border-top-style:' + (it.dashed ? 'dashed' : 'solid') + ';"></span>' +
+              '<div class="dleg-row-text"><div class="dleg-row-name">' + esc(it.label) + '</div></div>' +
+              (it.count !== undefined ? '<span class="dleg-count">' + it.count + '</span>' : '') +
+            '</div>'
+          ).join('') +
+        '</div></div>';
+      }
+
+      body.innerHTML = html;
+    }
+
+    function setDiagramLegendOpen(nextOpen) {
+      diagramLegendOpen = Boolean(nextOpen);
+      renderDiagramLegendPopover();
+    }
+
     function renderLegendBar(spotlightItems) {
       const bar = document.getElementById('legend-bar');
       if (!bar) return;
       if (activeViewKey === 'welcome' && !spotlightItems) {
         bar.innerHTML = '<strong style="color:var(--accent-text);">Schnellstart:</strong><span class="leg-item">Ansicht über Startkarte oder Skript-Menü wählen — Grafik wird erst bei Bedarf gerendert.</span>';
+        if (diagramLegendOpen) renderDiagramLegendPopover();
         return;
       }
       const items = spotlightItems || currentEdgeLegend;
@@ -5545,6 +5706,7 @@ export function generateInteractiveCallflowHtml(
       bar.innerHTML = prefix + items.map(it =>
         '<span class="leg-item"><span class="leg-line" style="border-top-color:' + it.color + ';border-top-style:' + (it.dashed ? 'dashed' : 'solid') + ';"></span><span>' + esc(it.label) + '</span>' + (it.count !== undefined ? '<span class="leg-count">(' + it.count + ')</span>' : '') + '</span>'
       ).join('');
+      if (diagramLegendOpen) renderDiagramLegendPopover();
     }
 
     function syncMasterDensityUi() {
@@ -7678,6 +7840,19 @@ export function generateInteractiveCallflowHtml(
         whatIsIt = 'Zentraler Knotenpunkt, an dem mehrere Wege zusammenlaufen oder sich auf Folgeziele aufteilen.';
       }
 
+      function translateConditionFallback(rawCond) {
+        const c = String(rawCond || '').replace(/^IF\s+/i, '').trim();
+        if (!c) return '';
+        if (/OUT\s+OF\s+SERVICE|OOS|NOT\s+IN\s+SERVICE/i.test(c)) return 'Es wird geprüft, ob der Dienst oder das Team aktuell außer Betrieb bzw. geschlossen ist.';
+        if (/(?:LOGGED|AVAILABLE|IDLE)\s+AGENTS?.*(?:=|<=)\s*0|NOT\s+LOGGED/i.test(c)) return 'Es wird geprüft, ob aktuell kein Mitarbeiter im Team angemeldet bzw. frei ist.';
+        if (/QUEUED\s+CALLS|CALLS\s+WAITING/i.test(c)) return 'Es wird geprüft, wie viele Anrufer bereits in der Warteschlange warten.';
+        if (/EXPECTED\s+WAIT\s+TIME|EWT/i.test(c)) return 'Es wird geprüft, ob die geschätzte Wartezeit einen Grenzwert überschreitet.';
+        if (/HOLIDAY|FEIERTAG/i.test(c)) return 'Es wird geprüft, ob heute ein Feiertag ist.';
+        if (/SONDZEIT|NOTFALL|EMERGENCY/i.test(c)) return 'Es wird geprüft, ob eine Sonderzeit- oder Notfallschaltung aktiv ist.';
+        if (/BUSY|FULL/i.test(c)) return 'Es wird geprüft, ob das Ziel oder die Warteschlange aktuell voll bzw. besetzt ist.';
+        return 'Es wird eine Regel geprüft: „' + c + '“.';
+      }
+
       const steps = [];
       if (snap.entryDnisNumbers && snap.entryDnisNumbers.length) {
         steps.push('Anrufer erreichen diesen Einstieg über: ' + snap.entryDnisNumbers.slice(0, 4).join(', ') + '.');
@@ -7686,8 +7861,8 @@ export function generateInteractiveCallflowHtml(
       }
       if (sched) steps.push('Es gelten feste Zeiten: ' + sched + (snap.hasHolidayCheck ? ' (inkl. Feiertagsprüfung)' : '') + '.');
       else if (snap.hasHolidayCheck) steps.push('Es wird automatisch geprüft, ob heute ein Feiertag ist.');
-      if (snap.condition) steps.push('Es wird eine Regel geprüft: „' + snap.condition + '“.');
-      if (snap.announcement) steps.push('Der Anrufer hört die Ansage „' + snap.announcement + '“.');
+      if (snap.condition) steps.push(translateConditionFallback(snap.condition));
+      if (snap.announcement) steps.push('Der Anrufer hört die Sprachansage „' + snap.announcement + '“.');
       if (snap.queueTarget) steps.push('Der Anruf wird an das Team „' + snap.queueTarget + '“ übergeben.');
       if (out.length) {
         steps.push(out.length === 1
@@ -7774,22 +7949,28 @@ export function generateInteractiveCallflowHtml(
     function wireInfoConnectionButtons(container) {
       container.querySelectorAll('.info-conn-btn').forEach(btn => {
         btn.addEventListener('click', () => {
-          const ref = btn.getAttribute('data-ref') || '';
-          const lbl = btn.getAttribute('data-label') || '';
+          const ref = (btn.getAttribute('data-ref') || '').trim();
+          const lbl = (btn.getAttribute('data-label') || '').trim();
+          if (!ref && !lbl) return;
           closeNodeInfoModal();
-          if (nodeMap.has(ref)) {
+          if (ref && nodeMap.has(ref)) {
             selectNode(ref, true);
             return;
           }
+          const refLower = ref.toLowerCase();
+          const lblLower = lbl.toLowerCase();
           const matchByLabel = GRAPH.nodes.find(n =>
-            n.label.toLowerCase().includes(ref.toLowerCase()) ||
-            n.id.toLowerCase().includes(ref.toLowerCase())
+            (refLower && n.id.toLowerCase() === refLower) ||
+            (refLower && n.label.toLowerCase().includes(refLower)) ||
+            (lblLower && n.label.toLowerCase() === lblLower)
           );
           if (matchByLabel) {
             selectNode(matchByLabel.id, true);
             return;
           }
-          jumpToScriptOrNode(ref, lbl);
+          if (ref) {
+            jumpToScriptOrNode(ref, lbl);
+          }
         });
       });
     }
@@ -7890,25 +8071,30 @@ export function generateInteractiveCallflowHtml(
           '</div>';
         }
 
+        const friendlyMap = exp.friendlyTargetLabels || {};
         html += '<div class="facts-grid">' +
           '<div><div class="section-title">Woher kommt der Anrufer? (' + inc.length + ')</div>' +
             (inc.length
-              ? inc.map(c =>
-                  '<button type="button" class="node-chip info-conn-btn" data-ref="' + esc(c.fromScriptNumber) + '" data-label="' + esc(c.fromLabel) + '">' +
-                    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">← ' + esc(c.fromLabel || c.fromScriptNumber) + '</span>' +
+              ? inc.map(c => {
+                  const refKey = String(c.fromScriptNumber || '').trim();
+                  const displayFrom = (refKey && friendlyMap[refKey]) || c.fromLabel || c.fromScriptNumber;
+                  return '<button type="button" class="node-chip info-conn-btn" data-ref="' + esc(c.fromScriptNumber) + '" data-label="' + esc(c.fromLabel) + '">' +
+                    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">← ' + esc(displayFrom) + '</span>' +
                     '<span class="badge">' + esc(c.edgeLabel || 'Zeigen') + '</span>' +
-                  '</button>'
-                ).join('')
+                  '</button>';
+                }).join('')
               : '<div class="muted-note">Startpunkt oder kein vorgeschaltetes Element in dieser Ansicht.</div>') +
           '</div>' +
           '<div><div class="section-title">Wohin geht es danach? (' + out.length + ')</div>' +
             (out.length
-              ? out.map(c =>
-                  '<button type="button" class="node-chip info-conn-btn" data-ref="' + esc(c.toTargetNumber) + '" data-label="' + esc(c.toTargetNumber) + '">' +
-                    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">→ ' + esc(c.toTargetNumber) + '</span>' +
+              ? out.map(c => {
+                  const refKey = String(c.toTargetNumber || '').trim();
+                  const displayTo = (refKey && friendlyMap[refKey]) || c.toTargetNumber;
+                  return '<button type="button" class="node-chip info-conn-btn" data-ref="' + esc(c.toTargetNumber) + '" data-label="' + esc(displayTo) + '">' +
+                    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">→ ' + esc(displayTo) + '</span>' +
                     '<span class="badge">' + esc(c.label || 'Weiter') + '</span>' +
-                  '</button>'
-                ).join('')
+                  '</button>';
+                }).join('')
               : '<div class="muted-note">Kein weiterer Folgeschritt in dieser Ansicht.</div>') +
           '</div>' +
         '</div>';
@@ -8192,16 +8378,10 @@ export function generateInteractiveCallflowHtml(
       });
     });
     window.addEventListener('resize', () => { syncCanvasNodeInfoButton(); });
-
-    document.addEventListener('keydown', e => {
-      if (e.key === 'Escape') {
-        if (nodeInfoOverlay && nodeInfoOverlay.style.display === 'flex') {
-          closeNodeInfoModal();
-        } else if (schedulesOverlay && schedulesOverlay.style.display === 'flex') {
-          schedulesOverlay.style.display = 'none';
-        }
-      }
-    });
+    const btnDiagramLegend = document.getElementById('btn-diagram-legend');
+    const btnCloseDiagramLegend = document.getElementById('btn-close-diagram-legend');
+    if (btnDiagramLegend) btnDiagramLegend.addEventListener('click', () => setDiagramLegendOpen(!diagramLegendOpen));
+    if (btnCloseDiagramLegend) btnCloseDiagramLegend.addEventListener('click', () => setDiagramLegendOpen(false));
 
     if (masterDensityGroup) {
       masterDensityGroup.querySelectorAll('.seg-btn').forEach(btn => {
@@ -9852,18 +10032,31 @@ export function generateInteractiveCallflowHtml(
       else openCallSimHud();
     });
 
-    // Global Keyboard Shortcuts in Callflow.html
+    // Unified Priority Keyboard & Escape Dispatcher in Callflow.html
     document.addEventListener('keydown', e => {
+      const isGsearchOpen = Boolean(gsearchOverlay && gsearchOverlay.classList.contains('open'));
+      const isNodeInfoOpen = Boolean(nodeInfoOverlay && nodeInfoOverlay.style.display === 'flex');
+      const isSchedulesOpen = Boolean(schedulesOverlay && schedulesOverlay.style.display === 'flex');
+      const isScriptDropdownOpen = Boolean(scriptDropdownPopover && scriptDropdownPopover.style.display === 'flex');
+      const anyModalOpen = isGsearchOpen || isNodeInfoOpen || isSchedulesOpen;
+
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        if (gsearchOverlay && gsearchOverlay.classList.contains('open')) closeGlobalSearchModal();
+        if (isGsearchOpen) closeGlobalSearchModal();
         else openGlobalSearchModal();
         return;
       }
       if (e.key === 'Escape') {
-        if (gsearchOverlay && gsearchOverlay.classList.contains('open')) { closeGlobalSearchModal(); return; }
-        if (simState.active) { closeCallSimHud(); return; }
+        if (isGsearchOpen) { e.preventDefault(); closeGlobalSearchModal(); return; }
+        if (isNodeInfoOpen) { e.preventDefault(); closeNodeInfoModal(); return; }
+        if (isSchedulesOpen) { e.preventDefault(); schedulesOverlay.style.display = 'none'; return; }
+        if (isScriptDropdownOpen) { e.preventDefault(); scriptDropdownPopover.style.display = 'none'; return; }
+        if (diagramLegendOpen) { e.preventDefault(); setDiagramLegendOpen(false); return; }
+        if (simState.active) { e.preventDefault(); closeCallSimHud(); return; }
+        return;
       }
+      if (anyModalOpen) return;
+
       const tag = (e.target && e.target.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.ctrlKey || e.metaKey || e.altKey) return;
       if (simState.active) {
@@ -9880,7 +10073,10 @@ export function generateInteractiveCallflowHtml(
         }
       }
       const key = e.key.toLowerCase();
-      if (key === 'm') {
+      if (key === 'l') {
+        e.preventDefault();
+        setDiagramLegendOpen(!diagramLegendOpen);
+      } else if (key === 'm') {
         e.preventDefault();
         setMinimapOpen(!minimapOpen);
       } else if (key === 'b') {

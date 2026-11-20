@@ -39,6 +39,7 @@ import {
   Trash2,
   Unlink,
   Wand2,
+  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -462,6 +463,7 @@ function OfflineStudioApp() {
   const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState<boolean>(false);
   const [isCallSimulatorOpen, setIsCallSimulatorOpen] = useState<boolean>(false);
   const [showMinimap, setShowMinimap] = useState<boolean>(false);
+  const [showDiagramLegend, setShowDiagramLegend] = useState<boolean>(false);
   const pendingNodeFocusHintRef = useRef<{
     nodeId?: string;
     fallbackNodeId?: string;
@@ -1331,6 +1333,10 @@ function OfflineStudioApp() {
           setEditingNodeSnapshot(null);
           return;
         }
+        if (showDiagramLegend) {
+          setShowDiagramLegend(false);
+          return;
+        }
         if (selectedCallflowEdge) {
           setSelectedCallflowEdge(null);
           return;
@@ -1394,6 +1400,7 @@ function OfflineStudioApp() {
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [
     editingNodeSnapshot,
+    showDiagramLegend,
     selectedCallflowNodeId,
     isolateSubgraphMode,
     selectedCallflowEdge,
@@ -1821,8 +1828,20 @@ function OfflineStudioApp() {
       ) {
         return;
       }
+      if (
+        editingNodeSnapshot ||
+        isGlobalSearchOpen ||
+        isOpeningHoursModalOpen ||
+        isNewCallflowModalOpen ||
+        isMultiScriptModalOpen
+      ) {
+        return;
+      }
       const key = e.key.toLowerCase();
-      if (key === 'm') {
+      if (key === 'l') {
+        e.preventDefault();
+        setShowDiagramLegend((prev) => !prev);
+      } else if (key === 'm') {
         e.preventDefault();
         setShowMinimap((prev) => !prev);
       } else if (key === 'b') {
@@ -1835,7 +1854,13 @@ function OfflineStudioApp() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [
+    editingNodeSnapshot,
+    isGlobalSearchOpen,
+    isOpeningHoursModalOpen,
+    isNewCallflowModalOpen,
+    isMultiScriptModalOpen,
+  ]);
 
   const handleGlobalSearchSelect = useCallback(
     (entry: GlobalSearchEntry) => {
@@ -4261,6 +4286,13 @@ function OfflineStudioApp() {
             }
 
             // Precompute structured Element Info snapshots using O(1) WorkspaceInspectContext
+            const exportScriptLabelMap: Record<string, string> = {};
+            scriptWorkspace.modules.forEach((mod) => {
+              if (!mod.scriptNumber || !mod.scriptName) return;
+              exportScriptLabelMap[mod.scriptNumber] = mod.scriptName;
+              exportScriptLabelMap[mod.scriptNumber.toLowerCase()] = mod.scriptName;
+              exportScriptLabelMap[canonicalScriptMatchKey(mod.scriptNumber)] = mod.scriptName;
+            });
             const nodeDetails: Record<string, InteractiveCallflowHtmlNodeDetail> = {};
             try {
               parsedGraph.nodes.forEach((node) => {
@@ -4298,7 +4330,11 @@ function OfflineStudioApp() {
                   specialParameters: snap.specialParameters,
                   relatedFindings: snap.relatedFindings,
                   rawLineSnippet: snap.rawLineSnippet,
-                  explanation: buildDualAudienceNodeExplanation(snap, parsedGraph),
+                  explanation: buildDualAudienceNodeExplanation(
+                    snap,
+                    parsedGraph,
+                    exportScriptLabelMap
+                  ),
                 };
               });
             } catch {
@@ -5347,6 +5383,20 @@ function OfflineStudioApp() {
                 }`}
               >
                 <Grid className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowDiagramLegend((prev) => !prev)}
+                title="Farb- und Bauteil-Legende ein-/ausblenden (L)"
+                className={`flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  showDiagramLegend
+                    ? 'text-indigo-200 bg-indigo-600/25 border border-indigo-500/50'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span className="hidden xl:inline text-[11px]">Legende</span>
               </button>
 
               <button
@@ -6707,6 +6757,162 @@ function OfflineStudioApp() {
                   >
                     Vorlagen
                   </button>
+                </div>
+              </div>
+            )}
+
+            {/* Floating Bottom-Left Toggleable Color & Node-Type Legend */}
+            {coloredSvg && showDiagramLegend && (
+              <div
+                data-canvas-ui="true"
+                onMouseDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
+                className={`absolute bottom-3 left-3 z-30 w-80 max-w-[calc(100%-24px)] max-h-[60vh] rounded-xl border shadow-2xl flex flex-col overflow-hidden ${
+                  canvasSurface === 'dark'
+                    ? 'bg-slate-900/95 border-slate-800 text-slate-100'
+                    : 'bg-white/95 border-slate-200 text-slate-900'
+                }`}
+              >
+                <div
+                  className={`px-3.5 py-2.5 border-b flex items-center justify-between gap-2 shrink-0 ${
+                    canvasSurface === 'dark'
+                      ? 'border-slate-800 bg-slate-950/80'
+                      : 'border-slate-200 bg-slate-50'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <Layers className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <span className="text-xs font-semibold truncate">
+                      Farb- &amp; Bauteil-Legende
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowDiagramLegend(false)}
+                    title="Legende schließen (L / Esc)"
+                    aria-label="Legende schließen"
+                    className={`p-1 rounded-md transition-colors cursor-pointer ${
+                      canvasSurface === 'dark'
+                        ? 'text-slate-400 hover:text-slate-100 hover:bg-slate-800'
+                        : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/70'
+                    }`}
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="p-3.5 overflow-y-auto space-y-3.5">
+                  <div className="space-y-2">
+                    <div
+                      className={`text-[11px] font-semibold ${
+                        canvasSurface === 'dark' ? 'text-slate-400' : 'text-slate-500'
+                      }`}
+                    >
+                      Bauteil-Farben (Was bedeutet was?)
+                    </div>
+                    <div className="space-y-2">
+                      {[
+                        {
+                          label: 'Einstieg & Akteure',
+                          desc: 'Hier kommen Anrufe über gewählte Rufnummern zuerst an.',
+                          color: '#38bdf8',
+                        },
+                        {
+                          label: 'Teil-Abläufe & Skripte',
+                          desc: 'Eigenständige Bausteine für Fachbereiche oder Themen.',
+                          color: '#818cf8',
+                        },
+                        {
+                          label: 'Zeit- & Regelweichen',
+                          desc: 'Prüfen Öffnungszeiten, Feiertage oder Bedingungen.',
+                          color: '#fbbf24',
+                        },
+                        {
+                          label: 'Sprachansagen & Musik',
+                          desc: 'Spielen Begrüßungen, Hinweise oder Wartemusik ab.',
+                          color: '#14b8a6',
+                        },
+                        {
+                          label: 'Warteschlangen / Teams',
+                          desc: 'Verbinden Anrufer mit der zuständigen Mitarbeiter-Gruppe.',
+                          color: '#a78bfa',
+                        },
+                        {
+                          label: 'Datenbank & Externe Ziele',
+                          desc: 'IT-Abfragen (HDX/DB) oder Weiterleitung nach außen.',
+                          color: '#34d399',
+                        },
+                        {
+                          label: 'Offene Punkte & Warnungen',
+                          desc: 'Fehlende Zielskripte, Außer-Betrieb oder Abbruch.',
+                          color: '#fb7185',
+                        },
+                      ].map((item) => (
+                        <div key={item.label} className="flex items-start gap-2.5">
+                          <span
+                            className="w-3 h-3 rounded-[3px] mt-0.5 shrink-0 border border-white/20"
+                            style={{ backgroundColor: item.color }}
+                            aria-hidden="true"
+                          />
+                          <div className="min-w-0 leading-snug">
+                            <div className="text-xs font-semibold">{item.label}</div>
+                            <div
+                              className={`text-[11px] ${
+                                canvasSurface === 'dark' ? 'text-slate-400' : 'text-slate-600'
+                              }`}
+                            >
+                              {item.desc}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {logicSummary.legend.filter((it) => it.kind === 'edge').length > 0 && (
+                    <div
+                      className={`pt-3 border-t space-y-2 ${
+                        canvasSurface === 'dark' ? 'border-slate-800' : 'border-slate-200'
+                      }`}
+                    >
+                      <div
+                        className={`text-[11px] font-semibold ${
+                          canvasSurface === 'dark' ? 'text-slate-400' : 'text-slate-500'
+                        }`}
+                      >
+                        Verbindungs-Linien ({pathColorMode === 'branches' ? 'Modus B: Verzweigung' : 'Modus A: Semantik'})
+                      </div>
+                      <div className="space-y-1.5">
+                        {logicSummary.legend
+                          .filter((it) => it.kind === 'edge')
+                          .map((it) => (
+                            <div
+                              key={it.id}
+                              className="flex items-center justify-between gap-2 text-xs"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span
+                                  className="w-4 shrink-0 border-t-2"
+                                  style={{
+                                    borderTopColor: it.borderColor || it.fillColor,
+                                    borderTopStyle: it.dashed ? 'dashed' : 'solid',
+                                  }}
+                                  aria-hidden="true"
+                                />
+                                <span className="truncate font-medium">{it.label}</span>
+                              </div>
+                              <span
+                                className={`font-mono text-[11px] tabular-nums shrink-0 ${
+                                  canvasSurface === 'dark' ? 'text-slate-400' : 'text-slate-500'
+                                }`}
+                              >
+                                {it.count}
+                              </span>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}

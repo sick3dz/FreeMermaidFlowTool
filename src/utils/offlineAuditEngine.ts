@@ -77,7 +77,7 @@ export interface SbomPackageItem {
   corporateNote: string;
 }
 
-export const AUDIT_APP_VERSION = '1.0.5';
+export const AUDIT_APP_VERSION = '1.0.6';
 
 export const ENTERPRISE_HIGHLIGHT_TILES: EnterpriseHighlightTile[] = [
   {
@@ -396,7 +396,7 @@ sha256sum MermaidFree2UseOpen_Offline.html`,
         reference: 'OPS.1.1.3 & DER.1',
         auditQuestion: 'Wie erfolgt die Nachvollziehbarkeit von Versionsständen und Sicherheitsupdates?',
         technicalProof:
-          'Keine stillen Hintergrund-Updates. Neue Stände (aktuell Version 1.0.5) werden explizit als benannte Einzeldatei über interne Freigabeprozesse ersetzt.',
+          `Keine stillen Hintergrund-Updates. Neue Stände (aktuell Version ${AUDIT_APP_VERSION}) werden explizit als benannte Einzeldatei über interne Freigabeprozesse ersetzt.`,
         verdict: 'Unterstützt',
       },
     ],
