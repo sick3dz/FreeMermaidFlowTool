@@ -18,6 +18,7 @@ import {
   GitBranch,
   Globe,
   Grid,
+  Info,
   Layers,
   Map as MapIcon,
   Maximize2,
@@ -150,6 +151,7 @@ import {
   updateEdgeLabelInWorkspace,
   updateWorkspaceNodeFromEdit,
 } from './utils/scriptCallflowParser';
+import { buildDualAudienceNodeExplanation } from './utils/nodeExplanationEngine';
 import {
   buildCallflowSimulationModel,
   buildWorkspaceGlobalSearchIndex,
@@ -640,6 +642,8 @@ function OfflineStudioApp() {
   const gutterRef = useRef<HTMLDivElement | null>(null);
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
   const stageElRef = useRef<HTMLDivElement | null>(null);
+  const activeNodeInfoBtnRef = useRef<HTMLButtonElement | null>(null);
+  const selectedCallflowNodeIdRef = useRef<string | null>(null);
   const liveSvgIndexRef = useRef<LiveSvgDomIndex | null>(null);
   const wireLineRef = useRef<SVGLineElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
@@ -1582,6 +1586,62 @@ function OfflineStudioApp() {
     };
   }, []);
 
+  const syncActiveNodeInfoButtonPosition = useCallback(() => {
+    const btn = activeNodeInfoBtnRef.current;
+    if (!btn) return;
+    const nodeId = selectedCallflowNodeIdRef.current;
+    const vp = canvasViewportRef.current;
+    const stage = stageElRef.current;
+    if (!nodeId || !vp || !stage) {
+      btn.style.display = 'none';
+      return;
+    }
+    let nodeEl: Element | null = null;
+    try {
+      nodeEl = stage.querySelector(`[data-callflow-node-id="${CSS.escape(nodeId)}"]`);
+    } catch {
+      nodeEl = stage.querySelector(`[data-callflow-node-id="${nodeId.replace(/"/g, '\\"')}"]`);
+    }
+    if (!nodeEl) {
+      btn.style.display = 'none';
+      return;
+    }
+    const nodeRect = nodeEl.getBoundingClientRect();
+    const vpRect = vp.getBoundingClientRect();
+    if (nodeRect.width <= 0 || nodeRect.height <= 0 || vpRect.width <= 0) {
+      btn.style.display = 'none';
+      return;
+    }
+    const rawLeft = nodeRect.right - vpRect.left + 6;
+    const rawTop = nodeRect.top - vpRect.top - 14;
+    if (
+      rawLeft < -48 ||
+      rawLeft > vpRect.width + 48 ||
+      rawTop < -48 ||
+      rawTop > vpRect.height + 48
+    ) {
+      btn.style.display = 'none';
+      return;
+    }
+    const clampedLeft = Math.max(8, Math.min(vpRect.width - 82, rawLeft));
+    const clampedTop = Math.max(8, Math.min(vpRect.height - 42, rawTop));
+    btn.style.display = 'inline-flex';
+    btn.style.transform = `translate3d(${Math.round(clampedLeft)}px, ${Math.round(clampedTop)}px, 0)`;
+  }, []);
+
+  useEffect(() => {
+    selectedCallflowNodeIdRef.current = selectedCallflowNodeId;
+    syncActiveNodeInfoButtonPosition();
+    const rafId = window.requestAnimationFrame(() => syncActiveNodeInfoButtonPosition());
+    return () => window.cancelAnimationFrame(rafId);
+  }, [selectedCallflowNodeId, coloredSvg, activeNodeOffsets, callflowViewLevel, syncActiveNodeInfoButtonPosition]);
+
+  useEffect(() => {
+    const onResize = () => syncActiveNodeInfoButtonPosition();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [syncActiveNodeInfoButtonPosition]);
+
   // Apply GPU-safe transform directly to canvas stage without promoting giant vector SVGs via permanent will-change
   const applyCameraToDom = useCallback(
     (panX: number, panY: number, z: number, activeGesture: boolean) => {
@@ -1594,8 +1654,9 @@ function OfflineStudioApp() {
         stage.style.transform = `translate3d(${panX}px, ${panY}px, 0) scale(${z})`;
       }
       syncGpuProxyDomAttr(activeGesture);
+      syncActiveNodeInfoButtonPosition();
     },
-    [syncGpuProxyDomAttr]
+    [syncGpuProxyDomAttr, syncActiveNodeInfoButtonPosition]
   );
 
   // Sync React camera state when programmatic zoom/pan buttons or resets run
@@ -4237,6 +4298,7 @@ function OfflineStudioApp() {
                   specialParameters: snap.specialParameters,
                   relatedFindings: snap.relatedFindings,
                   rawLineSnippet: snap.rawLineSnippet,
+                  explanation: buildDualAudienceNodeExplanation(snap, parsedGraph),
                 };
               });
             } catch {
@@ -5998,6 +6060,16 @@ function OfflineStudioApp() {
 
                       <button
                         type="button"
+                        onClick={() => handleOpenNodeEditor(callflowTrace.selectedNode.id)}
+                        title="Knoten-Info-Box öffnen (Laie & IT-Profi)"
+                        className="px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-600/20 hover:bg-emerald-600/35 border border-emerald-500/50 text-emerald-200 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        <Info className="w-3 h-3" />
+                        <span>Knoten-Info</span>
+                      </button>
+
+                      <button
+                        type="button"
                         onClick={() => handleFocusNodeOnCanvas(callflowTrace.selectedNode.id, 1.35)}
                         title="Kamera direkt auf diesen Knoten zentrieren und lesbar heranzoomen"
                         className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
@@ -6250,11 +6322,35 @@ function OfflineStudioApp() {
             )}
 
             {coloredSvg && !preloadProgress?.active ? (
-              <MemoizedSvgStage
-                ref={stageElRef}
-                svgHtml={coloredSvg}
-                gpuProxy={gpuProxy}
-              />
+              <>
+                <MemoizedSvgStage
+                  ref={stageElRef}
+                  svgHtml={coloredSvg}
+                  gpuProxy={gpuProxy}
+                />
+                <button
+                  ref={activeNodeInfoBtnRef}
+                  type="button"
+                  data-canvas-ui="true"
+                  style={{ display: 'none' }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onTouchStart={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (selectedCallflowNodeId) {
+                      handleOpenNodeEditor(selectedCallflowNodeId);
+                    }
+                  }}
+                  title="Knoten-Info öffnen (Laie & IT-Profi)"
+                  aria-label="Knoten-Info öffnen"
+                  className="absolute top-0 left-0 z-30 h-7 pl-1.5 pr-2.5 rounded-lg border border-indigo-400/70 bg-slate-900/95 hover:bg-indigo-600 text-slate-100 hover:text-white text-[11px] font-semibold shadow-xl items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
+                >
+                  <span className="w-4 h-4 rounded-full bg-indigo-500 text-white font-mono text-[10px] font-bold flex items-center justify-center shrink-0">
+                    i
+                  </span>
+                  <span>Info</span>
+                </button>
+              </>
             ) : callflowViewLevel.level === 'welcome' &&
               (scriptWorkspace.modules.length > 0 || code.trim().length > 0) ? (
               (() => {
@@ -7438,6 +7534,7 @@ function OfflineStudioApp() {
       <NodeInlineEditorModal
         isOpen={Boolean(editingNodeSnapshot)}
         snapshot={editingNodeSnapshot}
+        graph={callflowGraph}
         availableTargetRefs={scriptWorkspace.modules.map((m) => ({
           scriptNumber: m.scriptNumber,
           scriptName: m.scriptName,
@@ -7455,6 +7552,11 @@ function OfflineStudioApp() {
         onJumpToScript={(scriptNumber) => {
           setEditingNodeSnapshot(null);
           handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber });
+        }}
+        onSelectGraphNode={(nodeId) => {
+          setEditingNodeSnapshot(null);
+          setSelectedCallflowNodeId(nodeId);
+          handleFocusNodeOnCanvas(nodeId, 1.25);
         }}
         onOpenOpeningHours={(initialSearch) => {
           setEditingNodeSnapshot(null);

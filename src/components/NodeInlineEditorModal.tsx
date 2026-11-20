@@ -1,28 +1,32 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowDownLeft,
   ArrowRight,
   ArrowUpRight,
+  BookOpen,
   Calendar,
+  Check,
   Clock,
+  Copy,
   Edit3,
   ExternalLink,
   GitBranch,
   Hash,
-  Info,
   Layers,
-  ListChecks,
   Phone,
   Plus,
   RotateCcw,
   Save,
   Sliders,
+  Terminal,
   Trash2,
   Volume2,
   X,
 } from 'lucide-react';
 import { CallflowBuildingBlockType } from '../types/mermaidStudio';
+import { CallflowGraph } from '../types/mermaidStudio';
+import { buildDualAudienceNodeExplanation } from '../utils/nodeExplanationEngine';
 import {
   EditableCallflowNodeSnapshot,
   EditableNodeConnectionItem,
@@ -32,6 +36,7 @@ import {
 interface NodeInlineEditorModalProps {
   isOpen: boolean;
   snapshot: EditableCallflowNodeSnapshot | null;
+  graph?: CallflowGraph;
   availableTargetRefs: Array<{ scriptNumber: string; scriptName: string }>;
   hasCustomPositionOffset: boolean;
   onClose: () => void;
@@ -51,6 +56,7 @@ interface NodeInlineEditorModalProps {
   onResetPositionOffset: (nodeId: string) => void;
   onDeleteNode: (nodeId: string) => void;
   onJumpToScript?: (scriptNumber: string) => void;
+  onSelectGraphNode?: (nodeId: string) => void;
   onOpenOpeningHours?: (initialSearch?: string) => void;
 }
 
@@ -67,11 +73,12 @@ const BLOCK_TYPE_OPTIONS: Array<{
   { id: 'external', label: 'Externes Ziel', hint: 'Externe Rufnummer / Abwurf' },
 ];
 
-type ModalTab = 'overview' | 'edit' | 'schedule';
+type ModalViewMode = 'layperson' | 'pro' | 'edit';
 
 export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
   isOpen,
   snapshot,
+  graph,
   availableTargetRefs,
   hasCustomPositionOffset,
   onClose,
@@ -79,9 +86,10 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
   onResetPositionOffset,
   onDeleteNode,
   onJumpToScript,
+  onSelectGraphNode,
   onOpenOpeningHours,
 }) => {
-  const [activeTab, setActiveTab] = useState<ModalTab>('overview');
+  const [viewMode, setViewMode] = useState<ModalViewMode>('layperson');
   const [scriptNumber, setScriptNumber] = useState('');
   const [title, setTitle] = useState('');
   const [blockType, setBlockType] = useState<CallflowBuildingBlockType>('script');
@@ -91,10 +99,12 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
   const [condition, setCondition] = useState('');
   const [outgoingConnections, setOutgoingConnections] = useState<EditableNodeConnectionItem[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [copiedSnippet, setCopiedSnippet] = useState(false);
 
   useEffect(() => {
     if (!snapshot) return;
-    setActiveTab(snapshot.mode === 'raw-mermaid' ? 'edit' : 'overview');
+    // Confirmed default: always start in Layperson view on open so non-technical users understand immediately.
+    setViewMode('layperson');
     setScriptNumber(snapshot.scriptNumber);
     setTitle(snapshot.title);
     setBlockType(snapshot.blockType);
@@ -104,6 +114,7 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
     setCondition(snapshot.condition);
     setOutgoingConnections(snapshot.outgoingConnections.map((c) => ({ ...c })));
     setConfirmDelete(false);
+    setCopiedSnippet(false);
   }, [snapshot]);
 
   useEffect(() => {
@@ -115,7 +126,12 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
     return () => window.removeEventListener('keydown', handleKey);
   }, [isOpen, onClose]);
 
-  if (!isOpen || !snapshot) return null;
+  const explanation = useMemo(() => {
+    if (!snapshot) return null;
+    return buildDualAudienceNodeExplanation(snapshot, graph);
+  }, [snapshot, graph]);
+
+  if (!isOpen || !snapshot || !explanation) return null;
 
   const isStepMode = snapshot.mode === 'workspace-step';
   const isRawMermaid = snapshot.mode === 'raw-mermaid';
@@ -129,7 +145,7 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
   const specialParams = snapshot.specialParameters || [];
   const findings = snapshot.relatedFindings || [];
   const dnisList = snapshot.entryDnisNumbers || [];
-  const hasScheduleTab = !isRawMermaid && (rulesPreview.length > 0 || Boolean(snapshot.resolvedScheduleDisplay));
+  const graphNode = graph?.nodes.get(snapshot.nodeId);
 
   const handleAddConnection = () => {
     const nextIdx = outgoingConnections.length + 1;
@@ -178,6 +194,54 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
     onClose();
   };
 
+  const handleNavigateNeighbor = (refOrId: string, label?: string) => {
+    if (graph && onSelectGraphNode) {
+      if (graph.nodes.has(refOrId)) {
+        onClose();
+        onSelectGraphNode(refOrId);
+        return;
+      }
+      const refLower = refOrId.trim().toLowerCase();
+      const lblLower = (label || '').trim().toLowerCase();
+      const match = Array.from(graph.nodes.values()).find(
+        (n) =>
+          n.id.toLowerCase() === refLower ||
+          (refLower && n.label.toLowerCase().includes(refLower)) ||
+          (lblLower && n.label.toLowerCase() === lblLower)
+      );
+      if (match) {
+        onClose();
+        onSelectGraphNode(match.id);
+        return;
+      }
+    }
+    if (onJumpToScript && knownTargetKeySet.has(canonicalScriptMatchKey(refOrId))) {
+      handleJump(refOrId);
+    }
+  };
+
+  const handleCopySnippet = async () => {
+    if (!snapshot.rawLineSnippet) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(snapshot.rawLineSnippet);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = snapshot.rawLineSnippet;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopiedSnippet(true);
+      window.setTimeout(() => setCopiedSnippet(false), 1800);
+    } catch {
+      // Ignore clipboard permission errors in restricted contexts
+    }
+  };
+
   return (
     <div
       role="dialog"
@@ -201,11 +265,15 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
               {snapshot.title || snapshot.scriptNumber}
             </h3>
             <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400">
-              <span className="font-mono text-indigo-300 tabular-nums">
-                [{snapshot.scriptNumber}]
-              </span>
-              <span aria-hidden="true">·</span>
-              <span>{blockTypeLabel}</span>
+              <span className="text-slate-200 font-medium">{explanation.archetypeLabel}</span>
+              {snapshot.scriptNumber && !isRawMermaid && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-mono text-indigo-300 tabular-nums">
+                    Skript [{snapshot.scriptNumber}]
+                  </span>
+                </>
+              )}
               {isStepMode && snapshot.prio !== undefined && (
                 <>
                   <span aria-hidden="true">·</span>
@@ -220,12 +288,6 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                   </span>
                 </>
               )}
-              {snapshot.cdnAlias && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span className="font-mono tabular-nums">CDN {snapshot.cdnAlias}</span>
-                </>
-              )}
             </div>
           </div>
 
@@ -238,7 +300,7 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                   onClick={() => handleJump(snapshot.detailTargetScriptNumber!)}
                   className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
-                  <span>Skript öffnen</span>
+                  <span>Detail-Skript öffnen</span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </button>
               )}
@@ -253,82 +315,282 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
           </div>
         </div>
 
-        {/* Segmented Navigation Tabs */}
-        {!isRawMermaid && (
-          <div className="px-5 py-2.5 border-b border-slate-800 bg-slate-900 flex items-center justify-between gap-3 shrink-0">
-            <div className="flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg">
+        {/* Audience Mode Bar: Prominent Laie | IT-Profi Segmented Control + Studio Edit */}
+        <div className="px-5 py-2.5 border-b border-slate-800 bg-slate-900 flex flex-wrap items-center justify-between gap-2.5 shrink-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div
+              role="tablist"
+              aria-label="Ansichtsmodus der Knoten-Info"
+              className="inline-flex items-center gap-1 p-1 bg-slate-950 border border-slate-800 rounded-lg"
+            >
               <button
                 type="button"
-                onClick={() => setActiveTab('overview')}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                  activeTab === 'overview'
-                    ? 'bg-slate-800 text-slate-100'
-                    : 'text-slate-400 hover:text-slate-200'
+                role="tab"
+                aria-selected={viewMode === 'layperson'}
+                onClick={() => setViewMode('layperson')}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  viewMode === 'layperson'
+                    ? 'bg-emerald-600 text-white'
+                    : 'text-slate-400 hover:text-slate-100'
                 }`}
               >
-                <Info className="w-3.5 h-3.5" />
-                <span>Übersicht</span>
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Laie</span>
               </button>
               <button
                 type="button"
-                onClick={() => setActiveTab('edit')}
-                className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                  activeTab === 'edit'
-                    ? 'bg-slate-800 text-slate-100'
-                    : 'text-slate-400 hover:text-slate-200'
+                role="tab"
+                aria-selected={viewMode === 'pro'}
+                onClick={() => setViewMode('pro')}
+                className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  viewMode === 'pro'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-slate-100'
                 }`}
               >
-                <Edit3 className="w-3.5 h-3.5" />
-                <span>Bearbeiten</span>
+                <Terminal className="w-3.5 h-3.5" />
+                <span>IT-Profi</span>
               </button>
-              {hasScheduleTab && (
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('schedule')}
-                  className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    activeTab === 'schedule'
-                      ? 'bg-slate-800 text-slate-100'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <ListChecks className="w-3.5 h-3.5" />
-                  <span>Zeiten &amp; Regeln</span>
-                  <span className="text-[11px] font-mono text-slate-400 tabular-nums">
-                    ({rulesPreview.length})
-                  </span>
-                </button>
-              )}
             </div>
 
-            {onOpenOpeningHours && (
+            <button
+              type="button"
+              onClick={() => setViewMode('edit')}
+              className={`px-3 py-1.5 rounded-lg border text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                viewMode === 'edit'
+                  ? 'bg-slate-800 border-slate-700 text-slate-100'
+                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-100'
+              }`}
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>Bearbeiten</span>
+            </button>
+          </div>
+
+          {onOpenOpeningHours && !isRawMermaid && (
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onOpenOpeningHours(snapshot.scriptNumber);
+              }}
+              className="px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-xs text-amber-300 font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Clock className="w-3.5 h-3.5" />
+              <span>Alle Öffnungszeiten</span>
+            </button>
+          )}
+        </div>
+
+        {/* VIEW 1: LAIE (DEFAULT — EASY TO UNDERSTAND FOR EVERYONE) */}
+        {viewMode === 'layperson' && (
+          <div className="p-5 space-y-5 overflow-y-auto flex-1">
+            {/* Block 1: What is this building block? */}
+            <section className="rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-2">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h4 className="text-sm font-semibold text-slate-100">
+                  Wofür ist dieses Bauteil?
+                </h4>
+                <span className="text-xs text-emerald-300 font-medium">
+                  {explanation.shortTagline}
+                </span>
+              </div>
+              <p className="text-sm text-slate-200 leading-relaxed">
+                {explanation.whatIsIt}
+              </p>
+            </section>
+
+            {/* Block 2: What specifically happens to the caller here? */}
+            <section className="space-y-2.5 pb-4 border-b border-slate-800">
+              <h4 className="text-sm font-semibold text-slate-100">
+                Was passiert hier mit dem Anrufer?
+              </h4>
+              <ol className="space-y-2">
+                {explanation.whatHappensSteps.map((step, idx) => (
+                  <li
+                    key={idx}
+                    className="flex items-start gap-3 text-xs sm:text-sm text-slate-200 leading-relaxed"
+                  >
+                    <span className="w-5 h-5 rounded-md bg-slate-800 border border-slate-700 text-emerald-300 font-mono text-[11px] font-semibold flex items-center justify-center shrink-0 mt-0.5 tabular-nums">
+                      {idx + 1}
+                    </span>
+                    <span className="min-w-0">{step}</span>
+                  </li>
+                ))}
+              </ol>
+            </section>
+
+            {/* Block 3: Plain-Language Key Facts */}
+            {explanation.plainFacts.length > 0 && (
+              <section className="space-y-2.5 pb-4 border-b border-slate-800">
+                <h4 className="text-xs font-semibold text-slate-300">
+                  Wichtige Eckdaten im Klartext
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {explanation.plainFacts.map((fact) => (
+                    <div
+                      key={fact.label}
+                      className="rounded-lg border border-slate-800 bg-slate-950/60 px-3.5 py-2.5 space-y-0.5"
+                    >
+                      <div className="text-[11px] text-slate-400">{fact.label}</div>
+                      <div className="text-xs font-medium text-slate-100 leading-snug break-words">
+                        {fact.value}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {/* Block 4: Caller Journey (Where from -> Where to) */}
+            <section className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs font-semibold text-slate-200">
+                  <span className="flex items-center gap-1.5">
+                    <ArrowDownLeft className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Woher kommt der Anrufer?</span>
+                  </span>
+                  <span className="font-mono text-slate-400 tabular-nums">
+                    {incomingList.length}
+                  </span>
+                </div>
+                {incomingList.length === 0 ? (
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Hier beginnt dieser Ablauf (oder es gibt keinen vorgeschalteten Baustein in dieser Ansicht).
+                  </p>
+                ) : (
+                  <ul className="divide-y divide-slate-800/80 border border-slate-800 rounded-lg bg-slate-950/60 max-h-40 overflow-y-auto">
+                    {incomingList.map((inc, idx) => (
+                      <li key={`${inc.fromScriptNumber}-${idx}`}>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleNavigateNeighbor(inc.fromScriptNumber, inc.fromLabel)
+                          }
+                          className="w-full px-3 py-2 flex items-center justify-between gap-2 text-xs text-left hover:bg-slate-800/60 transition-colors cursor-pointer"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-slate-100 font-medium truncate">
+                              {inc.fromLabel || inc.fromScriptNumber}
+                            </div>
+                            {inc.edgeLabel && (
+                              <div className="text-[11px] text-slate-400 truncate">
+                                Weg: {inc.edgeLabel}
+                              </div>
+                            )}
+                          </div>
+                          <span className="text-[11px] text-sky-300 shrink-0">Zeigen</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs font-semibold text-slate-200">
+                  <span className="flex items-center gap-1.5">
+                    <ArrowUpRight className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Wohin geht es danach?</span>
+                  </span>
+                  <span className="font-mono text-slate-400 tabular-nums">
+                    {snapshot.outgoingConnections.length}
+                  </span>
+                </div>
+                {snapshot.outgoingConnections.length === 0 ? (
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Kein weiterer Folgeschritt in dieser Ansicht (z. B. Vermittlung an Team oder Gesprächsende).
+                  </p>
+                ) : (
+                  <ul className="divide-y divide-slate-800/80 border border-slate-800 rounded-lg bg-slate-950/60 max-h-40 overflow-y-auto">
+                    {snapshot.outgoingConnections.map((conn) => (
+                      <li key={conn.id}>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleNavigateNeighbor(conn.toTargetNumber, conn.label)
+                          }
+                          className="w-full px-3 py-2 flex items-center justify-between gap-2 text-xs text-left hover:bg-slate-800/60 transition-colors cursor-pointer"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-emerald-300 font-medium truncate">
+                              {conn.toTargetNumber}
+                            </div>
+                            {conn.label && (
+                              <div className="text-[11px] text-slate-400 truncate">
+                                Auslöser: {conn.label}
+                              </div>
+                            )}
+                          </div>
+                          <span className="text-[11px] text-emerald-300 shrink-0">Zeigen</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </section>
+
+            {/* Footer */}
+            <div className="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  onClose();
-                  onOpenOpeningHours(snapshot.scriptNumber);
-                }}
-                className="px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-xs text-amber-300 font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                onClick={() => setViewMode('pro')}
+                className="px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-indigo-300 text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
-                <Clock className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Öffnungszeiten-Fenster</span>
-                <span className="sm:hidden">Zeiten</span>
+                <Terminal className="w-3.5 h-3.5" />
+                <span>Technische Details (IT-Profi) anzeigen</span>
               </button>
-            )}
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Schließen
+              </button>
+            </div>
           </div>
         )}
 
-        {/* TAB 1: STRUCTURED OVERVIEW */}
-        {activeTab === 'overview' && !isRawMermaid && (
+        {/* VIEW 2: IT-PROFI (TECHNICAL SPECS, PARAMETERS, RULES, FINDINGS, RAW CODE) */}
+        {viewMode === 'pro' && (
           <div className="p-5 space-y-5 overflow-y-auto flex-1">
-            {/* Key Facts Grid (single-elevation clean hairline table) */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 pb-4 border-b border-slate-800 text-xs">
+            {/* Technical Summary Line */}
+            <div className="rounded-lg border border-slate-800 bg-slate-950 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="font-mono text-slate-300 tabular-nums break-all">
+                <span className="text-slate-500">Node-ID:</span>{' '}
+                <span className="text-indigo-300">{snapshot.nodeId}</span>
+                <span className="text-slate-600 mx-2">·</span>
+                <span>{explanation.technicalSummary}</span>
+              </div>
+            </div>
+
+            {/* Technical Configuration Grid */}
+            <section className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 pb-4 border-b border-slate-800 text-xs">
+              <div className="space-y-0.5">
+                <div className="text-slate-400 flex items-center gap-1.5">
+                  <Hash className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span>Bauteil-Typ &amp; Kennung</span>
+                </div>
+                <div className="font-mono text-slate-100 tabular-nums">
+                  {blockTypeLabel}
+                  {snapshot.scriptNumber ? ` · [${snapshot.scriptNumber}]` : ''}
+                  {snapshot.cdnAlias ? ` · CDN ${snapshot.cdnAlias}` : ''}
+                </div>
+                {graphNode && (
+                  <div className="text-[11px] font-mono text-slate-400 tabular-nums">
+                    Rolle: {graphNode.role} · {graphNode.inDegree} ein / {graphNode.outDegree} aus
+                  </div>
+                )}
+              </div>
+
               <div className="space-y-0.5">
                 <div className="text-slate-400 flex items-center gap-1.5">
                   <Clock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
                   <span>Öffnungszeiten / SondZeit</span>
                 </div>
                 <div className="font-mono text-slate-100 tabular-nums">
-                  {snapshot.resolvedScheduleDisplay || 'Keine Zeitbegrenzung (24/7)'}
+                  {snapshot.resolvedScheduleDisplay || snapshot.schedule || 'Kein Zeitprofil (24/7 oder geerbt)'}
                 </div>
                 {snapshot.hasHolidayCheck && (
                   <div className="text-[11px] text-amber-300 flex items-center gap-1 pt-0.5">
@@ -347,7 +609,7 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                   {dnisList.length > 0
                     ? dnisList.slice(0, 6).join(', ') +
                       (dnisList.length > 6 ? ` (+${dnisList.length - 6})` : '')
-                    : 'Kein direkter DNIS-Einstieg hinterlegt'}
+                    : '—'}
                 </div>
                 {snapshot.organizationName && (
                   <div className="text-[11px] text-slate-400">{snapshot.organizationName}</div>
@@ -357,7 +619,7 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
               <div className="space-y-0.5">
                 <div className="text-slate-400 flex items-center gap-1.5">
                   <Layers className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  <span>Warteschlange / Skillset</span>
+                  <span>Warteschlange / Skillset (Queue)</span>
                 </div>
                 <div className="font-mono text-slate-100">
                   {snapshot.queueTarget || '—'}
@@ -367,7 +629,7 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
               <div className="space-y-0.5">
                 <div className="text-slate-400 flex items-center gap-1.5">
                   <Volume2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span>Ansage / Treatment / Wartezeit</span>
+                  <span>Ansage / Treatment / Wait / HDX</span>
                 </div>
                 <div className="font-mono text-slate-100 tabular-nums">
                   {[
@@ -380,35 +642,33 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                 </div>
               </div>
 
-              {snapshot.condition && (
-                <div className="sm:col-span-2 space-y-0.5">
-                  <div className="text-slate-400 flex items-center gap-1.5">
-                    <GitBranch className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                    <span>Bedingung / Entscheider</span>
-                  </div>
-                  <div className="text-slate-100">{snapshot.condition}</div>
+              <div className="space-y-0.5">
+                <div className="text-slate-400 flex items-center gap-1.5">
+                  <GitBranch className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span>Bedingung / IF-Ausdruck</span>
                 </div>
-              )}
-            </div>
+                <div className="font-mono text-slate-100 break-words">
+                  {snapshot.condition || '—'}
+                </div>
+              </div>
+            </section>
 
-            {/* Incoming & Outgoing Connections Side-by-Side */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 pb-4 border-b border-slate-800">
+            {/* Incoming & Outgoing Technical References */}
+            <section className="grid grid-cols-1 sm:grid-cols-2 gap-5 pb-4 border-b border-slate-800">
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-xs font-semibold text-slate-200">
                   <span className="flex items-center gap-1.5">
                     <ArrowDownLeft className="w-3.5 h-3.5 text-sky-400" />
-                    <span>Eingehend (Woher)</span>
+                    <span>Eingehende Referenzen</span>
                   </span>
                   <span className="font-mono text-slate-400 tabular-nums">
                     {incomingList.length}
                   </span>
                 </div>
                 {incomingList.length === 0 ? (
-                  <p className="text-xs text-slate-500">
-                    Einstiegspunkt oder keine eingehenden Verweise erkannt.
-                  </p>
+                  <p className="text-xs text-slate-500">Keine eingehenden Referenzen.</p>
                 ) : (
-                  <ul className="divide-y divide-slate-800/80 border border-slate-800 rounded-lg bg-slate-950/60 max-h-40 overflow-y-auto">
+                  <ul className="divide-y divide-slate-800/80 border border-slate-800 rounded-lg bg-slate-950/60 max-h-36 overflow-y-auto">
                     {incomingList.map((inc, idx) => {
                       const canJumpInc =
                         Boolean(onJumpToScript) &&
@@ -423,18 +683,28 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                               {inc.fromLabel}
                             </div>
                             {inc.edgeLabel && (
-                              <div className="text-[11px] text-slate-400 truncate">
+                              <div className="text-[11px] font-mono text-slate-400 truncate">
                                 {inc.edgeLabel}
                               </div>
                             )}
                           </div>
-                          {canJumpInc && (
+                          {canJumpInc ? (
                             <button
                               type="button"
                               onClick={() => handleJump(inc.fromScriptNumber)}
                               className="text-[11px] text-indigo-300 hover:text-indigo-200 font-medium whitespace-nowrap shrink-0 cursor-pointer"
                             >
-                              Öffnen
+                              Skript öffnen
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleNavigateNeighbor(inc.fromScriptNumber, inc.fromLabel)
+                              }
+                              className="text-[11px] text-sky-300 hover:text-sky-200 font-medium whitespace-nowrap shrink-0 cursor-pointer"
+                            >
+                              Fokus
                             </button>
                           )}
                         </li>
@@ -448,18 +718,16 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                 <div className="flex items-center justify-between text-xs font-semibold text-slate-200">
                   <span className="flex items-center gap-1.5">
                     <ArrowUpRight className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Ausgehend (Wohin)</span>
+                    <span>Ausgehende Ziele</span>
                   </span>
                   <span className="font-mono text-slate-400 tabular-nums">
                     {snapshot.outgoingConnections.length}
                   </span>
                 </div>
                 {snapshot.outgoingConnections.length === 0 ? (
-                  <p className="text-xs text-slate-500">
-                    Endpunkt (Queue / Ansage / Abschluss) ohne weiteren Skript-Sprung.
-                  </p>
+                  <p className="text-xs text-slate-500">Keine ausgehenden Sprünge.</p>
                 ) : (
-                  <ul className="divide-y divide-slate-800/80 border border-slate-800 rounded-lg bg-slate-950/60 max-h-40 overflow-y-auto">
+                  <ul className="divide-y divide-slate-800/80 border border-slate-800 rounded-lg bg-slate-950/60 max-h-36 overflow-y-auto">
                     {snapshot.outgoingConnections.map((conn) => {
                       const canJumpTarget =
                         Boolean(onJumpToScript) &&
@@ -474,18 +742,28 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                               {conn.toTargetNumber}
                             </div>
                             {conn.label && (
-                              <div className="text-[11px] text-slate-400 truncate">
+                              <div className="text-[11px] font-mono text-slate-400 truncate">
                                 {conn.label}
                               </div>
                             )}
                           </div>
-                          {canJumpTarget && (
+                          {canJumpTarget ? (
                             <button
                               type="button"
                               onClick={() => handleJump(conn.toTargetNumber)}
                               className="text-[11px] text-indigo-300 hover:text-indigo-200 font-medium whitespace-nowrap shrink-0 cursor-pointer"
                             >
-                              Öffnen
+                              Skript öffnen
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleNavigateNeighbor(conn.toTargetNumber, conn.label)
+                              }
+                              className="text-[11px] text-emerald-300 hover:text-emerald-200 font-medium whitespace-nowrap shrink-0 cursor-pointer"
+                            >
+                              Fokus
                             </button>
                           )}
                         </li>
@@ -494,70 +772,177 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
                   </ul>
                 )}
               </div>
-            </div>
+            </section>
 
-            {/* Related Logic Findings (if any) */}
-            {findings.length > 0 && (
-              <div className="space-y-2 pb-4 border-b border-slate-800">
-                <div className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Prüfhinweise für dieses Element ({findings.length})</span>
+            {/* Module Rules & Schedule Table */}
+            {rulesPreview.length > 0 && (
+              <section className="space-y-2 pb-4 border-b border-slate-800">
+                <div className="flex items-center justify-between gap-2 text-xs font-semibold text-slate-200">
+                  <span>Prioritäts-Regeln &amp; Zeitpläne ({rulesPreview.length})</span>
+                  <span className="font-mono text-[11px] text-slate-400 tabular-nums">
+                    Skript [{snapshot.scriptNumber}]
+                  </span>
                 </div>
-                <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg bg-slate-950/60">
-                  {findings.map((f, idx) => (
-                    <div key={idx} className="px-3 py-2 text-xs space-y-0.5">
-                      <div
-                        className={`font-medium ${
-                          f.severity === 'error'
-                            ? 'text-rose-300'
-                            : f.severity === 'warning'
-                            ? 'text-amber-300'
-                            : 'text-sky-300'
-                        }`}
-                      >
-                        {f.title}
-                      </div>
-                      <div className="text-[11px] text-slate-400">{f.recommendation}</div>
-                    </div>
-                  ))}
+                <div className="border border-slate-800 rounded-lg overflow-x-auto bg-slate-950/60 max-h-52 overflow-y-auto">
+                  <table className="w-full border-collapse text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-800 bg-slate-950 text-slate-400 font-medium">
+                        <th className="py-2 px-3 whitespace-nowrap">Prio</th>
+                        <th className="py-2 px-3">Schritt</th>
+                        <th className="py-2 px-3">Zeit / Bedingung</th>
+                        <th className="py-2 px-3">Ziel / Aktion</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/80">
+                      {rulesPreview.map((rule) => {
+                        const isCurrentRule = Boolean(snapshot.ruleId && snapshot.ruleId === rule.id);
+                        return (
+                          <tr
+                            key={rule.id}
+                            className={isCurrentRule ? 'bg-indigo-950/35' : 'hover:bg-slate-800/30'}
+                          >
+                            <td className="py-2 px-3 font-mono text-slate-300 tabular-nums whitespace-nowrap align-top">
+                              P{rule.prio}
+                            </td>
+                            <td className="py-2 px-3 text-slate-100 font-medium align-top">
+                              {rule.stepName}
+                            </td>
+                            <td className="py-2 px-3 text-slate-300 align-top">
+                              {rule.schedule && (
+                                <div className="font-mono text-sky-300 tabular-nums">
+                                  {rule.schedule}
+                                </div>
+                              )}
+                              {rule.holiday && (
+                                <div className="text-amber-300">{rule.holiday}</div>
+                              )}
+                              {rule.condition && (
+                                <div className="font-mono text-slate-400">{rule.condition}</div>
+                              )}
+                              {!rule.schedule && !rule.holiday && !rule.condition && (
+                                <span className="text-slate-500">—</span>
+                              )}
+                            </td>
+                            <td className="py-2 px-3 font-mono text-slate-200 align-top">
+                              {[
+                                rule.targetNumber ? `→ ${rule.targetNumber}` : '',
+                                rule.queueTarget ? `Queue: ${rule.queueTarget}` : '',
+                                rule.announcement ? `Ansage: ${rule.announcement}` : '',
+                                rule.choicesCount > 0 ? `${rule.choicesCount} Auswahl-Ziele` : '',
+                              ]
+                                .filter(Boolean)
+                                .join(' · ') || '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
-              </div>
+              </section>
             )}
 
             {/* Extracted Avaya Special Parameters */}
             {specialParams.length > 0 && (
-              <div className="space-y-2 pb-4 border-b border-slate-800">
+              <section className="space-y-2 pb-4 border-b border-slate-800">
                 <div className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                   <Sliders className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>Erkannte Avaya-Parameter ({specialParams.length})</span>
+                  <span>Avaya-Sonderparameter ({specialParams.length})</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 text-xs">
-                  {specialParams.slice(0, 8).map((param) => (
+                  {specialParams.slice(0, 10).map((param) => (
                     <div
                       key={param.key}
                       className="flex items-baseline justify-between gap-2 py-1 border-b border-slate-800/60"
                     >
-                      <span className="text-slate-400 truncate">{param.label}</span>
+                      <span className="text-slate-400 truncate">
+                        {param.label}{' '}
+                        <span className="font-mono text-[10px] text-slate-500">
+                          ({param.key})
+                        </span>
+                      </span>
                       <span className="font-mono text-slate-100 tabular-nums truncate text-right">
                         {param.value}
                       </span>
                     </div>
                   ))}
                 </div>
-              </div>
+              </section>
             )}
 
-            {/* Clean Raw Source Excerpt */}
+            {/* Related Logic Findings */}
+            {findings.length > 0 && (
+              <section className="space-y-2 pb-4 border-b border-slate-800">
+                <div className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Prüfhinweise ({findings.length})</span>
+                </div>
+                <div className="divide-y divide-slate-800 border border-slate-800 rounded-lg bg-slate-950/60">
+                  {findings.map((f, idx) => {
+                    const severityLabel =
+                      f.severity === 'error'
+                        ? 'Fehler'
+                        : f.severity === 'warning'
+                        ? 'Warnung'
+                        : 'Hinweis';
+                    return (
+                      <div key={idx} className="px-3 py-2 text-xs space-y-0.5">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span
+                            className={`font-medium ${
+                              f.severity === 'error'
+                                ? 'text-rose-300'
+                                : f.severity === 'warning'
+                                ? 'text-amber-300'
+                                : 'text-sky-300'
+                            }`}
+                          >
+                            {f.title}
+                          </span>
+                          <span className="text-[11px] font-mono text-slate-400 shrink-0">
+                            {severityLabel}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-400">{f.recommendation}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
+            {/* Raw Source Snippet with Copy Button */}
             {snapshot.rawLineSnippet && (
-              <div className="space-y-1.5">
-                <div className="text-xs font-medium text-slate-400">Skript-Auszug</div>
-                <pre className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-[11px] font-mono text-slate-300 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-36">
+              <section className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-300">
+                    Original-Skript-Auszug
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopySnippet}
+                    className="px-2.5 py-1 rounded-md border border-slate-800 bg-slate-950 hover:bg-slate-800 text-[11px] font-medium text-slate-300 flex items-center gap-1 transition-colors cursor-pointer"
+                  >
+                    {copiedSnippet ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        <span className="text-emerald-300">Kopiert</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3 text-slate-400" />
+                        <span>Kopieren</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+                <pre className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-[11px] font-mono text-slate-200 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-40">
                   {snapshot.rawLineSnippet}
                 </pre>
-              </div>
+              </section>
             )}
 
-            {/* Overview Footer Actions */}
+            {/* IT-Profi Footer Actions */}
             <div className="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 {hasCustomPositionOffset && (
@@ -577,7 +962,7 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setActiveTab('edit')}
+                  onClick={() => setViewMode('edit')}
                   className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   <Edit3 className="w-3.5 h-3.5" />
@@ -595,8 +980,8 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
           </div>
         )}
 
-        {/* TAB 2: INLINE EDITOR FORM */}
-        {(activeTab === 'edit' || isRawMermaid) && (
+        {/* VIEW 3: INLINE EDITOR FORM (STUDIO ONLY) */}
+        {viewMode === 'edit' && (
           <form onSubmit={handleSubmit} className="p-5 space-y-4 overflow-y-auto flex-1">
             {/* Primary Row: ID/Script Number + Display Name */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -886,120 +1271,6 @@ export const NodeInlineEditorModal: React.FC<NodeInlineEditorModalProps> = ({
               </div>
             </div>
           </form>
-        )}
-
-        {/* TAB 3: SCHEDULE & MODULE RULES */}
-        {activeTab === 'schedule' && hasScheduleTab && (
-          <div className="p-5 space-y-4 overflow-y-auto flex-1">
-            <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
-              <div className="space-y-0.5">
-                <div className="text-xs font-semibold text-slate-100">
-                  Zeitpläne &amp; Regelabfolge in [{snapshot.scriptNumber}]
-                </div>
-                <div className="text-xs text-slate-400 font-mono tabular-nums">
-                  {snapshot.resolvedScheduleDisplay || 'Kein fester Zeitplan (24/7)'}
-                </div>
-              </div>
-              {onOpenOpeningHours && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onClose();
-                    onOpenOpeningHours('');
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  <Clock className="w-3.5 h-3.5" />
-                  <span>Alle Öffnungszeiten öffnen</span>
-                </button>
-              )}
-            </div>
-
-            {rulesPreview.length === 0 ? (
-              <p className="text-xs text-slate-400">
-                Für dieses Element sind keine einzelnen Prioritäts-Regeln hinterlegt.
-              </p>
-            ) : (
-              <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/60">
-                <table className="w-full border-collapse text-left text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-800 bg-slate-950 text-slate-400 font-medium">
-                      <th className="py-2.5 px-3 whitespace-nowrap">Prio</th>
-                      <th className="py-2.5 px-3">Schritt</th>
-                      <th className="py-2.5 px-3">Zeit / Bedingung</th>
-                      <th className="py-2.5 px-3">Aktion / Ziel</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/80">
-                    {rulesPreview.map((rule) => {
-                      const isCurrentRule = Boolean(snapshot.ruleId && snapshot.ruleId === rule.id);
-                      return (
-                        <tr
-                          key={rule.id}
-                          className={isCurrentRule ? 'bg-indigo-950/35' : 'hover:bg-slate-800/30'}
-                        >
-                          <td className="py-2.5 px-3 font-mono text-slate-300 tabular-nums whitespace-nowrap align-top">
-                            P{rule.prio}
-                          </td>
-                          <td className="py-2.5 px-3 text-slate-100 font-medium align-top">
-                            {rule.stepName}
-                          </td>
-                          <td className="py-2.5 px-3 text-slate-300 align-top">
-                            {rule.schedule && (
-                              <div className="font-mono text-sky-300 tabular-nums">
-                                {rule.schedule}
-                              </div>
-                            )}
-                            {rule.holiday && (
-                              <div className="text-amber-300">{rule.holiday}</div>
-                            )}
-                            {rule.condition && (
-                              <div className="text-slate-400">{rule.condition}</div>
-                            )}
-                            {!rule.schedule && !rule.holiday && !rule.condition && (
-                              <span className="text-slate-500">—</span>
-                            )}
-                          </td>
-                          <td className="py-2.5 px-3 font-mono text-slate-200 align-top">
-                            {[
-                              rule.targetNumber ? `→ ${rule.targetNumber}` : '',
-                              rule.queueTarget ? `Queue: ${rule.queueTarget}` : '',
-                              rule.announcement ? `Ansage: ${rule.announcement}` : '',
-                              rule.choicesCount > 0 ? `${rule.choicesCount} Auswahl-Ziele` : '',
-                            ]
-                              .filter(Boolean)
-                              .join(' · ') || '—'}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            <div className="pt-2 border-t border-slate-800 flex items-center justify-end gap-2">
-              {snapshot.canJumpToDetailScript &&
-                snapshot.detailTargetScriptNumber &&
-                onJumpToScript && (
-                  <button
-                    type="button"
-                    onClick={() => handleJump(snapshot.detailTargetScriptNumber!)}
-                    className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    <span>Im Detail-Diagramm ansehen</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                Schließen
-              </button>
-            </div>
-          </div>
         )}
       </div>
     </div>

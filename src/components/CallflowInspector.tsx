@@ -1452,7 +1452,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                   className="w-full py-1.5 px-3 rounded-lg bg-slate-900 hover:bg-slate-800 border border-indigo-500/40 text-indigo-200 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Edit3 className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>Ausgewählten Knoten jetzt bearbeiten (Text, Queue &amp; Ziele)</span>
+                  <span>Knoten-Info &amp; Bearbeitung öffnen (Laie / IT-Profi)</span>
                 </button>
               )}
 

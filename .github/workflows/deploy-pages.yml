@@ -22,12 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
+          package-manager-cache: false
 
       - name: Normalize package.json for public npm registry
         run: |
@@ -59,22 +60,60 @@ jobs:
       - name: Install dependencies
         run: npm install --legacy-peer-deps --no-audit --no-fund
 
+      - name: Strip any stray attachment or media folders before build
+        run: |
+          rm -rf .aistudio public/assets/aistudio
+
       - name: Run TypeScript check
         run: npm run lint
 
       - name: Build static web app
         run: npm run build
 
+      - name: Verify dist contains only clean app code (no images or user files)
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const allowedExact = new Set(["index.html", "offline-app.html"]);
+            const forbiddenExt = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif|ico|pdf|vsdx?|vdx|csv|tsv|xlsx?|docx?|txt|mmd|mermaid|xml|zip|7z|rar|tar|gz)$/i;
+            const violations = [];
+            function walk(dir, relBase = "") {
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  if (/aistudio|tempmedia/i.test(entry.name)) {
+                    violations.push(`Forbidden directory in dist: ${rel}`);
+                  }
+                  walk(full, rel);
+                } else {
+                  if (forbiddenExt.test(entry.name) || /aistudio|tempmedia/i.test(rel)) {
+                    violations.push(`Forbidden file in dist: ${rel}`);
+                  } else if (!allowedExact.has(rel) && !/^assets\/[^/]+\.(js|css)$/.test(rel)) {
+                    violations.push(`Unexpected file in dist: ${rel}`);
+                  }
+                }
+              }
+            }
+            walk("dist");
+            if (violations.length > 0) {
+              console.error("PRIVACY GATE FAILED:\n" + violations.join("\n"));
+              process.exit(1);
+            }
+            console.log("Privacy gate passed: dist contains only clean JS/CSS/HTML app artifacts.");
+          '
+
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
         with:
           enablement: true
 
       - name: Upload dist artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: './dist'
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

@@ -128,13 +128,13 @@ export default defineConfig(({command}) => {
 
   return {
     base: './',
+    // Never copy public/ (where chat image attachments can land) into dist/
+    publicDir: false,
     plugins: [
       react(),
       tailwindcss(),
       ...offlineAppPlugin(rootDir),
-      // Copies src/assets into dist/ so root-relative URLs like
-      // "/src/assets/images/..." (e.g. generate_image output) still resolve
-      // in production builds. Do not remove.
+      // Only copy code-owned src/assets if present, strictly excluding any aistudio/media/user data files.
       ...(!isOfflineSubBuild
         ? [
             {
@@ -147,8 +147,15 @@ export default defineConfig(({command}) => {
                 const distDir = path.resolve(rootDir, 'dist');
                 const srcAssets = path.resolve(rootDir, 'src/assets');
                 const distAssets = path.resolve(distDir, 'src/assets');
+                const blockedExt = /\.(png|jpe?g|webp|gif|bmp|tiff?|heic|heif|avif|ico|pdf|vsdx?|vdx|csv|tsv|xlsx?|docx?|txt|mmd|mermaid|xml|zip|7z|rar|tar|gz)$/i;
                 if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
-                  fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
+                  fs.cpSync(srcAssets, distAssets, {
+                    recursive: true,
+                    force: true,
+                    filter: (src) =>
+                      !src.includes(`${path.sep}aistudio`) &&
+                      !blockedExt.test(src),
+                  });
                 }
               },
             },

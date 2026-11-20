@@ -19,6 +19,7 @@ import {
 } from '../types/mermaidStudio';
 import { toMermaidNodeSuffix } from './scriptCallflowParser';
 import { sanitizeSvgForXmlParser } from './mermaidEngine';
+import { DualAudienceNodeExplanation } from './nodeExplanationEngine';
 import {
   applyColorToEdgePathAndMarkers,
   SEMANTIC_PALETTES,
@@ -3274,6 +3275,7 @@ export interface InteractiveCallflowHtmlNodeDetail {
     recommendation: string;
   }>;
   rawLineSnippet?: string;
+  explanation?: DualAudienceNodeExplanation;
 }
 
 export interface InteractiveCallflowHtmlView {
@@ -4303,6 +4305,184 @@ export function generateInteractiveCallflowHtml(
       white-space: pre-wrap;
       word-break: break-word;
     }
+    #canvas-node-info-btn {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 26;
+      display: none;
+      align-items: center;
+      gap: 5px;
+      height: 30px;
+      padding: 0 10px 0 7px;
+      border-radius: 8px;
+      border: 1px solid var(--accent-border);
+      background: var(--bg-header);
+      color: var(--text-main);
+      font-size: 11.5px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+      white-space: nowrap;
+      user-select: none;
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    #canvas-node-info-btn:hover {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+    }
+    #canvas-node-info-btn .cnib-icon {
+      width: 17px;
+      height: 17px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #ffffff;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    #canvas-node-info-btn:hover .cnib-icon {
+      background: rgba(255, 255, 255, 0.22);
+    }
+    .audience-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      padding: 9px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-header);
+      flex-shrink: 0;
+    }
+    .audience-switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 3px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-seg);
+    }
+    .audience-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+      transition: background 120ms ease, color 120ms ease;
+    }
+    .audience-btn:hover {
+      color: var(--text-main);
+    }
+    .audience-btn.active-layperson {
+      background: #059669;
+      color: #ffffff;
+    }
+    .audience-btn.active-pro {
+      background: var(--accent);
+      color: #ffffff;
+    }
+    .layperson-hero {
+      padding: 14px 16px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-input);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .layperson-hero-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .layperson-hero-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .layperson-hero-tagline {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #10b981;
+    }
+    .layperson-prose {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.55;
+      color: var(--text-main);
+    }
+    .layperson-steps {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .layperson-steps li {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      color: var(--text-main);
+    }
+    .layperson-step-num {
+      width: 20px;
+      height: 20px;
+      border-radius: 5px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-input);
+      color: #10b981;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .tech-meta-strip {
+      padding: 9px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-seg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+      word-break: break-word;
+    }
+    .copy-snippet-btn {
+      padding: 3px 9px;
+      border-radius: 5px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-card);
+      color: var(--text-main);
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .copy-snippet-btn:hover {
+      background: var(--bg-hover);
+      border-color: var(--accent-border);
+    }
     main.sidebar-collapsed aside {
       display: none;
     }
@@ -4730,6 +4910,7 @@ export function generateInteractiveCallflowHtml(
             <img id="gpu-proxy-layer" alt="" draggable="false" />
           </div>
         </div>
+        <button type="button" id="canvas-node-info-btn" title="Knoten-Info öffnen (Laie / IT-Profi)" aria-label="Knoten-Info öffnen"><span class="cnib-icon">i</span><span>Info</span></button>
         <div id="welcome-overlay" class="open" aria-label="Schnellstart Willkommensseite"></div>
         <div id="minimap-box" aria-label="Diagramm-Minimap">
           <div class="minimap-head">
@@ -4848,19 +5029,22 @@ export function generateInteractiveCallflowHtml(
     </aside>
   </main>
 
-  <!-- Double-Click Element Info Box Modal -->
+  <!-- Dual-Audience Element Info Box Modal (Laie | IT-Profi) -->
   <div id="node-info-modal-overlay" class="modal-backdrop">
     <div class="modal-shell" style="max-width:780px;">
       <div class="modal-header">
         <div style="min-width:0;">
           <h2 id="node-info-title" style="margin:0;font-size:15px;color:var(--text-main);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Element-Details</h2>
-          <div id="node-info-subtitle" style="font-size:11.5px;color:var(--text-muted);margin-top:2px;font-family:ui-monospace,monospace;"></div>
+          <div id="node-info-subtitle" style="font-size:11.5px;color:var(--text-muted);margin-top:2px;"></div>
         </div>
         <button type="button" id="btn-close-node-info" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:4px 8px;" title="Schließen (Esc)">✕</button>
       </div>
-      <div class="modal-tabs" id="node-info-tabs">
-        <button type="button" class="modal-tab-btn active" data-ntab="overview">Übersicht</button>
-        <button type="button" class="modal-tab-btn" data-ntab="rules">Zeiten &amp; Regeln</button>
+      <div class="audience-bar">
+        <div class="audience-switch" id="node-info-tabs" role="tablist" aria-label="Ansichtsmodus">
+          <button type="button" class="audience-btn active-layperson" data-nmode="layperson" role="tab" aria-selected="true">Laie</button>
+          <button type="button" class="audience-btn" data-nmode="pro" role="tab" aria-selected="false">IT-Profi</button>
+        </div>
+        <span id="node-info-mode-hint" style="font-size:11px;color:var(--text-muted);">Verständlich erklärt für Fachbereich &amp; Projekt</span>
       </div>
       <div id="node-info-body" class="modal-body"></div>
       <div class="modal-footer">
@@ -6008,9 +6192,56 @@ export function generateInteractiveCallflowHtml(
       if (b100) b100.textContent = '1:1';
     }
 
+    const canvasNodeInfoBtn = document.getElementById('canvas-node-info-btn');
+
+    function syncCanvasNodeInfoButton() {
+      if (!canvasNodeInfoBtn) return;
+      if (!activeNodeId || activeViewKey === 'welcome' || !stageFrame || !wrap) {
+        canvasNodeInfoBtn.style.display = 'none';
+        return;
+      }
+      const idx = viewNodeBoxCache.get(activeViewKey);
+      if (!idx) {
+        canvasNodeInfoBtn.style.display = 'none';
+        return;
+      }
+      const box = idx.boxes.find(b => b.id === activeNodeId);
+      if (!box) {
+        canvasNodeInfoBtn.style.display = 'none';
+        return;
+      }
+      const frameRect = stageFrame.getBoundingClientRect();
+      const wrapRect = wrap.getBoundingClientRect();
+      if (frameRect.width <= 0 || frameRect.height <= 0 || wrapRect.width <= 0) {
+        canvasNodeInfoBtn.style.display = 'none';
+        return;
+      }
+      const relRight = (box.maxX - idx.vbX) / idx.vbW;
+      const relTop = (box.minY - idx.vbY) / idx.vbH;
+      const rawLeft = (frameRect.left - wrapRect.left) + relRight * frameRect.width + 6;
+      const rawTop = (frameRect.top - wrapRect.top) + relTop * frameRect.height - 14;
+      if (rawLeft < -40 || rawLeft > wrapRect.width + 40 || rawTop < -40 || rawTop > wrapRect.height + 40) {
+        canvasNodeInfoBtn.style.display = 'none';
+        return;
+      }
+      const clampedLeft = Math.max(8, Math.min(wrapRect.width - 78, rawLeft));
+      const clampedTop = Math.max(8, Math.min(wrapRect.height - 42, rawTop));
+      canvasNodeInfoBtn.style.display = 'inline-flex';
+      canvasNodeInfoBtn.style.transform = 'translate3d(' + Math.round(clampedLeft) + 'px,' + Math.round(clampedTop) + 'px,0)';
+    }
+
+    if (canvasNodeInfoBtn) {
+      canvasNodeInfoBtn.addEventListener('mousedown', e => e.stopPropagation());
+      canvasNodeInfoBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (activeNodeId) openNodeInfoModal(activeNodeId);
+      });
+    }
+
     function applyTransformImmediate() {
       stage.style.transform = 'translate3d(' + panX + 'px,' + panY + 'px,0) scale(' + zoom + ')';
       updateMinimapViewport();
+      syncCanvasNodeInfoButton();
     }
 
     function updateTransform(activeGesture) {
@@ -6560,6 +6791,7 @@ export function generateInteractiveCallflowHtml(
         renderList('list-callers', []);
         renderList('list-callees', []);
         renderList('list-terminals', GRAPH.nodes.filter(n => n.outDegree === 0 && filterFn(n)).map(n => ({ ...n, badge: n.inDegree + ' Eingänge' })));
+        syncCanvasNodeInfoButton();
         return;
       }
 
@@ -6750,7 +6982,7 @@ export function generateInteractiveCallflowHtml(
       infoBtn.type = 'button';
       infoBtn.className = 'primary';
       infoBtn.style.width = '100%';
-      infoBtn.textContent = 'Element-Info & Zeiten öffnen (Doppelklick)';
+      infoBtn.textContent = 'Knoten-Info öffnen (Laie / IT-Profi)';
       infoBtn.onclick = () => openNodeInfoModal(activeNodeId);
       actionsRow.appendChild(infoBtn);
 
@@ -6819,6 +7051,7 @@ export function generateInteractiveCallflowHtml(
       }
 
       renderNodeSpecialParameters(activeNodeId);
+      syncCanvasNodeInfoButton();
 
       if (shouldFocusCamera && autoFocusEl.checked) {
         focusNodeCamera(activeNodeId);
@@ -7386,9 +7619,109 @@ export function generateInteractiveCallflowHtml(
       if (searchInput) setTimeout(() => searchInput.focus(), 40);
     }
 
-    // === DOPPELKLICK ELEMENT-INFO-BOX (ÜBERSICHT | ZEITEN & REGELN) ===
+    // === DUAL-AUDIENCE KNOTEN-INFO-BOX (LAIE | IT-PROFI) ===
     let activeInfoModalNodeId = '';
-    let activeInfoModalTab = 'overview'; // 'overview' | 'rules'
+    let activeInfoModalMode = 'layperson'; // 'layperson' | 'pro'
+
+    function buildFallbackExplanation(snap) {
+      const nObj = nodeMap.get(snap.nodeId);
+      const role = nObj ? nObj.role : 'step';
+      const inc = snap.incomingConnections || [];
+      const out = snap.outgoingConnections || [];
+      const rules = snap.moduleRulesPreview || [];
+      const sched = snap.resolvedScheduleDisplay || snap.schedule || '';
+      const bt = snap.blockType || 'script';
+
+      let archetypeLabel = 'Prozessschritt im Ablauf';
+      let shortTagline = 'Station im dargestellten Callflow';
+      let whatIsIt = 'Ein einzelner Baustein im Anrufweg, der den Anruf entgegennimmt und gemäß seiner Konfiguration weiterführt.';
+
+      if (snap.nodeId === 'FAX_BUNDLE' || /fax/i.test(snap.title || '')) {
+        archetypeLabel = 'Fax-Weiterleitung (Fax-Bündel)';
+        shortTagline = 'Gebündeltes Ziel für Fax-Verbindungen';
+        whatIsIt = 'Sammelziel für eingehende Fax-Rufnummern, getrennt von normalen Sprachanrufen.';
+      } else if (bt === 'dtmf') {
+        archetypeLabel = 'Tastenmenü (Sprachauswahl)';
+        shortTagline = 'Anrufer wählt per Telefontaste (1, 2, 3 …)';
+        whatIsIt = 'Ein interaktives Auswahlmenü: Nach einer Ansage drückt der Anrufer eine Zahl, um direkt im richtigen Bereich zu landen.';
+      } else if (bt === 'queue' || snap.queueTarget) {
+        archetypeLabel = 'Warteschlange (Mitarbeiter-Team)';
+        shortTagline = 'Verbindet den Anrufer mit dem zuständigen Team';
+        whatIsIt = 'Hier wird der Anrufer an eine Mitarbeiter-Gruppe übergeben und wartet bei Bedarf, bis ein Ansprechpartner frei wird.';
+      } else if (bt === 'condition' || sched || snap.condition || snap.hasHolidayCheck) {
+        archetypeLabel = 'Zeit-, Feiertags- oder Regelweiche';
+        shortTagline = 'Prüft Bedingungen und wählt automatisch den Weg';
+        whatIsIt = 'Eine automatische Entscheidungsstelle: Sie prüft Uhrzeit, Feiertage oder Bedingungen und leitet den Anruf entsprechend weiter.';
+      } else if (bt === 'announcement' || snap.announcement) {
+        archetypeLabel = 'Sprachansage (Audio-Hinweis)';
+        shortTagline = 'Spielt dem Anrufer eine Information vor';
+        whatIsIt = 'Spielt eine aufgezeichnete Ton-Ansage ab, z. B. Begrüßung, Hinweis oder Information außerhalb der Geschäftszeiten.';
+      } else if (bt === 'external' || snap.mode === 'workspace-external') {
+        archetypeLabel = 'Externes Ziel / Weiterleitung / Ende';
+        shortTagline = 'Übergibt nach außen oder beendet den Anruf';
+        whatIsIt = 'An dieser Stelle verlässt der Anruf den Ablauf durch Weiterleitung nach außen oder reguläres Gesprächsende.';
+      } else if (snap.mode === 'workspace-module') {
+        archetypeLabel = 'Teil-Ablauf (Unter-Skript)';
+        shortTagline = 'Eigenständiger Baustein für ein Thema / eine Abteilung';
+        whatIsIt = 'Bündelt alle Regeln, Öffnungszeiten, Ansagen und Ziele für genau diesen Fachbereich.';
+      } else if (role === 'entry') {
+        archetypeLabel = 'Startpunkt im Ablauf';
+        shortTagline = 'Hier beginnt dieser dargestellte Weg';
+        whatIsIt = 'Einstiegspunkt im Diagramm, von dem aus der Anruf in die nachfolgenden Stationen geleitet wird.';
+      } else if (role === 'terminal') {
+        archetypeLabel = 'Endpunkt im Ablauf';
+        shortTagline = 'Hier endet dieser dargestellte Pfad';
+        whatIsIt = 'Abschließende Station im aktuellen Schaubild ohne weitere nachgelagerte Schritte.';
+      } else if (role === 'hub') {
+        archetypeLabel = 'Verteiler / Verzweigung';
+        shortTagline = 'Bündelt oder verzweigt mehrere Wege';
+        whatIsIt = 'Zentraler Knotenpunkt, an dem mehrere Wege zusammenlaufen oder sich auf Folgeziele aufteilen.';
+      }
+
+      const steps = [];
+      if (snap.entryDnisNumbers && snap.entryDnisNumbers.length) {
+        steps.push('Anrufer erreichen diesen Einstieg über: ' + snap.entryDnisNumbers.slice(0, 4).join(', ') + '.');
+      } else if (inc.length) {
+        steps.push('Der Anruf kommt von ' + inc.slice(0, 3).map(c => c.fromLabel || c.fromScriptNumber).join(', ') + ' hier an.');
+      }
+      if (sched) steps.push('Es gelten feste Zeiten: ' + sched + (snap.hasHolidayCheck ? ' (inkl. Feiertagsprüfung)' : '') + '.');
+      else if (snap.hasHolidayCheck) steps.push('Es wird automatisch geprüft, ob heute ein Feiertag ist.');
+      if (snap.condition) steps.push('Es wird eine Regel geprüft: „' + snap.condition + '“.');
+      if (snap.announcement) steps.push('Der Anrufer hört die Ansage „' + snap.announcement + '“.');
+      if (snap.queueTarget) steps.push('Der Anruf wird an das Team „' + snap.queueTarget + '“ übergeben.');
+      if (out.length) {
+        steps.push(out.length === 1
+          ? 'Danach geht der Anruf weiter zu ' + out[0].toTargetNumber + '.'
+          : 'Danach verzweigt der Anruf auf ' + out.length + ' Ziele (' + out.slice(0, 3).map(c => c.toTargetNumber).join(', ') + ').');
+      } else if (rules.length) {
+        steps.push('Intern enthält dieses Modul ' + rules.length + ' nacheinander geprüfte Ablaufregeln.');
+      }
+      if (!steps.length) {
+        steps.push('Dieser Baustein verarbeitet den Anruf gemäß seiner Konfiguration.');
+      }
+
+      const plainFacts = [];
+      if (snap.organizationName) plainFacts.push({ label: 'Bereich / Organisation', value: snap.organizationName });
+      if (sched) plainFacts.push({ label: 'Erreichbarkeit / Zeiten', value: sched });
+      if (snap.queueTarget) plainFacts.push({ label: 'Zuständiges Team', value: snap.queueTarget });
+      if (snap.announcement) plainFacts.push({ label: 'Gesprochene Ansage', value: snap.announcement });
+      if (rules.length) plainFacts.push({ label: 'Hinterlegte Regeln', value: rules.length + ' Ablaufschritte' });
+      if (!plainFacts.length && nObj) {
+        plainFacts.push({ label: 'Einbindung im Ablauf', value: nObj.inDegree + ' Zugänge · ' + nObj.outDegree + ' Ausgänge' });
+      }
+
+      const techSummary = 'Typ: ' + bt + ' · Modus: ' + (snap.mode || 'element') +
+        (nObj ? ' · Rolle: ' + nObj.role + ' (' + nObj.inDegree + ' ein / ' + nObj.outDegree + ' aus)' : '');
+
+      return {
+        archetypeLabel,
+        shortTagline,
+        whatIsIt,
+        whatHappensSteps: steps,
+        plainFacts,
+        technicalSummary: techSummary,
+      };
+    }
 
     function resolveNodeInfoSnapshot(nodeId) {
       const activeView = viewsByKey.get(activeViewKey);
@@ -7424,7 +7757,8 @@ export function generateInteractiveCallflowHtml(
     function openNodeInfoModal(nodeId) {
       if (!nodeId) return;
       activeInfoModalNodeId = nodeId;
-      activeInfoModalTab = 'overview';
+      // Confirmed default: Layperson view first, IT-Profi in 1 click
+      activeInfoModalMode = 'layperson';
       const overlay = document.getElementById('node-info-modal-overlay');
       if (!overlay) return;
       overlay.style.display = 'flex';
@@ -7437,32 +7771,53 @@ export function generateInteractiveCallflowHtml(
       activeInfoModalNodeId = '';
     }
 
+    function wireInfoConnectionButtons(container) {
+      container.querySelectorAll('.info-conn-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const ref = btn.getAttribute('data-ref') || '';
+          const lbl = btn.getAttribute('data-label') || '';
+          closeNodeInfoModal();
+          if (nodeMap.has(ref)) {
+            selectNode(ref, true);
+            return;
+          }
+          const matchByLabel = GRAPH.nodes.find(n =>
+            n.label.toLowerCase().includes(ref.toLowerCase()) ||
+            n.id.toLowerCase().includes(ref.toLowerCase())
+          );
+          if (matchByLabel) {
+            selectNode(matchByLabel.id, true);
+            return;
+          }
+          jumpToScriptOrNode(ref, lbl);
+        });
+      });
+    }
+
     function renderNodeInfoModal() {
       const overlay = document.getElementById('node-info-modal-overlay');
       if (!overlay || !activeInfoModalNodeId) return;
       const snap = resolveNodeInfoSnapshot(activeInfoModalNodeId);
+      const exp = snap.explanation || buildFallbackExplanation(snap);
       const titleEl = document.getElementById('node-info-title');
       const subtitleEl = document.getElementById('node-info-subtitle');
+      const modeHintEl = document.getElementById('node-info-mode-hint');
       const bodyEl = document.getElementById('node-info-body');
       const jumpBtn = document.getElementById('btn-node-info-jump');
       const schedBtn = document.getElementById('btn-node-info-schedules');
 
-      const blockLabels = {
-        script: 'Skript / Modul',
-        announcement: 'Ansage / Audio',
-        queue: 'Skillset / Queue',
-        condition: 'Zeit- / IF-Weiche',
-        dtmf: 'DTMF-Menü',
-        external: 'Externes Ziel',
-      };
-      const typeLabel = blockLabels[snap.blockType] || 'Element';
       if (titleEl) titleEl.textContent = snap.title || snap.nodeId;
       if (subtitleEl) {
-        const metaParts = [typeLabel];
-        if (snap.scriptNumber) metaParts.push('Skript [' + snap.scriptNumber + ']');
-        if (snap.prio) metaParts.push('Prio ' + snap.prio);
+        const metaParts = [exp.archetypeLabel || 'Element'];
+        if (snap.scriptNumber && snap.mode !== 'raw-mermaid') metaParts.push('Skript [' + snap.scriptNumber + ']');
+        if (snap.prio !== undefined && snap.prio !== null) metaParts.push('Prio ' + snap.prio);
         if (snap.organizationName) metaParts.push(snap.organizationName);
         subtitleEl.textContent = metaParts.join(' · ');
+      }
+      if (modeHintEl) {
+        modeHintEl.textContent = activeInfoModalMode === 'layperson'
+          ? 'Verständlich erklärt für Fachbereich & Projekt'
+          : 'Technische Kennwerte, Regeln, Parameter & Quelltext';
       }
 
       const targetScriptRef = snap.detailTargetScriptNumber || (snap.canJumpToDetailScript ? snap.scriptNumber : '');
@@ -7488,63 +7843,135 @@ export function generateInteractiveCallflowHtml(
         };
       }
 
-      document.querySelectorAll('#node-info-tabs .modal-tab-btn').forEach(btn => {
-        const tid = btn.getAttribute('data-ntab');
-        btn.classList.toggle('active', tid === activeInfoModalTab);
-        if (tid === 'rules') {
-          const ruleCnt = (snap.moduleRulesPreview || []).length;
-          btn.textContent = 'Zeiten & Regeln' + (ruleCnt ? ' (' + ruleCnt + ')' : '');
-        }
+      document.querySelectorAll('#node-info-tabs .audience-btn').forEach(btn => {
+        const modeVal = btn.getAttribute('data-nmode');
+        const isAct = modeVal === activeInfoModalMode;
+        btn.classList.toggle('active-layperson', isAct && modeVal === 'layperson');
+        btn.classList.toggle('active-pro', isAct && modeVal === 'pro');
+        btn.setAttribute('aria-selected', isAct ? 'true' : 'false');
       });
 
       if (!bodyEl) return;
 
-      if (activeInfoModalTab === 'overview') {
+      const inc = snap.incomingConnections || [];
+      const out = snap.outgoingConnections || [];
+
+      if (activeInfoModalMode === 'layperson') {
+        let html = '';
+        html += '<div class="layperson-hero">' +
+          '<div class="layperson-hero-head">' +
+            '<span class="layperson-hero-title">Wofür ist dieses Bauteil?</span>' +
+            '<span class="layperson-hero-tagline">' + esc(exp.shortTagline || '') + '</span>' +
+          '</div>' +
+          '<p class="layperson-prose">' + esc(exp.whatIsIt || '') + '</p>' +
+        '</div>';
+
+        const steps = exp.whatHappensSteps || [];
+        if (steps.length) {
+          html += '<div>' +
+            '<div class="section-title">Was passiert hier mit dem Anrufer?</div>' +
+            '<ol class="layperson-steps">' +
+              steps.map((s, idx) =>
+                '<li><span class="layperson-step-num">' + (idx + 1) + '</span><span>' + esc(s) + '</span></li>'
+              ).join('') +
+            '</ol>' +
+          '</div>';
+        }
+
+        const plainFacts = exp.plainFacts || [];
+        if (plainFacts.length) {
+          html += '<div>' +
+            '<div class="section-title">Wichtige Eckdaten im Klartext</div>' +
+            '<div class="facts-grid">' +
+              plainFacts.map(f =>
+                '<div class="fact-cell"><div class="fact-label">' + esc(f.label) + '</div><div class="fact-value">' + esc(f.value) + '</div></div>'
+              ).join('') +
+            '</div>' +
+          '</div>';
+        }
+
+        html += '<div class="facts-grid">' +
+          '<div><div class="section-title">Woher kommt der Anrufer? (' + inc.length + ')</div>' +
+            (inc.length
+              ? inc.map(c =>
+                  '<button type="button" class="node-chip info-conn-btn" data-ref="' + esc(c.fromScriptNumber) + '" data-label="' + esc(c.fromLabel) + '">' +
+                    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">← ' + esc(c.fromLabel || c.fromScriptNumber) + '</span>' +
+                    '<span class="badge">' + esc(c.edgeLabel || 'Zeigen') + '</span>' +
+                  '</button>'
+                ).join('')
+              : '<div class="muted-note">Startpunkt oder kein vorgeschaltetes Element in dieser Ansicht.</div>') +
+          '</div>' +
+          '<div><div class="section-title">Wohin geht es danach? (' + out.length + ')</div>' +
+            (out.length
+              ? out.map(c =>
+                  '<button type="button" class="node-chip info-conn-btn" data-ref="' + esc(c.toTargetNumber) + '" data-label="' + esc(c.toTargetNumber) + '">' +
+                    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">→ ' + esc(c.toTargetNumber) + '</span>' +
+                    '<span class="badge">' + esc(c.label || 'Weiter') + '</span>' +
+                  '</button>'
+                ).join('')
+              : '<div class="muted-note">Kein weiterer Folgeschritt in dieser Ansicht.</div>') +
+          '</div>' +
+        '</div>';
+
+        html += '<div style="display:flex;justify-content:flex-start;padding-top:4px;">' +
+          '<button type="button" id="btn-inline-switch-pro" style="font-size:11.5px;padding:6px 11px;">Technische Details (IT-Profi) anzeigen →</button>' +
+        '</div>';
+
+        bodyEl.innerHTML = html;
+        wireInfoConnectionButtons(bodyEl);
+        const switchProBtn = document.getElementById('btn-inline-switch-pro');
+        if (switchProBtn) {
+          switchProBtn.addEventListener('click', () => {
+            activeInfoModalMode = 'pro';
+            renderNodeInfoModal();
+          });
+        }
+      } else {
+        // IT-PROFI VIEW
+        const nObj = nodeMap.get(snap.nodeId);
         const facts = [];
         const schedText = snap.resolvedScheduleDisplay || snap.schedule || '';
-        if (schedText) {
-          facts.push({ label: 'Öffnungszeiten / Zeitplan', value: schedText + (snap.hasHolidayCheck ? ' · Feiertagsprüfung aktiv' : ''), mono: true });
-        } else if (snap.hasHolidayCheck) {
-          facts.push({ label: 'Feiertagsprüfung', value: 'Aktiv', mono: false });
-        }
-        if (snap.entryDnisNumbers && snap.entryDnisNumbers.length) {
-          facts.push({ label: 'DNIS / Direktruf', value: snap.entryDnisNumbers.join(', '), mono: true });
-        }
-        if (snap.queueTarget) {
-          facts.push({ label: 'Skillset / Queue', value: snap.queueTarget, mono: true });
-        }
-        if (snap.announcement) {
-          facts.push({ label: 'Ansage / Audio', value: snap.announcement, mono: false });
-        }
+        facts.push({
+          label: 'Öffnungszeiten / SondZeit',
+          value: (schedText || 'Kein Zeitprofil (24/7 oder geerbt)') + (snap.hasHolidayCheck ? ' · Feiertagsprüfung aktiv' : ''),
+          mono: true,
+        });
+        facts.push({
+          label: 'DNIS / Direktruf',
+          value: (snap.entryDnisNumbers && snap.entryDnisNumbers.length) ? snap.entryDnisNumbers.join(', ') : '—',
+          mono: true,
+        });
+        facts.push({ label: 'Skillset / Queue', value: snap.queueTarget || '—', mono: true });
+        facts.push({
+          label: 'Ansage / Treatment / Wait / HDX',
+          value: [
+            snap.announcement || snap.treatmentInfo || '',
+            snap.waitSeconds !== undefined && snap.waitSeconds !== null ? 'WAIT ' + snap.waitSeconds + 's' : '',
+            snap.hdxAction ? 'HDX ' + snap.hdxAction : '',
+          ].filter(Boolean).join(' · ') || '—',
+          mono: true,
+        });
         if (snap.condition) {
-          facts.push({ label: 'Bedingung / Weiche', value: snap.condition, mono: true });
+          facts.push({ label: 'Bedingung / IF-Ausdruck', value: snap.condition, mono: true });
         }
         if (snap.cdnAlias) {
           facts.push({ label: 'CDN / Alias', value: snap.cdnAlias, mono: true });
         }
-        if (snap.waitSeconds !== undefined && snap.waitSeconds !== null) {
-          facts.push({ label: 'Wartezeit', value: snap.waitSeconds + ' Sek.', mono: true });
-        }
-        if (snap.treatmentInfo) {
-          facts.push({ label: 'Treatment / Musik', value: snap.treatmentInfo, mono: false });
-        }
-        if (snap.hdxAction) {
-          facts.push({ label: 'HDX / CTI / DB', value: snap.hdxAction, mono: true });
-        }
 
         let html = '';
-        if (facts.length) {
-          html += '<div><div class="section-title">Fakten &amp; Konfiguration</div><div class="facts-grid">' +
-            facts.map(f =>
-              '<div class="fact-cell"><div class="fact-label">' + esc(f.label) + '</div><div class="fact-value' + (f.mono ? ' mono' : '') + '">' + esc(f.value) + '</div></div>'
-            ).join('') +
-          '</div></div>';
-        }
+        html += '<div class="tech-meta-strip">' +
+          '<strong style="color:var(--accent-text);">Node-ID: ' + esc(snap.nodeId) + '</strong>' +
+          ' · ' + esc(exp.technicalSummary || (nObj ? ('Rolle: ' + nObj.role + ' (' + nObj.inDegree + ' ein / ' + nObj.outDegree + ' aus)') : '')) +
+        '</div>';
 
-        const inc = snap.incomingConnections || [];
-        const out = snap.outgoingConnections || [];
+        html += '<div><div class="section-title">Technische Konfiguration &amp; Schnittstellen</div><div class="facts-grid">' +
+          facts.map(f =>
+            '<div class="fact-cell"><div class="fact-label">' + esc(f.label) + '</div><div class="fact-value' + (f.mono ? ' mono' : '') + '">' + esc(f.value) + '</div></div>'
+          ).join('') +
+        '</div></div>';
+
         html += '<div class="facts-grid">' +
-          '<div><div class="section-title">Eingehend (' + inc.length + ')</div>' +
+          '<div><div class="section-title">Eingehende Referenzen (' + inc.length + ')</div>' +
             (inc.length
               ? inc.map(c =>
                   '<button type="button" class="node-chip info-conn-btn" data-ref="' + esc(c.fromScriptNumber) + '" data-label="' + esc(c.fromLabel) + '">' +
@@ -7552,9 +7979,9 @@ export function generateInteractiveCallflowHtml(
                     '<span class="badge">' + esc(c.edgeLabel || 'Aufruf') + '</span>' +
                   '</button>'
                 ).join('')
-              : '<div class="muted-note">Keine eingehenden Verbindungen erkannt.</div>') +
+              : '<div class="muted-note">Keine eingehenden Referenzen.</div>') +
           '</div>' +
-          '<div><div class="section-title">Ausgehend (' + out.length + ')</div>' +
+          '<div><div class="section-title">Ausgehende Ziele (' + out.length + ')</div>' +
             (out.length
               ? out.map(c =>
                   '<button type="button" class="node-chip info-conn-btn" data-ref="' + esc(c.toTargetNumber) + '" data-label="' + esc(c.toTargetNumber) + '">' +
@@ -7566,9 +7993,32 @@ export function generateInteractiveCallflowHtml(
           '</div>' +
         '</div>';
 
+        const rules = snap.moduleRulesPreview || [];
+        if (rules.length) {
+          html += '<div><div class="section-title">Prioritäts-Regeln &amp; Zeitpläne (' + rules.length + ')</div>' +
+            '<div class="an-table-wrap" style="max-height:240px;">' +
+              '<table class="an-table"><thead><tr><th>Prio</th><th>Schritt</th><th>Zeit / Feiertag</th><th>Bedingung</th><th>Ziel / Aktion</th></tr></thead><tbody>' +
+              rules.map(r => {
+                const actionParts = [];
+                if (r.targetNumber) actionParts.push('→ ' + r.targetNumber);
+                if (r.queueTarget) actionParts.push('Queue: ' + r.queueTarget);
+                if (r.announcement) actionParts.push('Ansage: ' + r.announcement);
+                if (r.choicesCount > 0) actionParts.push(r.choicesCount + ' Optionen');
+                return '<tr>' +
+                  '<td><strong>P' + esc(r.prio) + '</strong></td>' +
+                  '<td>' + esc(r.stepName) + '</td>' +
+                  '<td style="font-family:ui-monospace,monospace;color:var(--accent-text);">' + esc([r.schedule, r.holiday].filter(Boolean).join(' · ') || '—') + '</td>' +
+                  '<td style="font-family:ui-monospace,monospace;">' + esc(r.condition || '—') + '</td>' +
+                  '<td style="font-family:ui-monospace,monospace;">' + esc(actionParts.join(' · ') || '—') + '</td>' +
+                '</tr>';
+              }).join('') +
+              '</tbody></table>' +
+            '</div></div>';
+        }
+
         const params = snap.specialParameters || [];
         if (params.length) {
-          html += '<div><div class="section-title">Avaya-Parameter (' + params.length + ')</div><div style="display:flex;flex-direction:column;gap:5px;">' +
+          html += '<div><div class="section-title">Avaya-Sonderparameter (' + params.length + ')</div><div style="display:flex;flex-direction:column;gap:5px;">' +
             params.map(p =>
               '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:6px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-input);font-size:11.5px;">' +
                 '<span><strong>' + esc(p.label) + '</strong> <span style="font-family:monospace;color:var(--text-muted);font-size:10.5px;">(' + esc(p.key) + ')</span></span>' +
@@ -7581,82 +8031,45 @@ export function generateInteractiveCallflowHtml(
         const findings = snap.relatedFindings || [];
         if (findings.length) {
           html += '<div><div class="section-title">Prüfhinweise (' + findings.length + ')</div><div style="display:flex;flex-direction:column;gap:6px;">' +
-            findings.map(f =>
-              '<div class="an-item ' + (f.severity === 'error' ? 'sev-error' : f.severity === 'warning' ? 'sev-warning' : '') + '">' +
-                '<div class="an-item-title">' + esc(f.title) + '</div>' +
+            findings.map(f => {
+              const sevTxt = f.severity === 'error' ? 'Fehler' : (f.severity === 'warning' ? 'Warnung' : 'Hinweis');
+              return '<div class="an-item ' + (f.severity === 'error' ? 'sev-error' : f.severity === 'warning' ? 'sev-warning' : '') + '">' +
+                '<div class="an-item-title" style="display:flex;justify-content:space-between;gap:8px;"><span>' + esc(f.title) + '</span><span style="font-family:ui-monospace,monospace;font-size:10.5px;opacity:0.85;">' + sevTxt + '</span></div>' +
                 (f.recommendation ? '<div class="an-item-desc">' + esc(f.recommendation) + '</div>' : '') +
-              '</div>'
-            ).join('') +
+              '</div>';
+            }).join('') +
           '</div></div>';
         }
 
         if (snap.rawLineSnippet) {
-          html += '<div><div class="section-title">Skript-Auszug</div><pre class="raw-snippet">' + esc(snap.rawLineSnippet) + '</pre></div>';
-        }
-
-        bodyEl.innerHTML = html || '<div class="muted-note">Für dieses Element liegen keine weiteren Detaildaten vor.</div>';
-        bodyEl.querySelectorAll('.info-conn-btn').forEach(btn => {
-          btn.addEventListener('click', () => {
-            const ref = btn.getAttribute('data-ref') || '';
-            const lbl = btn.getAttribute('data-label') || '';
-            closeNodeInfoModal();
-            if (nodeMap.has(ref)) {
-              selectNode(ref, true);
-              return;
-            }
-            const matchByLabel = GRAPH.nodes.find(n => n.label.toLowerCase().includes(ref.toLowerCase()) || n.id.toLowerCase().includes(ref.toLowerCase()));
-            if (matchByLabel) {
-              selectNode(matchByLabel.id, true);
-              return;
-            }
-            jumpToScriptOrNode(ref, lbl);
-          });
-        });
-      } else {
-        const rules = snap.moduleRulesPreview || [];
-        let html = '';
-        const schedText = snap.resolvedScheduleDisplay || snap.schedule || '';
-        html += '<div class="profile-card">' +
-          '<div class="row-between" style="flex-wrap:wrap;gap:8px;">' +
-            '<div>' +
-              '<div class="fact-label">Aktiver Zeitplan</div>' +
-              '<div class="fact-value mono">' + esc(schedText || 'Kein spezifischer Zeitplan im Knoten (ggf. 24/7 oder geerbt)') + '</div>' +
-            '</div>' +
-            '<button type="button" id="btn-inline-open-all-scheds" class="amber" style="white-space:nowrap;">Alle Öffnungszeiten öffnen</button>' +
-          '</div>' +
-        '</div>';
-
-        if (rules.length) {
-          html += '<div><div class="section-title">Regeln &amp; Schritte im Skript (' + rules.length + ')</div>' +
-            '<div class="an-table-wrap" style="max-height:360px;">' +
-              '<table class="an-table"><thead><tr><th>Prio</th><th>Schritt / Regel</th><th>Zeit / Feiertag</th><th>Bedingung</th><th>Ziel / Aktion</th></tr></thead><tbody>' +
-              rules.map(r => {
-                const actionParts = [];
-                if (r.targetNumber) actionParts.push('→ ' + r.targetNumber);
-                if (r.queueTarget) actionParts.push('Queue: ' + r.queueTarget);
-                if (r.announcement) actionParts.push('Ansage: ' + r.announcement);
-                if (r.choicesCount > 0) actionParts.push(r.choicesCount + ' Optionen');
-                return '<tr>' +
-                  '<td><strong>' + esc(r.prio) + '</strong></td>' +
-                  '<td>' + esc(r.stepName) + '</td>' +
-                  '<td style="font-family:ui-monospace,monospace;color:var(--accent-text);">' + esc([r.schedule, r.holiday].filter(Boolean).join(' · ') || '—') + '</td>' +
-                  '<td>' + esc(r.condition || '—') + '</td>' +
-                  '<td>' + esc(actionParts.join(' · ') || '—') + '</td>' +
-                '</tr>';
-              }).join('') +
-              '</tbody></table>' +
-            '</div></div>';
-        } else {
-          html += '<div class="muted-note">Keine weiteren Detail-Regeln für dieses Element hinterlegt.</div>';
+          html += '<div>' +
+            '<div class="section-title"><span>Original-Skript-Auszug</span><button type="button" id="btn-copy-node-snippet" class="copy-snippet-btn">Kopieren</button></div>' +
+            '<pre class="raw-snippet">' + esc(snap.rawLineSnippet) + '</pre>' +
+          '</div>';
         }
 
         bodyEl.innerHTML = html;
-        const openAllBtn = document.getElementById('btn-inline-open-all-scheds');
-        if (openAllBtn) {
-          openAllBtn.addEventListener('click', () => {
-            const q = snap.scriptNumber || '';
-            closeNodeInfoModal();
-            openSchedulesModal(q);
+        wireInfoConnectionButtons(bodyEl);
+        const copyBtn = document.getElementById('btn-copy-node-snippet');
+        if (copyBtn && snap.rawLineSnippet) {
+          copyBtn.addEventListener('click', () => {
+            const text = snap.rawLineSnippet;
+            const done = () => {
+              copyBtn.textContent = 'Kopiert';
+              setTimeout(() => { copyBtn.textContent = 'Kopieren'; }, 1600);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(text).then(done).catch(() => {});
+            } else {
+              const ta = document.createElement('textarea');
+              ta.value = text;
+              ta.style.position = 'fixed';
+              ta.style.opacity = '0';
+              document.body.appendChild(ta);
+              ta.select();
+              try { document.execCommand('copy'); done(); } catch {}
+              document.body.removeChild(ta);
+            }
           });
         }
       }
@@ -7772,12 +8185,13 @@ export function generateInteractiveCallflowHtml(
         if (e.target === nodeInfoOverlay) closeNodeInfoModal();
       });
     }
-    document.querySelectorAll('#node-info-tabs .modal-tab-btn').forEach(btn => {
+    document.querySelectorAll('#node-info-tabs .audience-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        activeInfoModalTab = btn.getAttribute('data-ntab') || 'overview';
+        activeInfoModalMode = btn.getAttribute('data-nmode') === 'pro' ? 'pro' : 'layperson';
         renderNodeInfoModal();
       });
     });
+    window.addEventListener('resize', () => { syncCanvasNodeInfoButton(); });
 
     document.addEventListener('keydown', e => {
       if (e.key === 'Escape') {
