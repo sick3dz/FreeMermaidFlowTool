@@ -7,7 +7,6 @@ import {
   CallflowHealthFinding,
   CallflowIssueResolution,
   CallflowOpenIssue,
-  CallflowParameterCategory,
   CallflowResourceRegistry,
   CallflowRoutingMatrixRow,
   CallflowScheduleSummaryRow,
@@ -2038,7 +2037,7 @@ interface ResolveScheduleResult {
 
 interface CachedModuleTimesEntry {
   rawLen: number;
-  rulesLen: number;
+  rulesSig: string;
   result: string | null;
 }
 
@@ -2065,11 +2064,22 @@ interface WorkspaceScheduleIndex {
 const moduleExtractedTimesCache = new WeakMap<ScriptModule, CachedModuleTimesEntry>();
 const workspaceScheduleIndexCache = new WeakMap<ScriptWorkspace, WorkspaceScheduleIndex>();
 
+function computeModuleScheduleSignature(mod: ScriptModule): string {
+  const parts: string[] = [String(mod.rules.length), mod.commentScheduleHint || ''];
+  for (let i = 0; i < mod.rules.length; i++) {
+    const r = mod.rules[i];
+    if (r.schedule || r.holiday || r.condition) {
+      parts.push(`${r.id}:${r.schedule || ''}|${r.holiday || ''}|${r.condition || ''}`);
+    }
+  }
+  return parts.join('§');
+}
+
 function getCachedAllTimesFromModule(mod: ScriptModule): string | null {
   const rawLen = mod.rawText ? mod.rawText.length : 0;
-  const rulesLen = mod.rules.length;
+  const rulesSig = computeModuleScheduleSignature(mod);
   const cached = moduleExtractedTimesCache.get(mod);
-  if (cached && cached.rawLen === rawLen && cached.rulesLen === rulesLen) {
+  if (cached && cached.rawLen === rawLen && cached.rulesSig === rulesSig) {
     return cached.result;
   }
 
@@ -2109,7 +2119,7 @@ function getCachedAllTimesFromModule(mod: ScriptModule): string | null {
     }
   }
 
-  moduleExtractedTimesCache.set(mod, { rawLen, rulesLen, result });
+  moduleExtractedTimesCache.set(mod, { rawLen, rulesSig, result });
   return result;
 }
 
@@ -2253,7 +2263,7 @@ export function resolveScheduleWithSondZeit(
 ): ResolveScheduleResult {
   const wsIndex = workspace ? getWorkspaceScheduleIndex(workspace) : null;
   const memoKey = wsIndex
-    ? `${currentMod?.scriptNumber || ''}::${currentMod?.rawText?.length || 0}::${rawSchedule || ''}`
+    ? `${currentMod?.scriptNumber || ''}::${currentMod?.rawText?.length || 0}::${currentMod ? computeModuleScheduleSignature(currentMod) : ''}::${rawSchedule || ''}`
     : '';
   if (wsIndex && wsIndex.resolvedCache.has(memoKey)) {
     return wsIndex.resolvedCache.get(memoKey)!;
@@ -6849,14 +6859,15 @@ export function buildScriptDetailMermaid(
 
     rule.choices.forEach((ch, cIdx) => {
       const isNamed = /^(?:Feiertag|Zeitplan|Bedingung|Sprung)$/i.test(ch.choice);
-      const baseChoiceText = isNamed ? ch.choice : `Taste ${ch.choice}`;
+      const choicePrefix = isNamed ? ch.choice : `DTMF ${ch.choice}`;
+      const choiceEdgeText = isNamed ? ch.choice : `Wahl ${ch.choice}`;
       const choiceNodeId = `CHOICE_${modSuffix}_${idx}_${cIdx}`;
       const choiceLabel = ch.label
-        ? `DTMF ${ch.choice}: ${ch.label}`
-        : `DTMF ${ch.choice}`;
+        ? `${choicePrefix}: ${ch.label}`
+        : choicePrefix;
 
       lines.push(`        ${choiceNodeId}(["${sanitizeMermaidText(choiceLabel)}"])`);
-      lines.push(`        ${stepId} -->${sanitizeMermaidEdgeLabel(`Wahl ${ch.choice}`)} ${choiceNodeId}`);
+      lines.push(`        ${stepId} -->${sanitizeMermaidEdgeLabel(choiceEdgeText)} ${choiceNodeId}`);
 
       if (canonicalScriptMatchKey(ch.targetNumber) === modKey) {
         lines.push(`        ${choiceNodeId} -->${sanitizeMermaidEdgeLabel(`↻ Rücksprung`)} ${entryId}`);
@@ -6880,7 +6891,7 @@ export function buildScriptDetailMermaid(
       const anchorId = anchorStepIdx >= 0 ? `STEP_${modSuffix}_${anchorStepIdx + 1}` : entryId;
       const jumpId = registerExternalJump(lnk.toTargetNumber);
       lines.push(
-        `        ${anchorId} -->|${sanitizeMermaidText(lnk.label || 'Verknüpft')}| ${jumpId}`
+        `        ${anchorId} -->${sanitizeMermaidEdgeLabel(lnk.label || 'Verknüpft')} ${jumpId}`
       );
     });
 
@@ -9859,7 +9870,7 @@ export function connectNodesInWorkspace(
  */
 export function updateWorkspaceNodeFromEdit(
   workspace: ScriptWorkspace,
-  viewLevel: CallflowViewLevel,
+  _viewLevel: CallflowViewLevel,
   snapshot: EditableCallflowNodeSnapshot,
   updates: {
     scriptNumber: string;

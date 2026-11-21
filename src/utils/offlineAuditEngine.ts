@@ -77,7 +77,7 @@ export interface SbomPackageItem {
   corporateNote: string;
 }
 
-export const AUDIT_APP_VERSION = '1.1.5';
+export const AUDIT_APP_VERSION = '1.1.6';
 
 export const ENTERPRISE_HIGHLIGHT_TILES: EnterpriseHighlightTile[] = [
   {
@@ -307,7 +307,7 @@ sha256sum MermaidFree2UseOpen_Offline.html`,
         reference: 'Art. 21 Abs. 2 lit. c',
         auditQuestion: 'Bleibt das Werkzeug im Krisen- oder Offline-Fall nutzbar (BCM)?',
         technicalProof:
-          'Ja. Callflow-Analysen, Live-Anruf-Simulator, Öffnungszeiten-Prüfungen und interaktive HTML-Exporte funktionieren ohne Internet, Proxy oder Lizenzserver.',
+          'Ja. Callflow-Analysen, Öffnungszeiten-Prüfungen, Logik-Checks und interaktive HTML-Exporte funktionieren ohne Internet, Proxy oder Lizenzserver.',
         verdict: 'Voll resilient',
       },
       {
@@ -682,7 +682,7 @@ export const SBOM_PACKAGES: SbomPackageItem[] = [
     license: 'MIT',
     scope: 'runtime-offline',
     scopeLabel: 'Laufzeit (Offline-Bundle)',
-    purpose: 'Lokales DOM-Rendering aller Studio-, Simulator- und Audit-Ansichten',
+    purpose: 'Lokales DOM-Rendering aller Studio-, Callflow- und Audit-Ansichten',
     networkBehavior: '0 Requests (komplett geinlined)',
     corporateNote: 'Standard-Web-Renderer unter MIT-Lizenz.',
   },

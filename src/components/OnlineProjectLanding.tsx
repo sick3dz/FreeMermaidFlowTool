@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Archive,
   CheckCircle2,
@@ -20,6 +20,7 @@ import {
   inspectCachedStudioProject,
   scanAllBrowserCacheEntries,
 } from '../utils/offlineAppExporter';
+import { AUDIT_APP_VERSION } from '../utils/offlineAuditEngine';
 import { OfflineAuditSection } from './OfflineAuditSection';
 
 const PROJECT_OFFLINE_FILENAME = 'MermaidFree2UseOpen_Projekt_Offline.html';
@@ -59,7 +60,7 @@ const WORKFLOW_STAGES = [
   {
     step: '03.',
     title: 'Callflow-Studio & Callflow.html nutzen',
-    body: 'Der lokale Builder konfiguriert und erzeugt Ihre eigenständige Studio-HTML für .s-/Visio-Skripte, Live-Anruf-Simulator, Öffnungszeiten und Callflow.html-Exporte.',
+    body: 'Der lokale Builder konfiguriert und erzeugt Ihre eigenständige Studio-HTML für .s-/Visio-Skripte, Öffnungszeiten, Logik-Prüfung und Callflow.html-Exporte.',
   },
 ];
 
@@ -253,7 +254,7 @@ export default function OnlineProjectLanding() {
           {/* Zone 3: Version & Direct Project Offline Download */}
           <div className="flex items-center gap-3 shrink-0">
             <span className="text-[11px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
-              Version 1.1.5
+              Version {AUDIT_APP_VERSION}
             </span>
             <button
               type="button"
@@ -312,7 +313,7 @@ export default function OnlineProjectLanding() {
           <div className="lg:col-span-7 space-y-6">
             <div className="space-y-3">
               <p className="text-xs font-mono uppercase tracking-wider text-emerald-400 tabular-nums">
-                Version 1.1.5 · Offline-First Bereitstellung · Lokale Einzeldatei
+                Version {AUDIT_APP_VERSION} · Offline-First Bereitstellung · Lokale Einzeldatei
               </p>
               <h1 className="text-3xl sm:text-4xl lg:text-[42px] font-semibold tracking-tight text-slate-50 leading-[1.12]">
                 Projekt offline laden und lokal mit dem Builder starten

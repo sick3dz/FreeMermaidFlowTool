@@ -8,7 +8,6 @@ import {
   Clock,
   Code2,
   Copy,
-  Download,
   Edit3,
   Eye,
   FileImage,
@@ -30,7 +29,6 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
-  PhoneCall,
   Plus,
   RotateCcw,
   Scan,
@@ -77,7 +75,6 @@ import {
   getSvgDimensions,
   injectInitDirectiveIntoCode,
   isColorDark,
-  prepareStandaloneSvg,
   rasterizeSvgToGpuProxy,
   renderLocalMermaidDiagram,
   resetMermaidRenderQueue,
@@ -149,18 +146,15 @@ import {
   promoteEntryModuleToMain,
   rehydrateAndUpgradeWorkspace,
   reopenIssueInWorkspace,
-  toMermaidNodeSuffix,
   unignoreChecklistTargetInWorkspace,
   updateEdgeLabelInWorkspace,
   updateWorkspaceNodeFromEdit,
 } from './utils/scriptCallflowParser';
 import { buildDualAudienceNodeExplanation } from './utils/nodeExplanationEngine';
 import {
-  buildCallflowSimulationModel,
   buildWorkspaceGlobalSearchIndex,
-  CallSimulationStep,
   GlobalSearchEntry,
-} from './utils/callflowSimulator';
+} from './utils/globalSearchEngine';
 import {
   FolderAutoResolveSummary,
   FolderScriptFileEntry,
@@ -181,7 +175,6 @@ import { NewCallflowModal } from './components/NewCallflowModal';
 import { NodeInlineEditorModal } from './components/NodeInlineEditorModal';
 import { OpeningHoursModal } from './components/OpeningHoursModal';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
-import { CallSimulatorHud } from './components/CallSimulatorHud';
 import { CanvasMinimap } from './components/CanvasMinimap';
 import { LocalHtmlBuilderLanding } from './components/LocalHtmlBuilderLanding';
 import OnlineProjectLanding from './components/OnlineProjectLanding';
@@ -463,7 +456,6 @@ function OfflineStudioApp() {
   const [isOpeningHoursModalOpen, setIsOpeningHoursModalOpen] = useState<boolean>(false);
   const [openingHoursInitialSearch, setOpeningHoursInitialSearch] = useState<string>('');
   const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState<boolean>(false);
-  const [isCallSimulatorOpen, setIsCallSimulatorOpen] = useState<boolean>(false);
   const [showMinimap, setShowMinimap] = useState<boolean>(false);
   const [showDiagramLegend, setShowDiagramLegend] = useState<boolean>(false);
   const pendingNodeFocusHintRef = useRef<{
@@ -1795,15 +1787,7 @@ function OfflineStudioApp() {
     [scriptWorkspace, callflowGraph, callflowViewLevel]
   );
 
-  const callflowSimulationModel = useMemo(
-    () =>
-      buildCallflowSimulationModel(
-        scriptWorkspace.modules.length > 0 ? scriptWorkspace : null
-      ),
-    [scriptWorkspace]
-  );
-
-  // Resolve deferred node focus after Global Search or Call Simulator switches script views
+  // Resolve deferred node focus after Global Search switches script views
   useEffect(() => {
     const pending = pendingNodeFocusHintRef.current;
     if (!pending || !coloredSvg || callflowGraph.nodes.size === 0) return;
@@ -1932,52 +1916,6 @@ function OfflineStudioApp() {
             break;
           }
         }
-      }
-      if (focusId) {
-        setSelectedCallflowNodeId(focusId);
-        handleFocusNodeOnCanvas(focusId, 1.15);
-      }
-    },
-    [callflowViewLevel, callflowGraph, handleFocusNodeOnCanvas]
-  );
-
-  const handleSimulatorFocusStep = useCallback(
-    (step: CallSimulationStep) => {
-      const scriptNumber = step.scriptNumber;
-      const labelHint = step.queueTarget || step.announcement || step.title;
-      const alreadyOnTarget =
-        callflowViewLevel.level === 'detail' &&
-        canonicalScriptMatchKey(callflowViewLevel.scriptNumber) ===
-          canonicalScriptMatchKey(scriptNumber);
-      if (!alreadyOnTarget) {
-        pendingNodeFocusHintRef.current = {
-          nodeId: step.targetNodeId,
-          fallbackNodeId: step.fallbackNodeId,
-          labelHint,
-        };
-        handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber });
-        return;
-      }
-      let focusId: string | null =
-        step.targetNodeId && callflowGraph.nodes.has(step.targetNodeId)
-          ? step.targetNodeId
-          : step.fallbackNodeId && callflowGraph.nodes.has(step.fallbackNodeId)
-            ? step.fallbackNodeId
-            : null;
-      if (!focusId && labelHint) {
-        const needle = labelHint
-          .replace(/^(Queue|Ansage-Ende|Weiterleitung|Prio\s+\d+\s*·\s*):\s*/i, '')
-          .trim()
-          .toLowerCase();
-        for (const node of callflowGraph.nodes.values()) {
-          if (needle && node.label.toLowerCase().includes(needle)) {
-            focusId = node.id;
-            break;
-          }
-        }
-      }
-      if (!focusId && callflowGraph.entryNodes.length > 0) {
-        focusId = callflowGraph.entryNodes[0].id;
       }
       if (focusId) {
         setSelectedCallflowNodeId(focusId);
@@ -4007,19 +3945,7 @@ function OfflineStudioApp() {
     setMobileActivePane('preview');
   };
 
-  // Direct 1-Click SVG, PNG & Interactive HTML downloads (bake offsets/spotlight on demand)
-  const handleQuickDownloadSvg = () => {
-    const exportSvg = buildExportSvgSnapshot(true);
-    if (!exportSvg) return;
-    const { serializedSvg } = prepareStandaloneSvg(exportSvg, canvasSurface, 32);
-    const blob = new Blob([serializedSvg], { type: 'image/svg+xml;charset=utf-8' });
-    const safeName =
-      diagramTitle.toLowerCase().replace(/[^a-z0-9äöüß_-]+/gi, '-') || 'mermaid-diagramm';
-    triggerLocalDownload(blob, `${safeName}.svg`);
-    setQuickDownloadFeedback('svg');
-    setTimeout(() => setQuickDownloadFeedback(null), 2000);
-  };
-
+  // Direct 1-Click PNG & Interactive HTML downloads (bake offsets/spotlight on demand)
   const handleQuickDownloadPng = async () => {
     const exportSvg = buildExportSvgSnapshot(true);
     if (!exportSvg || isDownloadingPng) return;
@@ -4148,7 +4074,6 @@ function OfflineStudioApp() {
               initialIsolateSubgraph: isolateSubgraphMode,
               analysis: null,
               globalSearchIndex: globalSearchEntries,
-              simulationModel: null,
             }
           ),
         };
@@ -4723,7 +4648,6 @@ function OfflineStudioApp() {
               initialIsolateSubgraph: isolateSubgraphMode,
               analysis: analysisPayload,
               globalSearchIndex: globalSearchEntries,
-              simulationModel: callflowSimulationModel,
               includeOriginalScripts: hasAnyRawScripts,
               rawScriptsByNumber: hasAnyRawScripts ? rawScriptsByNumber : undefined,
             }
@@ -4780,7 +4704,6 @@ function OfflineStudioApp() {
       activeNodeOffsets,
       isMasterCompact,
       globalSearchEntries,
-      callflowSimulationModel,
     ]
   );
 
@@ -5975,24 +5898,6 @@ function OfflineStudioApp() {
 
                 <button
                   type="button"
-                  onClick={() => setIsCallSimulatorOpen((prev) => !prev)}
-                  title="Interaktiver Anruf-Simulator live auf dem Callflow (Play/Pause, Vor & Zurück)"
-                  className={`px-2.5 py-1 border rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
-                    isCallSimulatorOpen
-                      ? 'bg-emerald-600 hover:bg-emerald-500 border-emerald-400 text-white'
-                      : 'bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/40 text-emerald-200'
-                  }`}
-                >
-                  <PhoneCall
-                    className={`w-3.5 h-3.5 shrink-0 ${
-                      isCallSimulatorOpen ? 'text-white' : 'text-emerald-400'
-                    }`}
-                  />
-                  <span>Anruf-Simulator</span>
-                </button>
-
-                <button
-                  type="button"
                   onClick={() => setIsGlobalSearchOpen(true)}
                   title="Globale Suche über alle Skripte, DNIS, Queues, Ansagen & Zeiten (Strg+K)"
                   className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
@@ -6833,33 +6738,20 @@ function OfflineStudioApp() {
                           Suche (Strg+K)
                         </button>
                         {scriptWorkspace.modules.length > 0 && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => setIsCallSimulatorOpen(true)}
-                              className={`px-2 py-1 rounded border transition-colors cursor-pointer ${
-                                isDarkCanvas
-                                  ? 'bg-slate-950 hover:bg-slate-800 border-slate-800 text-emerald-300'
-                                  : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-emerald-700'
-                              }`}
-                            >
-                              Anruf-Simulator
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setOpeningHoursInitialSearch('');
-                                setIsOpeningHoursModalOpen(true);
-                              }}
-                              className={`px-2 py-1 rounded border transition-colors cursor-pointer ${
-                                isDarkCanvas
-                                  ? 'bg-slate-950 hover:bg-slate-800 border-slate-800 text-amber-300'
-                                  : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-amber-700'
-                              }`}
-                            >
-                              Öffnungszeiten
-                            </button>
-                          </>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setOpeningHoursInitialSearch('');
+                              setIsOpeningHoursModalOpen(true);
+                            }}
+                            className={`px-2 py-1 rounded border transition-colors cursor-pointer ${
+                              isDarkCanvas
+                                ? 'bg-slate-950 hover:bg-slate-800 border-slate-800 text-amber-300'
+                                : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-amber-700'
+                            }`}
+                          >
+                            Öffnungszeiten
+                          </button>
                         )}
                       </div>
                       <button
@@ -7264,22 +7156,6 @@ function OfflineStudioApp() {
                 </div>
               )}
             </div>
-
-            {/* Live Floating Call Simulator HUD (Play/Pause, Back/Forward, Speed, Step Timeline) */}
-            {isCallSimulatorOpen && callflowSimulationModel.scripts.length > 0 && (
-              <div className="absolute bottom-3 left-3 right-3 z-30 pointer-events-none flex justify-center">
-                <CallSimulatorHud
-                  isOpen={isCallSimulatorOpen}
-                  onClose={() => setIsCallSimulatorOpen(false)}
-                  model={callflowSimulationModel}
-                  activeScriptNumber={
-                    callflowViewLevel.level === 'detail' ? callflowViewLevel.scriptNumber : null
-                  }
-                  isDarkSurface={canvasSurface === 'dark'}
-                  onFocusStep={handleSimulatorFocusStep}
-                />
-              </div>
-            )}
           </div>
 
           {/* Interactive Logic Legend & Path Swatch Footer Bar */}

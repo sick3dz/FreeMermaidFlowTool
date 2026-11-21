@@ -7,7 +7,6 @@ import {
   Download,
   FolderUp,
   Loader2,
-  PlayCircle,
   ShieldCheck,
   Terminal,
   X,
@@ -18,8 +17,8 @@ import {
   buildAndDownloadOfflineApp,
   extractSeedFromRecoveryFile,
   inspectCachedStudioProject,
-  isRunningAsOfflineSingleFile,
 } from '../utils/offlineAppExporter';
+import { AUDIT_APP_VERSION } from '../utils/offlineAuditEngine';
 import { OfflineWorkspaceSeed, SmartColorMode } from '../types/mermaidStudio';
 import { OfflineAuditSection } from './OfflineAuditSection';
 
@@ -127,25 +126,24 @@ mermaid.initialize({
   },
   {
     id: 'analysis-sim',
-    label: 'Analyse & Sim',
-    value: 'Live-Simulator',
-    sublabel: 'Zeiten & Suche',
+    label: 'Analyse & Zeiten',
+    value: 'Öffnungszeiten',
+    sublabel: 'Suche & Logik-Check',
     accentClass: 'text-emerald-300',
-    title: 'Interaktiver Live-Anruf-Simulator, Öffnungszeiten & Globale Suche',
+    title: 'Öffnungszeiten-Solver, Globale Suche & Statische Logikprüfung',
     summary:
-      'Simuliert Anrufe direkt live auf dem Callflow-Diagramm mit Play/Pause, Vor/Zurück, Tempo-Steuerung und automatischem Zielskript-Wechsel. Ergänzt durch Öffnungszeiten-Übersicht, globale Suche (Strg+K) und statische Logikprüfung.',
+      'Löst Wochentage, Uhrzeiten, SondZeit-Referenzen und Feiertagsregeln skriptübergreifend auf und exportiert sie strukturiert als Excel-CSV. Ergänzt durch globale Suche (Strg+K), Ressourcen-Register und Zyklus-/Sackgassen-Prüfung.',
     facts: [
-      { label: 'Anruf-Simulator', value: 'Play/Pause, Vor/Zurück, Tempo & Schritt-Leiste' },
-      { label: 'Cross-Script-Sprung', value: 'Wechselt automatisch ins Zielskript & fokussiert Knoten' },
       { label: 'Öffnungszeiten', value: 'Skriptübergreifende SondZeit- & Feiertags-Auflösung' },
+      { label: 'Excel-CSV Export', value: 'Getrennte Spalten für Wochentage, Uhrzeiten & Quelle' },
       { label: 'Globale Suche', value: 'Strg+K über Skripte, DNIS, Skillsets & Ansagen' },
+      { label: 'Logikprüfung', value: 'Erkennt fehlende Zielskripte, Zyklen & Sackgassen' },
     ],
-    snippetTitle: 'LIVE-SIMULATION & PARITÄT IM CALLFLOW.HTML EXPORT',
-    snippetCode: `// Schrittweise Pfadauswertung direkt auf dem aktiven Diagramm:
-const trace = simulateCallflowPath(workspace, {
-  entryScriptId, dnisInput, simulatedDay, simulatedTime, holidayActive, dtmfInputs
-});
-// Identischer Live-Simulator ist auch in der exportierten Callflow.html enthalten.`,
+    snippetTitle: 'ZEITPLAN-AUFLÖSUNG & CSV-EXPORT',
+    snippetCode: `// Skriptübergreifende Auflösung inkl. SondZeit-Switch & Namensmuster:
+const rows = buildWorkspaceScheduleOverview(workspace);
+const csv = exportOpeningHoursCsv(workspace);
+// Identische Übersicht & CSV-Export sind auch in Callflow.html enthalten.`,
   },
   {
     id: 'air-gapped',
@@ -181,7 +179,7 @@ const WORKFLOW_STEPS: WorkflowStepSpec[] = [
     subtitle: 'Alle Engines inline',
     detailTitle: '01 · Einzeldatei-HTML mit Voreinstellungen erzeugen',
     summary:
-      'Der Offline-Builder bündelt React 19, Tailwind-Styles, Mermaid.js v11, Eclipse ELK, JSZip, den Parser für Avaya-.s-Skripte sowie den Live-Anruf-Simulator synchron in eine einzige portable .html-Datei.',
+      'Der Offline-Builder bündelt React 19, Tailwind-Styles, Mermaid.js v11, Eclipse ELK, JSZip sowie den Parser für Avaya-.s-Skripte synchron in eine einzige portable .html-Datei.',
     facts: [
       { label: 'Artefakt', value: '1 eigenständige HTML5-Datei (0 externe Chunks)' },
       { label: 'Optionale Vorgaben', value: 'Arbeitsmodus, helles/dunkles Theme & Farbmodus' },
@@ -214,11 +212,11 @@ const WORKFLOW_STEPS: WorkflowStepSpec[] = [
   {
     id: 'step-3',
     stepNumber: '03',
-    shortTitle: 'Im RAM parsen & testen',
-    subtitle: '.s, Visio & Live-Simulator',
+    shortTitle: 'Im RAM parsen & prüfen',
+    subtitle: '.s, Visio & Öffnungszeiten',
     detailTitle: '03 · Skripte, Ordner & Visio lokal im Browser-RAM analysieren',
     summary:
-      'Avaya-.s-Skripte, komplette Skript-Verzeichnisse und Visio-Dateien (.vsdx) werden per HTML5 FileReader im Arbeitsspeicher verarbeitet, als 2-Ebenen-Callflow visualisiert und direkt im Live-Anruf-Simulator durchlaufen.',
+      'Avaya-.s-Skripte, komplette Skript-Verzeichnisse und Visio-Dateien (.vsdx) werden per HTML5 FileReader im Arbeitsspeicher verarbeitet, als 2-Ebenen-Callflow visualisiert und auf Öffnungszeiten sowie Routing-Logik geprüft.',
     facts: [
       { label: 'Zeichenkodierung', value: 'Auto-Detect UTF-8, Windows-1252 & ISO-8859-1' },
       { label: 'Rekursion', value: 'BFS-Ordner-Resolver lädt nur aktive Zielskripte' },
@@ -236,9 +234,9 @@ const workspace = buildScriptWorkspace(modules);`,
     subtitle: 'Callflow.html, CSV & Kopie',
     detailTitle: '04 · Interaktive Callflow.html, Tabellen & Projekt-Kopien sichern',
     summary:
-      'Aus der lokalen Offline-App heraus lassen sich jederzeit interaktive Read-Only Callflow.html-Viewer (inkl. Live-Simulator), Excel-CSVs, Markdown-Doku sowie neue Offline-App-Projekt-Snapshots (DOM-Quine) erzeugen.',
+      'Aus der lokalen Offline-App heraus lassen sich jederzeit interaktive Read-Only Callflow.html-Viewer (inkl. Pfad-Tracing, Suche & Öffnungszeiten), Excel-CSVs, Markdown-Doku sowie neue Offline-App-Projekt-Snapshots (DOM-Quine) erzeugen.',
     facts: [
-      { label: 'Fachbereichs-Viewer', value: 'Callflow.html mit vor-gerenderten SVGs & Simulator' },
+      { label: 'Fachbereichs-Viewer', value: 'Callflow.html mit vor-gerenderten SVGs, Suche & Zeiten' },
       { label: 'Projekt-Kopie', value: 'Rekonstruiert sich offline direkt aus dem DOM neu' },
     ],
     codeTitle: 'SELF-REPLICATING OFFLINE-EXPORT (DOM-QUINE)',
@@ -305,7 +303,7 @@ S_Main(["★ [Main] Einstieg"]) -->|"[Mandant_A] 1001234"| S_Service_Menu`,
     bullets: [
       'In der laufenden Offline-App liest reconstructHtmlFromActiveOfflineDocument() das aktive Inline-Skript und Stylesheet direkt aus dem DOM aus.',
       'Optional wird der komplette Projektstand (Module, Layout-Offsets, Checkliste, Speicherstände) XSS-sicher als window.__MERMAID_OFFLINE_SEED__ eingebettet.',
-      'Zusätzlich erzeugt der Callflow.html-Export einen eigenständigen Read-Only-Viewer für Fachabteilungen inkl. Live-Anruf-Simulator und Öffnungszeiten.',
+      'Zusätzlich erzeugt der Callflow.html-Export einen eigenständigen Read-Only-Viewer für Fachabteilungen inkl. Pfad-Tracing, Globaler Suche und Öffnungszeiten.',
     ],
     fileHint: 'src/utils/offlineAppExporter.ts',
     code: `if (isRunningAsOfflineSingleFile()) {
@@ -397,35 +395,9 @@ S_1040 -->|"Taste 1"| CHOICE_1040_1`,
 }`,
   },
   {
-    id: 'call-simulator',
-    category: 'analysis',
-    categoryLabel: 'Analyse & Simulation',
-    title: 'Live-Anruf-Simulator (Play, Pause & Schritt-Steuerung)',
-    versionTag: 'Live-Canvas-HUD · Cross-Script-Fokus',
-    pipelineLine: 'Eingabeparameter (DNIS / Zeit / DTMF) → Trace-Engine → Live-Knotenfokus',
-    description:
-      'Simuliert konkrete Anrufszenarien Schritt für Schritt direkt auf dem Callflow-Diagramm — inklusive automatischem Wechsel ins Zielskript und sauberer Parität im Callflow.html-Export.',
-    capabilities: [
-      'Kompakte Steuerleiste direkt über dem Diagramm: Play/Pause, Schritt Zurück/Vor, Tempo (0.5x–2x) & klickbare Schritt-Leiste',
-      'Testet DNIS/Rufnummer, Wochentag, Uhrzeit, Feiertags-Status und DTMF-Tastenwahl realitätsnah',
-      'Wechselt bei Skript-Sprüngen automatisch in das Zielskript und fokussiert den aktiven Knoten per Smooth-Pan',
-    ],
-    facts: [
-      { label: 'Steuerung', value: 'Play/Pause · Zurück · Vor · 0.5x / 1x / 2x' },
-      { label: 'Darstellung', value: 'Live-Highlight direkt auf dem SVG-Callflow' },
-      { label: 'Export-Parität', value: 'Vollständig lauffähig in exportierter Callflow.html' },
-    ],
-    codeTitle: 'LIVE-TRACE-SCHRITT & ZIELSKRIPT-WECHSEL',
-    code: `// Bei jedem Simulationsschritt wird das Zielskript automatisch aktiviert:
-if (step.scriptId && step.scriptId !== activeScriptId) {
-  onSelectScript(step.scriptId);
-}
-focusCanvasNode(step.nodeId, { highlightPath: visitedNodeIds });`,
-  },
-  {
     id: 'opening-hours',
     category: 'analysis',
-    categoryLabel: 'Analyse & Simulation',
+    categoryLabel: 'Analyse & Zeiten',
     title: 'Öffnungszeiten-, SondZeit- & Feiertags-Solver',
     versionTag: 'Cross-Script Lookup · Excel-CSV',
     pipelineLine: 'Zeit-Extraktor → SondZeit-Auflösung → SCHED_ / HOLIDAY_ Knoten & Modal',
@@ -449,7 +421,7 @@ SCHED_1040_1 -->|Innerhalb Öffnungszeit| QUEUE_S_Service`,
   {
     id: 'search-minimap-health',
     category: 'analysis',
-    categoryLabel: 'Analyse & Simulation',
+    categoryLabel: 'Analyse & Zeiten',
     title: 'Globale Suche, GPU-Minimap & Logikprüfung',
     versionTag: 'Strg+K · Minimap (M) · DFS-Zyklustest',
     pipelineLine: 'Cross-Ref-Index → Sofortsuche / Minimap-Viewport / Erreichbarkeits-Prüfung',
@@ -484,7 +456,7 @@ SCHED_1040_1 -->|Innerhalb Öffnungszeit| QUEUE_S_Service`,
     description:
       'Erzeugt sämtliche Dokumentations- und Übergabeformate vollständig lokal im Browser — vom schreibgeschützten Fachbereichs-Viewer bis zur neuen Offline-App-Projektkopie.',
     capabilities: [
-      'Interaktive Callflow.html (Read-Only): Vor-gerenderte 2-Ebenen-SVGs, Pfad-Tracing, Suche, Zeiten & Live-Anruf-Simulator',
+      'Interaktive Callflow.html (Read-Only): Vor-gerenderte 2-Ebenen-SVGs, Pfad-Tracing, Suche & Öffnungszeiten-CSV',
       'Offline-App Projekt-Kopie (.html): Speichert den aktuellen Arbeitsstand direkt aus file:// als neue Offline-App',
       'Vektor-SVG, High-DPI PNG (1x/2x/4x), Routing-Matrix (.csv), Öffnungszeiten (.csv) und Abnahme-Doku (.md)',
     ],
@@ -531,7 +503,6 @@ async function copyTextWithOfflineFallback(text: string): Promise<boolean> {
 }
 
 export const LocalHtmlBuilderLanding: React.FC = () => {
-  const isOfflineModeActive = useMemo(() => isRunningAsOfflineSingleFile(), []);
   const cachedProject = useMemo(() => inspectCachedStudioProject(), []);
   const [importedRecoverySeed, setImportedRecoverySeed] = useState<Omit<
     OfflineWorkspaceSeed,
@@ -770,7 +741,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
           {/* Zone 3: Version */}
           <div className="flex items-center gap-3 shrink-0">
             <span className="text-[11px] font-mono text-slate-400 tabular-nums whitespace-nowrap">
-              Version 1.1.5
+              Version {AUDIT_APP_VERSION}
             </span>
           </div>
         </div>
@@ -812,7 +783,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
           <div className="lg:col-span-7 space-y-5">
             <div className="space-y-2.5">
               <p className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 tabular-nums">
-                Version 1.1.5 · Reine Offline-Anwendung · file:// Einzeldatei · 0 Byte Netzwerkverkehr
+                Version {AUDIT_APP_VERSION} · Reine Offline-Anwendung · file:// Einzeldatei · 0 Byte Netzwerkverkehr
               </p>
               <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-slate-50 leading-tight">
                 Offline-Callflow-Studio für Avaya-.s-Skripte, Visio &amp; Mermaid
@@ -820,7 +791,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
               <p className="text-sm text-slate-300 leading-relaxed max-w-2xl">
                 Dieses Werkzeug wird ausschließlich als lokale Offline-HTML-Datei
                 ausgeführt. Laden Sie Ihr konfiguriertes Einzeldatei-Paket herunter und
-                starten Sie Analyse, Live-Anruf-Simulator, Öffnungszeiten und
+                starten Sie Analyse, Öffnungszeiten-Auswertung, Logikprüfung und
                 Callflow.html-Exporte per Doppelklick ohne Internet oder Installation.
               </p>
             </div>
@@ -1314,7 +1285,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                   { id: 'all' as const, label: `Alle (${EMBEDDED_MODULES.length})` },
                   { id: 'engine' as const, label: 'Layout & Rendering' },
                   { id: 'parsers' as const, label: 'Skript- & Visio-Parser' },
-                  { id: 'analysis' as const, label: 'Analyse & Simulation' },
+                  { id: 'analysis' as const, label: 'Analyse & Zeiten' },
                   { id: 'exports' as const, label: 'Offline-Exporte' },
                 ].map((cat) => (
                   <button
@@ -1354,9 +1325,6 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                             {mod.categoryLabel}
                           </div>
                           <div className="text-xs font-semibold text-slate-100 mt-0.5 flex items-center gap-1.5">
-                            {mod.id === 'call-simulator' && (
-                              <PlayCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                            )}
                             <span className="truncate">{mod.title}</span>
                           </div>
                         </div>
@@ -1530,7 +1498,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
             </span>
             <span className="text-[11px] text-slate-500">
               Mermaid v11 · Eclipse ELK &amp; Dagre · Parser für Avaya-.s-Skripte · JSZip
-              Visio Parser · Live-Anruf-Simulator
+              Visio Parser · Öffnungszeiten-Solver
             </span>
           </div>
           <p className="text-[11px] text-slate-500 leading-relaxed">

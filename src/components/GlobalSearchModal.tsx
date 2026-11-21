@@ -3,7 +3,7 @@ import { ArrowRight, Search, X } from 'lucide-react';
 import {
   GlobalSearchCategory,
   GlobalSearchEntry,
-} from '../utils/callflowSimulator';
+} from '../utils/globalSearchEngine';
 
 interface GlobalSearchModalProps {
   isOpen: boolean;
