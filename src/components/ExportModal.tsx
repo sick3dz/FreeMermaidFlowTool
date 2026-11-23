@@ -227,7 +227,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       triggerLocalDownload(blob, 'Callflow.html');
       if (fallbackCount > 0) {
         setExportStatus(
-          `Callflow.html gespeichert (${fallbackCount} Ansicht(en) per Zeitlimit-Fallback erstellt).`
+          `Callflow.html gespeichert (${fallbackCount} große Ansicht(en) im schnellen Dagre-/Vektor-Modus gerendert).`
         );
       } else {
         setExportStatus(
@@ -728,7 +728,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     {(htmlExportProgress.fallbackCount || 0) > 0 && (
                       <>
                         <span className="text-amber-300">
-                          {htmlExportProgress.fallbackCount} per Fallback
+                          {htmlExportProgress.fallbackCount} im Schnell-Modus
                         </span>
                         <span aria-hidden="true">·</span>
                       </>

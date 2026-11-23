@@ -77,7 +77,7 @@ export interface SbomPackageItem {
   corporateNote: string;
 }
 
-export const AUDIT_APP_VERSION = '1.1.6';
+export const AUDIT_APP_VERSION = '1.1.7';
 
 export const ENTERPRISE_HIGHLIGHT_TILES: EnterpriseHighlightTile[] = [
   {

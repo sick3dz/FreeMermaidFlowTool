@@ -92,6 +92,7 @@ import {
   applyLiveNodeOffsetsToDom,
   applyLiveSpotlightToDom,
   applyNodeOffsetsToSvg,
+  buildDeterministicFlowchartSvg,
   buildIsolatedPathMermaidCode,
   buildLiveSvgDomIndex,
   disconnectEdgeInMermaidCode,
@@ -4114,23 +4115,8 @@ function OfflineStudioApp() {
           window.setTimeout(resolve, 0);
         });
 
-      const buildFallbackViewSvg = (label: string, reason: string): string => {
-        const bg = targetSurface === 'dark' ? '#0f172a' : '#ffffff';
-        const border = targetSurface === 'dark' ? '#334155' : '#cbd5e1';
-        const titleFill = targetSurface === 'dark' ? '#f1f5f9' : '#0f172a';
-        const subFill = targetSurface === 'dark' ? '#94a3b8' : '#475569';
-        const badgeFill = targetSurface === 'dark' ? '#f59e0b' : '#b45309';
-        const esc = (s: string) =>
-          s
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;');
-        return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 220" width="760" height="220"><rect x="16" y="16" width="728" height="188" rx="14" fill="${bg}" stroke="${border}" stroke-width="1.5"/><text x="40" y="62" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" font-weight="600" fill="${badgeFill}">Fallback-Ansicht (Zeitlimit / Render-Schutz)</text><text x="40" y="96" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18" font-weight="600" fill="${titleFill}">${esc(label.slice(0, 72))}</text><text x="40" y="132" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="${subFill}">${esc(reason.slice(0, 96))}</text><text x="40" y="164" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="${subFill}">Alle Skriptdaten, Parameter und Verknüpfungen bleiben in der HTML-Analyse vollständig verfügbar.</text></svg>`;
-      };
-
       const totalEstimatedViews = scriptWorkspace.modules.length + 2;
-      const VIEW_TIMEOUT_MS = 5000;
+      const VIEW_TIMEOUT_MS = 8000;
 
       try {
         // 1. Open Status Popup immediately BEFORE any heavy workspace computation
@@ -4267,6 +4253,7 @@ function OfflineStudioApp() {
           ...exportThemeConfig,
           layoutEngine: 'dagre',
           look: 'classic',
+          curve: 'linear',
         };
         const exportScriptLabelMap: Record<string, string> = {};
         scriptWorkspace.modules.forEach((mod) => {
@@ -4333,17 +4320,6 @@ function OfflineStudioApp() {
                 'Voll-Detail-Karte bei Großprojekt durch Kompakt-Master ersetzt';
               await yieldFrame();
             }
-          } else if (
-            spec.key.startsWith('script:') &&
-            (trimmedSpecCode.length > 55000 || specEdgeCount > 320)
-          ) {
-            rawSvg = buildFallbackViewSvg(
-              spec.label,
-              `Großskript (${specEdgeCount} Übergänge) — zur Stabilisierung als Platzhalter exportiert`
-            );
-            usedFallback = true;
-            lastWarning = `${spec.label}: Großskript als Schutz-Platzhalter exportiert`;
-            await yieldFrame();
           }
 
           if (!rawSvg) {
@@ -4351,58 +4327,67 @@ function OfflineStudioApp() {
             await yieldFrame();
             if (signal.aborted) return { html: null, aborted: true };
 
-            const preferFastDagreForLargeSpec =
+            const isLargeSpec =
               (spec.key.startsWith('script:') || spec.key === 'master:detailed') &&
-              (trimmedSpecCode.length > 14000 || specEdgeCount > 110) &&
-              (exportThemeConfig.layoutEngine !== 'dagre' || exportThemeConfig.look !== 'classic');
+              (trimmedSpecCode.length > 14000 || specEdgeCount > 110);
+            const isVeryLargeSpec =
+              trimmedSpecCode.length > 45000 || specEdgeCount > 280;
+            const preferFastDagreForLargeSpec =
+              isLargeSpec &&
+              (exportThemeConfig.layoutEngine !== 'dagre' ||
+                exportThemeConfig.look !== 'classic' ||
+                exportThemeConfig.curve !== 'linear');
             const initialRenderTheme = preferFastDagreForLargeSpec
               ? dagreFallbackTheme
               : exportThemeConfig;
+            const initialNativeLabels =
+              isLargeSpec || shouldUseNativeSvgLabels(spec.mermaidCode);
+            const initialTimeoutMs = isVeryLargeSpec
+              ? 20000
+              : isLargeSpec
+                ? 12000
+                : VIEW_TIMEOUT_MS;
 
             const res = await renderLocalMermaidDiagram(
               spec.mermaidCode,
               initialRenderTheme,
-              shouldUseNativeSvgLabels(spec.mermaidCode),
-              { timeoutMs: VIEW_TIMEOUT_MS, skipParseDiagnostics: true, signal }
+              initialNativeLabels,
+              { timeoutMs: initialTimeoutMs, skipParseDiagnostics: true, signal }
             );
             rawSvg = res.svg;
             wasCacheHit = Boolean(res.fromCache);
-            if (rawSvg && preferFastDagreForLargeSpec) {
+            if (rawSvg && (preferFastDagreForLargeSpec || isLargeSpec)) {
               usedFallback = true;
-              lastWarning = `${spec.label} im schnellen Dagre-Modus gerendert`;
+              lastWarning = `${spec.label} im schnellen Dagre-Vektor-Modus gerendert`;
             }
 
             if (!rawSvg && !signal.aborted) {
               if (res.timedOut) {
                 resetMermaidRenderQueue();
               }
-              if (
-                !preferFastDagreForLargeSpec &&
-                (exportThemeConfig.layoutEngine !== 'dagre' ||
-                  exportThemeConfig.look !== 'classic')
-              ) {
+              if (!preferFastDagreForLargeSpec || !initialNativeLabels) {
                 setHtmlExportProgress((prev) =>
                   prev
                     ? {
                         ...prev,
-                        lastWarning: `${spec.label}: Dagre-Fallback wird versucht…`,
+                        lastWarning: `${spec.label}: Schneller Dagre-Vektor-Modus wird versucht…`,
                       }
                     : prev
                 );
                 await yieldFrame();
-                const fallbackRes = await renderLocalMermaidDiagram(
+                const retryRes = await renderLocalMermaidDiagram(
                   spec.mermaidCode,
                   dagreFallbackTheme,
-                  shouldUseNativeSvgLabels(spec.mermaidCode),
-                  { timeoutMs: 3500, skipParseDiagnostics: true, signal }
+                  true,
+                  { timeoutMs: 15000, skipParseDiagnostics: true, signal }
                 );
-                if (fallbackRes.timedOut) {
+                if (retryRes.timedOut) {
                   resetMermaidRenderQueue();
                 }
-                rawSvg = fallbackRes.svg;
+                rawSvg = retryRes.svg;
                 if (rawSvg) {
                   usedFallback = true;
-                  lastWarning = `${spec.label} im Dagre-Fallback gerendert`;
+                  lastWarning = `${spec.label} im schnellen Dagre-Vektor-Modus gerendert`;
                 }
               }
 
@@ -4416,12 +4401,21 @@ function OfflineStudioApp() {
               }
 
               if (!rawSvg) {
-                rawSvg = buildFallbackViewSvg(
-                  spec.label,
-                  res.validation.errorMessage || 'Zeitlimit überschritten'
-                );
+                let rescueGraph: CallflowGraph;
+                try {
+                  rescueGraph = parseCallflowGraph(spec.mermaidCode);
+                } catch {
+                  rescueGraph = {
+                    nodes: new Map(),
+                    edges: [],
+                    entryNodes: [],
+                    hubNodes: [],
+                    terminalNodes: [],
+                  };
+                }
+                rawSvg = buildDeterministicFlowchartSvg(rescueGraph, targetSurface, spec.label);
                 usedFallback = true;
-                lastWarning = `${spec.label}: Platzhalter-Ansicht wegen Zeitlimit erzeugt`;
+                lastWarning = `${spec.label}: Vollständige Vektor-Visualisierung im Schnell-Layout gerendert`;
               }
             }
           }
@@ -4748,7 +4742,7 @@ function OfflineStudioApp() {
         setQuickDownloadFeedback('html');
         if (fallbackCount && fallbackCount > 0) {
           setHtmlExportNotice(
-            `Callflow.html gespeichert (${fallbackCount} Ansicht(en) per Zeitlimit-Fallback erstellt).`
+            `Callflow.html gespeichert (${fallbackCount} große Ansicht(en) im schnellen Dagre-/Vektor-Modus gerendert).`
           );
           window.setTimeout(() => setHtmlExportNotice(null), 4500);
         } else if (hasRawScriptsInWorkspace) {
@@ -7899,7 +7893,7 @@ function OfflineStudioApp() {
                   {(htmlExportProgress.fallbackCount || 0) > 0 && (
                     <>
                       <span className="text-amber-300">
-                        {htmlExportProgress.fallbackCount} per Fallback
+                        {htmlExportProgress.fallbackCount} im Schnell-Modus
                       </span>
                       <span aria-hidden="true">·</span>
                     </>

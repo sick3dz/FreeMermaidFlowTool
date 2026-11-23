@@ -30,6 +30,7 @@ import {
   updateWorkspaceNodeFromEdit,
 } from '../src/utils/scriptCallflowParser';
 import {
+  buildDeterministicFlowchartSvg,
   parseCallflowGraph,
   traceCallflowForNode,
   generateInteractiveCallflowHtml,
@@ -424,7 +425,40 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.1.6', 'Expected release version 1.1.6');
+  assert.equal(AUDIT_APP_VERSION, '1.1.7', 'Expected release version 1.1.7');
+});
+
+// 8. Giant script (> 320 edges) real vector SVG guarantee & zero placeholder boxes
+runTest('8. Giant script (> 320 edges) renders full vector SVG without placeholder boxes', () => {
+  const giantLines: string[] = ['=== 50001 ===', '/* Giant Stress Script */'];
+  for (let r = 1; r <= 190; r++) {
+    giantLines.push('IF DAY OF WEEK EQUALS MONDAY..FRIDAY AND TIME OF DAY 08:00..17:00 THEN');
+    giantLines.push(`  GIVE RAN ${5000 + r}`);
+    giantLines.push(`  EXECUTE ${60000 + r}`);
+    giantLines.push('END IF');
+  }
+  const parsed = parseCallflowTextWithFallback(giantLines.join('\n'), { isMasterHint: true });
+  const ws = buildScriptWorkspace(parsed);
+  const detailMermaid = buildScriptDetailMermaid(ws, '50001');
+  const graph = parseCallflowGraph(detailMermaid);
+  assert.ok(graph.edges.length > 320, `Expected > 320 edges for giant script, got ${graph.edges.length}`);
+
+  const t0 = performance.now();
+  const svg = buildDeterministicFlowchartSvg(graph, 'dark', '[50001] Giant Stress Script');
+  const renderMs = performance.now() - t0;
+
+  assert.ok(renderMs < 150, `Deterministic vector SVG render should be fast (< 150 ms), took ${renderMs.toFixed(1)} ms`);
+  assert.ok(svg.startsWith('<svg '), 'Must output valid SVG root');
+  assert.ok(svg.includes('class="node default"'), 'Must render real interactive SVG node groups');
+  assert.ok(svg.includes('class="flowchart-link'), 'Must render real interactive SVG edge paths');
+  assert.ok(!svg.includes('Fallback-Ansicht'), 'Must never output static Fallback-Ansicht placeholder');
+  assert.ok(!svg.includes('Platzhalter'), 'Must never output static Platzhalter text');
+
+  // Verify App.tsx has completely removed buildFallbackViewSvg & placeholder boxes
+  const appSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.ok(!appSrc.includes('buildFallbackViewSvg'), 'src/App.tsx must not contain buildFallbackViewSvg');
+  assert.ok(!appSrc.includes('Schutz-Platzhalter'), 'src/App.tsx must not contain Schutz-Platzhalter');
+  assert.ok(!appSrc.includes('Platzhalter-Ansicht'), 'src/App.tsx must not contain Platzhalter-Ansicht');
 });
 
 const failed = results.filter((r) => !r.passed);
