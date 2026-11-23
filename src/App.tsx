@@ -92,7 +92,6 @@ import {
   applyLiveNodeOffsetsToDom,
   applyLiveSpotlightToDom,
   applyNodeOffsetsToSvg,
-  buildDeterministicFlowchartSvg,
   buildIsolatedPathMermaidCode,
   buildLiveSvgDomIndex,
   disconnectEdgeInMermaidCode,
@@ -117,6 +116,10 @@ import {
   traceCallflowForNode,
   updateEdgeLabelInMermaidCode,
 } from './utils/callflowEngine';
+import {
+  renderElkWorkerFlowchartSvg,
+  terminateActiveElkWorker,
+} from './utils/elkWorkerLayout';
 import {
   addBuildingBlockToWorkspace,
   analyzeWorkspaceLogicHealth,
@@ -500,6 +503,7 @@ function OfflineStudioApp() {
   // Rendering & Validation states
   const [baseRenderedSvg, setBaseRenderedSvg] = useState<string | null>(null);
   const [masterRenderError, setMasterRenderError] = useState<string | null>(null);
+  const [elkWorkerBusyLabel, setElkWorkerBusyLabel] = useState<string | null>(null);
   const [validation, setValidation] = useState<ValidationState>({
     isValid: true,
     diagramType: 'Flowchart / Callflow v11',
@@ -932,11 +936,11 @@ function OfflineStudioApp() {
       return;
     }
 
+    const elkAbortController = new AbortController();
     const delayMs = !hasBaseRenderedSvgRef.current ? 0 : 120;
     const timer = window.setTimeout(async () => {
       const complexity = shouldUseFastDeterministicVectorLayout(effectiveMermaidCode);
       if (complexity.useFastVector && callflowViewLevel.level !== 'master') {
-        const t0 = performance.now();
         let fastGraph: CallflowGraph;
         try {
           fastGraph = parseCallflowGraph(effectiveMermaidCode);
@@ -954,22 +958,33 @@ function OfflineStudioApp() {
             activeWorkspaceViewKey.startsWith('script:')
               ? `[${activeWorkspaceViewKey.slice(7)}] Detail-Callflow`
               : 'Callflow';
-          const fastSvg = buildDeterministicFlowchartSvg(
-            fastGraph,
-            canvasSurface,
-            activeTitle
+          setElkWorkerBusyLabel(
+            `ELK-Layout wird im Hintergrund berechnet (${fastGraph.nodes.size} Knoten, ${complexity.edgeCount} Verbindungen)…`
           );
-          if (isCancelled) return;
+          const elkRes = await renderElkWorkerFlowchartSvg({
+            mermaidCode: effectiveMermaidCode,
+            graph: fastGraph,
+            surface: canvasSurface,
+            direction: currentDirection || 'LR',
+            title: activeTitle,
+            timeoutMs: 18000,
+            signal: elkAbortController.signal,
+          });
+          setElkWorkerBusyLabel(null);
+          if (isCancelled || elkRes.aborted || !elkRes.svg) return;
           hasBaseRenderedSvgRef.current = true;
           setValidation({
             isValid: true,
-            diagramType: 'Flowchart (Vektor-Schnelllayout)',
+            diagramType:
+              elkRes.engine === 'deterministic-fallback'
+                ? 'Flowchart (Vektor-Fallback)'
+                : 'Flowchart (ELK-Worker)',
             errorMessage: null,
             errorLine: null,
-            lastRenderMs: Math.max(1, Math.round(performance.now() - t0)),
+            lastRenderMs: elkRes.durationMs,
           });
           setMasterRenderError(null);
-          setBaseRenderedSvg(fastSvg);
+          setBaseRenderedSvg(elkRes.svg);
           return;
         }
       }
@@ -1014,7 +1029,7 @@ function OfflineStudioApp() {
           );
         }
       } else {
-        // Rescue non-master flowcharts with deterministic vector SVG instead of showing a blank error
+        // Rescue non-master flowcharts with ELK Worker (or upgraded deterministic fallback) instead of a blank error
         let rescueGraph: CallflowGraph | null = null;
         if (/^(?:flowchart|graph)\b/i.test(trimmed)) {
           try {
@@ -1029,21 +1044,33 @@ function OfflineStudioApp() {
             activeWorkspaceViewKey.startsWith('script:')
               ? `[${activeWorkspaceViewKey.slice(7)}] Detail-Callflow`
               : 'Callflow';
-          const rescueSvg = buildDeterministicFlowchartSvg(
-            rescueGraph,
-            canvasSurface,
-            activeTitle
+          setElkWorkerBusyLabel(
+            `ELK-Layout wird im Hintergrund berechnet (${rescueGraph.nodes.size} Knoten)…`
           );
+          const rescueRes = await renderElkWorkerFlowchartSvg({
+            mermaidCode: effectiveMermaidCode,
+            graph: rescueGraph,
+            surface: canvasSurface,
+            direction: currentDirection || 'LR',
+            title: activeTitle,
+            timeoutMs: 18000,
+            signal: elkAbortController.signal,
+          });
+          setElkWorkerBusyLabel(null);
+          if (isCancelled || rescueRes.aborted || !rescueRes.svg) return;
           hasBaseRenderedSvgRef.current = true;
           setValidation({
             isValid: true,
-            diagramType: 'Flowchart (Vektor-Schnelllayout)',
+            diagramType:
+              rescueRes.engine === 'deterministic-fallback'
+                ? 'Flowchart (Vektor-Fallback)'
+                : 'Flowchart (ELK-Worker)',
             errorMessage: null,
             errorLine: null,
-            lastRenderMs: 1,
+            lastRenderMs: rescueRes.durationMs,
           });
           setMasterRenderError(null);
-          setBaseRenderedSvg(rescueSvg);
+          setBaseRenderedSvg(rescueRes.svg);
         } else {
           setValidation(result.validation);
           setMasterRenderError(
@@ -1055,6 +1082,8 @@ function OfflineStudioApp() {
 
     return () => {
       isCancelled = true;
+      elkAbortController.abort();
+      setElkWorkerBusyLabel(null);
       window.clearTimeout(timer);
     };
   }, [
@@ -4048,6 +4077,7 @@ function OfflineStudioApp() {
     if (exportAbortControllerRef.current) {
       exportAbortControllerRef.current.abort();
     }
+    terminateActiveElkWorker('Interaktiver HTML-Export abgebrochen');
     resetMermaidRenderQueue();
     setHtmlExportProgress(null);
     setIsDownloadingHtml(false);
@@ -4088,11 +4118,15 @@ function OfflineStudioApp() {
           const singleComplexity = shouldUseFastDeterministicVectorLayout(code);
           let singleRawSvg: string | null = null;
           if (singleComplexity.useFastVector) {
-            singleRawSvg = buildDeterministicFlowchartSvg(
-              parseCallflowGraph(code),
-              targetSurface,
-              'Callflow'
-            );
+            const singleElk = await renderElkWorkerFlowchartSvg({
+              mermaidCode: code,
+              graph: parseCallflowGraph(code),
+              surface: targetSurface,
+              direction: currentDirection || 'LR',
+              title: 'Callflow',
+              timeoutMs: 18000,
+            });
+            singleRawSvg = singleElk.svg || null;
           } else {
             const rendered = await renderLocalMermaidDiagram(
               code,
@@ -4104,11 +4138,15 @@ function OfflineStudioApp() {
             if (!singleRawSvg && /^(?:flowchart|graph)\b/i.test(code.trim())) {
               const rescueGraph = parseCallflowGraph(code);
               if (rescueGraph.nodes.size > 0) {
-                singleRawSvg = buildDeterministicFlowchartSvg(
-                  rescueGraph,
-                  targetSurface,
-                  'Callflow'
-                );
+                const rescueElk = await renderElkWorkerFlowchartSvg({
+                  mermaidCode: code,
+                  graph: rescueGraph,
+                  surface: targetSurface,
+                  direction: currentDirection || 'LR',
+                  title: 'Callflow',
+                  timeoutMs: 18000,
+                });
+                singleRawSvg = rescueElk.svg || null;
               }
             }
             if (!singleRawSvg) {
@@ -4119,6 +4157,13 @@ function OfflineStudioApp() {
                   'Das aktive Diagramm konnte nicht für den HTML-Export gerendert werden.',
               };
             }
+          }
+          if (!singleRawSvg) {
+            return {
+              html: null,
+              errorMessage:
+                'Das aktive Diagramm konnte nicht für den HTML-Export gerendert werden.',
+            };
           }
           currentExportSvg = applySmartLogicColoring(
             singleRawSvg,
@@ -4418,13 +4463,13 @@ function OfflineStudioApp() {
             complexity.useFastVector &&
             spec.key.startsWith('script:')
           ) {
-            // Hybrid Export: Route giant scripts (> 200 edges or > 32k chars) UPFRONT to our O(V+E)
-            // deterministic Builder-styled vector layout so synchronous Dagre NEVER freezes the browser.
+            // Hybrid Export: Route giant scripts (> 200 edges or > 32k chars) UPFRONT to our non-blocking
+            // ELK Web Worker (Sugiyama orthogonal layout matching Builder direction LR/TB) so the UI stays 100% responsive.
             setHtmlExportProgress((prev) =>
               prev
                 ? {
                     ...prev,
-                    lastWarning: `${spec.label}: Schnelles Vektor-Layout (${specEdgeCount} Verbindungen)…`,
+                    lastWarning: `${spec.label}: ELK-Layout wird im Hintergrund berechnet (${specEdgeCount} Verbindungen)…`,
                   }
                 : prev
             );
@@ -4442,13 +4487,26 @@ function OfflineStudioApp() {
                 terminalNodes: [],
               };
             }
-            rawSvg = buildDeterministicFlowchartSvg(
-              fastGraph,
-              targetSurface,
-              spec.label
-            );
-            usedFallback = true;
-            lastWarning = `${spec.label}: Schnelles Vektor-Layout (${specEdgeCount} Verbindungen)`;
+            const elkRes = await renderElkWorkerFlowchartSvg({
+              mermaidCode: spec.mermaidCode,
+              graph: fastGraph,
+              surface: targetSurface,
+              direction: currentDirection || 'LR',
+              title: spec.label,
+              timeoutMs: 18000,
+              signal,
+            });
+            if (signal.aborted || elkRes.aborted) {
+              return { html: null, aborted: true };
+            }
+            rawSvg = elkRes.svg;
+            wasCacheHit = elkRes.fromCache;
+            if (elkRes.engine === 'deterministic-fallback') {
+              usedFallback = true;
+              lastWarning = `${spec.label}: Vektor-Fallback nach Zeitlimit (${specEdgeCount} Verbindungen)`;
+            } else {
+              lastWarning = `${spec.label}: Sauberes ELK-Worker-Layout (${specEdgeCount} Verbindungen)`;
+            }
           }
 
           if (!rawSvg) {
@@ -4536,9 +4594,24 @@ function OfflineStudioApp() {
                     terminalNodes: [],
                   };
                 }
-                rawSvg = buildDeterministicFlowchartSvg(rescueGraph, targetSurface, spec.label);
-                usedFallback = true;
-                lastWarning = `${spec.label}: Vollständige Vektor-Visualisierung im Schnell-Layout gerendert`;
+                const rescueRes = await renderElkWorkerFlowchartSvg({
+                  mermaidCode: spec.mermaidCode,
+                  graph: rescueGraph,
+                  surface: targetSurface,
+                  direction: currentDirection || 'LR',
+                  title: spec.label,
+                  timeoutMs: 18000,
+                  signal,
+                });
+                if (signal.aborted || rescueRes.aborted) {
+                  return { html: null, aborted: true };
+                }
+                rawSvg = rescueRes.svg;
+                usedFallback = rescueRes.engine === 'deterministic-fallback';
+                lastWarning =
+                  rescueRes.engine === 'deterministic-fallback'
+                    ? `${spec.label}: Vektor-Fallback gerendert`
+                    : `${spec.label}: ELK-Worker-Layout gerendert`;
               }
             }
           }
@@ -6645,6 +6718,18 @@ function OfflineStudioApp() {
                     OK
                   </button>
                 </div>
+              </div>
+            )}
+
+            {/* Non-blocking background ELK Web Worker progress toast for giant scripts */}
+            {elkWorkerBusyLabel && (
+              <div
+                data-canvas-ui="true"
+                onMouseDown={(e) => e.stopPropagation()}
+                className="absolute top-3 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-slate-900/95 border border-indigo-500/45 shadow-xl text-xs text-slate-100 pointer-events-auto"
+              >
+                <span className="w-3.5 h-3.5 rounded-full border-2 border-indigo-400 border-t-transparent animate-spin shrink-0" />
+                <span className="font-medium whitespace-nowrap">{elkWorkerBusyLabel}</span>
               </div>
             )}
 

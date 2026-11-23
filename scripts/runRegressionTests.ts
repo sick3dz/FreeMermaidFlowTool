@@ -36,6 +36,10 @@ import {
   traceCallflowForNode,
   generateInteractiveCallflowHtml,
 } from '../src/utils/callflowEngine';
+import {
+  clearElkLayoutCache,
+  renderElkWorkerFlowchartSvg,
+} from '../src/utils/elkWorkerLayout';
 import { buildWorkspaceGlobalSearchIndex } from '../src/utils/globalSearchEngine';
 import { AUDIT_APP_VERSION } from '../src/utils/offlineAuditEngine';
 
@@ -59,6 +63,49 @@ function runTest(name: string, fn: () => void) {
     results.push({ name, durationMs: performance.now() - t0, passed: false, error: message });
     console.error(`  FAIL  ${name}\n${message}`);
   }
+}
+
+async function runAsyncTest(name: string, fn: () => Promise<void>) {
+  const t0 = performance.now();
+  try {
+    await fn();
+    results.push({ name, durationMs: performance.now() - t0, passed: true });
+    console.log(`  PASS  ${name} (${(performance.now() - t0).toFixed(1)} ms)`);
+  } catch (err) {
+    const message = err instanceof Error ? err.stack || err.message : String(err);
+    results.push({ name, durationMs: performance.now() - t0, passed: false, error: message });
+    console.error(`  FAIL  ${name}\n${message}`);
+  }
+}
+
+function extractNodeRectsFromSvg(svg: string): Array<{ id: string; x: number; y: number; w: number; h: number }> {
+  const rects: Array<{ id: string; x: number; y: number; w: number; h: number }> = [];
+  const nodeRe = /<g class="node default"[^>]*data-id="([^"]+)"[^>]*transform="translate\(([-0-9.]+),\s*([-0-9.]+)\)"[^>]*><rect[^>]*width="([-0-9.]+)"[^>]*height="([-0-9.]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = nodeRe.exec(svg)) !== null) {
+    rects.push({
+      id: m[1],
+      x: parseFloat(m[2]),
+      y: parseFloat(m[3]),
+      w: parseFloat(m[4]),
+      h: parseFloat(m[5]),
+    });
+  }
+  return rects;
+}
+
+function countOverlappingRectPairs(rects: Array<{ id: string; x: number; y: number; w: number; h: number }>): number {
+  let overlaps = 0;
+  for (let i = 0; i < rects.length; i++) {
+    const a = rects[i];
+    for (let j = i + 1; j < rects.length; j++) {
+      const b = rects[j];
+      const sepX = a.x + a.w <= b.x + 0.5 || b.x + b.w <= a.x + 0.5;
+      const sepY = a.y + a.h <= b.y + 0.5 || b.y + b.h <= a.y + 0.5;
+      if (!sepX && !sepY) overlaps += 1;
+    }
+  }
+  return overlaps;
 }
 
 function buildSyntheticMultiScriptFixture(): string {
@@ -426,66 +473,140 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.1.8', 'Expected release version 1.1.8');
+  assert.equal(AUDIT_APP_VERSION, '1.1.9', 'Expected release version 1.1.9');
 });
 
-// 8. Hybrid export upfront complexity gate, giant script (> 320 edges) vector SVG & zero placeholder boxes
-runTest('8. Hybrid export upfront routing & giant script (> 320 edges) crisp vector SVG', () => {
-  // Normal script must stay on standard Mermaid path
-  const normalMermaid = 'flowchart LR\n  A["Start"] --> B["Ende"]\n  B --> C["Queue"]';
-  const normalGate = shouldUseFastDeterministicVectorLayout(normalMermaid);
-  assert.equal(normalGate.useFastVector, false, 'Normal script must NOT trigger fast vector bypass');
+async function finalizeSuite() {
+  // 8. Real ELK orthogonal layout (LR & TB), zero node overlaps on > 320-edge giant script & zero placeholders
+  await runAsyncTest(
+    '8. Real ELK layout (> 320 edges): zero node overlaps, LR/TB direction fidelity & cache hit',
+    async () => {
+      clearElkLayoutCache();
 
-  const giantLines: string[] = ['=== 50001 ===', '/* Giant Stress Script */'];
-  for (let r = 1; r <= 190; r++) {
-    giantLines.push('IF DAY OF WEEK EQUALS MONDAY..FRIDAY AND TIME OF DAY 08:00..17:00 THEN');
-    giantLines.push(`  GIVE RAN ${5000 + r}`);
-    giantLines.push(`  EXECUTE ${60000 + r}`);
-    giantLines.push('END IF');
+      // Normal script must stay on standard Mermaid path
+      const normalMermaid = 'flowchart LR\n  A["Start"] --> B["Ende"]\n  B --> C["Queue"]';
+      const normalGate = shouldUseFastDeterministicVectorLayout(normalMermaid);
+      assert.equal(normalGate.useFastVector, false, 'Normal script must NOT trigger giant-script routing');
+
+      const giantLines: string[] = ['=== 50001 ===', '/* Giant Stress Script */'];
+      for (let r = 1; r <= 190; r++) {
+        giantLines.push('IF DAY OF WEEK EQUALS MONDAY..FRIDAY AND TIME OF DAY 08:00..17:00 THEN');
+        giantLines.push(`  GIVE RAN ${5000 + r}`);
+        giantLines.push(`  EXECUTE ${60000 + r}`);
+        giantLines.push('END IF');
+      }
+      const parsed = parseCallflowTextWithFallback(giantLines.join('\n'), { isMasterHint: true });
+      const ws = buildScriptWorkspace(parsed);
+      const detailMermaid = buildScriptDetailMermaid(ws, '50001');
+      const giantGate = shouldUseFastDeterministicVectorLayout(detailMermaid);
+      assert.equal(
+        giantGate.useFastVector,
+        true,
+        `Giant script (${giantGate.edgeCount} edges, ${giantGate.charLength} chars) must trigger ELK Worker routing`
+      );
+
+      const graph = parseCallflowGraph(detailMermaid);
+      assert.ok(graph.edges.length > 320, `Expected > 320 edges for giant script, got ${graph.edges.length}`);
+
+      // Test LR direction via real ELK engine
+      const resLR = await renderElkWorkerFlowchartSvg({
+        mermaidCode: detailMermaid,
+        graph,
+        surface: 'dark',
+        direction: 'LR',
+        title: '[50001] Giant Stress Script',
+        timeoutMs: 18000,
+      });
+      assert.notEqual(
+        resLR.engine,
+        'deterministic-fallback',
+        'Giant script should render cleanly through real ELK layout engine, not fallback'
+      );
+      assert.equal(resLR.direction, 'LR', 'ELK output must preserve LR direction');
+      assert.ok(resLR.svg.startsWith('<svg '), 'ELK must output valid SVG root');
+      assert.ok(resLR.svg.includes('data-edge-from="'), 'ELK edges must include O(1) data-edge-from');
+      assert.ok(resLR.svg.includes('data-edge-to="'), 'ELK edges must include O(1) data-edge-to');
+      assert.ok(resLR.svg.includes('class="node default"'), 'ELK must emit interactive Mermaid-compatible nodes');
+      assert.ok(resLR.svg.includes('class="flowchart-link'), 'ELK must emit interactive flowchart links');
+      assert.ok(!resLR.svg.includes('Fallback-Ansicht'), 'Must never output static Fallback-Ansicht placeholder');
+      assert.ok(!resLR.svg.includes('Platzhalter'), 'Must never output static Platzhalter text');
+
+      const lrRects = extractNodeRectsFromSvg(resLR.svg);
+      assert.equal(lrRects.length, graph.nodes.size, 'All graph nodes must be rendered in ELK SVG');
+      assert.equal(
+        countOverlappingRectPairs(lrRects),
+        0,
+        'ELK LR layout must have ZERO overlapping node cards'
+      );
+
+      // Verify cache hit on repeat call
+      const resLRCached = await renderElkWorkerFlowchartSvg({
+        mermaidCode: detailMermaid,
+        graph,
+        surface: 'dark',
+        direction: 'LR',
+        title: '[50001] Giant Stress Script',
+      });
+      assert.equal(resLRCached.fromCache, true, 'Repeat ELK layout with same code/direction/surface must hit cache');
+
+      // Test TB direction via real ELK engine (header switched to TB)
+      const detailMermaidTB = detailMermaid.replace(/^flowchart\s+LR\b/i, 'flowchart TB');
+      const resTB = await renderElkWorkerFlowchartSvg({
+        mermaidCode: detailMermaidTB,
+        graph,
+        surface: 'light',
+        direction: 'TB',
+        title: '[50001] Giant Stress Script',
+        timeoutMs: 18000,
+      });
+      assert.equal(resTB.direction, 'TB', 'ELK output must honor TB direction');
+      const tbRects = extractNodeRectsFromSvg(resTB.svg);
+      assert.equal(tbRects.length, graph.nodes.size, 'All graph nodes must be rendered in ELK TB SVG');
+      assert.equal(
+        countOverlappingRectPairs(tbRects),
+        0,
+        'ELK TB layout must have ZERO overlapping node cards'
+      );
+
+      // Verify upgraded emergency fallback also has zero overlaps in both LR and TB
+      const fbLR = buildDeterministicFlowchartSvg(graph, 'dark', '[50001]', 'LR');
+      assert.equal(
+        countOverlappingRectPairs(extractNodeRectsFromSvg(fbLR)),
+        0,
+        'Emergency fallback LR must have ZERO overlapping nodes'
+      );
+      const fbTB = buildDeterministicFlowchartSvg(graph, 'dark', '[50001]', 'TB');
+      assert.equal(
+        countOverlappingRectPairs(extractNodeRectsFromSvg(fbTB)),
+        0,
+        'Emergency fallback TB must have ZERO overlapping nodes'
+      );
+
+      // Verify App.tsx wires ELK Worker + cancel termination and has zero placeholder boxes
+      const appSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+      assert.ok(
+        appSrc.includes('renderElkWorkerFlowchartSvg'),
+        'src/App.tsx must wire renderElkWorkerFlowchartSvg for giant scripts'
+      );
+      assert.ok(
+        appSrc.includes('terminateActiveElkWorker'),
+        'src/App.tsx must terminate ELK Worker on export cancellation'
+      );
+      assert.ok(!appSrc.includes('buildFallbackViewSvg'), 'src/App.tsx must not contain buildFallbackViewSvg');
+      assert.ok(!appSrc.includes('Schutz-Platzhalter'), 'src/App.tsx must not contain Schutz-Platzhalter');
+      assert.ok(!appSrc.includes('Platzhalter-Ansicht'), 'src/App.tsx must not contain Platzhalter-Ansicht');
+    }
+  );
+
+  const failed = results.filter((r) => !r.passed);
+  const totalTime = results.reduce((sum, r) => sum + r.durationMs, 0);
+  console.log(
+    `\nRegression Suite Summary: ${results.length - failed.length}/${results.length} passed in ${totalTime.toFixed(1)} ms.\n`
+  );
+
+  if (failed.length > 0) {
+    process.exit(1);
   }
-  const parsed = parseCallflowTextWithFallback(giantLines.join('\n'), { isMasterHint: true });
-  const ws = buildScriptWorkspace(parsed);
-  const detailMermaid = buildScriptDetailMermaid(ws, '50001');
-  const giantGate = shouldUseFastDeterministicVectorLayout(detailMermaid);
-  assert.equal(
-    giantGate.useFastVector,
-    true,
-    `Giant script (${giantGate.edgeCount} edges, ${giantGate.charLength} chars) must trigger upfront fast vector layout`
-  );
-
-  const graph = parseCallflowGraph(detailMermaid);
-  assert.ok(graph.edges.length > 320, `Expected > 320 edges for giant script, got ${graph.edges.length}`);
-
-  const t0 = performance.now();
-  const svg = buildDeterministicFlowchartSvg(graph, 'dark', '[50001] Giant Stress Script');
-  const renderMs = performance.now() - t0;
-
-  assert.ok(renderMs < 150, `Deterministic vector SVG render should be fast (< 150 ms), took ${renderMs.toFixed(1)} ms`);
-  assert.ok(svg.startsWith('<svg '), 'Must output valid SVG root');
-  assert.ok(svg.includes('class="node default"'), 'Must render real interactive SVG node groups');
-  assert.ok(svg.includes('class="flowchart-link'), 'Must render real interactive SVG edge paths');
-  assert.ok(svg.includes('data-edge-from="'), 'Edge paths must include O(1) data-edge-from attribute');
-  assert.ok(svg.includes('data-edge-to="'), 'Edge paths must include O(1) data-edge-to attribute');
-  assert.ok(!svg.includes('Fallback-Ansicht'), 'Must never output static Fallback-Ansicht placeholder');
-  assert.ok(!svg.includes('Platzhalter'), 'Must never output static Platzhalter text');
-
-  // Verify App.tsx wires upfront complexity routing and has zero placeholder boxes
-  const appSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
-  assert.ok(
-    appSrc.includes('shouldUseFastDeterministicVectorLayout'),
-    'src/App.tsx must wire upfront shouldUseFastDeterministicVectorLayout routing'
-  );
-  assert.ok(!appSrc.includes('buildFallbackViewSvg'), 'src/App.tsx must not contain buildFallbackViewSvg');
-  assert.ok(!appSrc.includes('Schutz-Platzhalter'), 'src/App.tsx must not contain Schutz-Platzhalter');
-  assert.ok(!appSrc.includes('Platzhalter-Ansicht'), 'src/App.tsx must not contain Platzhalter-Ansicht');
-});
-
-const failed = results.filter((r) => !r.passed);
-const totalTime = results.reduce((sum, r) => sum + r.durationMs, 0);
-console.log(
-  `\nRegression Suite Summary: ${results.length - failed.length}/${results.length} passed in ${totalTime.toFixed(1)} ms.\n`
-);
-
-if (failed.length > 0) {
-  process.exit(1);
 }
+
+void finalizeSuite();

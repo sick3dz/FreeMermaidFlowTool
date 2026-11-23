@@ -3331,7 +3331,8 @@ export function shouldUseFastDeterministicVectorLayout(mermaidCode: string): {
 export function buildDeterministicFlowchartSvg(
   graph: CallflowGraph,
   surface: 'dark' | 'light',
-  title?: string
+  title?: string,
+  direction: 'LR' | 'TB' | 'TD' | 'RL' | 'BT' = 'LR'
 ): string {
   const escXml = (s: string): string =>
     String(s ?? '')
@@ -3387,7 +3388,7 @@ export function buildDeterministicFlowchartSvg(
   }
 
   let qHead = 0;
-  const maxRankCap = Math.max(12, Math.min(80, Math.ceil(Math.sqrt(allNodes.length) * 3)));
+  const maxRankCap = Math.max(16, Math.min(120, Math.ceil(Math.sqrt(allNodes.length) * 4)));
   while (qHead < queue.length) {
     const cur = queue[qHead++];
     const curRank = rankById.get(cur) || 0;
@@ -3400,27 +3401,29 @@ export function buildDeterministicFlowchartSvg(
     }
   }
 
-  // Assign any remaining disconnected/cycle-only nodes
   for (const n of allNodes) {
     if (!rankById.has(n.id)) {
       rankById.set(n.id, 0);
     }
   }
 
-  // Group nodes by rank & apply single-pass barycenter sorting to reduce edge crossings
-  const rawColumns = new Map<number, CallflowNode[]>();
+  const rawLayers = new Map<number, CallflowNode[]>();
   for (const n of allNodes) {
     const r = rankById.get(n.id) || 0;
-    if (!rawColumns.has(r)) rawColumns.set(r, []);
-    rawColumns.get(r)!.push(n);
+    if (!rawLayers.has(r)) rawLayers.set(r, []);
+    rawLayers.get(r)!.push(n);
   }
 
-  const sortedRanks = Array.from(rawColumns.keys()).sort((a, b) => a - b);
+  const sortedRanks = Array.from(rawLayers.keys()).sort((a, b) => a - b);
+  if (direction === 'RL' || direction === 'BT') {
+    sortedRanks.reverse();
+  }
+
   const orderIndexById = new Map<string, number>();
   for (const r of sortedRanks) {
-    const colNodes = rawColumns.get(r)!;
-    if (r > 0) {
-      colNodes.sort((a, b) => {
+    const layerNodes = rawLayers.get(r)!;
+    if (orderIndexById.size > 0) {
+      layerNodes.sort((a, b) => {
         const parentsA = (inAdj.get(a.id) || []).filter((p) => orderIndexById.has(p));
         const parentsB = (inAdj.get(b.id) || []).filter((p) => orderIndexById.has(p));
         const avgA =
@@ -3434,52 +3437,53 @@ export function buildDeterministicFlowchartSvg(
         return avgA - avgB;
       });
     }
-    colNodes.forEach((n, idx) => orderIndexById.set(n.id, idx));
+    layerNodes.forEach((n, idx) => orderIndexById.set(n.id, idx));
   }
 
+  const isVertical = direction === 'TB' || direction === 'TD' || direction === 'BT';
   const NODE_W = 248;
   const NODE_H = 68;
-  const COL_GAP = 112;
-  const SUBCOL_GAP = 42;
-  const ROW_GAP = 22;
+  const LAYER_GAP = isVertical ? 92 : 124;
+  const SIBLING_GAP = isVertical ? 34 : 26;
   const PAD_X = 48;
   const PAD_Y = 58;
-  const MAX_ROWS_PER_SUBCOL = 18;
 
-  // Pre-calculate max column height for clean vertical centering of smaller columns
-  let maxRowsInAnySubCol = 1;
+  // Single clean column (LR/RL) or single clean row (TB/BT) per rank — never pile overlapping sub-columns
+  let maxLayerSpan = 1;
   for (const r of sortedRanks) {
-    const colLen = rawColumns.get(r)!.length;
-    const subColCount = Math.max(1, Math.ceil(colLen / MAX_ROWS_PER_SUBCOL));
-    const rowsPerSubCol = Math.ceil(colLen / subColCount);
-    if (rowsPerSubCol > maxRowsInAnySubCol) maxRowsInAnySubCol = rowsPerSubCol;
+    const count = rawLayers.get(r)!.length;
+    if (count > maxLayerSpan) maxLayerSpan = count;
   }
-  const contentHeight = maxRowsInAnySubCol * NODE_H + Math.max(0, maxRowsInAnySubCol - 1) * ROW_GAP;
+
+  const maxCrossSize = isVertical
+    ? maxLayerSpan * NODE_W + Math.max(0, maxLayerSpan - 1) * SIBLING_GAP
+    : maxLayerSpan * NODE_H + Math.max(0, maxLayerSpan - 1) * SIBLING_GAP;
 
   const posById = new Map<string, { x: number; y: number; w: number; h: number }>();
-  let cursorX = PAD_X;
-  let maxBottomY = PAD_Y + contentHeight;
+  let maxRightX = 760;
+  let maxBottomY = 340;
 
-  for (const r of sortedRanks) {
-    const colNodes = rawColumns.get(r)!;
-    const subColCount = Math.max(1, Math.ceil(colNodes.length / MAX_ROWS_PER_SUBCOL));
-    const rowsPerSubCol = Math.ceil(colNodes.length / subColCount);
+  sortedRanks.forEach((r, rankIdx) => {
+    const layerNodes = rawLayers.get(r)!;
+    const layerCrossSize = isVertical
+      ? layerNodes.length * NODE_W + Math.max(0, layerNodes.length - 1) * SIBLING_GAP
+      : layerNodes.length * NODE_H + Math.max(0, layerNodes.length - 1) * SIBLING_GAP;
+    const crossOffset = Math.max(0, Math.round((maxCrossSize - layerCrossSize) * 0.5));
 
-    for (let sc = 0; sc < subColCount; sc++) {
-      const slice = colNodes.slice(sc * rowsPerSubCol, (sc + 1) * rowsPerSubCol);
-      const sliceH = slice.length * NODE_H + Math.max(0, slice.length - 1) * ROW_GAP;
-      const offsetY = Math.max(0, Math.round((contentHeight - sliceH) * 0.25));
-      slice.forEach((node, rowIdx) => {
-        const x = cursorX;
-        const y = PAD_Y + offsetY + rowIdx * (NODE_H + ROW_GAP);
-        posById.set(node.id, { x, y, w: NODE_W, h: NODE_H });
-        if (y + NODE_H > maxBottomY) maxBottomY = y + NODE_H;
-      });
-      cursorX += NODE_W + (sc + 1 < subColCount ? SUBCOL_GAP : COL_GAP);
-    }
-  }
+    layerNodes.forEach((node, slotIdx) => {
+      const x = isVertical
+        ? PAD_X + crossOffset + slotIdx * (NODE_W + SIBLING_GAP)
+        : PAD_X + rankIdx * (NODE_W + LAYER_GAP);
+      const y = isVertical
+        ? PAD_Y + rankIdx * (NODE_H + LAYER_GAP)
+        : PAD_Y + crossOffset + slotIdx * (NODE_H + SIBLING_GAP);
+      posById.set(node.id, { x, y, w: NODE_W, h: NODE_H });
+      if (x + NODE_W > maxRightX) maxRightX = x + NODE_W;
+      if (y + NODE_H > maxBottomY) maxBottomY = y + NODE_H;
+    });
+  });
 
-  const totalW = Math.max(760, cursorX - COL_GAP + PAD_X);
+  const totalW = Math.max(760, maxRightX + PAD_X);
   const totalH = Math.max(340, maxBottomY + PAD_Y);
 
   const wrapLabelLines = (raw: string): string[] => {
@@ -3552,11 +3556,6 @@ export function buildDeterministicFlowchartSvg(
     edgeCounterByPair.set(pairKey, idx + 1);
     const edgeDomId = `L_${edge.from}_${edge.to}_${idx}`;
 
-    const x1 = pFrom.x + pFrom.w;
-    const y1 = pFrom.y + pFrom.h / 2;
-    const x2 = pTo.x;
-    const y2 = pTo.y + pTo.h / 2;
-
     let d: string;
     let labelX: number;
     let labelY: number;
@@ -3567,18 +3566,42 @@ export function buildDeterministicFlowchartSvg(
       d = `M ${lx - 18} ${ly} C ${lx - 30} ${ly - 36}, ${lx + 30} ${ly - 36}, ${lx + 18} ${ly}`;
       labelX = lx;
       labelY = ly - 24;
-    } else if (x2 >= x1 - 8) {
-      const dx = Math.max(36, Math.min(120, (x2 - x1) * 0.45));
-      d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
-      labelX = (x1 + x2) / 2;
-      labelY = (y1 + y2) / 2 - 4;
+    } else if (isVertical) {
+      const x1 = pFrom.x + pFrom.w / 2;
+      const y1 = pFrom.y + pFrom.h;
+      const x2 = pTo.x + pTo.w / 2;
+      const y2 = pTo.y;
+      if (y2 >= y1 - 8) {
+        const midY = y1 + Math.min(48, Math.max(20, (y2 - y1) * 0.5));
+        d = `M ${x1.toFixed(1)} ${y1.toFixed(1)} L ${x1.toFixed(1)} ${midY.toFixed(1)} L ${x2.toFixed(1)} ${midY.toFixed(1)} L ${x2.toFixed(1)} ${y2.toFixed(1)}`;
+        labelX = (x1 + x2) / 2;
+        labelY = midY - 4;
+      } else {
+        const arcOffset = 28 + (idx % 4) * 14;
+        const midX = Math.max(pFrom.x + pFrom.w, pTo.x + pTo.w) + arcOffset;
+        const midY = (pFrom.y + pTo.y) / 2;
+        d = `M ${pFrom.x + pFrom.w} ${pFrom.y + pFrom.h / 2} Q ${midX} ${midY}, ${pTo.x + pTo.w} ${pTo.y + pTo.h / 2}`;
+        labelX = midX;
+        labelY = midY;
+      }
     } else {
-      const arcOffset = 28 + (idx % 4) * 14;
-      const midX = (x1 + x2) / 2;
-      const midY = Math.min(y1, y2) - arcOffset;
-      d = `M ${pFrom.x + pFrom.w / 2} ${pFrom.y} Q ${midX} ${midY}, ${pTo.x + pTo.w / 2} ${pTo.y}`;
-      labelX = midX;
-      labelY = midY + 4;
+      const x1 = pFrom.x + pFrom.w;
+      const y1 = pFrom.y + pFrom.h / 2;
+      const x2 = pTo.x;
+      const y2 = pTo.y + pTo.h / 2;
+      if (x2 >= x1 - 8) {
+        const midX = x1 + Math.min(56, Math.max(24, (x2 - x1) * 0.5));
+        d = `M ${x1.toFixed(1)} ${y1.toFixed(1)} L ${midX.toFixed(1)} ${y1.toFixed(1)} L ${midX.toFixed(1)} ${y2.toFixed(1)} L ${x2.toFixed(1)} ${y2.toFixed(1)}`;
+        labelX = midX;
+        labelY = (y1 + y2) / 2 - 4;
+      } else {
+        const arcOffset = 28 + (idx % 4) * 14;
+        const midX = (x1 + x2) / 2;
+        const midY = Math.min(y1, y2) - arcOffset;
+        d = `M ${pFrom.x + pFrom.w / 2} ${pFrom.y} Q ${midX} ${midY}, ${pTo.x + pTo.w / 2} ${pTo.y}`;
+        labelX = midX;
+        labelY = midY + 4;
+      }
     }
 
     const isDotted = edge.isAsync || edge.rawArrow.includes('.');
