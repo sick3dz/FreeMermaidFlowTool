@@ -183,12 +183,14 @@ export function classifySemanticRole(
     return 'async-queue';
   }
 
-  // 3. Storage / Database / Persistence / HDX READVAR / Recorded Prompts
+  // 3. Storage / Database / Persistence / HDX / External API (FlixCheck) / Recorded Prompts
   if (
     shapeHint === 'cylinder' ||
-    /\b(db|database|datenbank|postgres|postgresql|mysql|sql|redis|cache|storage|speicher|archiv|archive|s3|disk|bucket|mongo|repository|table|persistenz|readvar|hdx|sonderansage|endpunkt|route\s*call)\b/i.test(
+    /\b(db|database|datenbank|postgres|postgresql|mysql|sql|redis|cache|storage|speicher|archiv|archive|s3|disk|bucket|mongo|repository|table|persistenz|readvar|hdx|flixcheck|send\s+request|get\s+response|sonderansage|endpunkt|route\s*call)\b/i.test(
       lower
-    )
+    ) ||
+    lower.includes('📲') ||
+    lower.includes('🔌')
   ) {
     return 'storage-db';
   }

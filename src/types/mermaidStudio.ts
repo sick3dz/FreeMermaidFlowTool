@@ -100,6 +100,45 @@ export interface ScriptChoiceOption {
   label?: string;
 }
 
+export type ExternalApiCommandKind =
+  | 'send-request'
+  | 'get-response'
+  | 'send-info'
+  | 'readvar'
+  | 'host-call';
+
+export type FlixcheckActionKind =
+  | 'create-check'
+  | 'get-check'
+  | 'update-custom-values'
+  | 'download-file'
+  | 'webhook'
+  | 'generic';
+
+export type FlixcheckChannelKind = 'sms' | 'whatsapp' | 'email' | 'unknown';
+
+export type FlixcheckApiVersionStatus = 'v7' | 'v1-legacy' | 'via-provider';
+
+export interface ExternalApiIntegrationMeta {
+  provider: 'flixcheck' | 'hdx';
+  providerId?: string;
+  isFlixcheck: boolean;
+  commandKind: ExternalApiCommandKind;
+  action: FlixcheckActionKind;
+  actionLabel: string;
+  channel: FlixcheckChannelKind;
+  channelLabel?: string;
+  templateId?: string;
+  recipientRef?: string;
+  endpointPath?: string;
+  apiVersion: FlixcheckApiVersionStatus;
+  customValueVars?: string[];
+  responseVars?: string[];
+  hasResponseHandler?: boolean;
+  hasErrorFallback?: boolean;
+  hasHardcodedSecret?: boolean;
+}
+
 export interface ScriptRule {
   id: string;
   prio: number;
@@ -130,6 +169,7 @@ export interface ScriptRule {
   hdxAction?: string;
   treatmentInfo?: string;
   loopSectionTarget?: string;
+  externalIntegration?: ExternalApiIntegrationMeta;
 }
 
 export interface ScriptModule {
@@ -319,7 +359,8 @@ export type CallflowHealthCategory =
   | 'orphan-module'
   | 'inactive-overflow'
   | 'missing-schedule-guard'
-  | 'duplicate-prio';
+  | 'duplicate-prio'
+  | 'external-api';
 
 export interface CallflowHealthFinding {
   id: string;
@@ -390,11 +431,30 @@ export interface CallflowCrossRefRegistryItem {
   ruleCount: number;
 }
 
+export interface CallflowExternalApiRegistryItem {
+  id: string;
+  provider: 'flixcheck' | 'hdx';
+  providerLabel: string;
+  providerId?: string;
+  isFlixcheck: boolean;
+  action: FlixcheckActionKind;
+  actionLabel: string;
+  channel: FlixcheckChannelKind;
+  channelLabel?: string;
+  templateId?: string;
+  endpointPath?: string;
+  apiVersion: FlixcheckApiVersionStatus;
+  hasWarning: boolean;
+  warningSummary?: string;
+  usages: CallflowResourceUsageRef[];
+}
+
 export interface CallflowResourceRegistry {
   skillsets: CallflowSkillsetRegistryItem[];
   announcements: CallflowAnnouncementRegistryItem[];
   variables: CallflowVariableRegistryItem[];
   crossRefs: CallflowCrossRefRegistryItem[];
+  externalApis?: CallflowExternalApiRegistryItem[];
   specialParameters?: CallflowScriptParameterItem[];
   parametersByScript?: Record<string, CallflowScriptParameterItem[]>;
 }

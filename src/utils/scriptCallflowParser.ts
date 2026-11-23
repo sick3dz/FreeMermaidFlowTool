@@ -3,6 +3,7 @@ import {
   CallflowBuildingBlockType,
   CallflowCrossRefRegistryItem,
   CallflowEdge,
+  CallflowExternalApiRegistryItem,
   CallflowGraph,
   CallflowHealthFinding,
   CallflowIssueResolution,
@@ -15,6 +16,8 @@ import {
   CallflowVariableRegistryItem,
   CallflowViewLevel,
   DiagramDirection,
+  ExternalApiCommandKind,
+  ExternalApiIntegrationMeta,
   MasterScriptChecklistItem,
   NodePositionOffset,
   ResolvedIssueRecord,
@@ -25,6 +28,15 @@ import {
   ScriptRule,
   ScriptWorkspace,
 } from '../types/mermaidStudio';
+import {
+  FLIXCHECK_OFFLINE_SPEC,
+  analyzeModuleExternalApiHealth,
+  detectExternalApiIntegration,
+  enrichModuleExternalApiFlow,
+  formatExternalIntegrationCardSummary,
+  isHardcodedApiSecretAssignment,
+  redactPotentialSecrets,
+} from './flixcheckSpec';
 
 export const SAMPLE_MULTI_SCRIPT_TEXT = `=== Main ===
 Prio: 1 | Name: Zeitplan & Feiertagsprüfung | Zeitplan: Mo-Fr 08:00-18:00 | Feiertag: 9900 | Wohin: Schaltung1
@@ -2471,7 +2483,7 @@ function parseAaccScriptBlocks(
   const isOclBodyCodeLine = (line: string): boolean => {
     const t = line.trim();
     if (!t) return false;
-    return /^(?:section\b(?!\s+["']?init\b)|const\b|var\b|event\b|assign\b|readvar\b|send\b|if\b|else\b|end\b|give\b|transfer\b|route\b|queue\b|collect\b|execute\b|call\b|goto\b|subscript\b|open\b|play\b|wait\b|disconnect\b|drop\b|where\b|select\b|case\b|value\b|default\b|otherwise\b)/i.test(
+    return /^(?:section\b(?!\s+["']?init\b)|const\b|var\b|event\b|assign\b|readvar\b|send\b|get\s+response\b|receive\s+host\b|if\b|else\b|end\b|give\b|transfer\b|route\b|queue\b|collect\b|execute\b|call\b|goto\b|subscript\b|open\b|play\b|wait\b|disconnect\b|drop\b|where\b|select\b|case\b|value\b|default\b|otherwise\b)/i.test(
       t
     );
   };
@@ -2573,7 +2585,7 @@ function parseAaccScriptBlocks(
     for (const rawLine of sliceLines.slice(0, 12)) {
       const t = rawLine.trim();
       if (!t) continue;
-      if (/^(?:section|const|var|event|assign|readvar|send|if|where|select|case|value|open|give|queue|route|execute|call|collect|wait|disconnect|drop)\b/i.test(t)) {
+      if (/^(?:section|const|var|event|assign|readvar|send|get\s+response|receive\s+host|if|where|select|case|value|open|give|queue|route|execute|call|collect|wait|disconnect|drop)\b/i.test(t)) {
         break;
       }
       nonEmptyBeforeSection.push(t);
@@ -3145,7 +3157,38 @@ function parseAaccScriptBlocks(
       return merged;
     };
 
+    const activeAssignVars = new Map<string, string>();
+    let moduleHasHardcodedSecret = false;
+    const moduleFlixContextText = `${scriptNumber} ${scriptName} ${headerCommentSlice.slice(0, 600)}`;
+
+    const recordAssignVars = (text: string) => {
+      const assigns = extractAssignStatements(text);
+      for (const a of assigns) {
+        if (isHardcodedApiSecretAssignment(a.variable, a.value)) {
+          moduleHasHardcodedSecret = true;
+          activeAssignVars.set(a.variable.toLowerCase(), '***redacted***');
+        } else {
+          activeAssignVars.set(a.variable.toLowerCase(), a.value);
+        }
+      }
+      const eqRe = /\bassign\s+([A-Za-z0-9_]+)\s*=\s*([^\r\n;]+)/gi;
+      let meq: RegExpExecArray | null;
+      while ((meq = eqRe.exec(text)) !== null) {
+        const vName = meq[1].trim();
+        const vVal = meq[2].trim();
+        if (!/\bto\s+[A-Za-z0-9_]+$/i.test(vVal)) {
+          if (isHardcodedApiSecretAssignment(vName, vVal)) {
+            moduleHasHardcodedSecret = true;
+            activeAssignVars.set(vName.toLowerCase(), '***redacted***');
+          } else {
+            activeAssignVars.set(vName.toLowerCase(), vVal);
+          }
+        }
+      }
+    };
+
     const applyAssignmentsToOrga = (text: string, targetOrga: AaccOrgaContext): AaccOrgaContext => {
+      recordAssignVars(text);
       let next = { ...targetOrga };
       const assigns = extractAssignStatements(text);
       for (const a of assigns) {
@@ -3207,9 +3250,18 @@ function parseAaccScriptBlocks(
       const readVarCmd = actionSegment.match(
         /\breadvar\s+([A-Za-z0-9ÄÖÜäöüß_.-]+)(?:\s+from\s+([A-Za-z0-9ÄÖÜäöüß_.-]+))?/i
       );
-      const sendInfoCmd = actionSegment.match(
-        /\bsend\s+info\b(?:\s+(.+))?$/i
+      const sendRequestCmd = actionSegment.match(
+        /\bsend\s+request\s+([A-Za-z0-9ÄÖÜäöüß_.-]+)(?:[\s,;]+(.+))?$/i
       );
+      const getResponseCmd = actionSegment.match(
+        /\bget\s+response\s+([A-Za-z0-9ÄÖÜäöüß_.-]+)(?:[\s,;]+(.+))?$/i
+      );
+      const hostCallCmd = actionSegment.match(
+        /\b(open|send|receive)\s+host\s+([A-Za-z0-9ÄÖÜäöüß_.-]+)(?:[\s,;]+(.+))?$/i
+      );
+      const sendInfoCmd = !sendRequestCmd
+        ? actionSegment.match(/\bsend\s+info\b(?:\s+(.+))?$/i)
+        : null;
       const ivrTreatmentCmd = !execCmd
         ? actionSegment.match(
             /\bgive\s+ivr\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))(?:\s+with\s+treatment\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+)))?/i
@@ -3332,10 +3384,62 @@ function parseAaccScriptBlocks(
           : 'Besetztton (Busy)'
         : undefined;
 
-      const hdxAction = readVarCmd
+      let hdxCommandKind: ExternalApiCommandKind | undefined;
+      let hdxProviderId: string | undefined;
+      let hdxArgsText = '';
+
+      if (sendRequestCmd) {
+        hdxCommandKind = 'send-request';
+        hdxProviderId = sendRequestCmd[1]?.trim();
+        hdxArgsText = sendRequestCmd[2]?.trim() || '';
+      } else if (getResponseCmd) {
+        hdxCommandKind = 'get-response';
+        hdxProviderId = getResponseCmd[1]?.trim();
+        hdxArgsText = getResponseCmd[2]?.trim() || '';
+      } else if (hostCallCmd) {
+        hdxCommandKind = hostCallCmd[1].toLowerCase() === 'receive' ? 'get-response' : 'host-call';
+        hdxProviderId = hostCallCmd[2]?.trim();
+        hdxArgsText = hostCallCmd[3]?.trim() || '';
+      } else if (sendInfoCmd) {
+        hdxCommandKind = 'send-info';
+        const rest = sendInfoCmd[1]?.trim() || '';
+        const firstTok = rest.split(/[\s,;]+/)[0];
+        hdxProviderId = firstTok && /^[A-Za-z_][A-Za-z0-9_.-]{1,}$/.test(firstTok) ? firstTok : undefined;
+        hdxArgsText = rest;
+      } else if (readVarCmd) {
+        hdxCommandKind = 'readvar';
+        hdxProviderId = readVarCmd[2]?.trim();
+        hdxArgsText = `${readVarCmd[1] || ''} ${readVarCmd[2] || ''}`.trim();
+      }
+
+      const externalIntegration: ExternalApiIntegrationMeta | undefined = hdxCommandKind
+        ? detectExternalApiIntegration({
+            commandKind: hdxCommandKind,
+            providerId: hdxProviderId,
+            argsText: hdxArgsText,
+            rawLine,
+            activeVars: activeAssignVars,
+            moduleContextText: moduleFlixContextText,
+            hasHardcodedSecretInModule: moduleHasHardcodedSecret,
+          })
+        : undefined;
+
+      const hdxAction = sendRequestCmd
+        ? redactPotentialSecrets(
+            `SEND REQUEST ${sendRequestCmd[1]}${sendRequestCmd[2] ? `, ${sendRequestCmd[2].trim()}` : ''}`
+          )
+        : getResponseCmd
+        ? redactPotentialSecrets(
+            `GET RESPONSE ${getResponseCmd[1]}${getResponseCmd[2] ? `, ${getResponseCmd[2].trim()}` : ''}`
+          )
+        : hostCallCmd
+        ? redactPotentialSecrets(
+            `${hostCallCmd[1].toUpperCase()} HOST ${hostCallCmd[2]}${hostCallCmd[3] ? `, ${hostCallCmd[3].trim()}` : ''}`
+          )
+        : readVarCmd
         ? `READVAR ${readVarCmd[1]}${readVarCmd[2] ? ` ⇐ ${readVarCmd[2]}` : ''}`
         : sendInfoCmd
-        ? `SEND INFO${sendInfoCmd[1] ? `: ${sendInfoCmd[1].trim()}` : ''}`
+        ? redactPotentialSecrets(`SEND INFO${sendInfoCmd[1] ? `: ${sendInfoCmd[1].trim()}` : ''}`)
         : undefined;
 
       const waitSecondsVal = waitCmd
@@ -3354,6 +3458,9 @@ function parseAaccScriptBlocks(
         !disconnectCmd &&
         !readVarCmd &&
         !sendInfoCmd &&
+        !sendRequestCmd &&
+        !getResponseCmd &&
+        !hostCallCmd &&
         !isFaxRoute &&
         !isLocalSectionCall
       ) {
@@ -3377,6 +3484,9 @@ function parseAaccScriptBlocks(
         disconnectCmd ||
         readVarCmd ||
         sendInfoCmd ||
+        sendRequestCmd ||
+        getResponseCmd ||
+        hostCallCmd ||
         isFaxRoute
       ) {
         const orga = resolveOrgaForRule(
@@ -3408,6 +3518,8 @@ function parseAaccScriptBlocks(
             : `Queue: ${queueToken}`
           : routeCmd
           ? `Route Call → ${routeTarget || rawRouteToken}`
+          : externalIntegration?.isFlixcheck
+          ? `FlixCheck: ${externalIntegration.actionLabel}`
           : hdxAction
           ? hdxAction
           : ivrTreatmentCmd
@@ -3460,13 +3572,14 @@ function parseAaccScriptBlocks(
           announcement: formattedAnnouncement,
           treatmentInfo,
           hdxAction,
+          externalIntegration,
           loopSectionTarget: isLocalSectionCall ? rawExecToken : undefined,
           intrinsicMetrics: activeIntrinsics.length > 0 ? activeIntrinsics : undefined,
           schedule: detectedTime.schedule,
           holiday: detectedTime.holiday,
           condition: combinedCondition,
           choices: [],
-          rawLine,
+          rawLine: externalIntegration?.hasHardcodedSecret ? redactPotentialSecrets(rawLine) : rawLine,
           organizationName: orga.organizationName,
           orgaCode: orga.orgaCode,
           brandName: orga.brandName,
@@ -3727,8 +3840,9 @@ function parseAaccScriptBlocks(
         continue;
       }
 
-      // Handle standalone `assign ... to ...` lines inside/outside IF blocks
+      // Handle standalone `assign ... to ...` (or `assign var = val`) lines inside/outside IF blocks
       if (/^assign\b/i.test(t)) {
+        recordAssignVars(t);
         const assigns = extractAssignStatements(t);
         const hasRoutingVar = assigns.some((a) =>
           /^(?:src_route_number|Sys_brand)$/i.test(a.variable)
@@ -3971,6 +4085,7 @@ function parseAaccScriptBlocks(
     }
 
     if (rules.length > 0) {
+      enrichModuleExternalApiFlow(rules, trimmedChunk);
       const outSet = new Set<string>();
       rules.forEach((r) => {
         if (
@@ -6148,7 +6263,20 @@ export function buildMasterOverviewMermaid(
           `${hasBroadcastOrTreat ? '📢' : '🎵'} ${mediaList.slice(0, 2).join(' · ')}`
         );
       }
-      if (hdxList.length > 0) {
+      const flixRules = mod.rules.filter((r) => Boolean(r.externalIntegration?.isFlixcheck));
+      if (flixRules.length > 0) {
+        const hasLegacyV1 = flixRules.some((r) => r.externalIntegration?.apiVersion === 'v1-legacy');
+        const ch = flixRules.find((r) => r.externalIntegration?.channelLabel)?.externalIntegration?.channelLabel;
+        const tpl = flixRules.find((r) => r.externalIntegration?.templateId)?.externalIntegration?.templateId;
+        const flixTag = [
+          hasLegacyV1 ? '📲 FlixCheck (⚠️ v1)' : '📲 FlixCheck',
+          ch || null,
+          tpl ? `TPL: ${tpl}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        cycleParts.unshift(flixTag);
+      } else if (hdxList.length > 0) {
         cycleParts.push(`🗄️ ${hdxList.slice(0, 2).join(' · ')}`);
       }
       const ccmaCycleBadge =
@@ -6746,7 +6874,11 @@ export function buildScriptDetailMermaid(
     } else if (rule.announcement) {
       metaParts.push(`Ansage: ${sanitizeMermaidText(rule.announcement)}`);
     }
-    if (rule.hdxAction) {
+    if (rule.externalIntegration) {
+      metaParts.push(
+        sanitizeMermaidText(formatExternalIntegrationCardSummary(rule.externalIntegration))
+      );
+    } else if (rule.hdxAction) {
       metaParts.push(`🗄️ CTI/HDX: ${sanitizeMermaidText(rule.hdxAction)}`);
     }
     if (rule.skillsetPriority !== undefined) {
@@ -6770,7 +6902,22 @@ export function buildScriptDetailMermaid(
     if (idx === 0) {
       lines.push(`        ${entryId} --> ${stepId}`);
     } else {
-      lines.push(`        ${prevStepId} -.->|Fallback / Weiter| ${stepId}`);
+      const prevRule = sortedRules[idx - 1];
+      const prevWasApi = Boolean(prevRule?.externalIntegration);
+      const curCond = `${rule.condition || ''} ${rule.stepName || ''}`;
+      let seqEdgeLabel = 'Fallback / Weiter';
+      let seqArrow = '-.->';
+      if (prevWasApi && rule.externalIntegration?.commandKind === 'get-response') {
+        seqEdgeLabel = 'API-Antwort';
+        seqArrow = '-->';
+      } else if (prevWasApi && /\b(?:error|fehler|timeout|sonst|else|4\d\d|5\d\d|fail)/i.test(curCond)) {
+        seqEdgeLabel = 'Fehler / Timeout';
+        seqArrow = '-.->';
+      } else if (prevWasApi && /\b(?:200|201|ok|sent|erfolg|success|true|0\b)/i.test(curCond)) {
+        seqEdgeLabel = 'Erfolg (OK)';
+        seqArrow = '-->';
+      }
+      lines.push(`        ${prevStepId} ${seqArrow}|${seqEdgeLabel}| ${stepId}`);
     }
     prevStepId = stepId;
 
@@ -7284,6 +7431,7 @@ export function analyzeWorkspaceLogicHealth(
       Boolean(rule.announcement) ||
       Boolean(rule.treatmentInfo) ||
       Boolean(rule.hdxAction) ||
+      Boolean(rule.externalIntegration) ||
       Boolean(rule.isDisconnect) ||
       Boolean(rule.loopSectionTarget) ||
       rule.waitSeconds !== undefined ||
@@ -7481,6 +7629,9 @@ export function analyzeWorkspaceLogicHealth(
         });
       }
     }
+
+    // 2c. Offline FlixCheck API v7 & AACC HDX logic/security checks
+    findings.push(...analyzeModuleExternalApiHealth(mod));
   }
 
   const severityOrder: Record<string, number> = { error: 0, warning: 1, info: 2 };
@@ -7509,24 +7660,32 @@ export function extractScriptSpecialParameters(
     items.push(item);
   };
 
-  // 1. Collect all ASSIGN statements from rawText
+  // 1. Collect all ASSIGN statements from rawText (mit automatischer Secret-Maskierung)
   const varMap = new Map<string, string>();
+  const redactedSecretVars = new Set<string>();
+  const sanitizeAssignValue = (varName: string, rawVal: string): string => {
+    if (isHardcodedApiSecretAssignment(varName, rawVal)) {
+      redactedSecretVars.add(varName.toLowerCase());
+      return '***redacted***';
+    }
+    return redactPotentialSecrets(rawVal);
+  };
   if (mod.rawText) {
     const cleaned = stripScriptCommentsAndNoise(mod.rawText);
     const assignToRegex = /\bassign\s+([\s\S]{1,120}?)\s+to\s+([A-Za-z0-9_]+)\b/gi;
     let m: RegExpExecArray | null;
     while ((m = assignToRegex.exec(cleaned)) !== null) {
-      const val = m[1].replace(/\s+/g, ' ').trim().replace(/^['"]|['"]$/g, '');
+      const rawVal = m[1].replace(/\s+/g, ' ').trim().replace(/^['"]|['"]$/g, '');
       const varName = m[2].trim();
-      varMap.set(varName, val);
+      varMap.set(varName, sanitizeAssignValue(varName, rawVal));
     }
     const assignEqRegex = /\bassign\s+([A-Za-z0-9_]+)\s*=\s*([^\r\n;]+)/gi;
     let meq: RegExpExecArray | null;
     while ((meq = assignEqRegex.exec(cleaned)) !== null) {
       const varName = meq[1].trim();
-      const val = meq[2].trim().replace(/^['"]|['"]$/g, '');
-      if (!/\bto\s+[A-Za-z0-9_]+$/i.test(val) && !varMap.has(varName)) {
-        varMap.set(varName, val);
+      const rawVal = meq[2].trim().replace(/^['"]|['"]$/g, '');
+      if (!/\bto\s+[A-Za-z0-9_]+$/i.test(rawVal) && !varMap.has(varName)) {
+        varMap.set(varName, sanitizeAssignValue(varName, rawVal));
       }
     }
   }
@@ -7796,7 +7955,9 @@ export function extractScriptSpecialParameters(
       category: 'custom',
       value: vVal,
       rawValue: vVal,
-      note: 'Skriptinterne Zuweisung',
+      note: redactedSecretVars.has(vKey)
+        ? 'Maskierter API-Schlüssel / Zugangsdaten (redacted)'
+        : 'Skriptinterne Zuweisung',
     });
   }
 
@@ -8009,8 +8170,11 @@ export function extractWorkspaceResourceRegistry(
       const assignToRegex = /\bassign\s+([\s\S]{1,120}?)\s+to\s+([A-Za-z0-9_]+)\b/gi;
       let m: RegExpExecArray | null;
       while ((m = assignToRegex.exec(cleanedRaw)) !== null) {
-        const val = m[1].replace(/\s+/g, ' ').trim();
+        const rawVal = m[1].replace(/\s+/g, ' ').trim();
         const varName = m[2].trim();
+        const val = isHardcodedApiSecretAssignment(varName, rawVal)
+          ? '***redacted***'
+          : redactPotentialSecrets(rawVal);
         registerVariable(varName, val, mod.scriptNumber, mod.scriptName);
         if (/^Sys_Team_Skillset$/i.test(varName)) {
           registerSkillset(val, 'primary', {
@@ -8037,8 +8201,11 @@ export function extractWorkspaceResourceRegistry(
       let meq: RegExpExecArray | null;
       while ((meq = assignEqRegex.exec(cleanedRaw)) !== null) {
         const varName = meq[1].trim();
-        const val = meq[2].trim();
-        if (!/\bto\s+[A-Za-z0-9_]+$/i.test(val)) {
+        const rawVal = meq[2].trim();
+        if (!/\bto\s+[A-Za-z0-9_]+$/i.test(rawVal)) {
+          const val = isHardcodedApiSecretAssignment(varName, rawVal)
+            ? '***redacted***'
+            : redactPotentialSecrets(rawVal);
           registerVariable(varName, val, mod.scriptNumber, mod.scriptName);
         }
       }
@@ -8130,6 +8297,84 @@ export function extractWorkspaceResourceRegistry(
     });
   });
 
+  // 4. External APIs & FlixCheck registry entries
+  const externalApiMap = new Map<string, CallflowExternalApiRegistryItem>();
+  for (const mod of modules) {
+    for (const rule of mod.rules) {
+      const ext = rule.externalIntegration;
+      if (!ext) continue;
+      const key = [
+        ext.provider,
+        (ext.providerId || '').toLowerCase(),
+        ext.action,
+        (ext.templateId || '').toLowerCase(),
+        ext.channel,
+        ext.apiVersion,
+        (ext.endpointPath || '').toLowerCase(),
+      ].join('::');
+
+      const warnings: string[] = [];
+      if (ext.hasHardcodedSecret) warnings.push('Möglicher Klartext-API-Key (maskiert)');
+      if (ext.isFlixcheck && ext.apiVersion === 'v1-legacy') {
+        warnings.push(`API v1 abgekündigt (EOL ${FLIXCHECK_OFFLINE_SPEC.legacyDeprecationDate})`);
+      }
+      if ((ext.commandKind === 'send-request' || ext.commandKind === 'host-call') && ext.hasResponseHandler === false) {
+        warnings.push('Kein GET RESPONSE erkannt');
+      } else if ((ext.commandKind === 'send-request' || ext.commandKind === 'host-call') && ext.hasErrorFallback === false) {
+        warnings.push('Kein Fehler-/Timeout-Fallback');
+      }
+
+      let item = externalApiMap.get(key);
+      if (!item) {
+        item = {
+          id: key,
+          provider: ext.provider,
+          providerLabel: ext.isFlixcheck
+            ? 'FlixCheck'
+            : ext.providerId || 'HDX-Provider',
+          providerId: ext.providerId,
+          isFlixcheck: ext.isFlixcheck,
+          action: ext.action,
+          actionLabel: ext.actionLabel,
+          channel: ext.channel,
+          channelLabel: ext.channelLabel,
+          templateId: ext.templateId,
+          endpointPath: ext.endpointPath,
+          apiVersion: ext.apiVersion,
+          hasWarning: warnings.length > 0,
+          warningSummary: warnings.length > 0 ? warnings.join(' · ') : undefined,
+          usages: [],
+        };
+        externalApiMap.set(key, item);
+      } else if (warnings.length > 0 && !item.hasWarning) {
+        item.hasWarning = true;
+        item.warningSummary = warnings.join(' · ');
+      }
+      if (
+        !item.usages.some(
+          (u) =>
+            u.scriptNumber === mod.scriptNumber &&
+            u.prio === rule.prio &&
+            u.stepName === rule.stepName
+        )
+      ) {
+        item.usages.push({
+          scriptNumber: mod.scriptNumber,
+          scriptName: mod.scriptName,
+          prio: rule.prio,
+          stepName: rule.stepName,
+          context: ext.endpointPath || rule.hdxAction || rule.condition,
+        });
+      }
+    }
+  }
+
+  const externalApis = Array.from(externalApiMap.values()).sort((a, b) => {
+    if (a.isFlixcheck !== b.isFlixcheck) return a.isFlixcheck ? -1 : 1;
+    if (a.hasWarning !== b.hasWarning) return a.hasWarning ? -1 : 1;
+    return a.providerLabel.localeCompare(b.providerLabel, 'de');
+  });
+
   return {
     skillsets: Array.from(skillsetMap.values()).sort((a, b) =>
       a.name.localeCompare(b.name, 'de')
@@ -8141,6 +8386,7 @@ export function extractWorkspaceResourceRegistry(
       a.variableName.localeCompare(b.variableName, 'de')
     ),
     crossRefs,
+    externalApis,
     specialParameters: Array.from(allParamsMap.values()),
     parametersByScript,
   };
@@ -8193,6 +8439,10 @@ export function buildWorkspaceRoutingMatrix(
         referencedTargets.push(ch.targetNumber);
       }
 
+      if (rule.externalIntegration && targetParts.length === 0) {
+        targetParts.push(formatExternalIntegrationCardSummary(rule.externalIntegration));
+      }
+
       let targetStatus = 'Intern / Queue';
       if (referencedTargets.length > 0) {
         const statuses = referencedTargets.map((t) => {
@@ -8208,6 +8458,14 @@ export function buildWorkspaceRoutingMatrix(
         } else {
           targetStatus = 'Vollständig geladen';
         }
+      } else if (rule.externalIntegration) {
+        targetStatus = rule.externalIntegration.isFlixcheck
+          ? rule.externalIntegration.apiVersion === 'v1-legacy'
+            ? 'FlixCheck API v1 (Legacy)'
+            : rule.externalIntegration.apiVersion === 'v7'
+            ? 'FlixCheck API v7'
+            : 'FlixCheck (HDX)'
+          : 'Extern / HDX';
       } else if (!rule.queueTarget && !rule.announcement) {
         targetStatus = 'Offen / Prüfen';
       }
@@ -8308,8 +8566,9 @@ export function exportMigrationDocumentationMarkdown(
   md.push(
     `- **Referenz-Abgleich:** ${presentCount} geladen · ${externalCount} extern · ${missingCount} ausstehend`
   );
+  const externalApiList = registry.externalApis || [];
   md.push(
-    `- **Erkannte Ressourcen:** ${registry.skillsets.length} Skillsets/Queues · ${registry.announcements.length} Ansagen/RAN · ${registry.variables.length} Systemvariablen`
+    `- **Erkannte Ressourcen:** ${registry.skillsets.length} Skillsets/Queues · ${registry.announcements.length} Ansagen/RAN · ${registry.variables.length} Systemvariablen · ${externalApiList.length} Externe APIs / FlixCheck`
   );
   md.push(`- **Logik-Prüfbefunde:** ${health.length}`);
   md.push('');
@@ -8411,6 +8670,27 @@ export function exportMigrationDocumentationMarkdown(
     });
   }
   md.push('');
+
+  if (externalApiList.length > 0) {
+    md.push('### 2.5 Externe APIs & FlixCheck-Integrationen');
+    md.push('| Dienst / Provider | Aktion | Kanal | Template-ID | Endpunkt / API-Version | Verwendet in Skripten | Status |');
+    md.push('| --- | --- | --- | --- | --- | --- | --- |');
+    externalApiList.forEach((api) => {
+      const verLabel =
+        api.apiVersion === 'v7'
+          ? 'API v7'
+          : api.apiVersion === 'v1-legacy'
+          ? `⚠️ API v1 (EOL ${FLIXCHECK_OFFLINE_SPEC.legacyDeprecationDate})`
+          : 'via HDX-Provider';
+      const refs = api.usages
+        .map((u) => `\`[${u.scriptNumber}]\`${u.prio !== undefined ? ` (Prio ${u.prio})` : ''}`)
+        .join(', ');
+      md.push(
+        `| **${api.providerLabel}**${api.providerId && api.providerId !== api.providerLabel ? ` (\`${api.providerId}\`)` : ''} | ${api.actionLabel} | ${api.channelLabel || '—'} | ${api.templateId ? `\`${api.templateId}\`` : '—'} | ${api.endpointPath ? `\`${api.endpointPath}\` · ` : ''}${verLabel} | ${refs} | ${api.hasWarning ? `⚠️ ${api.warningSummary}` : 'OK'} |`
+      );
+    });
+    md.push('');
+  }
 
   // 3. Logik-Prüfung
   md.push('## 3. Automatische Logik- & Qualitätsprüfung');

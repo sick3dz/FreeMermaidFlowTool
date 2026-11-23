@@ -214,7 +214,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
   const [scheduleSearch, setScheduleSearch] = useState('');
   const [healthFilter, setHealthFilter] = useState<'all' | 'error' | 'warning' | 'info'>('all');
   const [registrySubTab, setRegistrySubTab] = useState<
-    'skillsets' | 'announcements' | 'special' | 'variables' | 'crossrefs'
+    'skillsets' | 'announcements' | 'special' | 'variables' | 'apis' | 'crossrefs'
   >('skillsets');
   const [registrySearch, setRegistrySearch] = useState('');
   const [matrixSearch, setMatrixSearch] = useState('');
@@ -366,13 +366,14 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
     () =>
       shouldComputeRegistry
         ? extractWorkspaceResourceRegistry(moduleOnlyWorkspace)
-        : { skillsets: [], announcements: [], variables: [], crossRefs: [] },
+        : { skillsets: [], announcements: [], variables: [], crossRefs: [], externalApis: [] },
     [shouldComputeRegistry, moduleOnlyWorkspace]
   );
   const totalRegistryCount =
     resourceRegistry.skillsets.length +
     resourceRegistry.announcements.length +
-    resourceRegistry.variables.length;
+    resourceRegistry.variables.length +
+    (resourceRegistry.externalApis || []).length;
 
   const routingMatrixRows = useMemo(
     () => (shouldComputeMatrix ? buildWorkspaceRoutingMatrix(moduleOnlyWorkspace) : []),
@@ -1778,6 +1779,17 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                   </button>
                   <button
                     type="button"
+                    onClick={() => setRegistrySubTab('apis')}
+                    className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
+                      registrySubTab === 'apis'
+                        ? 'bg-cyan-600/20 border-cyan-500/40 text-cyan-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    FlixCheck / APIs ({(resourceRegistry.externalApis || []).length})
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setRegistrySubTab('crossrefs')}
                     className={`py-1.5 px-2 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
                       registrySubTab === 'crossrefs'
@@ -2002,6 +2014,96 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                     {resourceRegistry.variables.length === 0 && (
                       <div className="text-xs text-slate-500 py-2">
                         Keine AACC ASSIGN-Variablen im Quelltext gefunden.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Sub-Tab 3e: External APIs & FlixCheck */}
+                {registrySubTab === 'apis' && (
+                  <div className="space-y-2 max-h-[480px] overflow-y-auto pr-0.5">
+                    {(resourceRegistry.externalApis || [])
+                      .filter(
+                        (api) =>
+                          !registrySearch.trim() ||
+                          `${api.providerLabel} ${api.providerId || ''} ${api.actionLabel} ${api.templateId || ''} ${api.channelLabel || ''} ${api.endpointPath || ''} ${api.apiVersion}`
+                            .toLowerCase()
+                            .includes(registrySearch.toLowerCase()) ||
+                          api.usages.some((u) =>
+                            `${u.scriptNumber} ${u.scriptName}`
+                              .toLowerCase()
+                              .includes(registrySearch.toLowerCase())
+                          )
+                      )
+                      .map((api) => (
+                        <div
+                          key={api.id}
+                          className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold text-cyan-200 truncate">
+                              {api.isFlixcheck ? '📲 ' : '🔌 '}
+                              {api.providerLabel} · {api.actionLabel}
+                            </span>
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 ${
+                                api.apiVersion === 'v1-legacy'
+                                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                  : api.apiVersion === 'v7'
+                                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                  : 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
+                              }`}
+                            >
+                              {api.apiVersion === 'v1-legacy'
+                                ? '⚠️ API v1 Legacy'
+                                : api.apiVersion === 'v7'
+                                ? 'API v7'
+                                : 'HDX-Provider'}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5 text-[10px] text-slate-300">
+                            {api.channelLabel && (
+                              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700">
+                                Kanal: {api.channelLabel}
+                              </span>
+                            )}
+                            {api.templateId && (
+                              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono">
+                                Template: {api.templateId}
+                              </span>
+                            )}
+                            {api.endpointPath && (
+                              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono truncate max-w-full">
+                                {api.endpointPath}
+                              </span>
+                            )}
+                          </div>
+                          {api.hasWarning && api.warningSummary && (
+                            <div className="text-[10px] text-amber-300 bg-amber-500/10 border border-amber-500/25 rounded px-2 py-1">
+                              ⚠️ {api.warningSummary}
+                            </div>
+                          )}
+                          <div className="space-y-1 pt-0.5">
+                            {api.usages.slice(0, 5).map((u, uIdx) => (
+                              <button
+                                key={`${api.id}-u-${uIdx}`}
+                                type="button"
+                                onClick={() => jumpToScriptInInspector(u.scriptNumber, true)}
+                                className="w-full text-left px-2 py-1 rounded bg-slate-950/70 hover:bg-slate-800 border border-slate-800/80 text-[11px] text-slate-300 flex items-center justify-between gap-2 cursor-pointer"
+                              >
+                                <span className="truncate font-mono">
+                                  [{u.scriptNumber}] {u.scriptName}
+                                  {u.prio !== undefined ? ` (Prio ${u.prio})` : ''}
+                                </span>
+                                <span className="text-[10px] text-cyan-400 shrink-0">Öffnen →</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    {(!resourceRegistry.externalApis || resourceRegistry.externalApis.length === 0) && (
+                      <div className="text-xs text-slate-500 py-2">
+                        Keine FlixCheck- oder HDX-API-Aufrufe in den geladenen Skripten erkannt.
                       </div>
                     )}
                   </div>

@@ -473,7 +473,7 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.2.0', 'Expected release version 1.2.0');
+  assert.equal(AUDIT_APP_VERSION, '1.2.1', 'Expected release version 1.2.1');
 });
 
 async function finalizeSuite() {
@@ -631,6 +631,141 @@ async function finalizeSuite() {
       assert.ok(!appSrc.includes('buildFallbackViewSvg'), 'src/App.tsx must not contain buildFallbackViewSvg');
       assert.ok(!appSrc.includes('Schutz-Platzhalter'), 'src/App.tsx must not contain Schutz-Platzhalter');
       assert.ok(!appSrc.includes('Platzhalter-Ansicht'), 'src/App.tsx must not contain Platzhalter-Ansicht');
+    }
+  );
+
+  // 9. FlixCheck & AACC HDX offline logic processing (v7, Legacy v1 EOL, secret redaction, Registry, Search & Export)
+  runTest(
+    '9. FlixCheck & AACC HDX parsing, v1/v7 health checks, secret redaction, Registry & Callflow.html',
+    () => {
+      const syntheticSecret = 'fc_live_SyntheticDemoSecretKey987654321';
+      const flixFixture = [
+        '=== Main ===',
+        'WHERE CLID EQUALS',
+        '  VALUE 4930200100: EXECUTE FlixCheck_Schaden',
+        '  VALUE 4930200200: EXECUTE FlixCheck_Legacy',
+        '  DEFAULT: EXECUTE FlixCheck_Schaden',
+        'END WHERE',
+        '',
+        '=== FlixCheck_Schaden ===',
+        '/* Digitaler Schaden-Check via FlixCheck API v7 */',
+        'ASSIGN "https://api.flixcheck.com/user/v7/checks" TO gv_fc_url',
+        'ASSIGN "TPL_SCHADEN_2026" TO gv_fc_templateId',
+        'ASSIGN "sms" TO gv_fc_sendType',
+        'ASSIGN CLID TO gv_fc_recipient',
+        'SEND REQUEST FlixCheck_HDX, gv_fc_url, gv_fc_templateId, gv_fc_sendType, gv_fc_recipient',
+        'GET RESPONSE FlixCheck_HDX, gv_fc_status, gv_fc_checkId',
+        'IF gv_fc_status = 200 THEN',
+        '  GIVE RAN 7101',
+        '  DISCONNECT',
+        'ELSE',
+        '  GIVE RAN 7199',
+        '  QUEUE TO SKILLSET sk_schaden_fallback',
+        'END IF',
+        '',
+        '=== FlixCheck_Legacy ===',
+        '/* Veraltetes FlixCheck v1 Modul mit fehlendem Fallback & Klartext-Key */',
+        `ASSIGN "${syntheticSecret}" TO gv_fc_apiKey`,
+        'ASSIGN "https://api.flixcheck.com/api/v1/checks" TO gv_fc_url',
+        'ASSIGN "whatsapp" TO gv_fc_sendType',
+        'SEND REQUEST FlixCheck_V1, gv_fc_url, gv_fc_sendType',
+        'GIVE RAN 7200',
+        'DISCONNECT',
+      ].join('\n');
+
+      const parsed = parseCallflowTextWithFallback(flixFixture, { isMasterHint: true });
+      const ws = buildScriptWorkspace(parsed);
+
+      const modV7 = ws.modules.find((m) => m.scriptNumber === 'FlixCheck_Schaden');
+      const modV1 = ws.modules.find((m) => m.scriptNumber === 'FlixCheck_Legacy');
+      assert.ok(modV7, 'FlixCheck_Schaden module must be parsed');
+      assert.ok(modV1, 'FlixCheck_Legacy module must be parsed');
+
+      const reqV7 = modV7.rules.find((r) => r.externalIntegration?.commandKind === 'send-request');
+      assert.ok(reqV7?.externalIntegration, 'SEND REQUEST must attach externalIntegration metadata');
+      assert.equal(reqV7.externalIntegration.isFlixcheck, true, 'Must classify as FlixCheck integration');
+      assert.equal(reqV7.externalIntegration.apiVersion, 'v7', 'Must recognize /user/v7/checks as API v7');
+      assert.equal(reqV7.externalIntegration.channel, 'sms', 'Must extract SMS channel from contextual ASSIGN');
+      assert.equal(reqV7.externalIntegration.templateId, 'TPL_SCHADEN_2026', 'Must extract templateId from contextual ASSIGN');
+      assert.equal(reqV7.externalIntegration.hasResponseHandler, true, 'Must correlate paired GET RESPONSE');
+      assert.equal(reqV7.externalIntegration.hasErrorFallback, true, 'Must detect ELSE fallback queue');
+
+      const reqV1 = modV1.rules.find((r) => r.externalIntegration?.commandKind === 'send-request');
+      assert.ok(reqV1?.externalIntegration, 'Legacy FlixCheck SEND REQUEST must be parsed');
+      assert.equal(reqV1.externalIntegration.apiVersion, 'v1-legacy', 'Must flag /api/v1/checks as v1-legacy');
+      assert.equal(reqV1.externalIntegration.channel, 'whatsapp', 'Must extract WhatsApp channel');
+      assert.equal(reqV1.externalIntegration.hasHardcodedSecret, true, 'Must detect hardcoded synthetic API key');
+      assert.equal(reqV1.externalIntegration.hasResponseHandler, false, 'Must detect missing GET RESPONSE');
+
+      // Health checks must surface v1 deprecation (EOL 31.12.2026), secret error, missing GET RESPONSE, and missing template info
+      const health = analyzeWorkspaceLogicHealth(ws);
+      const apiHealth = health.filter((h) => h.category === 'external-api');
+      assert.ok(
+        apiHealth.some((h) => h.severity === 'error' && /klartext-api-key/i.test(h.title)),
+        'Health check must flag hardcoded API key as error'
+      );
+      assert.ok(
+        apiHealth.some((h) => h.severity === 'warning' && /v1/i.test(h.title) && h.title.includes('31.12.2026')),
+        'Health check must flag deprecated FlixCheck API v1 with EOL 31.12.2026'
+      );
+      assert.ok(
+        apiHealth.some((h) => h.severity === 'warning' && /ohne GET RESPONSE/i.test(h.title)),
+        'Health check must warn about SEND REQUEST without GET RESPONSE'
+      );
+
+      // Resource Registry must populate externalApis AND redact secret in variables
+      const registry = extractWorkspaceResourceRegistry(ws);
+      assert.ok((registry.externalApis || []).length >= 2, 'Resource Registry must list FlixCheck integrations');
+      assert.ok(
+        (registry.externalApis || []).some((a) => a.templateId === 'TPL_SCHADEN_2026' && a.apiVersion === 'v7'),
+        'Resource Registry must expose v7 FlixCheck template entry'
+      );
+      assert.ok(
+        (registry.externalApis || []).some((a) => a.apiVersion === 'v1-legacy' && a.hasWarning),
+        'Resource Registry must expose v1-legacy warning entry'
+      );
+      const serializedReg = JSON.stringify(registry);
+      assert.ok(!serializedReg.includes(syntheticSecret), 'Registry must NEVER leak raw hardcoded API key');
+      assert.ok(serializedReg.includes('***redacted***'), 'Registry must redact hardcoded API key');
+
+      // Master & Detail Mermaid must show FlixCheck badges
+      const masterMermaid = buildMasterOverviewMermaid(ws, 'LR', { compact: false });
+      const detailV7 = buildScriptDetailMermaid(ws, 'FlixCheck_Schaden');
+      assert.ok(masterMermaid.includes('FlixCheck'), 'Master diagram must highlight FlixCheck modules');
+      assert.ok(detailV7.includes('TPL_SCHADEN_2026'), 'Detail diagram must display extracted template ID');
+      assert.ok(detailV7.includes('API v7'), 'Detail diagram must display API v7 tag');
+
+      // Global Search must index FlixCheck template & channel under category "api"
+      const searchIndex = buildWorkspaceGlobalSearchIndex(ws);
+      assert.ok(
+        searchIndex.some((e) => e.category === 'api' && e.searchText.includes('tpl_schaden_2026')),
+        'Global Search must index FlixCheck template under api category'
+      );
+
+      // Markdown documentation & Callflow.html export must include FlixCheck section without leaking secret
+      const md = exportMigrationDocumentationMarkdown(ws);
+      assert.ok(md.includes('Externe APIs & FlixCheck-Integrationen'), 'Markdown export must include FlixCheck section');
+      assert.ok(!md.includes(syntheticSecret), 'Markdown export must NEVER leak hardcoded API key');
+
+      const dummySvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><g class="node"><rect width="80" height="40"/></g></svg>';
+      const detailGraph = parseCallflowGraph(detailV7);
+      const html = generateInteractiveCallflowHtml('FlixCheck Test', dummySvg, detailGraph, 'dark', {
+        views: [{ key: 'script:FlixCheck_Schaden', label: 'FlixCheck_Schaden', svg: dummySvg, graph: detailGraph }],
+        activeViewKey: 'script:FlixCheck_Schaden',
+        analysis: {
+          openIssues: ws.issues || [],
+          healthFindings: health,
+          scheduleRows: buildWorkspaceScheduleOverview(ws),
+          registry,
+          routingMatrixRows: buildWorkspaceRoutingMatrix(ws),
+          masterScriptNumber: ws.masterScriptNumber,
+        },
+        globalSearchIndex: searchIndex,
+      });
+      const scriptMatches = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+      new Function(scriptMatches[scriptMatches.length - 1][1]);
+      assert.ok(html.includes('FlixCheck / APIs'), 'Callflow.html must render FlixCheck / APIs registry tab');
+      assert.ok(!html.includes(syntheticSecret), 'Callflow.html must NEVER leak hardcoded API key');
     }
   );
 

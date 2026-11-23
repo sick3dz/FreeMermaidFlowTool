@@ -19,6 +19,7 @@ const CATEGORY_TABS: Array<{ id: 'all' | GlobalSearchCategory; label: string }> 
   { id: 'queue', label: 'Queues' },
   { id: 'announcement', label: 'Ansagen' },
   { id: 'schedule', label: 'Zeiten' },
+  { id: 'api', label: 'FlixCheck / API' },
   { id: 'cdn', label: 'CDN' },
 ];
 
@@ -29,6 +30,7 @@ const CATEGORY_LABELS: Record<GlobalSearchCategory, string> = {
   announcement: 'Ansage',
   cdn: 'CDN',
   schedule: 'Zeitregel',
+  api: 'FlixCheck / API',
   node: 'Element',
 };
 

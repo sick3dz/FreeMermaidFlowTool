@@ -11,6 +11,7 @@ export type GlobalSearchCategory =
   | 'announcement'
   | 'cdn'
   | 'schedule'
+  | 'api'
   | 'node';
 
 export interface GlobalSearchEntry {
@@ -163,6 +164,54 @@ export function buildWorkspaceGlobalSearchIndex(
             subtitle: `Zeitregel in ${scriptTitle}`,
             meta: `Prio ${rule.prio}${rule.queueTarget ? ` → ${rule.queueTarget}` : rule.targetNumber ? ` → ${rule.targetNumber}` : ''}`,
             searchText: `zeit öffnungszeiten feiertag sondzeit ${schedLabel} ${mod.scriptNumber} ${mod.scriptName} ${rule.stepName}`.toLowerCase(),
+            viewKey: scriptViewKey,
+            scriptNumber: mod.scriptNumber,
+          });
+        }
+
+        if (rule.externalIntegration) {
+          const ext = rule.externalIntegration;
+          const apiTitle = ext.isFlixcheck
+            ? `FlixCheck · ${ext.actionLabel}${ext.templateId ? ` (${ext.templateId})` : ''}`
+            : `HDX · ${ext.providerId || ext.actionLabel}`;
+          const verTag =
+            ext.apiVersion === 'v1-legacy'
+              ? '⚠️ API v1 (Legacy)'
+              : ext.apiVersion === 'v7'
+              ? 'API v7'
+              : 'HDX-Provider';
+          pushUnique({
+            id: `api:${mod.scriptNumber}:${rule.id}`,
+            category: 'api',
+            title: apiTitle,
+            subtitle: [
+              scriptTitle,
+              ext.channelLabel ? `Kanal: ${ext.channelLabel}` : null,
+              ext.endpointPath || null,
+            ]
+              .filter(Boolean)
+              .join(' · '),
+            meta: `Prio ${rule.prio} · ${verTag}`,
+            searchText: [
+              'api',
+              'hdx',
+              ext.isFlixcheck ? 'flixcheck' : '',
+              ext.provider,
+              ext.providerId,
+              ext.action,
+              ext.actionLabel,
+              ext.channel,
+              ext.channelLabel,
+              ext.templateId,
+              ext.endpointPath,
+              ext.apiVersion,
+              mod.scriptNumber,
+              mod.scriptName,
+              rule.stepName,
+            ]
+              .filter(Boolean)
+              .join(' ')
+              .toLowerCase(),
             viewKey: scriptViewKey,
             scriptNumber: mod.scriptNumber,
           });

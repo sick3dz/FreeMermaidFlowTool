@@ -8065,6 +8065,7 @@ export function generateInteractiveCallflowHtml(
                 '<button class="chip' + (anInvCategory === 'announcements' ? ' active' : '') + '" data-c="announcements">Ansagen (' + reg.announcements.length + ')</button>' +
                 '<button class="chip' + (anInvCategory === 'special' ? ' active' : '') + '" data-c="special">Sonderparameter (' + ((reg.specialParameters && reg.specialParameters.length) || 0) + ')</button>' +
                 '<button class="chip' + (anInvCategory === 'variables' ? ' active' : '') + '" data-c="variables">Alle Variablen (' + reg.variables.length + ')</button>' +
+                '<button class="chip' + (anInvCategory === 'externalApis' ? ' active' : '') + '" data-c="externalApis">FlixCheck / APIs (' + ((reg.externalApis && reg.externalApis.length) || 0) + ')</button>' +
                 '<button class="chip' + (anInvCategory === 'crossRefs' ? ' active' : '') + '" data-c="crossRefs">Kreuzref. (' + reg.crossRefs.length + ')</button>' +
               '</div>'
             : '<div class="muted-note">Knoten-Inventar im aktuellen Diagramm (' + GRAPH.nodes.length + ' Knoten)</div>');
@@ -8150,6 +8151,38 @@ export function generateInteractiveCallflowHtml(
             });
             body.appendChild(el);
           });
+        } else if (anInvCategory === 'externalApis') {
+          const apiList = reg.externalApis || [];
+          const items = apiList.filter(a => !q || (a.providerLabel + ' ' + (a.providerId || '') + ' ' + a.actionLabel + ' ' + (a.templateId || '') + ' ' + (a.channelLabel || '') + ' ' + (a.endpointPath || '') + ' ' + a.apiVersion).toLowerCase().includes(q) || (a.usages || []).some(u => (u.scriptNumber + ' ' + u.scriptName).toLowerCase().includes(q)));
+          if (!items.length) {
+            const empty = document.createElement('div');
+            empty.className = 'card muted-note';
+            empty.textContent = 'Keine FlixCheck- oder HDX-API-Integrationen gefunden.';
+            body.appendChild(empty);
+          } else {
+            items.slice(0, 100).forEach(api => {
+              const el = document.createElement('div');
+              el.className = 'an-item';
+              const verText = api.apiVersion === 'v1-legacy' ? 'API v1 Legacy' : api.apiVersion === 'v7' ? 'API v7' : 'HDX-Provider';
+              const verCls = api.apiVersion === 'v1-legacy' ? 'err' : api.apiVersion === 'v7' ? 'ok' : '';
+              const metaBits = [];
+              if (api.channelLabel) metaBits.push('Kanal: ' + api.channelLabel);
+              if (api.templateId) metaBits.push('Template: ' + api.templateId);
+              if (api.endpointPath) metaBits.push(api.endpointPath);
+              el.innerHTML =
+                '<div class="row-between"><span class="an-item-title">' + esc((api.isFlixcheck ? 'FlixCheck · ' : '') + api.actionLabel) + '</span><span class="an-tag ' + verCls + '">' + esc(verText) + '</span></div>' +
+                (metaBits.length ? '<div class="an-item-desc">' + esc(metaBits.join(' · ')) + '</div>' : '') +
+                (api.hasWarning && api.warningSummary ? '<div class="an-item-desc" style="color:#fbbf24;">Warnung: ' + esc(api.warningSummary) + '</div>' : '');
+              (api.usages || []).slice(0, 5).forEach(u => {
+                const btn = document.createElement('button');
+                btn.className = 'node-chip';
+                btn.innerHTML = '<span>' + esc('[' + u.scriptNumber + '] ' + u.scriptName + (u.prio !== undefined ? ' (Prio ' + u.prio + ')' : '')) + '</span><span class="badge">Zeigen →</span>';
+                btn.onclick = () => jumpToScriptOrNode(u.scriptNumber, api.templateId || api.providerLabel);
+                el.appendChild(btn);
+              });
+              body.appendChild(el);
+            });
+          }
         } else {
           const items = reg.crossRefs.filter(cr => !q || (cr.refKey + ' ' + cr.displayName).toLowerCase().includes(q));
           items.slice(0, 100).forEach(cr => {
@@ -9682,6 +9715,7 @@ export function generateInteractiveCallflowHtml(
       queue: 'Queues',
       announcement: 'Ansagen',
       schedule: 'Zeiten',
+      api: 'FlixCheck / API',
       cdn: 'CDN',
       node: 'Elemente',
     };
@@ -9719,7 +9753,7 @@ export function generateInteractiveCallflowHtml(
       GLOBAL_SEARCH_ENTRIES.forEach(e => {
         counts[e.category] = (counts[e.category] || 0) + 1;
       });
-      const order = ['all', 'script', 'dnis', 'queue', 'announcement', 'schedule', 'cdn', 'node'];
+      const order = ['all', 'script', 'dnis', 'queue', 'announcement', 'schedule', 'api', 'cdn', 'node'];
       gsearchCatsEl.innerHTML = '';
       order.forEach(cat => {
         if (cat !== 'all' && !counts[cat]) return;
