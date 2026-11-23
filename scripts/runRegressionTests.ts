@@ -473,7 +473,7 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.1.9', 'Expected release version 1.1.9');
+  assert.equal(AUDIT_APP_VERSION, '1.2.0', 'Expected release version 1.2.0');
 });
 
 async function finalizeSuite() {
@@ -490,6 +490,9 @@ async function finalizeSuite() {
 
       const giantLines: string[] = ['=== 50001 ===', '/* Giant Stress Script */'];
       for (let r = 1; r <= 190; r++) {
+        if (r === 1) giantLines.push('SECTION Eingangspruefung');
+        if (r === 65) giantLines.push('SECTION Warteschleife');
+        if (r === 130) giantLines.push('SECTION Eskalation');
         giantLines.push('IF DAY OF WEEK EQUALS MONDAY..FRIDAY AND TIME OF DAY 08:00..17:00 THEN');
         giantLines.push(`  GIVE RAN ${5000 + r}`);
         giantLines.push(`  EXECUTE ${60000 + r}`);
@@ -497,7 +500,19 @@ async function finalizeSuite() {
       }
       const parsed = parseCallflowTextWithFallback(giantLines.join('\n'), { isMasterHint: true });
       const ws = buildScriptWorkspace(parsed);
-      const detailMermaid = buildScriptDetailMermaid(ws, '50001');
+      let detailMermaid = buildScriptDetailMermaid(ws, '50001');
+
+      // Inject synthetic back-edges / cycle loops to verify outer perimeter cycle routing
+      const baseGraph = parseCallflowGraph(detailMermaid);
+      const stepIds = [...baseGraph.nodes.keys()].filter((id) => /^STEP_/i.test(id));
+      if (stepIds.length >= 40) {
+        const cycleLines = [
+          `  ${stepIds[20]} -.->|"↻ Zyklus: Rücksprung A"| ${stepIds[2]}`,
+          `  ${stepIds[35]} -.->|"↻ Zyklus: Rücksprung B"| ${stepIds[8]}`,
+        ];
+        detailMermaid = `${detailMermaid}\n${cycleLines.join('\n')}`;
+      }
+
       const giantGate = shouldUseFastDeterministicVectorLayout(detailMermaid);
       assert.equal(
         giantGate.useFastVector,
@@ -528,11 +543,25 @@ async function finalizeSuite() {
       assert.ok(resLR.svg.includes('data-edge-to="'), 'ELK edges must include O(1) data-edge-to');
       assert.ok(resLR.svg.includes('class="node default"'), 'ELK must emit interactive Mermaid-compatible nodes');
       assert.ok(resLR.svg.includes('class="flowchart-link'), 'ELK must emit interactive flowchart links');
+      assert.ok(resLR.svg.includes('class="cluster"'), 'ELK v1.2.0 must emit real subgraph/section container boxes');
+      assert.ok(resLR.svg.includes('data-cycle-edge="true"'), 'ELK v1.2.0 must route cycle back-edges as outer arcs');
+      assert.ok(
+        resLR.svg.includes('data-resting-opacity="0.22"'),
+        'Outer cycle arcs must carry resting transparency data-resting-opacity="0.22"'
+      );
+      assert.ok(
+        /\sd="M[^"]*[QC]\s*[-0-9.]+/.test(resLR.svg),
+        'ELK v1.2.0 must emit smooth Bézier curves (Q/C path commands)'
+      );
       assert.ok(!resLR.svg.includes('Fallback-Ansicht'), 'Must never output static Fallback-Ansicht placeholder');
       assert.ok(!resLR.svg.includes('Platzhalter'), 'Must never output static Platzhalter text');
 
       const lrRects = extractNodeRectsFromSvg(resLR.svg);
       assert.equal(lrRects.length, graph.nodes.size, 'All graph nodes must be rendered in ELK SVG');
+      assert.ok(
+        lrRects.every((r) => r.h >= 66),
+        'Every rendered node card must meet generous minimum height (>= 66 px) to prevent text overlap'
+      );
       assert.equal(
         countOverlappingRectPairs(lrRects),
         0,
@@ -559,7 +588,14 @@ async function finalizeSuite() {
         title: '[50001] Giant Stress Script',
         timeoutMs: 18000,
       });
+      assert.notEqual(
+        resTB.engine,
+        'deterministic-fallback',
+        'Giant script TB must render cleanly through real ELK layout engine, not fallback'
+      );
       assert.equal(resTB.direction, 'TB', 'ELK output must honor TB direction');
+      assert.ok(resTB.svg.includes('class="cluster"'), 'ELK TB layout must also emit subgraph/section boxes');
+      assert.ok(resTB.svg.includes('data-cycle-edge="true"'), 'ELK TB layout must route cycle back-edges outside');
       const tbRects = extractNodeRectsFromSvg(resTB.svg);
       assert.equal(tbRects.length, graph.nodes.size, 'All graph nodes must be rendered in ELK TB SVG');
       assert.equal(

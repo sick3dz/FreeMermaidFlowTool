@@ -2981,9 +2981,11 @@ export function applyLiveSpotlightToDom(
     });
 
     index.allEdges.forEach((edge) => {
-      edge.edgeEl.style.opacity = edge.origOpacity;
+      const restEdgeOp = edge.edgeEl.getAttribute('data-resting-opacity');
+      edge.edgeEl.style.opacity = restEdgeOp ?? edge.origOpacity;
       if (edge.labelEl) {
-        edge.labelEl.style.opacity = edge.origLabelOpacity;
+        const restLblOp = edge.labelEl.getAttribute('data-resting-opacity');
+        edge.labelEl.style.opacity = restLblOp ?? edge.origLabelOpacity;
       }
       edge.paths.forEach(restoreParsedPathStyles);
     });
@@ -7522,7 +7524,8 @@ export function generateInteractiveCallflowHtml(
             if (!matchSrcDest) { edgeEl.style.display = 'none'; hiddenEdgeIdx.add(idx); return; }
           }
           edgeEl.style.display = '';
-          edgeEl.style.opacity = !hasSearchOrRole ? '1' : dimOpacity;
+          const restEdgeOp = edgeEl.getAttribute('data-resting-opacity') || '1';
+          edgeEl.style.opacity = !hasSearchOrRole ? restEdgeOp : dimOpacity;
         });
 
         allSvgLabels.forEach((lblEl, idx) => {
@@ -7532,7 +7535,8 @@ export function generateInteractiveCallflowHtml(
           }
           if (!isEdgeAllowedByType(lblEl)) { lblEl.style.display = 'none'; return; }
           lblEl.style.display = '';
-          lblEl.style.opacity = !hasSearchOrRole ? '1' : dimOpacity;
+          const restLblOp = lblEl.getAttribute('data-resting-opacity') || '1';
+          lblEl.style.opacity = !hasSearchOrRole ? restLblOp : dimOpacity;
         });
 
         updateClusterVisibility(visibleSvgNodes);
