@@ -32,6 +32,7 @@ import {
 import {
   buildDeterministicFlowchartSvg,
   parseCallflowGraph,
+  shouldUseFastDeterministicVectorLayout,
   traceCallflowForNode,
   generateInteractiveCallflowHtml,
 } from '../src/utils/callflowEngine';
@@ -425,11 +426,16 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.1.7', 'Expected release version 1.1.7');
+  assert.equal(AUDIT_APP_VERSION, '1.1.8', 'Expected release version 1.1.8');
 });
 
-// 8. Giant script (> 320 edges) real vector SVG guarantee & zero placeholder boxes
-runTest('8. Giant script (> 320 edges) renders full vector SVG without placeholder boxes', () => {
+// 8. Hybrid export upfront complexity gate, giant script (> 320 edges) vector SVG & zero placeholder boxes
+runTest('8. Hybrid export upfront routing & giant script (> 320 edges) crisp vector SVG', () => {
+  // Normal script must stay on standard Mermaid path
+  const normalMermaid = 'flowchart LR\n  A["Start"] --> B["Ende"]\n  B --> C["Queue"]';
+  const normalGate = shouldUseFastDeterministicVectorLayout(normalMermaid);
+  assert.equal(normalGate.useFastVector, false, 'Normal script must NOT trigger fast vector bypass');
+
   const giantLines: string[] = ['=== 50001 ===', '/* Giant Stress Script */'];
   for (let r = 1; r <= 190; r++) {
     giantLines.push('IF DAY OF WEEK EQUALS MONDAY..FRIDAY AND TIME OF DAY 08:00..17:00 THEN');
@@ -440,6 +446,13 @@ runTest('8. Giant script (> 320 edges) renders full vector SVG without placehold
   const parsed = parseCallflowTextWithFallback(giantLines.join('\n'), { isMasterHint: true });
   const ws = buildScriptWorkspace(parsed);
   const detailMermaid = buildScriptDetailMermaid(ws, '50001');
+  const giantGate = shouldUseFastDeterministicVectorLayout(detailMermaid);
+  assert.equal(
+    giantGate.useFastVector,
+    true,
+    `Giant script (${giantGate.edgeCount} edges, ${giantGate.charLength} chars) must trigger upfront fast vector layout`
+  );
+
   const graph = parseCallflowGraph(detailMermaid);
   assert.ok(graph.edges.length > 320, `Expected > 320 edges for giant script, got ${graph.edges.length}`);
 
@@ -451,11 +464,17 @@ runTest('8. Giant script (> 320 edges) renders full vector SVG without placehold
   assert.ok(svg.startsWith('<svg '), 'Must output valid SVG root');
   assert.ok(svg.includes('class="node default"'), 'Must render real interactive SVG node groups');
   assert.ok(svg.includes('class="flowchart-link'), 'Must render real interactive SVG edge paths');
+  assert.ok(svg.includes('data-edge-from="'), 'Edge paths must include O(1) data-edge-from attribute');
+  assert.ok(svg.includes('data-edge-to="'), 'Edge paths must include O(1) data-edge-to attribute');
   assert.ok(!svg.includes('Fallback-Ansicht'), 'Must never output static Fallback-Ansicht placeholder');
   assert.ok(!svg.includes('Platzhalter'), 'Must never output static Platzhalter text');
 
-  // Verify App.tsx has completely removed buildFallbackViewSvg & placeholder boxes
+  // Verify App.tsx wires upfront complexity routing and has zero placeholder boxes
   const appSrc = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8');
+  assert.ok(
+    appSrc.includes('shouldUseFastDeterministicVectorLayout'),
+    'src/App.tsx must wire upfront shouldUseFastDeterministicVectorLayout routing'
+  );
   assert.ok(!appSrc.includes('buildFallbackViewSvg'), 'src/App.tsx must not contain buildFallbackViewSvg');
   assert.ok(!appSrc.includes('Schutz-Platzhalter'), 'src/App.tsx must not contain Schutz-Platzhalter');
   assert.ok(!appSrc.includes('Platzhalter-Ansicht'), 'src/App.tsx must not contain Platzhalter-Ansicht');

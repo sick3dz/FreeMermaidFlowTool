@@ -113,6 +113,7 @@ import {
   setHoveredLockTargetsInDom,
   setMagneticSnapTargetInDom,
   shiftLiveConnectedEdgesForDrag,
+  shouldUseFastDeterministicVectorLayout,
   traceCallflowForNode,
   updateEdgeLabelInMermaidCode,
 } from './utils/callflowEngine';
@@ -933,6 +934,46 @@ function OfflineStudioApp() {
 
     const delayMs = !hasBaseRenderedSvgRef.current ? 0 : 120;
     const timer = window.setTimeout(async () => {
+      const complexity = shouldUseFastDeterministicVectorLayout(effectiveMermaidCode);
+      if (complexity.useFastVector && callflowViewLevel.level !== 'master') {
+        const t0 = performance.now();
+        let fastGraph: CallflowGraph;
+        try {
+          fastGraph = parseCallflowGraph(effectiveMermaidCode);
+        } catch {
+          fastGraph = {
+            nodes: new Map(),
+            edges: [],
+            entryNodes: [],
+            hubNodes: [],
+            terminalNodes: [],
+          };
+        }
+        if (fastGraph.nodes.size > 0) {
+          const activeTitle =
+            activeWorkspaceViewKey.startsWith('script:')
+              ? `[${activeWorkspaceViewKey.slice(7)}] Detail-Callflow`
+              : 'Callflow';
+          const fastSvg = buildDeterministicFlowchartSvg(
+            fastGraph,
+            canvasSurface,
+            activeTitle
+          );
+          if (isCancelled) return;
+          hasBaseRenderedSvgRef.current = true;
+          setValidation({
+            isValid: true,
+            diagramType: 'Flowchart (Vektor-Schnelllayout)',
+            errorMessage: null,
+            errorLine: null,
+            lastRenderMs: Math.max(1, Math.round(performance.now() - t0)),
+          });
+          setMasterRenderError(null);
+          setBaseRenderedSvg(fastSvg);
+          return;
+        }
+      }
+
       const useNativeSvgLabels = shouldUseNativeSvgLabels(effectiveMermaidCode);
       const result = await renderLocalMermaidDiagram(
         effectiveMermaidCode,
@@ -973,10 +1014,42 @@ function OfflineStudioApp() {
           );
         }
       } else {
-        setValidation(result.validation);
-        setMasterRenderError(
-          result.validation.errorMessage || 'Das Diagramm konnte nicht gerendert werden.'
-        );
+        // Rescue non-master flowcharts with deterministic vector SVG instead of showing a blank error
+        let rescueGraph: CallflowGraph | null = null;
+        if (/^(?:flowchart|graph)\b/i.test(trimmed)) {
+          try {
+            const parsed = parseCallflowGraph(effectiveMermaidCode);
+            if (parsed.nodes.size > 0) rescueGraph = parsed;
+          } catch {
+            rescueGraph = null;
+          }
+        }
+        if (rescueGraph) {
+          const activeTitle =
+            activeWorkspaceViewKey.startsWith('script:')
+              ? `[${activeWorkspaceViewKey.slice(7)}] Detail-Callflow`
+              : 'Callflow';
+          const rescueSvg = buildDeterministicFlowchartSvg(
+            rescueGraph,
+            canvasSurface,
+            activeTitle
+          );
+          hasBaseRenderedSvgRef.current = true;
+          setValidation({
+            isValid: true,
+            diagramType: 'Flowchart (Vektor-Schnelllayout)',
+            errorMessage: null,
+            errorLine: null,
+            lastRenderMs: 1,
+          });
+          setMasterRenderError(null);
+          setBaseRenderedSvg(rescueSvg);
+        } else {
+          setValidation(result.validation);
+          setMasterRenderError(
+            result.validation.errorMessage || 'Das Diagramm konnte nicht gerendert werden.'
+          );
+        }
       }
     }, delayMs);
 
@@ -987,6 +1060,7 @@ function OfflineStudioApp() {
   }, [
     effectiveMermaidCode,
     themeConfig,
+    canvasSurface,
     scriptWorkspace.modules.length,
     callflowViewLevel.level,
     isolateSubgraphMode,
@@ -1542,16 +1616,14 @@ function OfflineStudioApp() {
     });
   };
 
-  // Toggle GPU-safe raster proxy layer during pan/zoom gestures or zoomed-out overview so huge SVGs never overflow Chromium VRAM
+  // Toggle GPU-safe raster proxy layer strictly during active pan/zoom gestures so resting overview stays 100% crisp Vector SVG
   const syncGpuProxyDomAttr = useCallback((forceTransforming?: boolean) => {
     const vp = canvasViewportRef.current;
     if (!vp) return;
     const hasProxy = Boolean(gpuProxyRef.current) && isLargeCanvasDiagramRef.current;
     const isGesture = Boolean(forceTransforming || isTransformingRef.current);
-    const isZoomedOutOverview =
-      cameraRef.current.zoom < 0.85 && !hasInteractiveOverlayStateRef.current;
     const shouldUseProxy =
-      hasProxy && !nodeDragRef.current.active && (isGesture || isZoomedOutOverview);
+      hasProxy && !nodeDragRef.current.active && isGesture;
     if (shouldUseProxy) {
       vp.setAttribute('data-gpu-proxy', 'true');
     } else {
@@ -4013,22 +4085,43 @@ function OfflineStudioApp() {
         let currentExportSvg = buildExportSvgSnapshot(false);
         if (!currentExportSvg) {
           if (!code.trim()) return { html: null };
-          const rendered = await renderLocalMermaidDiagram(
-            code,
-            themeConfig,
-            shouldUseNativeSvgLabels(code),
-            { timeoutMs: 10000 }
-          );
-          if (!rendered.svg) {
-            return {
-              html: null,
-              errorMessage:
-                rendered.validation.errorMessage ||
-                'Das aktive Diagramm konnte nicht für den HTML-Export gerendert werden.',
-            };
+          const singleComplexity = shouldUseFastDeterministicVectorLayout(code);
+          let singleRawSvg: string | null = null;
+          if (singleComplexity.useFastVector) {
+            singleRawSvg = buildDeterministicFlowchartSvg(
+              parseCallflowGraph(code),
+              targetSurface,
+              'Callflow'
+            );
+          } else {
+            const rendered = await renderLocalMermaidDiagram(
+              code,
+              themeConfig,
+              shouldUseNativeSvgLabels(code),
+              { timeoutMs: 10000 }
+            );
+            singleRawSvg = rendered.svg;
+            if (!singleRawSvg && /^(?:flowchart|graph)\b/i.test(code.trim())) {
+              const rescueGraph = parseCallflowGraph(code);
+              if (rescueGraph.nodes.size > 0) {
+                singleRawSvg = buildDeterministicFlowchartSvg(
+                  rescueGraph,
+                  targetSurface,
+                  'Callflow'
+                );
+              }
+            }
+            if (!singleRawSvg) {
+              return {
+                html: null,
+                errorMessage:
+                  rendered.validation.errorMessage ||
+                  'Das aktive Diagramm konnte nicht für den HTML-Export gerendert werden.',
+              };
+            }
           }
           currentExportSvg = applySmartLogicColoring(
-            rendered.svg,
+            singleRawSvg,
             code,
             smartColorMode,
             targetSurface,
@@ -4292,7 +4385,8 @@ function OfflineStudioApp() {
             ? preloadedViewsRef.current.get(preloadLookupKey)
             : undefined;
 
-          const specEdgeCount = (trimmedSpecCode.match(/-->|-.->|==>/g) || []).length;
+          const complexity = shouldUseFastDeterministicVectorLayout(trimmedSpecCode);
+          const specEdgeCount = complexity.edgeCount;
 
           if (
             canReuseActiveCanvasSvg &&
@@ -4310,7 +4404,7 @@ function OfflineStudioApp() {
             wasCacheHit = true;
           } else if (
             spec.key === 'master:detailed' &&
-            (trimmedSpecCode.length > 45000 || specEdgeCount > 260)
+            complexity.useFastVector
           ) {
             const compactView = views.find((v) => v.key === 'master');
             if (compactView) {
@@ -4320,18 +4414,51 @@ function OfflineStudioApp() {
                 'Voll-Detail-Karte bei Großprojekt durch Kompakt-Master ersetzt';
               await yieldFrame();
             }
+          } else if (
+            complexity.useFastVector &&
+            spec.key.startsWith('script:')
+          ) {
+            // Hybrid Export: Route giant scripts (> 200 edges or > 32k chars) UPFRONT to our O(V+E)
+            // deterministic Builder-styled vector layout so synchronous Dagre NEVER freezes the browser.
+            setHtmlExportProgress((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    lastWarning: `${spec.label}: Schnelles Vektor-Layout (${specEdgeCount} Verbindungen)…`,
+                  }
+                : prev
+            );
+            await yieldFrame();
+            if (signal.aborted) return { html: null, aborted: true };
+            let fastGraph: CallflowGraph;
+            try {
+              fastGraph = parseCallflowGraph(spec.mermaidCode);
+            } catch {
+              fastGraph = {
+                nodes: new Map(),
+                edges: [],
+                entryNodes: [],
+                hubNodes: [],
+                terminalNodes: [],
+              };
+            }
+            rawSvg = buildDeterministicFlowchartSvg(
+              fastGraph,
+              targetSurface,
+              spec.label
+            );
+            usedFallback = true;
+            lastWarning = `${spec.label}: Schnelles Vektor-Layout (${specEdgeCount} Verbindungen)`;
           }
 
           if (!rawSvg) {
-            // Yield a frame BEFORE starting heavy Mermaid rendering so the UI updates immediately
+            // Yield a frame BEFORE starting Mermaid rendering so the UI updates immediately
             await yieldFrame();
             if (signal.aborted) return { html: null, aborted: true };
 
             const isLargeSpec =
               (spec.key.startsWith('script:') || spec.key === 'master:detailed') &&
               (trimmedSpecCode.length > 14000 || specEdgeCount > 110);
-            const isVeryLargeSpec =
-              trimmedSpecCode.length > 45000 || specEdgeCount > 280;
             const preferFastDagreForLargeSpec =
               isLargeSpec &&
               (exportThemeConfig.layoutEngine !== 'dagre' ||
@@ -4342,11 +4469,7 @@ function OfflineStudioApp() {
               : exportThemeConfig;
             const initialNativeLabels =
               isLargeSpec || shouldUseNativeSvgLabels(spec.mermaidCode);
-            const initialTimeoutMs = isVeryLargeSpec
-              ? 20000
-              : isLargeSpec
-                ? 12000
-                : VIEW_TIMEOUT_MS;
+            const initialTimeoutMs = isLargeSpec ? 10000 : VIEW_TIMEOUT_MS;
 
             const res = await renderLocalMermaidDiagram(
               spec.mermaidCode,
@@ -4379,7 +4502,7 @@ function OfflineStudioApp() {
                   spec.mermaidCode,
                   dagreFallbackTheme,
                   true,
-                  { timeoutMs: 15000, skipParseDiagnostics: true, signal }
+                  { timeoutMs: 10000, skipParseDiagnostics: true, signal }
                 );
                 if (retryRes.timedOut) {
                   resetMermaidRenderQueue();

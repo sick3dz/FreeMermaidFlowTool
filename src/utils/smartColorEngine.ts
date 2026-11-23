@@ -1043,29 +1043,108 @@ function applyPathColorDifferentiation(
     }
   });
 
-  // Pre-build edge matcher pairs sorted longest IDs first
+  // Pre-build O(1) indexed lookup maps before falling back to regex matchers
   const consumedCodeEdgeIdx = new Set<number>();
-  const compiledMatchers = [...codeEdges]
-    .sort((a, b) => b.from.length + b.to.length - (a.from.length + a.to.length))
-    .map((e) => {
-      const fEsc = e.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const tEsc = e.to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      return {
-        edge: e,
-        exactLsLe: new RegExp(`(?:^|\\s)LS_${fEsc}\\s+LE_${tEsc}(?:\\s|$)`),
-        exactL: new RegExp(`(?:^|[-\\s])L[-_]${fEsc}[-_]${tEsc}(?:[-_]\\d+(?:[-_]\\d+)?)?(?=$|\\s)`, 'i'),
-        generic: new RegExp(`(?:^|[-_L\\s])${fEsc}[-_]${tEsc}(?:[-_]\\d+|\\s|$)`, 'i'),
-      };
-    });
+  const edgesByPairKey = new Map<string, ParsedCodeEdgeMeta[]>();
+  const edgeByMermaidLId = new Map<string, ParsedCodeEdgeMeta>();
+  const pairOccurrenceCounter = new Map<string, number>();
+
+  for (const e of codeEdges) {
+    const fLow = e.from.toLowerCase();
+    const tLow = e.to.toLowerCase();
+    const pairKey = `${fLow}->${tLow}`;
+    const list = edgesByPairKey.get(pairKey);
+    if (list) list.push(e);
+    else edgesByPairKey.set(pairKey, [e]);
+
+    const occ = pairOccurrenceCounter.get(pairKey) || 0;
+    pairOccurrenceCounter.set(pairKey, occ + 1);
+    edgeByMermaidLId.set(`l_${fLow}_${tLow}_${occ}`, e);
+    edgeByMermaidLId.set(`l-${fLow}-${tLow}-${occ}`, e);
+  }
+
+  let compiledMatchers: Array<{
+    edge: ParsedCodeEdgeMeta;
+    exactLsLe: RegExp;
+    exactL: RegExp;
+    generic: RegExp;
+  }> | null = null;
+
+  const getCompiledMatchers = () => {
+    if (compiledMatchers) return compiledMatchers;
+    compiledMatchers = [...codeEdges]
+      .sort((a, b) => b.from.length + b.to.length - (a.from.length + a.to.length))
+      .map((e) => {
+        const fEsc = e.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const tEsc = e.to.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return {
+          edge: e,
+          exactLsLe: new RegExp(`(?:^|\\s)LS_${fEsc}\\s+LE_${tEsc}(?:\\s|$)`),
+          exactL: new RegExp(`(?:^|[-\\s])L[-_]${fEsc}[-_]${tEsc}(?:[-_]\\d+(?:[-_]\\d+)?)?(?=$|\\s)`, 'i'),
+          generic: new RegExp(`(?:^|[-_L\\s])${fEsc}[-_]${tEsc}(?:[-_]\\d+|\\s|$)`, 'i'),
+        };
+      });
+    return compiledMatchers;
+  };
+
+  const takeNextUnconsumedForPair = (pairKey: string): ParsedCodeEdgeMeta | null => {
+    const bucket = edgesByPairKey.get(pairKey);
+    if (!bucket) return null;
+    for (const candidate of bucket) {
+      if (!consumedCodeEdgeIdx.has(candidate.index)) {
+        consumedCodeEdgeIdx.add(candidate.index);
+        return candidate;
+      }
+    }
+    return null;
+  };
 
   const matchCodeEdge = (edgeEl: Element, idx: number): ParsedCodeEdgeMeta | null => {
+    // 1. O(1) direct data-edge-from / data-edge-to attribute hit (deterministic vector SVGs)
+    const directFrom = edgeEl.getAttribute('data-edge-from');
+    const directTo = edgeEl.getAttribute('data-edge-to');
+    if (directFrom && directTo) {
+      const hit = takeNextUnconsumedForPair(`${directFrom.toLowerCase()}->${directTo.toLowerCase()}`);
+      if (hit) return hit;
+    }
+
+    // 2. O(1) exact Mermaid L_<from>_<to>_<occ> lookup (handles multi-underscore node IDs safely)
     const nestedDataId =
       edgeEl.getAttribute('data-id') ||
       edgeEl.querySelector('[data-id]')?.getAttribute('data-id') ||
       '';
-    const meta = `${edgeEl.getAttribute('id') || ''} ${nestedDataId} ${edgeEl.getAttribute('class') || ''}`;
+    const rawId = nestedDataId || edgeEl.getAttribute('id') || '';
+    if (rawId) {
+      const lowerRaw = rawId.toLowerCase();
+      const directExact = edgeByMermaidLId.get(lowerRaw);
+      if (directExact && !consumedCodeEdgeIdx.has(directExact.index)) {
+        consumedCodeEdgeIdx.add(directExact.index);
+        return directExact;
+      }
+      const lIdx = lowerRaw.indexOf('l_');
+      if (lIdx > 0) {
+        const suffixExact = edgeByMermaidLId.get(lowerRaw.slice(lIdx));
+        if (suffixExact && !consumedCodeEdgeIdx.has(suffixExact.index)) {
+          consumedCodeEdgeIdx.add(suffixExact.index);
+          return suffixExact;
+        }
+      }
+    }
 
-    for (const m of compiledMatchers) {
+    // 3. O(1) LS_<from> LE_<to> class token lookup
+    const cls = edgeEl.getAttribute('class') || '';
+    if (cls.includes('LS_') && cls.includes('LE_')) {
+      const lsMatch = cls.match(/(?:^|\s)LS_(\S+)/);
+      const leMatch = cls.match(/(?:^|\s)LE_(\S+)/);
+      if (lsMatch && leMatch) {
+        const hit = takeNextUnconsumedForPair(`${lsMatch[1].toLowerCase()}->${leMatch[1].toLowerCase()}`);
+        if (hit) return hit;
+      }
+    }
+
+    // 4. Lazy fallback regex scan only for non-standard Mermaid edge IDs
+    const meta = `${edgeEl.getAttribute('id') || ''} ${nestedDataId} ${cls}`;
+    for (const m of getCompiledMatchers()) {
       if (consumedCodeEdgeIdx.has(m.edge.index)) continue;
       if (
         m.exactLsLe.test(meta) ||

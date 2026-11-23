@@ -2120,33 +2120,56 @@ export function buildLiveSvgDomIndex(
     });
   });
 
-  // Pre-compile edge matchers once + O(1) direct pair lookup map (eliminates O(E^3) freeze on large Master graphs)
-  const compiledEdges = graph.edges
-    .map((edge) => createEdgeMetaMatcher(edge))
-    .sort((a, b) => b.score - a.score);
-
+  // Pre-compile edge matchers lazily + O(1) exact L_<from>_<to>_<occ> and pair lookup maps
   const edgeByPairKey = new Map<string, CallflowEdge>();
+  const edgeByMermaidLId = new Map<string, CallflowEdge>();
+  const pairOccCounter = new Map<string, number>();
   for (const edge of graph.edges) {
-    const k = `${edge.from.toLowerCase()}->${edge.to.toLowerCase()}`;
+    const fLow = edge.from.toLowerCase();
+    const tLow = edge.to.toLowerCase();
+    const k = `${fLow}->${tLow}`;
     if (!edgeByPairKey.has(k)) {
       edgeByPairKey.set(k, edge);
     }
+    const occ = pairOccCounter.get(k) || 0;
+    pairOccCounter.set(k, occ + 1);
+    edgeByMermaidLId.set(`l_${fLow}_${tLow}_${occ}`, edge);
+    edgeByMermaidLId.set(`l-${fLow}-${tLow}-${occ}`, edge);
   }
 
+  let compiledEdges: ReturnType<typeof createEdgeMetaMatcher>[] | null = null;
+  const getCompiledEdges = () => {
+    if (!compiledEdges) {
+      compiledEdges = graph.edges
+        .map((edge) => createEdgeMetaMatcher(edge))
+        .sort((a, b) => b.score - a.score);
+    }
+    return compiledEdges;
+  };
+
   const matchEdgeMeta = (el: Element): CallflowEdge | null => {
+    const attrFrom = el.getAttribute('data-edge-from');
+    const attrTo = el.getAttribute('data-edge-to');
+    if (attrFrom && attrTo) {
+      const directAttr = edgeByPairKey.get(`${attrFrom.toLowerCase()}->${attrTo.toLowerCase()}`);
+      if (directAttr) return directAttr;
+    }
     const rawId =
       el.getAttribute('data-id') ||
       el.getAttribute('id') ||
       '';
     if (rawId) {
-      const fastLMatch = rawId.match(/(?:^|-)L_([^_]+(?:_[^_]+)*?)_([^_]+(?:_[^_]+)*?)_\d+$/i);
-      if (fastLMatch) {
-        const direct = edgeByPairKey.get(`${fastLMatch[1].toLowerCase()}->${fastLMatch[2].toLowerCase()}`);
-        if (direct) return direct;
+      const lowerRaw = rawId.toLowerCase();
+      const exactHit = edgeByMermaidLId.get(lowerRaw);
+      if (exactHit) return exactHit;
+      const lIdx = lowerRaw.indexOf('l_');
+      if (lIdx > 0) {
+        const suffixHit = edgeByMermaidLId.get(lowerRaw.slice(lIdx));
+        if (suffixHit) return suffixHit;
       }
     }
     const meta = getSvgEdgeElementMeta(el);
-    for (const item of compiledEdges) {
+    for (const item of getCompiledEdges()) {
       if (item.matches(meta)) {
         return item.edge;
       }
@@ -3275,11 +3298,35 @@ export function autoGroupCallflowByTopology(
 }
 
 /**
- * Deterministic, O(V + E) layered SVG flowchart renderer that produces a complete,
- * clickable, traceable Mermaid-compatible SVG directly from a parsed CallflowGraph.
- * Used as a guaranteed real-visualization safety net if Mermaid's browser layout
- * hits extreme size/time limits — ensuring large scripts NEVER degrade to static
- * placeholder cards.
+ * Shared upfront complexity gate used by BOTH the live Builder and interactive
+ * Callflow.html batch export. Detects giant flowcharts that would freeze Mermaid's
+ * synchronous single-threaded Dagre layout and routes them directly to the
+ * O(V + E) deterministic vector flowchart engine (< 30 ms, zero freeze, zero placeholders).
+ */
+export function shouldUseFastDeterministicVectorLayout(mermaidCode: string): {
+  useFastVector: boolean;
+  edgeCount: number;
+  charLength: number;
+} {
+  const trimmed = (mermaidCode || '').trim();
+  const charLength = trimmed.length;
+  if (!trimmed || !/^(?:flowchart|graph)\b/i.test(trimmed)) {
+    return { useFastVector: false, edgeCount: 0, charLength };
+  }
+  const edgeMatches = trimmed.match(/-->|-.->|==>/g);
+  const edgeCount = edgeMatches ? edgeMatches.length : 0;
+  return {
+    useFastVector: edgeCount > 200 || charLength > 32000,
+    edgeCount,
+    charLength,
+  };
+}
+
+/**
+ * Deterministic, O(V + E) layered SVG flowchart renderer with barycenter ordering
+ * that produces a complete, clickable, traceable Builder-styled Mermaid-compatible SVG
+ * directly from a parsed CallflowGraph. Ensures giant scripts NEVER freeze the browser
+ * and NEVER degrade to static placeholder cards.
  */
 export function buildDeterministicFlowchartSvg(
   graph: CallflowGraph,
@@ -3295,28 +3342,32 @@ export function buildDeterministicFlowchartSvg(
       .replace(/'/g, '&#39;');
 
   const allNodes = Array.from(graph.nodes.values());
-  const bg = surface === 'dark' ? '#0f172a' : '#f8fafc';
-  const textMain = surface === 'dark' ? '#f1f5f9' : '#0f172a';
-  const textMuted = surface === 'dark' ? '#94a3b8' : '#475569';
-  const edgeStroke = surface === 'dark' ? '#64748b' : '#64748b';
-  const edgeLabelBg = surface === 'dark' ? '#1e293b' : '#ffffff';
-  const edgeLabelBorder = surface === 'dark' ? '#334155' : '#cbd5e1';
+  const isDark = surface === 'dark';
+  const bg = isDark ? '#0f172a' : '#f8fafc';
+  const textMain = isDark ? '#f1f5f9' : '#0f172a';
+  const textMuted = isDark ? '#94a3b8' : '#475569';
+  const edgeStroke = isDark ? '#64748b' : '#64748b';
+  const edgeLabelBg = isDark ? '#1e293b' : '#ffffff';
+  const edgeLabelBorder = isDark ? '#334155' : '#cbd5e1';
 
   if (allNodes.length === 0) {
     const safeTitle = escXml((title || 'Callflow').slice(0, 80));
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" width="640" height="160" style="background:${bg}"><rect x="16" y="16" width="608" height="128" rx="12" fill="${surface === 'dark' ? '#1e293b' : '#ffffff'}" stroke="${edgeLabelBorder}" stroke-width="1.5"/><text x="36" y="72" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="${textMain}">${safeTitle}</text><text x="36" y="104" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="${textMuted}">Keine Knoten im Diagramm vorhanden.</text></svg>`;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" width="640" height="160" style="background:${bg}"><rect x="16" y="16" width="608" height="128" rx="12" fill="${isDark ? '#1e293b' : '#ffffff'}" stroke="${edgeLabelBorder}" stroke-width="1.5"/><text x="36" y="72" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="600" fill="${textMain}">${safeTitle}</text><text x="36" y="104" font-family="ui-sans-serif, system-ui, sans-serif" font-size="13" fill="${textMuted}">Keine Knoten im Diagramm vorhanden.</text></svg>`;
   }
 
   // Build adjacency & compute BFS topological layers (handles cycles safely)
   const outAdj = new Map<string, string[]>();
+  const inAdj = new Map<string, string[]>();
   const inDeg = new Map<string, number>();
   for (const n of allNodes) {
     outAdj.set(n.id, []);
+    inAdj.set(n.id, []);
     inDeg.set(n.id, 0);
   }
   for (const e of graph.edges) {
     if (!graph.nodes.has(e.from) || !graph.nodes.has(e.to)) continue;
     outAdj.get(e.from)!.push(e.to);
+    inAdj.get(e.to)!.push(e.from);
     inDeg.set(e.to, (inDeg.get(e.to) || 0) + 1);
   }
 
@@ -3356,7 +3407,7 @@ export function buildDeterministicFlowchartSvg(
     }
   }
 
-  // Group nodes by rank; split overly tall columns so giant fan-outs stay readable
+  // Group nodes by rank & apply single-pass barycenter sorting to reduce edge crossings
   const rawColumns = new Map<number, CallflowNode[]>();
   for (const n of allNodes) {
     const r = rankById.get(n.id) || 0;
@@ -3365,17 +3416,49 @@ export function buildDeterministicFlowchartSvg(
   }
 
   const sortedRanks = Array.from(rawColumns.keys()).sort((a, b) => a - b);
-  const NODE_W = 244;
-  const NODE_H = 66;
-  const COL_GAP = 108;
-  const ROW_GAP = 24;
+  const orderIndexById = new Map<string, number>();
+  for (const r of sortedRanks) {
+    const colNodes = rawColumns.get(r)!;
+    if (r > 0) {
+      colNodes.sort((a, b) => {
+        const parentsA = (inAdj.get(a.id) || []).filter((p) => orderIndexById.has(p));
+        const parentsB = (inAdj.get(b.id) || []).filter((p) => orderIndexById.has(p));
+        const avgA =
+          parentsA.length > 0
+            ? parentsA.reduce((s, p) => s + (orderIndexById.get(p) || 0), 0) / parentsA.length
+            : Number.MAX_SAFE_INTEGER;
+        const avgB =
+          parentsB.length > 0
+            ? parentsB.reduce((s, p) => s + (orderIndexById.get(p) || 0), 0) / parentsB.length
+            : Number.MAX_SAFE_INTEGER;
+        return avgA - avgB;
+      });
+    }
+    colNodes.forEach((n, idx) => orderIndexById.set(n.id, idx));
+  }
+
+  const NODE_W = 248;
+  const NODE_H = 68;
+  const COL_GAP = 112;
+  const SUBCOL_GAP = 42;
+  const ROW_GAP = 22;
   const PAD_X = 48;
-  const PAD_Y = 56;
-  const MAX_ROWS_PER_SUBCOL = 24;
+  const PAD_Y = 58;
+  const MAX_ROWS_PER_SUBCOL = 18;
+
+  // Pre-calculate max column height for clean vertical centering of smaller columns
+  let maxRowsInAnySubCol = 1;
+  for (const r of sortedRanks) {
+    const colLen = rawColumns.get(r)!.length;
+    const subColCount = Math.max(1, Math.ceil(colLen / MAX_ROWS_PER_SUBCOL));
+    const rowsPerSubCol = Math.ceil(colLen / subColCount);
+    if (rowsPerSubCol > maxRowsInAnySubCol) maxRowsInAnySubCol = rowsPerSubCol;
+  }
+  const contentHeight = maxRowsInAnySubCol * NODE_H + Math.max(0, maxRowsInAnySubCol - 1) * ROW_GAP;
 
   const posById = new Map<string, { x: number; y: number; w: number; h: number }>();
   let cursorX = PAD_X;
-  let maxBottomY = PAD_Y + NODE_H;
+  let maxBottomY = PAD_Y + contentHeight;
 
   for (const r of sortedRanks) {
     const colNodes = rawColumns.get(r)!;
@@ -3384,18 +3467,20 @@ export function buildDeterministicFlowchartSvg(
 
     for (let sc = 0; sc < subColCount; sc++) {
       const slice = colNodes.slice(sc * rowsPerSubCol, (sc + 1) * rowsPerSubCol);
+      const sliceH = slice.length * NODE_H + Math.max(0, slice.length - 1) * ROW_GAP;
+      const offsetY = Math.max(0, Math.round((contentHeight - sliceH) * 0.25));
       slice.forEach((node, rowIdx) => {
         const x = cursorX;
-        const y = PAD_Y + rowIdx * (NODE_H + ROW_GAP);
+        const y = PAD_Y + offsetY + rowIdx * (NODE_H + ROW_GAP);
         posById.set(node.id, { x, y, w: NODE_W, h: NODE_H });
         if (y + NODE_H > maxBottomY) maxBottomY = y + NODE_H;
       });
-      cursorX += NODE_W + (sc + 1 < subColCount ? 36 : COL_GAP);
+      cursorX += NODE_W + (sc + 1 < subColCount ? SUBCOL_GAP : COL_GAP);
     }
   }
 
-  const totalW = Math.max(720, cursorX - COL_GAP + PAD_X);
-  const totalH = Math.max(320, maxBottomY + PAD_Y);
+  const totalW = Math.max(760, cursorX - COL_GAP + PAD_X);
+  const totalH = Math.max(340, maxBottomY + PAD_Y);
 
   const wrapLabelLines = (raw: string): string[] => {
     const normalized = String(raw || '')
@@ -3408,11 +3493,11 @@ export function buildDeterministicFlowchartSvg(
       let line = '';
       for (const w of words) {
         const candidate = line ? `${line} ${w}` : w;
-        if (candidate.length > 32 && line) {
+        if (candidate.length > 33 && line) {
           out.push(line);
-          line = w.length > 32 ? `${w.slice(0, 31)}…` : w;
+          line = w.length > 33 ? `${w.slice(0, 32)}…` : w;
         } else {
-          line = candidate.length > 32 ? `${candidate.slice(0, 31)}…` : candidate;
+          line = candidate.length > 33 ? `${candidate.slice(0, 32)}…` : candidate;
         }
         if (out.length >= 3) break;
       }
@@ -3422,36 +3507,35 @@ export function buildDeterministicFlowchartSvg(
     return out.length > 0 ? out.slice(0, 3) : ['Knoten'];
   };
 
-  const getNodeColors = (node: CallflowNode): { fill: string; stroke: string; accent: string } => {
+  const getNodeColors = (node: CallflowNode): { fill: string; stroke: string; headerTint: string } => {
     const lbl = (node.label || '').toLowerCase();
     const idLower = node.id.toLowerCase();
-    const isDark = surface === 'dark';
     if (node.role === 'entry' || /einstieg|start|main/.test(idLower)) {
       return isDark
-        ? { fill: '#064e3b', stroke: '#10b981', accent: '#34d399' }
-        : { fill: '#ecfdf5', stroke: '#059669', accent: '#047857' };
+        ? { fill: '#064e3b', stroke: '#10b981', headerTint: '#047857' }
+        : { fill: '#ecfdf5', stroke: '#059669', headerTint: '#d1fae5' };
     }
     if (
       /zeit|feiertag|sondzeit|bedingung|dtmf|wahl|menu|choice/.test(lbl) ||
       idLower.startsWith('choice_')
     ) {
       return isDark
-        ? { fill: '#451a03', stroke: '#f59e0b', accent: '#fbbf24' }
-        : { fill: '#fffbeb', stroke: '#d97706', accent: '#b45309' };
+        ? { fill: '#451a03', stroke: '#f59e0b', headerTint: '#78350f' }
+        : { fill: '#fffbeb', stroke: '#d97706', headerTint: '#fef3c7' };
     }
     if (/queue|skillset|warteschlange|agent/.test(lbl) || idLower.startsWith('queue_')) {
       return isDark
-        ? { fill: '#172554', stroke: '#3b82f6', accent: '#60a5fa' }
-        : { fill: '#eff6ff', stroke: '#2563eb', accent: '#1d4ed8' };
+        ? { fill: '#172554', stroke: '#3b82f6', headerTint: '#1e3a8a' }
+        : { fill: '#eff6ff', stroke: '#2563eb', headerTint: '#dbeafe' };
     }
     if (node.role === 'terminal' || /disconnect|trennen|abwurf|ende|ansage/.test(lbl)) {
       return isDark
-        ? { fill: '#3b0764', stroke: '#a855f7', accent: '#c084fc' }
-        : { fill: '#faf5ff', stroke: '#7e22ce', accent: '#6b21a8' };
+        ? { fill: '#3b0764', stroke: '#a855f7', headerTint: '#581c87' }
+        : { fill: '#faf5ff', stroke: '#7e22ce', headerTint: '#f3e8ff' };
     }
     return isDark
-      ? { fill: '#1e293b', stroke: '#475569', accent: '#38bdf8' }
-      : { fill: '#ffffff', stroke: '#94a3b8', accent: '#0284c7' };
+      ? { fill: '#1e293b', stroke: '#475569', headerTint: '#334155' }
+      : { fill: '#ffffff', stroke: '#94a3b8', headerTint: '#f1f5f9' };
   };
 
   const edgePathParts: string[] = [];
@@ -3478,19 +3562,17 @@ export function buildDeterministicFlowchartSvg(
     let labelY: number;
 
     if (edge.from === edge.to) {
-      // Self-loop above the node
       const lx = pFrom.x + pFrom.w / 2;
       const ly = pFrom.y;
       d = `M ${lx - 18} ${ly} C ${lx - 30} ${ly - 36}, ${lx + 30} ${ly - 36}, ${lx + 18} ${ly}`;
       labelX = lx;
       labelY = ly - 24;
     } else if (x2 >= x1 - 8) {
-      const dx = Math.max(32, (x2 - x1) * 0.45);
+      const dx = Math.max(36, Math.min(120, (x2 - x1) * 0.45));
       d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
       labelX = (x1 + x2) / 2;
       labelY = (y1 + y2) / 2 - 4;
     } else {
-      // Back-edge or same-column edge: arc cleanly around
       const arcOffset = 28 + (idx % 4) * 14;
       const midX = (x1 + x2) / 2;
       const midY = Math.min(y1, y2) - arcOffset;
@@ -3502,18 +3584,20 @@ export function buildDeterministicFlowchartSvg(
     const isDotted = edge.isAsync || edge.rawArrow.includes('.');
     const isThick = edge.rawArrow.includes('=');
     const strokeDash = isDotted ? ' stroke-dasharray="5,4"' : '';
-    const strokeWidth = isThick ? '2.4' : '1.4';
+    const strokeWidth = isThick ? '2.4' : '1.45';
+    const escFrom = escXml(edge.from);
+    const escTo = escXml(edge.to);
     edgePathParts.push(
-      `<path id="${escXml(edgeDomId)}" data-id="${escXml(edgeDomId)}" class="flowchart-link edge-thickness-normal edge-pattern-solid" d="${d}" fill="none" stroke="${edgeStroke}" stroke-width="${strokeWidth}"${strokeDash} marker-end="url(#det-arrow)"/>`
+      `<path id="${escXml(edgeDomId)}" data-id="${escXml(edgeDomId)}" data-edge-from="${escFrom}" data-edge-to="${escTo}" class="flowchart-link edge-thickness-normal edge-pattern-solid" d="${d}" fill="none" stroke="${edgeStroke}" stroke-width="${strokeWidth}"${strokeDash} marker-end="url(#det-arrow)"/>`
     );
 
     const cleanEdgeLabel = (edge.label || '').trim();
-    if (cleanEdgeLabel && graph.edges.length <= 700) {
+    if (cleanEdgeLabel && graph.edges.length <= 750) {
       const shortLbl =
         cleanEdgeLabel.length > 26 ? `${cleanEdgeLabel.slice(0, 25)}…` : cleanEdgeLabel;
-      const pillW = Math.max(36, Math.min(180, shortLbl.length * 6.4 + 14));
+      const pillW = Math.max(36, Math.min(180, shortLbl.length * 6.3 + 14));
       edgeLabelParts.push(
-        `<g class="edgeLabel" data-id="${escXml(edgeDomId)}" transform="translate(${labelX.toFixed(1)}, ${labelY.toFixed(1)})"><rect x="${(-pillW / 2).toFixed(1)}" y="-9" width="${pillW.toFixed(1)}" height="18" rx="4" fill="${edgeLabelBg}" stroke="${edgeLabelBorder}" stroke-width="0.9"/><text x="0" y="3.5" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="${textMuted}">${escXml(shortLbl)}</text></g>`
+        `<g class="edgeLabel" data-id="${escXml(edgeDomId)}" data-edge-from="${escFrom}" data-edge-to="${escTo}" transform="translate(${labelX.toFixed(1)}, ${labelY.toFixed(1)})"><rect x="${(-pillW / 2).toFixed(1)}" y="-9" width="${pillW.toFixed(1)}" height="18" rx="4" fill="${edgeLabelBg}" stroke="${edgeLabelBorder}" stroke-width="0.9"/><text x="0" y="3.5" text-anchor="middle" font-family="ui-sans-serif, system-ui, sans-serif" font-size="10.5" fill="${textMuted}">${escXml(shortLbl)}</text></g>`
       );
     }
   }
@@ -3524,17 +3608,17 @@ export function buildDeterministicFlowchartSvg(
     if (!pos) continue;
     const colors = getNodeColors(node);
     const lines = wrapLabelLines(node.label || node.id);
-    const lineHeight = 15;
+    const lineHeight = 15.5;
     const startY = (pos.h - (lines.length - 1) * lineHeight) / 2 + 4;
     const tspans = lines
       .map(
         (ln, li) =>
-          `<tspan x="${(pos.w / 2).toFixed(1)}" y="${(startY + li * lineHeight).toFixed(1)}"${li === 0 ? ' font-weight="600"' : ''}>${escXml(ln)}</tspan>`
+          `<tspan x="${(pos.w / 2).toFixed(1)}" y="${(startY + li * lineHeight).toFixed(1)}"${li === 0 ? ' font-weight="600"' : ` fill="${textMuted}" font-size="11"`}>${escXml(ln)}</tspan>`
       )
       .join('');
     const nodeDomId = `flowchart-${node.id}-0`;
     nodeParts.push(
-      `<g class="node default" id="${escXml(nodeDomId)}" data-id="${escXml(node.id)}" transform="translate(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)})"><rect class="basic label-container" x="0" y="0" width="${pos.w}" height="${pos.h}" rx="8" fill="${colors.fill}" stroke="${colors.stroke}" stroke-width="1.6"/><text font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="${textMain}" text-anchor="middle">${tspans}</text></g>`
+      `<g class="node default" id="${escXml(nodeDomId)}" data-id="${escXml(node.id)}" transform="translate(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)})"><rect class="basic label-container" x="0" y="0" width="${pos.w}" height="${pos.h}" rx="10" fill="${colors.fill}" stroke="${colors.stroke}" stroke-width="1.6"/><text font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" fill="${textMain}" text-anchor="middle">${tspans}</text></g>`
     );
   }
 
@@ -6603,15 +6687,9 @@ export function generateInteractiveCallflowHtml(
       if (gpuProxyImg && gpuProxyImg.src !== entry.url) {
         applyProxyImgElement(entry);
       }
-      const hasInteractiveFilter =
-        Boolean(activeNodeId) ||
-        Boolean(activeEdge) ||
-        hiddenNodeTypes.size > 0 ||
-        roleFilter !== 'all' ||
-        Boolean((searchEl && searchEl.value || '').trim());
+      // Use raster GPU proxy strictly during active pan/zoom gestures so resting views stay razor-sharp Vector SVG
       const isGesture = Boolean(forceGesture || wrap.dataset.transforming === 'true');
-      const isOverview = zoom < 0.85 && !hasInteractiveFilter;
-      if (isGesture || isOverview) {
+      if (isGesture) {
         wrap.dataset.gpuProxy = 'true';
       } else {
         delete wrap.dataset.gpuProxy;
