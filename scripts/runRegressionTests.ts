@@ -473,7 +473,7 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.2.1', 'Expected release version 1.2.1');
+  assert.equal(AUDIT_APP_VERSION, '1.2.2', 'Expected release version 1.2.2');
 });
 
 async function finalizeSuite() {
@@ -644,8 +644,19 @@ async function finalizeSuite() {
         'WHERE CLID EQUALS',
         '  VALUE 4930200100: EXECUTE FlixCheck_Schaden',
         '  VALUE 4930200200: EXECUTE FlixCheck_Legacy',
-        '  DEFAULT: EXECUTE FlixCheck_Schaden',
+        '  VALUE 4930200300: EXECUTE Standard_HDX_Routing',
+        '  DEFAULT: EXECUTE Standard_HDX_Routing',
         'END WHERE',
+        '',
+        '=== Standard_HDX_Routing ===',
+        '/* Normales Avaya AACC Standard-Skript mit internem Host-DB/CTI HDX */',
+        'ASSIGN "12345" TO fc_id',
+        'ASSIGN "OK" TO fc_status',
+        'SEND REQUEST HostDB, CLID, gv_kunde',
+        'SEND INFO CTI_Server, gv_callid',
+        'READVAR gv_segment FROM HostDB',
+        'OPEN HOST Mainframe_01',
+        'QUEUE TO SKILLSET sk_standard_hotline',
         '',
         '=== FlixCheck_Schaden ===',
         '/* Digitaler Schaden-Check via FlixCheck API v7 */',
@@ -676,10 +687,23 @@ async function finalizeSuite() {
       const parsed = parseCallflowTextWithFallback(flixFixture, { isMasterHint: true });
       const ws = buildScriptWorkspace(parsed);
 
+      const modNormal = ws.modules.find((m) => m.scriptNumber === 'Standard_HDX_Routing');
       const modV7 = ws.modules.find((m) => m.scriptNumber === 'FlixCheck_Schaden');
       const modV1 = ws.modules.find((m) => m.scriptNumber === 'FlixCheck_Legacy');
+      assert.ok(modNormal, 'Standard_HDX_Routing normal module must be parsed');
       assert.ok(modV7, 'FlixCheck_Schaden module must be parsed');
       assert.ok(modV1, 'FlixCheck_Legacy module must be parsed');
+
+      // Normal AACC HDX script must keep hdxAction but NEVER be misclassified as FlixCheck or external HTTP API
+      assert.ok(
+        modNormal.rules.some((r) => Boolean(r.hdxAction && r.hdxAction.includes('HostDB'))),
+        'Normal AACC HDX script must preserve internal hdxAction steps'
+      );
+      assert.equal(
+        modNormal.rules.filter((r) => Boolean(r.externalIntegration)).length,
+        0,
+        'Normal AACC HDX script must NEVER attach externalIntegration or mix with FlixCheck'
+      );
 
       const reqV7 = modV7.rules.find((r) => r.externalIntegration?.commandKind === 'send-request');
       assert.ok(reqV7?.externalIntegration, 'SEND REQUEST must attach externalIntegration metadata');
@@ -697,9 +721,14 @@ async function finalizeSuite() {
       assert.equal(reqV1.externalIntegration.hasHardcodedSecret, true, 'Must detect hardcoded synthetic API key');
       assert.equal(reqV1.externalIntegration.hasResponseHandler, false, 'Must detect missing GET RESPONSE');
 
-      // Health checks must surface v1 deprecation (EOL 31.12.2026), secret error, missing GET RESPONSE, and missing template info
+      // Health checks must surface v1 deprecation (EOL 31.12.2026), secret error, missing GET RESPONSE — and ZERO findings on Standard_HDX_Routing!
       const health = analyzeWorkspaceLogicHealth(ws);
       const apiHealth = health.filter((h) => h.category === 'external-api');
+      assert.equal(
+        apiHealth.filter((h) => h.scriptNumber === 'Standard_HDX_Routing').length,
+        0,
+        'Normal AACC HDX script must produce ZERO external-api / HTTP health findings'
+      );
       assert.ok(
         apiHealth.some((h) => h.severity === 'error' && /klartext-api-key/i.test(h.title)),
         'Health check must flag hardcoded API key as error'
@@ -713,9 +742,16 @@ async function finalizeSuite() {
         'Health check must warn about SEND REQUEST without GET RESPONSE'
       );
 
-      // Resource Registry must populate externalApis AND redact secret in variables
+      // Resource Registry must populate externalApis ONLY for real FlixCheck/HTTP modules AND redact secret in variables
       const registry = extractWorkspaceResourceRegistry(ws);
       assert.ok((registry.externalApis || []).length >= 2, 'Resource Registry must list FlixCheck integrations');
+      assert.equal(
+        (registry.externalApis || []).some((a) =>
+          a.usages.some((u) => u.scriptNumber === 'Standard_HDX_Routing')
+        ),
+        false,
+        'Resource Registry externalApis must NOT mix in normal internal AACC HDX scripts'
+      );
       assert.ok(
         (registry.externalApis || []).some((a) => a.templateId === 'TPL_SCHADEN_2026' && a.apiVersion === 'v7'),
         'Resource Registry must expose v7 FlixCheck template entry'

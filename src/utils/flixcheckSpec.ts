@@ -25,10 +25,13 @@ export const FLIXCHECK_OFFLINE_SPEC = {
 };
 
 const FLIXCHECK_KEYWORD_RE =
-  /\b(?:flixcheck|flix[\s_-]*check|api\.flixcheck\.com|dev\.flixcheck\.com|(?:\/(?:user|customer|guest)\/v7\/)|(?:\/(?:api|frontend)\/v1\/checks?))\b/i;
+  /\b(?:flixcheck|flix[\s_-]*check|api\.flixcheck\.com|dev\.flixcheck\.com|flixcheck\.de|(?:\/(?:user|customer|guest)\/v7\/)|(?:\/(?:api|frontend)\/v1\/checks?))\b/i;
 
 const FLIXCHECK_VAR_HINT_RE =
-  /(?:^|[_\s.-])(?:fc|flix|flixcheck)[_-]?(?:template|check|channel|sendtype|status|url|endpoint|api|provider|id|token|key|mobile|phone|recipient|mail|email|custom)/i;
+  /(?:^|[_\s.-])(?:(?:flix|flixcheck)[_-]?(?:template|check|channel|sendtype|status|url|endpoint|api|provider|id|token|key|mobile|phone|recipient|mail|email|custom)|fc[_-]?(?:template|check|sendtype|channel|endpoint|api[_-]?url|flix))\b/i;
+
+const EXPLICIT_EXTERNAL_HTTP_RE =
+  /(?:https?:\/\/[A-Za-z0-9.-]+\.[A-Za-z]{2,}|\/(?:api|rest)\/v\d+\/|\b(?:webhook|rest[_-]?api|http[_-]?post|http[_-]?get|http[_-]?put|http[_-]?request|json[_-]?api)\b)/i;
 
 const SECRET_ASSIGN_VAR_RE =
   /(?:^|[_\s.-])(?:api[_-]?key|x[_-]?api[_-]?key|auth[_-]?token|bearer[_-]?token|access[_-]?token|secret[_-]?key|flixcheck[_-]?key|fc[_-]?key|fc[_-]?token)(?:$|[_\s.-])/i;
@@ -197,11 +200,16 @@ export interface DetectExternalApiInput {
 }
 
 /**
- * Builds structured FlixCheck / HDX metadata from an AACC command plus active contextual ASSIGN variables.
+ * Builds structured FlixCheck / explicit external HTTP-API metadata from an AACC command
+ * plus active contextual ASSIGN variables.
+ *
+ * Returns `undefined` for ordinary internal Avaya AACC HDX commands (e.g. internal Host/DB/CTI
+ * SEND REQUEST, SEND INFO, READVAR, OPEN/SEND/RECEIVE HOST) that have no FlixCheck or
+ * explicit external HTTP/REST API context — preventing false-positive mixing and HTTP warnings.
  */
 export function detectExternalApiIntegration(
   input: DetectExternalApiInput
-): ExternalApiIntegrationMeta {
+): ExternalApiIntegrationMeta | undefined {
   const {
     commandKind,
     providerId,
@@ -282,14 +290,24 @@ export function detectExternalApiIntegration(
   const isFlixcheck =
     FLIXCHECK_KEYWORD_RE.test(combinedContext) ||
     varIndicatesFlixcheck ||
-    (Boolean(providerId) && /\b(?:flix|fc[_-]|check[_-]?api)\b/i.test(providerId!));
+    (Boolean(providerId) && /\b(?:flixcheck|flix[\s_-]?check|flix[_-]?hdx)\b/i.test(providerId!));
+
+  // Explicit non-FlixCheck HTTP/REST API detection ONLY from actual code/endpoint vars (never comments)
+  const codeOnlyContext = `${providerId || ''} ${argsText} ${rawLine} ${endpointSourceText}`;
+  const isExplicitExternalHttpApi =
+    !isFlixcheck && EXPLICIT_EXTERNAL_HTTP_RE.test(codeOnlyContext);
+
+  // Strictly leave ordinary internal Avaya AACC HDX commands untouched (no mixing, no HTTP warnings)
+  if (!isFlixcheck && !isExplicitExternalHttpApi) {
+    return undefined;
+  }
 
   if (!hasHardcodedSecret && SECRET_VALUE_PATTERN_RE.test(rawLine) && /api[_-]?key|bearer|token|secret/i.test(rawLine)) {
     hasHardcodedSecret = true;
   }
 
   const { apiVersion, endpointPath } = detectApiVersionFromText(
-    `${endpointSourceText} ${rawLine} ${argsText} ${moduleContextText}`
+    `${endpointSourceText} ${rawLine} ${argsText} ${isFlixcheck ? moduleContextText : ''}`
   );
 
   // Channel detection prioritizes explicit channel variable / line text before general module text
@@ -357,46 +375,70 @@ export function enrichModuleExternalApiFlow(rules: ScriptRule[], rawText: string
       let foundResponse = false;
       let foundErrorFallback = false;
 
-      // Look ahead within the same section (or next 12 rules) for GET RESPONSE / READVAR and status/error branches
-      for (let j = i + 1; j < Math.min(rules.length, i + 14); j++) {
+      // Look ahead across the module (same section first, plus subsequent response/event/fallback sections)
+      for (let j = i + 1; j < Math.min(rules.length, i + 40); j++) {
         const next = rules[j];
+        const isSameSection =
+          !rule.sectionName ||
+          !next.sectionName ||
+          rule.sectionName.toLowerCase() === next.sectionName.toLowerCase();
+
+        // Check paired GET RESPONSE / READVAR (even if GET RESPONSE itself didn't repeat the FlixCheck keyword)
+        const nextIsRawResponseCmd =
+          !next.externalIntegration &&
+          Boolean(next.hdxAction && /^(?:GET\s+RESPONSE|READVAR|RECEIVE\s+HOST)\b/i.test(next.hdxAction));
+
         if (
-          rule.sectionName &&
-          next.sectionName &&
-          rule.sectionName.toLowerCase() !== next.sectionName.toLowerCase()
-        ) {
-          break;
-        }
-        if (
-          next.externalIntegration &&
-          (next.externalIntegration.commandKind === 'get-response' ||
-            next.externalIntegration.commandKind === 'readvar')
+          (next.externalIntegration &&
+            (next.externalIntegration.commandKind === 'get-response' ||
+              next.externalIntegration.commandKind === 'readvar')) ||
+          (isSameSection && nextIsRawResponseCmd)
         ) {
           foundResponse = true;
-          // Inherit template/channel/provider context on paired GET RESPONSE for richer visualization
-          if (ext.isFlixcheck && !next.externalIntegration.isFlixcheck) {
-            next.externalIntegration.isFlixcheck = true;
-            next.externalIntegration.provider = 'flixcheck';
-          }
-          if (!next.externalIntegration.templateId && ext.templateId) {
-            next.externalIntegration.templateId = ext.templateId;
-          }
-          if (next.externalIntegration.channel === 'unknown' && ext.channel !== 'unknown') {
-            next.externalIntegration.channel = ext.channel;
-            next.externalIntegration.channelLabel = ext.channelLabel;
-          }
-          if (next.externalIntegration.apiVersion === 'via-provider' && ext.apiVersion !== 'via-provider') {
-            next.externalIntegration.apiVersion = ext.apiVersion;
-            next.externalIntegration.endpointPath = ext.endpointPath;
+          if (!next.externalIntegration && nextIsRawResponseCmd) {
+            next.externalIntegration = {
+              provider: ext.provider,
+              providerId: ext.providerId,
+              isFlixcheck: ext.isFlixcheck,
+              commandKind: /^READVAR\b/i.test(next.hdxAction || '') ? 'readvar' : 'get-response',
+              action: 'get-check',
+              actionLabel: ext.isFlixcheck ? 'Check-Status / Antwort lesen' : 'API-Antwort lesen',
+              channel: ext.channel,
+              channelLabel: ext.channelLabel,
+              templateId: ext.templateId,
+              endpointPath: ext.endpointPath,
+              apiVersion: ext.apiVersion,
+            };
+          } else if (next.externalIntegration) {
+            if (ext.isFlixcheck && !next.externalIntegration.isFlixcheck) {
+              next.externalIntegration.isFlixcheck = true;
+              next.externalIntegration.provider = 'flixcheck';
+            }
+            if (!next.externalIntegration.templateId && ext.templateId) {
+              next.externalIntegration.templateId = ext.templateId;
+            }
+            if (next.externalIntegration.channel === 'unknown' && ext.channel !== 'unknown') {
+              next.externalIntegration.channel = ext.channel;
+              next.externalIntegration.channelLabel = ext.channelLabel;
+            }
+            if (next.externalIntegration.apiVersion === 'via-provider' && ext.apiVersion !== 'via-provider') {
+              next.externalIntegration.apiVersion = ext.apiVersion;
+              next.externalIntegration.endpointPath = ext.endpointPath;
+            }
           }
         }
-        const condAndLine = `${next.condition || ''} ${next.stepName || ''} ${next.rawLine || ''}`;
+
+        const condAndLine = `${next.condition || ''} ${next.stepName || ''} ${next.eventName || ''} ${next.sectionName || ''} ${next.rawLine || ''}`;
         if (RESPONSE_STATUS_COND_RE.test(condAndLine)) {
           foundResponse = true;
         }
         if (
-          ERROR_OR_FALLBACK_COND_RE.test(condAndLine) &&
-          (next.queueTarget || next.targetNumber || next.announcement || next.isDisconnect)
+          (ERROR_OR_FALLBACK_COND_RE.test(condAndLine) || Boolean(next.eventName)) &&
+          (next.queueTarget ||
+            next.targetNumber ||
+            next.announcement ||
+            next.isDisconnect ||
+            next.loopSectionTarget)
         ) {
           foundErrorFallback = true;
         }
@@ -486,9 +528,10 @@ export function analyzeModuleExternalApiHealth(mod: ScriptModule): CallflowHealt
     }
 
     // 3. Synchronous SEND REQUEST without GET RESPONSE or error/timeout fallback
+    //    Strictly scoped to genuine FlixCheck / external HTTP-API integrations and deduplicated per module
     if (ext.commandKind === 'send-request' || ext.commandKind === 'host-call') {
       if (ext.hasResponseHandler === false) {
-        pushUnique(`noresp:${mod.scriptNumber}:${rule.id}`, {
+        pushUnique(`noresp:${mod.scriptNumber}`, {
           id: `health-api-noresp-${mod.scriptNumber}-${rule.id}`,
           severity: 'warning',
           category: 'external-api',
@@ -496,13 +539,13 @@ export function analyzeModuleExternalApiHealth(mod: ScriptModule): CallflowHealt
           scriptName: mod.scriptName,
           ruleId: rule.id,
           prio: rule.prio,
-          title: `SEND REQUEST ohne GET RESPONSE / Statusprüfung in [${mod.scriptNumber}]`,
-          description: `Prio ${rule.prio} (${rule.stepName}) sendet eine synchrone HDX-Anfrage, aber im Anschluss wurden weder GET RESPONSE / READVAR noch eine Statusprüfung erkannt.`,
+          title: `${ext.isFlixcheck ? 'FlixCheck' : 'API'}: SEND REQUEST ohne GET RESPONSE / Statusprüfung in [${mod.scriptNumber}]`,
+          description: `Prio ${rule.prio} (${rule.stepName}) sendet eine synchrone ${ext.isFlixcheck ? 'FlixCheck-' : 'API-'}Anfrage, aber im Anschluss wurden weder GET RESPONSE / READVAR noch eine Statusprüfung erkannt.`,
           recommendation:
             'Antwort mit GET RESPONSE entgegennehmen und Erfolgs- sowie Timeout-/Fehlerpfade explizit verzweigen (oder SEND INFO für Fire-and-Forget verwenden).',
         });
       } else if (ext.hasErrorFallback === false) {
-        pushUnique(`nofallback:${mod.scriptNumber}:${rule.id}`, {
+        pushUnique(`nofallback:${mod.scriptNumber}`, {
           id: `health-api-nofallback-${mod.scriptNumber}-${rule.id}`,
           severity: 'warning',
           category: 'external-api',
@@ -510,21 +553,21 @@ export function analyzeModuleExternalApiHealth(mod: ScriptModule): CallflowHealt
           scriptName: mod.scriptName,
           ruleId: rule.id,
           prio: rule.prio,
-          title: `Fehlender Fehler-/Timeout-Fallback nach API-Aufruf in [${mod.scriptNumber}]`,
-          description: `Nach dem synchronen ${ext.isFlixcheck ? 'FlixCheck-' : 'HDX-'}Aufruf (Prio ${rule.prio}) wurde zwar eine Antwort gelesen, aber kein expliziter Fehler- oder Timeout-Fallback (z. B. Agenten-Queue oder Ansage) erkannt.`,
+          title: `${ext.isFlixcheck ? 'FlixCheck' : 'API'}: Fehlender Fehler-/Timeout-Fallback in [${mod.scriptNumber}]`,
+          description: `Nach dem synchronen ${ext.isFlixcheck ? 'FlixCheck-' : 'API-'}Aufruf (Prio ${rule.prio}) wurde zwar eine Antwort gelesen, aber kein expliziter Fehler- oder Timeout-Fallback (z. B. Agenten-Queue, Subskript oder Ansage) erkannt.`,
           recommendation:
-            'Für HTTP-Fehler (4xx/5xx) oder HDX-Timeouts einen klaren ELSE-Fallback auf eine Warteschlange oder Entschuldigungsansage definieren.',
+            'Für API-Fehler (4xx/5xx) oder Timeouts einen klaren ELSE-Fallback auf eine Warteschlange oder Entschuldigungsansage definieren.',
         });
       }
     }
 
-    // 4. FlixCheck create-check missing templateId or channel info
+    // 4. FlixCheck create-check missing templateId or channel info (deduplicated per module)
     if (ext.isFlixcheck && ext.action === 'create-check') {
       const missingFields: string[] = [];
       if (!ext.templateId) missingFields.push('Template-ID');
       if (ext.channel === 'unknown') missingFields.push('Versandkanal (SMS / WhatsApp / E-Mail)');
       if (missingFields.length > 0) {
-        pushUnique(`missing-params:${mod.scriptNumber}:${rule.id}`, {
+        pushUnique(`missing-params:${mod.scriptNumber}`, {
           id: `health-api-params-${mod.scriptNumber}-${rule.id}`,
           severity: 'info',
           category: 'external-api',

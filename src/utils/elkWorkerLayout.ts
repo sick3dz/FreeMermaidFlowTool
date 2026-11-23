@@ -643,7 +643,7 @@ function getBuilderNodeColors(
       ? { fill: '#064e3b', stroke: '#10b981' }
       : { fill: '#ecfdf5', stroke: '#059669' };
   }
-  if (/flixcheck|📲|🔌|send\s+request|get\s+response|hdx-connector/.test(lbl)) {
+  if (/flixcheck|📲|🔌|hdx-connector/.test(lbl)) {
     return isDark
       ? { fill: '#083344', stroke: '#06b6d4' }
       : { fill: '#ecfeff', stroke: '#0891b2' };
