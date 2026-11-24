@@ -139,6 +139,7 @@ import {
   EditableNodeConnectionItem,
   exportMigrationDocumentationMarkdown,
   exportOpeningHoursCsv,
+  exportOpeningHoursXlsx,
   exportRoutingMatrixCsv,
   extractScriptNumberFromNodeId,
   extractWorkspaceResourceRegistry,
@@ -2033,12 +2034,22 @@ function OfflineStudioApp() {
     [callflowViewLevel, callflowGraph, handleFocusNodeOnCanvas]
   );
 
+  const handleExportOpeningHoursXlsx = useCallback(async () => {
+    if (scriptWorkspace.modules.length === 0) return;
+    const blob = await exportOpeningHoursXlsx(scriptWorkspace, {
+      diagramTitle: diagramTitle || undefined,
+    });
+    triggerLocalDownload(blob, 'Callflow-Oeffnungszeiten.xlsx');
+  }, [scriptWorkspace, diagramTitle]);
+
   const handleExportOpeningHoursCsv = useCallback(() => {
     if (scriptWorkspace.modules.length === 0) return;
-    const csv = exportOpeningHoursCsv(scriptWorkspace);
+    const csv = exportOpeningHoursCsv(scriptWorkspace, {
+      diagramTitle: diagramTitle || undefined,
+    });
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     triggerLocalDownload(blob, 'Callflow-Oeffnungszeiten.csv');
-  }, [scriptWorkspace]);
+  }, [scriptWorkspace, diagramTitle]);
 
   const handleExportRoutingMatrixCsv = useCallback(() => {
     if (scriptWorkspace.modules.length === 0) return;
@@ -7882,6 +7893,9 @@ function OfflineStudioApp() {
         buildInteractiveHtml={buildInteractiveHtmlForSurface}
         htmlExportProgress={htmlExportProgress}
         onCancelInteractiveHtml={cancelInteractiveHtmlExport}
+        onExportOpeningHoursXlsx={
+          scriptWorkspace.modules.length > 0 ? handleExportOpeningHoursXlsx : undefined
+        }
         onExportOpeningHoursCsv={
           scriptWorkspace.modules.length > 0 ? handleExportOpeningHoursCsv : undefined
         }

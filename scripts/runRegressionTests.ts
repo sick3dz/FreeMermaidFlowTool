@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import JSZip from 'jszip';
 
 import {
   SAMPLE_MULTI_SCRIPT_TEXT,
@@ -17,7 +18,10 @@ import {
   extractScheduleFromSondZeitName,
   resolveScheduleWithSondZeit,
   buildWorkspaceScheduleOverview,
+  buildWorkspaceOpeningHoursBundle,
   exportOpeningHoursCsv,
+  exportOpeningHoursMarkdown,
+  exportOpeningHoursXlsxBytes,
   buildMasterOverviewMermaid,
   buildScriptDetailMermaid,
   extractWorkspaceResourceRegistry,
@@ -32,6 +36,11 @@ import {
   markAvayaWaypointsInWorkspace,
   unmarkAvayaWaypointInWorkspace,
 } from '../src/utils/scriptCallflowParser';
+import {
+  buildOpeningHoursXlsxFileMap,
+  buildStoreZipUint8Array,
+  parseScheduleToWeekdayMatrix,
+} from '../src/utils/openingHoursExporter';
 import {
   buildDeterministicFlowchartSvg,
   parseCallflowGraph,
@@ -225,11 +234,13 @@ runTest('2. Opening hours, SondZeit parsing, ReDoS guard & CSV clock times', () 
 
   const csv = exportOpeningHoursCsv(ws);
   const firstLine = csv.replace(/^\uFEFF/, '').split(/\r?\n/)[0];
-  assert.ok(firstLine.includes('Wochentage'), 'CSV header must include Wochentage');
-  assert.ok(firstLine.includes('Uhrzeiten'), 'CSV header must include Uhrzeiten');
-  assert.ok(firstLine.includes('Öffnungszeiten (Gesamt)'), 'CSV header must include Öffnungszeiten (Gesamt)');
-  assert.ok(firstLine.includes('SondZeit / Zeitplan-Ref'), 'CSV header must include SondZeit / Zeitplan-Ref');
-  assert.match(csv, /\d{1,2}:\d{2}[–-]\d{1,2}:\d{2}/, 'CSV body must contain formatted clock-time ranges');
+  assert.ok(firstLine.includes('Skript-Nr.'), 'CSV header must include Skript-Nr.');
+  assert.ok(firstLine.includes('Kategorie'), 'CSV header must include Kategorie');
+  assert.ok(firstLine.includes('Mo;Di;Mi;Do;Fr;Sa;So'), 'CSV header must include Mo–So weekday matrix columns');
+  assert.ok(firstLine.includes('SondZeit / Quelle'), 'CSV header must include SondZeit / Quelle');
+  assert.ok(firstLine.includes('Feiertag / Sonderstatus'), 'CSV header must include Feiertag / Sonderstatus');
+  assert.ok(firstLine.includes('Überlauf / Ansage / Ziel'), 'CSV header must include Überlauf / Ansage / Ziel');
+  assert.match(csv, /\d{2}:\d{2}[–-]\d{2}:\d{2}/, 'CSV body must contain formatted clock-time ranges');
 });
 
 // 3. Mermaid generation, branch label bugfix & manual link escaping
@@ -1397,6 +1408,122 @@ async function finalizeSuite() {
         oracleItem?.status,
         'waypoint',
         'Agent_Queuing_Oracle without local .s file must remain "waypoint"'
+      );
+    }
+  );
+
+  // 16. Structured Opening Hours Export: Mo–So Matrix, 24/7 Separation, 4-Sheet .xlsx Workbook & Callflow.html Parity
+  await runAsyncTest(
+    '16. Opening Hours Mo–So matrix, 24/7 separation, native 4-sheet .xlsx & Callflow.html parity',
+    async () => {
+      // A. Mo–So matrix parser edge cases
+      const splitWeek = parseScheduleToWeekdayMatrix('Mo–Do 08:00–17:00, Fr 08:00–15:00', true);
+      assert.equal(splitWeek.Mo, '08:00–17:00');
+      assert.equal(splitWeek.Do, '08:00–17:00');
+      assert.equal(splitWeek.Fr, '08:00–15:00');
+      assert.equal(splitWeek.Sa, 'Geschlossen');
+      assert.equal(splitWeek.So, 'Geschlossen');
+
+      const lunchBreak = parseScheduleToWeekdayMatrix('Mo–Fr 08:00–12:00, 13:00–17:00', true);
+      assert.equal(lunchBreak.Mo, '08:00–12:00, 13:00–17:00');
+      assert.equal(lunchBreak.Sa, 'Geschlossen');
+
+      const unresolvedSz = parseScheduleToWeekdayMatrix('SondZeit_Extern_CCMA_Unbekannt', true);
+      assert.equal(unresolvedSz.Mo, '—', 'Unresolved CCMA SondZeit must conservatively stay "—"');
+      assert.equal(unresolvedSz.Sa, '—', 'Unresolved CCMA SondZeit must not falsely claim Geschlossen');
+
+      // B. Consolidated 1-row-per-script bundle + 24/7 separation + dedicated holiday entries
+      const modules = parseCallflowTextWithFallback(buildSyntheticMultiScriptFixture(), { isMasterHint: true });
+      const ws = buildScriptWorkspace(modules);
+      const bundle = buildWorkspaceOpeningHoursBundle(ws, { diagramTitle: 'Test-Callflow' });
+
+      assert.equal(
+        bundle.allMatrixRows.length,
+        ws.modules.length,
+        'Matrix must consolidate strictly to 1 row per script module'
+      );
+      assert.ok(bundle.activeMatrixRows.length >= 1, 'Expected active scripts with opening hours/SondZeit');
+      assert.ok(bundle.alwaysOpenRows.length >= 1, 'Expected separated 24/7 scripts');
+      assert.equal(
+        bundle.activeMatrixRows.some((r) => r.category === 'always-open'),
+        false,
+        'activeMatrixRows must never mix in 24/7 scripts'
+      );
+
+      const sampleWs = buildScriptWorkspace(
+        parseCallflowTextWithFallback(SAMPLE_MULTI_SCRIPT_TEXT, { isMasterHint: true })
+      );
+      const sampleBundle = buildWorkspaceOpeningHoursBundle(sampleWs, { diagramTitle: 'Sample-Callflow' });
+      assert.ok(
+        sampleBundle.holidayEntries.length >= 1,
+        'Expected dedicated holiday entries from SAMPLE_MULTI_SCRIPT_TEXT'
+      );
+
+      // C. CSV with & without 24/7
+      const csvAll = exportOpeningHoursCsv(ws, { includeAlwaysOpen: true });
+      const csvNo247 = exportOpeningHoursCsv(ws, { includeAlwaysOpen: false });
+      const allLineCount = csvAll.replace(/^\uFEFF/, '').split(/\r?\n/).length;
+      const no247LineCount = csvNo247.replace(/^\uFEFF/, '').split(/\r?\n/).length;
+      assert.equal(allLineCount, 1 + bundle.allMatrixRows.length, 'Full CSV must have header + 1 row per script');
+      assert.equal(no247LineCount, 1 + bundle.activeMatrixRows.length, 'Filtered CSV must exclude 24/7 scripts');
+      assert.equal(csvNo247.includes('24/7 (Ohne Zeitplan)'), false, 'Filtered CSV must not contain 24/7 rows');
+
+      // D. Compact Markdown
+      const md = exportOpeningHoursMarkdown(ws, { includeAlwaysOpen: true });
+      assert.ok(md.includes('## 1. Skripte mit Öffnungszeiten, SondZeit & Feiertagen'));
+      assert.ok(md.includes('## 2. 24/7-Skripte (Ohne Zeitbeschränkung)'));
+
+      // E. Native compressed .xlsx workbook (4 sheets with 24/7, 3 sheets without 24/7)
+      const xlsxFullBytes = await exportOpeningHoursXlsxBytes(ws, {
+        includeAlwaysOpen: true,
+        diagramTitle: 'Test-Callflow',
+      });
+      const zipFull = await JSZip.loadAsync(xlsxFullBytes);
+      const wbXmlFull = await zipFull.file('xl/workbook.xml')?.async('string');
+      assert.ok(wbXmlFull, 'xlsx archive must contain xl/workbook.xml');
+      assert.ok(wbXmlFull!.includes('Öffnungszeiten (Mo-So)'), 'Sheet 1 missing');
+      assert.ok(wbXmlFull!.includes('Feiertage &amp; SondZeit'), 'Sheet 2 missing');
+      assert.ok(wbXmlFull!.includes('24-7 &amp; Ohne Zeitplan'), 'Sheet 3 missing');
+      assert.ok(wbXmlFull!.includes('Regel-Details'), 'Sheet 4 missing');
+      const sheet1Xml = await zipFull.file('xl/worksheets/sheet1.xml')?.async('string');
+      assert.ok(sheet1Xml?.includes('state="frozen"'), 'Sheet 1 must have frozen header rows');
+      assert.ok(sheet1Xml?.includes('<autoFilter '), 'Sheet 1 must have AutoFilter');
+
+      const xlsxNo247Bytes = await exportOpeningHoursXlsxBytes(ws, { includeAlwaysOpen: false });
+      const zipNo247 = await JSZip.loadAsync(xlsxNo247Bytes);
+      const wbXmlNo247 = await zipNo247.file('xl/workbook.xml')?.async('string');
+      assert.equal(
+        wbXmlNo247?.includes('24-7 &amp; Ohne Zeitplan'),
+        false,
+        'When includeAlwaysOpen=false, Sheet 3 must be omitted'
+      );
+
+      // F. Zero-dependency STORE-mode ZIP builder (used inside standalone Callflow.html)
+      const fileMap = buildOpeningHoursXlsxFileMap(bundle, { includeAlwaysOpen: true });
+      const storeZipBytes = buildStoreZipUint8Array(fileMap);
+      const parsedStoreZip = await JSZip.loadAsync(storeZipBytes);
+      const storeWbXml = await parsedStoreZip.file('xl/workbook.xml')?.async('string');
+      assert.equal(storeWbXml, fileMap['xl/workbook.xml'], 'STORE-mode ZIP must decode identically via JSZip');
+
+      // G. Standalone Callflow.html embeds openingHoursBundle + offline .xlsx runtime
+      const masterMermaid = buildMasterOverviewMermaid(ws, 'LR', { compact: false });
+      const graph = parseCallflowGraph(masterMermaid);
+      const svg = buildDeterministicFlowchartSvg(graph, 'dark');
+      const html = generateInteractiveCallflowHtml('Test-Callflow', svg, graph, 'dark', {
+        analysis: {
+          openIssues: [],
+          healthFindings: [],
+          scheduleRows: buildWorkspaceScheduleOverview(ws),
+          registry: extractWorkspaceResourceRegistry(ws),
+          routingMatrixRows: buildWorkspaceRoutingMatrix(ws),
+        },
+      });
+      assert.ok(html.includes('"openingHoursBundle"'), 'Callflow.html must embed openingHoursBundle');
+      assert.ok(html.includes('id="btn-modal-xlsx"'), 'Callflow.html modal must include Excel (.xlsx) button');
+      assert.ok(html.includes('id="btn-modal-hide-247"'), 'Callflow.html modal must include 24/7 hide toggle');
+      assert.ok(
+        html.includes('downloadOpeningHoursXlsxFromBundle'),
+        'Callflow.html must include offline XLSX generator runtime'
       );
     }
   );

@@ -20,6 +20,8 @@ import {
   ExternalApiIntegrationMeta,
   MasterScriptChecklistItem,
   NodePositionOffset,
+  OpeningHoursExportBundle,
+  OpeningHoursExportOptions,
   ResolvedIssueRecord,
   ScriptChoiceOption,
   ScriptManualLink,
@@ -37,6 +39,13 @@ import {
   isHardcodedApiSecretAssignment,
   redactPotentialSecrets,
 } from './flixcheckSpec';
+import {
+  buildOpeningHoursBundleFromWorkspace,
+  exportOpeningHoursXlsxBlob,
+  exportOpeningHoursXlsxUint8Array,
+  formatOpeningHoursMatrixCsv,
+  formatOpeningHoursMatrixMarkdown,
+} from './openingHoursExporter';
 
 export const SAMPLE_MULTI_SCRIPT_TEXT = `=== Main ===
 Prio: 1 | Name: Zeitplan & Feiertagsprüfung | Zeitplan: Mo-Fr 08:00-18:00 | Feiertag: 9900 | Wohin: Schaltung1
@@ -9293,21 +9302,33 @@ export function exportMigrationDocumentationMarkdown(
     md.push('');
   }
 
-  // 2.4 Öffnungszeiten & Feiertags-Übersicht
-  const scheduleRows = buildWorkspaceScheduleOverview(workspace);
-  md.push('### 2.4 Öffnungszeiten & Feiertags-Übersicht');
-  if (scheduleRows.length === 0) {
+  // 2.4 Öffnungszeiten & Feiertags-Übersicht (kompakte Mo–So Wochenmatrix pro Skript)
+  const scheduleBundle = buildWorkspaceOpeningHoursBundle(workspace);
+  md.push('### 2.4 Öffnungszeiten & Feiertags-Übersicht (Wochenmatrix Mo–So)');
+  if (scheduleBundle.allMatrixRows.length === 0) {
     md.push('_Keine Skripte im Arbeitsbereich vorhanden._');
   } else {
-    md.push(
-      '| Skript | Schritt / Regel | Öffnungszeiten | Feiertag / Sonderzeit | Aktion / Überlauf / Ziel |'
-    );
-    md.push('| --- | --- | --- | --- | --- |');
-    scheduleRows.forEach((sr) => {
+    if (scheduleBundle.activeMatrixRows.length > 0) {
       md.push(
-        `| \`[${sr.scriptNumber}]\` ${sr.scriptName} | ${sr.prio !== undefined ? `Prio ${sr.prio}: ` : ''}${sr.stepName} | ${sr.openingHours} | ${sr.holidayAndSpecial} | ${sr.closedOrOverflowAction} |`
+        '| Skript | Kategorie | Mo | Di | Mi | Do | Fr | Sa | So | SondZeit / Quelle | Feiertag | Überlauf / Ziel |'
       );
-    });
+      md.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+      scheduleBundle.activeMatrixRows.forEach((sr) => {
+        md.push(
+          `| \`[${sr.scriptNumber}]\` ${sr.scriptName} | ${sr.categoryLabel} | ${sr.days.Mo} | ${sr.days.Di} | ${sr.days.Mi} | ${sr.days.Do} | ${sr.days.Fr} | ${sr.days.Sa} | ${sr.days.So} | ${sr.sondZeitSource} | ${sr.holidaySummary} | ${sr.overflowSummary} |`
+        );
+      });
+    } else {
+      md.push('_Keine zeitlich begrenzten Skripte oder Feiertagsprüfungen erkannt._');
+    }
+    if (scheduleBundle.alwaysOpenRows.length > 0) {
+      md.push('');
+      md.push(
+        `**24/7-Skripte ohne Zeitbeschränkung (${scheduleBundle.alwaysOpenRows.length}):** ${scheduleBundle.alwaysOpenRows
+          .map((r) => `\`[${r.scriptNumber}]\` ${r.scriptName}`)
+          .join(', ')}`
+      );
+    }
   }
   md.push('');
 
@@ -9644,70 +9665,59 @@ export function buildWorkspaceScheduleOverview(
 }
 
 /**
- * Exportiert die Öffnungszeiten- und Feiertags-Übersicht als UTF-8 CSV (mit BOM für Excel)
- * inkl. expliziter Spalten für Wochentage, Uhrzeiten und SondZeit-Referenz.
+ * Erstellt das konsolidierte Öffnungszeiten-Exportpaket (1 Zeile pro Skript mit Mo–So-Matrix,
+ * getrennten SondZeit-/Feiertags-Bereichen, 24/7-Abtrennung und deduplizierten Regel-Details).
  */
-export function exportOpeningHoursCsv(workspace: ScriptWorkspace): string {
-  const rows = buildWorkspaceScheduleOverview(workspace);
-  const escapeCsvCell = (val: string | number): string => {
-    const str = String(val ?? '').replace(/\r?\n/g, ' ');
-    if (/[;,"\t]/.test(str)) {
-      return `"${str.replace(/"/g, '""')}"`;
-    }
-    return str;
-  };
+export function buildWorkspaceOpeningHoursBundle(
+  workspace: ScriptWorkspace,
+  options?: OpeningHoursExportOptions
+): OpeningHoursExportBundle {
+  return buildOpeningHoursBundleFromWorkspace(workspace, buildWorkspaceScheduleOverview, options);
+}
 
-  const headers = [
-    'Skript-Nr.',
-    'Skript-Name',
-    'Prio',
-    'Schritt / Regel',
-    'Wochentage',
-    'Uhrzeiten',
-    'Öffnungszeiten (Gesamt)',
-    'SondZeit / Zeitplan-Ref',
-    'Feiertag / Sonderzeit',
-    'Aktion / Überlauf / Ziel',
-    'Status',
-  ];
+/**
+ * Exportiert die bereinigte Öffnungszeiten-Wochenmatrix (1 Zeile pro Skript, Mo–So Spalten)
+ * als UTF-8 CSV (mit BOM & Semikolon für Excel).
+ */
+export function exportOpeningHoursCsv(
+  workspace: ScriptWorkspace,
+  options?: OpeningHoursExportOptions
+): string {
+  const bundle = buildWorkspaceOpeningHoursBundle(workspace, options);
+  return formatOpeningHoursMatrixCsv(bundle, options);
+}
 
-  const lines = [
-    headers.map(escapeCsvCell).join(';'),
-    ...rows.map((r) => {
-      const fallbackParts =
-        r.weekdays && r.clockTimes
-          ? {
-              openingHours: r.openingHours,
-              weekdays: r.weekdays,
-              clockTimes: r.clockTimes,
-              scheduleSource: r.scheduleSource || '—',
-            }
-          : splitOpeningHoursComponents(r.openingHours, r.hasSchedule);
-      return [
-        r.scriptNumber,
-        r.scriptName,
-        r.prio ?? '—',
-        r.stepName,
-        fallbackParts.weekdays,
-        fallbackParts.clockTimes,
-        fallbackParts.openingHours,
-        fallbackParts.scheduleSource,
-        r.holidayAndSpecial,
-        r.closedOrOverflowAction,
-        r.hasSchedule && r.hasHoliday
-          ? 'Öffnungszeiten + Feiertag'
-          : r.hasSchedule
-          ? 'Öffnungszeiten hinterlegt'
-          : r.hasHoliday
-          ? 'Feiertag / Sonderzeit'
-          : 'Ohne Zeitangabe (24/7)',
-      ]
-        .map(escapeCsvCell)
-        .join(';');
-    }),
-  ];
+/**
+ * Exportiert die konsolidierte Öffnungszeiten-Wochenmatrix als kompaktes Markdown.
+ */
+export function exportOpeningHoursMarkdown(
+  workspace: ScriptWorkspace,
+  options?: OpeningHoursExportOptions
+): string {
+  const bundle = buildWorkspaceOpeningHoursBundle(workspace, options);
+  return formatOpeningHoursMatrixMarkdown(bundle, options);
+}
 
-  return `\uFEFF${lines.join('\r\n')}`;
+/**
+ * Exportiert das formatierte Mehrblatt-Excel-Workbook (.xlsx) als Uint8Array.
+ */
+export async function exportOpeningHoursXlsxBytes(
+  workspace: ScriptWorkspace,
+  options?: OpeningHoursExportOptions
+): Promise<Uint8Array> {
+  const bundle = buildWorkspaceOpeningHoursBundle(workspace, options);
+  return exportOpeningHoursXlsxUint8Array(bundle, options);
+}
+
+/**
+ * Exportiert das formatierte Mehrblatt-Excel-Workbook (.xlsx) als Browser-Blob.
+ */
+export async function exportOpeningHoursXlsx(
+  workspace: ScriptWorkspace,
+  options?: OpeningHoursExportOptions
+): Promise<Blob> {
+  const bundle = buildWorkspaceOpeningHoursBundle(workspace, options);
+  return exportOpeningHoursXlsxBlob(bundle, options);
 }
 
 export interface EditableNodeConnectionItem {

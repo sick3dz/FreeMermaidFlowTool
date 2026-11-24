@@ -496,6 +496,78 @@ export interface CallflowScheduleSummaryRow {
   hasHoliday: boolean;
 }
 
+export type WeekdayKey = 'Mo' | 'Di' | 'Mi' | 'Do' | 'Fr' | 'Sa' | 'So';
+
+export type OpeningHoursCategory = 'hours' | 'sondzeit' | 'holiday' | 'always-open';
+
+export type WeekdayScheduleMatrix = Record<WeekdayKey, string>;
+
+export interface ConsolidatedScriptScheduleRow {
+  scriptNumber: string;
+  scriptName: string;
+  isMaster: boolean;
+  category: OpeningHoursCategory;
+  categoryLabel: string;
+  days: WeekdayScheduleMatrix;
+  compactScheduleSummary: string;
+  sondZeitSource: string;
+  holidaySummary: string;
+  overflowSummary: string;
+  hasSchedule: boolean;
+  hasHoliday: boolean;
+  isSondZeit: boolean;
+  ruleCount: number;
+  detailRows: CallflowScheduleSummaryRow[];
+}
+
+export interface SondZeitProfileSummary {
+  profileName: string;
+  sourceType: 'SondZeit-Plan' | 'Feste Dienstzeit';
+  resolvedSchedule: string;
+  days: WeekdayScheduleMatrix;
+  scriptCount: number;
+  scripts: Array<{ scriptNumber: string; scriptName: string }>;
+  scriptsList: string;
+  overflowSummary: string;
+}
+
+export interface HolidayRuleSummary {
+  scriptNumber: string;
+  scriptName: string;
+  holidayCondition: string;
+  actionSummary: string;
+  linkedSchedule: string;
+}
+
+export interface OpeningHoursExportBundle {
+  generatedAt: string;
+  diagramTitle?: string;
+  totalScripts: number;
+  activeMatrixRows: ConsolidatedScriptScheduleRow[];
+  alwaysOpenRows: ConsolidatedScriptScheduleRow[];
+  allMatrixRows: ConsolidatedScriptScheduleRow[];
+  sondZeitProfiles: SondZeitProfileSummary[];
+  holidayEntries: HolidayRuleSummary[];
+  detailRows: CallflowScheduleSummaryRow[];
+  stats: {
+    totalScripts: number;
+    withHours: number;
+    withSondZeit: number;
+    withHoliday: number;
+    alwaysOpen: number;
+    detailRuleCount: number;
+  };
+}
+
+export interface OpeningHoursExportOptions {
+  /** If false, 24/7 scripts are omitted from CSV/Markdown and Blatt 3 in Excel. Default: true */
+  includeAlwaysOpen?: boolean;
+  /** Optional title shown in Excel workbook banner & Markdown heading */
+  diagramTitle?: string;
+  /** Optional pre-filtered subset of raw schedule rows (e.g., active modal search/filter) */
+  rowsOverride?: CallflowScheduleSummaryRow[];
+}
+
 export interface OfflineWorkspaceSeed {
   seedId: string;
   exportedAt: string;

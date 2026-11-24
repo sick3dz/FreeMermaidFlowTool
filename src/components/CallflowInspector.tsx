@@ -51,6 +51,7 @@ import {
   canonicalScriptMatchKey,
   exportMigrationDocumentationMarkdown,
   exportOpeningHoursCsv,
+  exportOpeningHoursXlsx,
   exportRoutingMatrixCsv,
   extractScriptNumberFromNodeId,
   extractScriptSpecialParameters,
@@ -463,6 +464,18 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
       );
     });
   }, [scheduleOverviewRows, scheduleFilter, scheduleSearch]);
+
+  const handleDownloadOpeningHoursXlsx = async () => {
+    const blob = await exportOpeningHoursXlsx(scriptWorkspace);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `callflow-oeffnungszeiten-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   const handleDownloadOpeningHoursCsv = () => {
     const csv = exportOpeningHoursCsv(scriptWorkspace);
@@ -2578,14 +2591,24 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
               </div>
             ) : (
               <>
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center justify-between gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleDownloadOpeningHoursXlsx}
+                    title="Formatiertes Excel-Workbook (.xlsx) mit Mo–So Matrix, Feiertagen, 24/7 und Regel-Details"
+                    className="flex-1 py-2 px-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Download className="w-3.5 h-3.5 shrink-0" />
+                    <span>Excel-Workbook (.xlsx)</span>
+                  </button>
                   <button
                     type="button"
                     onClick={handleDownloadOpeningHoursCsv}
-                    className="w-full py-2 px-3 bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                    title="Bereinigte Mo–So Matrix als CSV speichern"
+                    className="py-2 px-2.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium rounded-lg transition-colors flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Öffnungszeiten-Liste für Excel speichern (.csv)</span>
+                    <Download className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <span>CSV</span>
                   </button>
                 </div>
 

@@ -58,6 +58,7 @@ interface ExportModalProps {
   }>;
   htmlExportProgress?: HtmlExportProgress | null;
   onCancelInteractiveHtml?: () => void;
+  onExportOpeningHoursXlsx?: () => void | Promise<void>;
   onExportOpeningHoursCsv?: () => void;
   onExportRoutingMatrixCsv?: () => void;
   onExportMarkdownDoc?: () => void;
@@ -81,6 +82,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   buildInteractiveHtml,
   htmlExportProgress = null,
   onCancelInteractiveHtml,
+  onExportOpeningHoursXlsx,
   onExportOpeningHoursCsv,
   onExportRoutingMatrixCsv,
   onExportMarkdownDoc,
@@ -500,12 +502,38 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           </div>
 
           {/* Workspace Documentation & Tables Export */}
-          {(onExportOpeningHoursCsv || onExportRoutingMatrixCsv || onExportMarkdownDoc) && (
+          {(onExportOpeningHoursXlsx ||
+            onExportOpeningHoursCsv ||
+            onExportRoutingMatrixCsv ||
+            onExportMarkdownDoc) && (
             <div className="pt-4 border-t border-slate-800 space-y-2.5">
               <div className="text-xs font-medium text-slate-300">
                 Dokumentation &amp; Tabellen (direkter Download)
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {onExportOpeningHoursXlsx && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await onExportOpeningHoursXlsx();
+                      setExportStatus(
+                        'Öffnungszeiten-Excel (Callflow-Oeffnungszeiten.xlsx · 4 Blätter) heruntergeladen.'
+                      );
+                      setTimeout(() => setExportStatus(null), 3200);
+                    }}
+                    className="px-3 py-2.5 rounded-lg bg-emerald-950/35 border border-emerald-500/40 hover:border-emerald-400/70 text-left transition-colors flex items-center gap-2.5 cursor-pointer"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-emerald-100 truncate">
+                        Öffnungszeiten (Excel .xlsx)
+                      </div>
+                      <div className="text-[11px] text-emerald-300/80 truncate">
+                        Mo–So Matrix · Feiertage · 24/7 · Details
+                      </div>
+                    </div>
+                  </button>
+                )}
                 {onExportOpeningHoursCsv && (
                   <button
                     type="button"
@@ -522,7 +550,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                         Öffnungszeiten (CSV)
                       </div>
                       <div className="text-[11px] text-slate-400 truncate">
-                        Excel-Tabelle aller Zeiten
+                        Bereinigte Mo–So Wochenmatrix
                       </div>
                     </div>
                   </button>
@@ -556,9 +584,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                       setExportStatus('Migrations-Dokumentation (Callflow-Dokumentation.md) heruntergeladen.');
                       setTimeout(() => setExportStatus(null), 3000);
                     }}
-                    className="px-3 py-2.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-emerald-500/60 text-left transition-colors flex items-center gap-2.5 cursor-pointer"
+                    className="px-3 py-2.5 rounded-lg bg-slate-950 border border-slate-800 hover:border-sky-500/60 text-left transition-colors flex items-center gap-2.5 cursor-pointer"
                   >
-                    <FileText className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <FileText className="w-4 h-4 text-sky-400 shrink-0" />
                     <div className="min-w-0">
                       <div className="text-xs font-semibold text-slate-100 truncate">
                         Gesamt-Doku (Markdown)

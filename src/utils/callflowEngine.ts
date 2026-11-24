@@ -14,6 +14,7 @@ import {
   CallflowScriptParameterItem,
   CallflowTraceResult,
   NodePositionOffset,
+  OpeningHoursExportBundle,
   PathColorMode,
   SmartColorNodeType,
 } from '../types/mermaidStudio';
@@ -26,6 +27,10 @@ import {
   SMART_COLOR_NODE_TYPE_OPTIONS,
 } from './smartColorEngine';
 import { GlobalSearchEntry } from './globalSearchEngine';
+import {
+  buildOpeningHoursExportBundleFromRows,
+  getEmbeddedOpeningHoursExportRuntimeJs,
+} from './openingHoursExporter';
 
 const RESERVED_KEYWORDS = new Set([
   'flowchart',
@@ -3724,6 +3729,7 @@ export interface InteractiveCallflowHtmlAnalysisPayload {
   openIssues: CallflowOpenIssue[];
   healthFindings: CallflowHealthFinding[];
   scheduleRows: CallflowScheduleSummaryRow[];
+  openingHoursBundle?: OpeningHoursExportBundle;
   registry: CallflowResourceRegistry;
   routingMatrixRows: CallflowRoutingMatrixRow[];
   masterScriptNumber?: string;
@@ -3853,6 +3859,17 @@ export function generateInteractiveCallflowHtml(
     drillTargetsByNodeId[`SELF_${suffix}`] = entry;
   });
 
+  const enrichedAnalysis: InteractiveCallflowHtmlAnalysisPayload | null = options?.analysis
+    ? {
+        ...options.analysis,
+        openingHoursBundle:
+          options.analysis.openingHoursBundle ||
+          buildOpeningHoursExportBundleFromRows(options.analysis.scheduleRows || [], {
+            diagramTitle: diagramTitle || undefined,
+          }),
+      }
+    : null;
+
   const scriptCount = effectiveViews.filter((v) => Boolean(v.scriptNumber)).length;
   const safePayloadJson = JSON.stringify({
     views: serializedViews,
@@ -3876,7 +3893,7 @@ export function generateInteractiveCallflowHtml(
     viewKeyByScriptNumber,
     nodeTypeOptions: SMART_COLOR_NODE_TYPE_OPTIONS,
     semanticPalettes: SEMANTIC_PALETTES,
-    analysis: options?.analysis || null,
+    analysis: enrichedAnalysis,
     globalSearchIndex: options?.globalSearchIndex || [],
     includeOriginalScripts: hasOriginalScriptsEnabled,
     rawScriptsByNumber: sanitizedRawScriptsByNumber,
@@ -5618,32 +5635,35 @@ export function generateInteractiveCallflowHtml(
     </div>
   </div>
 
-  <!-- Opening Hours Overview Modal (Zeitprofile + Detail-Tabelle) -->
+  <!-- Opening Hours Overview Modal (Wochenmatrix Mo–So + Zeitprofile + Detail-Regeln) -->
   <div id="schedules-modal-overlay" class="modal-backdrop">
-    <div class="modal-shell" style="max-width:1040px;">
+    <div class="modal-shell" style="max-width:1180px;">
       <div class="modal-header">
         <div>
-          <h2 style="margin:0;font-size:15px;color:var(--text-main);">Öffnungszeiten-Übersicht</h2>
-          <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;font-variant-numeric:tabular-nums;" id="schedules-modal-subtitle">Übersicht aller Zeitprofile &amp; Regeln</div>
+          <h2 style="margin:0;font-size:15px;color:var(--text-main);">Öffnungszeiten-Übersicht &amp; Wochenmatrix (Mo–So)</h2>
+          <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;font-variant-numeric:tabular-nums;" id="schedules-modal-subtitle">Konsolidierte Wochenmatrix pro Skript</div>
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
           <div class="seg-group" id="modal-sched-view-group">
-            <button type="button" class="seg-btn active" data-sview="profiles">Zeitprofile</button>
-            <button type="button" class="seg-btn" data-sview="table">Detail-Tabelle</button>
+            <button type="button" class="seg-btn active" data-sview="matrix">Wochenmatrix (Mo–So)</button>
+            <button type="button" class="seg-btn" data-sview="profiles">Zeitprofile</button>
+            <button type="button" class="seg-btn" data-sview="table">Detail-Regeln</button>
           </div>
           <button type="button" id="btn-close-schedules-modal" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:4px 8px;" title="Schließen (Esc)">✕</button>
         </div>
       </div>
       <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--bg-input);flex-shrink:0;">
-        <input type="text" id="modal-sched-search" placeholder="Skript, Uhrzeit (08:00), Mo-Fr, SondZeit suchen..." style="flex:1;min-width:200px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-main);padding:6px 10px;border-radius:6px;font-size:11.5px;font-family:inherit;outline:none;" />
-        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-          <button type="button" id="btn-modal-md" style="padding:6px 10px;background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-strong);border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Markdown kopieren</button>
-          <button type="button" id="btn-modal-csv" style="padding:6px 11px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Excel CSV</button>
+        <input type="text" id="modal-sched-search" placeholder="Skript, Uhrzeit (08:00), Fr, SondZeit suchen..." style="flex:1;min-width:190px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-main);padding:6px 10px;border-radius:6px;font-size:11.5px;font-family:inherit;outline:none;" />
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap;">
+          <button type="button" id="btn-modal-hide-247" style="padding:6px 10px;background:var(--bg-card);color:var(--text-muted);border:1px solid var(--border-strong);border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;" title="24/7-Skripte aus Vorschau und Export ausblenden">24/7 ausblenden</button>
+          <button type="button" id="btn-modal-md" style="padding:6px 10px;background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-strong);border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">Markdown</button>
+          <button type="button" id="btn-modal-csv" style="padding:6px 10px;background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-strong);border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">CSV</button>
+          <button type="button" id="btn-modal-xlsx" style="padding:6px 12px;background:#059669;color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;" title="Formatiertes 4-Blatt Excel-Workbook (.xlsx) herunterladen">Excel (.xlsx)</button>
         </div>
       </div>
       <div id="modal-sched-cats" style="padding:8px 18px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;gap:6px;background:var(--bg-header);flex-shrink:0;">
         <button type="button" class="chip active" data-cat="all">Alle <span class="cat-cnt"></span></button>
-        <button type="button" class="chip" data-cat="hours">Mit Uhrzeiten <span class="cat-cnt"></span></button>
+        <button type="button" class="chip" data-cat="hours">Dienstzeiten <span class="cat-cnt"></span></button>
         <button type="button" class="chip" data-cat="sondzeit">SondZeit <span class="cat-cnt"></span></button>
         <button type="button" class="chip" data-cat="holiday">Feiertag <span class="cat-cnt"></span></button>
         <button type="button" class="chip" data-cat="always-open">24/7 <span class="cat-cnt"></span></button>
@@ -5842,6 +5862,8 @@ export function generateInteractiveCallflowHtml(
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
+
+${getEmbeddedOpeningHoursExportRuntimeJs()}
 
     function switchAsideTab(tabId) {
       activeAsideTab = tabId;
@@ -7981,12 +8003,14 @@ export function generateInteractiveCallflowHtml(
 
       if (activeAnalysisSubtab === 'schedules') {
         const rows = an ? (an.scheduleRows || []) : [];
+        const ohBundle = an ? an.openingHoursBundle : null;
         const ctrl = document.createElement('div');
         ctrl.className = 'card';
         ctrl.innerHTML =
-          '<div class="row-between" style="margin-bottom:7px;">' +
+          '<div class="row-between" style="margin-bottom:7px;gap:5px;">' +
             '<input type="text" id="an-sched-search" placeholder="Skript, Zeit oder Feiertag suchen..." value="' + esc(anSchedSearch) + '" style="flex:1;" />' +
-            '<button id="btn-csv-schedules">CSV laden</button>' +
+            '<button id="btn-xlsx-schedules" style="background:#059669;color:#fff;border-color:#059669;">Excel .xlsx</button>' +
+            '<button id="btn-csv-schedules">CSV</button>' +
           '</div>' +
           '<div class="filter-chips" id="an-sched-chips">' +
             '<button class="chip' + (anSchedFilter === 'all' ? ' active' : '') + '" data-f="all">Alle (' + rows.length + ')</button>' +
@@ -7997,12 +8021,25 @@ export function generateInteractiveCallflowHtml(
         body.appendChild(ctrl);
         ctrl.querySelector('#an-sched-search').addEventListener('input', e => { anSchedSearch = e.target.value; renderAnalysisTab(); });
         ctrl.querySelectorAll('#an-sched-chips .chip').forEach(c => c.addEventListener('click', () => { anSchedFilter = c.getAttribute('data-f'); renderAnalysisTab(); }));
+        ctrl.querySelector('#btn-xlsx-schedules').addEventListener('click', () => {
+          if (ohBundle) {
+            downloadOpeningHoursXlsxFromBundle(ohBundle, true, 'callflow-oeffnungszeiten.xlsx');
+          }
+        });
         ctrl.querySelector('#btn-csv-schedules').addEventListener('click', () => {
-          downloadUtf8Csv(
-            'callflow-oeffnungszeiten.csv',
-            SCHEDULE_CSV_HEADERS,
-            rows.map(buildScheduleCsvRow)
-          );
+          if (ohBundle) {
+            downloadUtf8Csv(
+              'callflow-oeffnungszeiten.csv',
+              OH_CSV_HEADERS,
+              buildOpeningHoursCsvRowsFromBundle(ohBundle, true)
+            );
+          } else {
+            downloadUtf8Csv(
+              'callflow-oeffnungszeiten.csv',
+              SCHEDULE_CSV_HEADERS,
+              rows.map(buildScheduleCsvRow)
+            );
+          }
         });
 
         if (!an || !rows.length) {
@@ -8263,16 +8300,17 @@ export function generateInteractiveCallflowHtml(
       });
     });
 
-    // === EXTRA FENSTER: ÖFFNUNGSZEITEN-ÜBERSICHT (ZEITPROFILE & DETAIL-TABELLE) ===
-    let schedulesModalView = 'profiles'; // 'profiles' | 'table'
+    // === EXTRA FENSTER: ÖFFNUNGSZEITEN-ÜBERSICHT (WOCHENMATRIX MO–SO, ZEITPROFILE & DETAIL-REGELN) ===
+    let schedulesModalView = 'matrix'; // 'matrix' | 'profiles' | 'table'
     let schedulesModalCategory = 'all'; // 'all' | 'hours' | 'sondzeit' | 'holiday' | 'always-open'
+    let schedulesModalHide247 = false;
 
     function classifyScheduleRow(r) {
       const hoursStr = String(r.openingHours || '').trim();
-      const hasClock = /\\d{1,2}[:.]\\d{2}/.test(hoursStr);
-      const isSond = /sondzeit/i.test(hoursStr) || /sondzeit/i.test(String(r.scriptName || '')) || /sondzeit/i.test(String(r.holidayAndSpecial || ''));
-      if (hasClock) return 'hours';
-      if (isSond) return 'sondzeit';
+      const srcStr = String(r.scheduleSource || '').trim();
+      const isSond = /sondzeit/i.test(srcStr) || /sondzeit/i.test(hoursStr) || /sondzeit/i.test(String(r.scriptName || '')) || /sondzeit/i.test(String(r.scriptNumber || ''));
+      if (r.hasSchedule && isSond) return 'sondzeit';
+      if (r.hasSchedule) return 'hours';
       if (r.hasHoliday) return 'holiday';
       return 'always-open';
     }
@@ -8285,19 +8323,55 @@ export function generateInteractiveCallflowHtml(
       return 'Ohne Zeitbeschränkung (24/7)';
     }
 
+    function getOpeningHoursBundle() {
+      return (PAYLOAD.analysis && PAYLOAD.analysis.openingHoursBundle) || null;
+    }
+
+    function getFilteredMatrixRowsForModal() {
+      const bundle = getOpeningHoursBundle();
+      const allM = bundle ? (bundle.allMatrixRows || []) : [];
+      const q = (document.getElementById('modal-sched-search') ? document.getElementById('modal-sched-search').value : '').trim().toLowerCase();
+      return allM.filter(r => {
+        if (schedulesModalHide247 && r.category === 'always-open' && schedulesModalCategory !== 'always-open') return false;
+        if (schedulesModalCategory === 'hours' && !r.hasSchedule) return false;
+        if (schedulesModalCategory === 'sondzeit' && r.category !== 'sondzeit') return false;
+        if (schedulesModalCategory === 'holiday' && !r.hasHoliday) return false;
+        if (schedulesModalCategory === 'always-open' && r.category !== 'always-open') return false;
+        if (!q) return true;
+        const d = r.days || {};
+        const hay = (
+          String(r.scriptNumber || '') + ' ' +
+          String(r.scriptName || '') + ' ' +
+          String(r.categoryLabel || '') + ' ' +
+          String(r.compactScheduleSummary || '') + ' ' +
+          String(r.sondZeitSource || '') + ' ' +
+          String(r.holidaySummary || '') + ' ' +
+          String(r.overflowSummary || '') + ' ' +
+          OH_WEEKDAYS.map(k => k + ' ' + (d[k] || '')).join(' ')
+        ).toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
     function getFilteredScheduleRowsForModal() {
+      const bundle = getOpeningHoursBundle();
       const an = PAYLOAD.analysis;
-      const rows = an ? (an.scheduleRows || []) : [];
+      const rows = bundle ? (bundle.detailRows || []) : (an ? (an.scheduleRows || []) : []);
       const q = (document.getElementById('modal-sched-search') ? document.getElementById('modal-sched-search').value : '').trim().toLowerCase();
       return rows.filter(r => {
         const cat = classifyScheduleRow(r);
-        if (schedulesModalCategory !== 'all' && cat !== schedulesModalCategory) return false;
+        if (schedulesModalHide247 && cat === 'always-open' && schedulesModalCategory !== 'always-open') return false;
+        if (schedulesModalCategory === 'hours' && !r.hasSchedule) return false;
+        if (schedulesModalCategory === 'sondzeit' && cat !== 'sondzeit') return false;
+        if (schedulesModalCategory === 'holiday' && !r.hasHoliday) return false;
+        if (schedulesModalCategory === 'always-open' && cat !== 'always-open') return false;
         if (!q) return true;
         const hay = (
           String(r.scriptNumber || '') + ' ' +
           String(r.scriptName || '') + ' ' +
           String(r.stepName || '') + ' ' +
           String(r.openingHours || '').replace(/:\\s+/g, ':') + ' ' +
+          String(r.scheduleSource || '') + ' ' +
           String(r.holidayAndSpecial || '') + ' ' +
           String(r.closedOrOverflowAction || '')
         ).toLowerCase();
@@ -8305,16 +8379,47 @@ export function generateInteractiveCallflowHtml(
       });
     }
 
+    function renderDayCellHtml(val) {
+      if (val === 'Geschlossen') return '<span style="color:var(--text-dim);font-style:italic;font-size:10.5px;">Geschl.</span>';
+      if (val === '24/7') return '<span style="font-family:ui-monospace,monospace;font-weight:700;color:#34d399;font-size:11px;">24/7</span>';
+      if (!val || val === '—') return '<span style="color:var(--text-dim);">—</span>';
+      return '<span style="font-family:ui-monospace,monospace;font-weight:600;color:var(--accent-text);font-size:11px;white-space:nowrap;">' + esc(val) + '</span>';
+    }
+
     function renderSchedulesModalContent() {
       const body = document.getElementById('modal-sched-body');
       const subtitle = document.getElementById('schedules-modal-subtitle');
+      const hideBtn = document.getElementById('btn-modal-hide-247');
       if (!body) return;
+      const bundle = getOpeningHoursBundle();
       const an = PAYLOAD.analysis;
-      const allRows = an ? (an.scheduleRows || []) : [];
-      const filtered = getFilteredScheduleRowsForModal();
+      const allRows = bundle ? (bundle.detailRows || []) : (an ? (an.scheduleRows || []) : []);
+      const filteredDetails = getFilteredScheduleRowsForModal();
+      const filteredMatrix = getFilteredMatrixRowsForModal();
 
-      const catCounts = { all: allRows.length, hours: 0, sondzeit: 0, holiday: 0, 'always-open': 0 };
-      allRows.forEach(r => { catCounts[classifyScheduleRow(r)] += 1; });
+      if (hideBtn) {
+        hideBtn.textContent = schedulesModalHide247 ? '24/7 ausgeblendet ✓' : '24/7 ausblenden';
+        hideBtn.style.background = schedulesModalHide247 ? 'rgba(16,185,129,0.18)' : 'var(--bg-card)';
+        hideBtn.style.borderColor = schedulesModalHide247 ? '#10b981' : 'var(--border-strong)';
+        hideBtn.style.color = schedulesModalHide247 ? '#6ee7b7' : 'var(--text-muted)';
+      }
+
+      const st = bundle && bundle.stats
+        ? bundle.stats
+        : {
+            totalScripts: new Set(allRows.map(r => r.scriptNumber)).size,
+            withHours: allRows.filter(r => classifyScheduleRow(r) === 'hours').length,
+            withSondZeit: allRows.filter(r => classifyScheduleRow(r) === 'sondzeit').length,
+            withHoliday: allRows.filter(r => r.hasHoliday).length,
+            alwaysOpen: allRows.filter(r => classifyScheduleRow(r) === 'always-open').length,
+          };
+      const catCounts = {
+        all: st.totalScripts,
+        hours: st.withHours + st.withSondZeit,
+        sondzeit: st.withSondZeit,
+        holiday: st.withHoliday,
+        'always-open': st.alwaysOpen,
+      };
       document.querySelectorAll('#modal-sched-cats .chip').forEach(ch => {
         const c = ch.getAttribute('data-cat');
         ch.classList.toggle('active', c === schedulesModalCategory);
@@ -8325,23 +8430,86 @@ export function generateInteractiveCallflowHtml(
         b.classList.toggle('active', b.getAttribute('data-sview') === schedulesModalView);
       });
 
-      const uniqueScriptCount = new Set(allRows.map(r => r.scriptNumber)).size;
       if (subtitle) {
-        subtitle.textContent = filtered.length + ' von ' + allRows.length + ' Zeitregeln · ' + uniqueScriptCount + ' Skripte';
+        subtitle.textContent = st.totalScripts + ' Skripte · ' + st.withHours + ' Dienstzeiten · ' + st.withSondZeit + ' SondZeit · ' + st.withHoliday + ' Feiertage · ' + st.alwaysOpen + ' 24/7';
       }
 
       if (!allRows.length) {
         body.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;font-size:12px;">Keine Öffnungszeiten oder Zeitpläne im Callflow gefunden.</div>';
         return;
       }
-      if (!filtered.length) {
+
+      if (schedulesModalView === 'matrix' && bundle) {
+        if (!filteredMatrix.length) {
+          body.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;font-size:12px;">Keine passenden Skripte für die aktuelle Filterung gefunden.</div>';
+          return;
+        }
+        const activeList = filteredMatrix.filter(r => r.category !== 'always-open');
+        const aoList = filteredMatrix.filter(r => r.category === 'always-open');
+        let htmlParts = [];
+
+        if (activeList.length) {
+          htmlParts.push(
+            '<div style="margin-bottom:14px;">' +
+              '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-size:11.5px;">' +
+                '<strong style="color:var(--text-main);">Öffnungszeiten, SondZeit &amp; Feiertage (' + activeList.length + ' Skripte)</strong>' +
+                '<span style="color:var(--text-muted);">1 konsolidierte Zeile pro Skript</span>' +
+              '</div>' +
+              '<div class="an-table-wrap" style="max-height:none;overflow-x:auto;">' +
+                '<table class="an-table"><thead><tr>' +
+                  '<th>Skript</th><th>Kategorie</th>' +
+                  OH_WEEKDAYS.map(d => '<th style="text-align:center;">' + d + '</th>').join('') +
+                  '<th>SondZeit / Quelle</th><th>Feiertag</th><th>Überlauf / Ziel</th><th style="text-align:right;">Diagramm</th>' +
+                '</tr></thead><tbody>' +
+                activeList.map(r => {
+                  const d = r.days || {};
+                  const tagCls = r.category === 'hours' ? 'ok' : 'warn';
+                  return '<tr>' +
+                    '<td style="white-space:nowrap;"><strong>[' + esc(r.scriptNumber) + ']</strong> ' + esc(r.scriptName) + '</td>' +
+                    '<td style="white-space:nowrap;"><span class="an-tag ' + tagCls + '">' + esc(r.categoryLabel) + '</span></td>' +
+                    OH_WEEKDAYS.map(k => '<td style="text-align:center;">' + renderDayCellHtml(d[k]) + '</td>').join('') +
+                    '<td style="font-family:ui-monospace,monospace;font-size:11px;">' + esc(r.sondZeitSource || '—') + '</td>' +
+                    '<td>' + (r.hasHoliday ? '<span style="color:#fbbf24;">' + esc(r.holidaySummary) + '</span>' : '—') + '</td>' +
+                    '<td>' + esc(r.overflowSummary || '—') + '</td>' +
+                    '<td style="text-align:right;white-space:nowrap;"><button type="button" class="sched-jump-btn" data-snum="' + esc(r.scriptNumber) + '" style="padding:3px 8px;font-size:10.5px;background:var(--bg-input);border:1px solid var(--border);color:var(--text-main);border-radius:5px;cursor:pointer;white-space:nowrap;">Öffnen →</button></td>' +
+                  '</tr>';
+                }).join('') +
+                '</tbody></table>' +
+              '</div>' +
+            '</div>'
+          );
+        }
+
+        if (aoList.length) {
+          htmlParts.push(
+            '<div>' +
+              '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-size:11.5px;">' +
+                '<strong style="color:#34d399;">24/7-Skripte ohne Zeitbeschränkung (' + aoList.length + ')</strong>' +
+                '<span style="color:var(--text-muted);">Im Excel-Workbook separat auf Blatt „24-7 &amp; Ohne Zeitplan“</span>' +
+              '</div>' +
+              '<div class="an-table-wrap" style="max-height:none;overflow-x:auto;">' +
+                '<table class="an-table"><thead><tr><th>Skript</th><th>Status</th><th>Queues, Ansagen &amp; Ziele</th><th style="text-align:right;">Diagramm</th></tr></thead><tbody>' +
+                aoList.map(r =>
+                  '<tr>' +
+                    '<td style="white-space:nowrap;"><strong>[' + esc(r.scriptNumber) + ']</strong> ' + esc(r.scriptName) + '</td>' +
+                    '<td style="white-space:nowrap;"><span class="an-tag">' + esc(r.categoryLabel) + '</span></td>' +
+                    '<td>' + esc(r.overflowSummary || '—') + '</td>' +
+                    '<td style="text-align:right;white-space:nowrap;"><button type="button" class="sched-jump-btn" data-snum="' + esc(r.scriptNumber) + '" style="padding:3px 8px;font-size:10.5px;background:var(--bg-input);border:1px solid var(--border);color:var(--text-main);border-radius:5px;cursor:pointer;white-space:nowrap;">Öffnen →</button></td>' +
+                  '</tr>'
+                ).join('') +
+                '</tbody></table>' +
+              '</div>' +
+            '</div>'
+          );
+        }
+
+        body.innerHTML = htmlParts.join('');
+      } else if (!filteredDetails.length) {
         body.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:40px;font-size:12px;">Keine passenden Öffnungszeiten für die aktuelle Filterung gefunden.</div>';
         return;
-      }
-
-      if (schedulesModalView === 'profiles') {
+      } else if (schedulesModalView === 'profiles') {
         const groupMap = new Map();
-        filtered.forEach(r => {
+        filteredDetails.forEach(r => {
           const cat = classifyScheduleRow(r);
           const title = normalizeScheduleProfileTitle(r, cat);
           const key = cat + '::' + title.toLowerCase();
@@ -8360,7 +8528,7 @@ export function generateInteractiveCallflowHtml(
         });
         const catRank = { hours: 0, sondzeit: 1, holiday: 2, 'always-open': 3 };
         const groups = Array.from(groupMap.values()).sort((a, b) => (catRank[a.cat] - catRank[b.cat]) || (b.rows.length - a.rows.length));
-        const catLabel = { hours: 'Uhrzeiten', sondzeit: 'SondZeit', holiday: 'Feiertag', 'always-open': '24/7' };
+        const catLabel = { hours: 'Dienstzeiten', sondzeit: 'SondZeit', holiday: 'Feiertag', 'always-open': '24/7' };
         const catTagClass = { hours: 'ok', sondzeit: 'warn', holiday: 'warn', 'always-open': '' };
 
         body.innerHTML = '<div style="display:flex;flex-direction:column;gap:10px;">' + groups.map(grp => {
@@ -8386,7 +8554,7 @@ export function generateInteractiveCallflowHtml(
         body.innerHTML =
           '<div class="an-table-wrap" style="max-height:none;">' +
             '<table class="an-table"><thead><tr><th>Skript</th><th>Regel / Schritt</th><th>Öffnungszeiten (SondZeit)</th><th>Feiertag</th><th>Überlauf / Aktion</th><th style="text-align:right;">Aktion</th></tr></thead><tbody>' +
-            filtered.map(r =>
+            filteredDetails.map(r =>
               '<tr>' +
                 '<td><strong>[' + esc(r.scriptNumber) + ']</strong> ' + esc(r.scriptName) + '</td>' +
                 '<td>' + (r.prio ? 'Prio ' + r.prio + ' · ' : '') + esc(r.stepName) + '</td>' +
@@ -9175,7 +9343,9 @@ export function generateInteractiveCallflowHtml(
     const btnCloseSchedulesModal = document.getElementById('btn-close-schedules-modal');
     const modalSchedSearch = document.getElementById('modal-sched-search');
     const btnModalCsv = document.getElementById('btn-modal-csv');
+    const btnModalXlsx = document.getElementById('btn-modal-xlsx');
     const btnModalMd = document.getElementById('btn-modal-md');
+    const btnModalHide247 = document.getElementById('btn-modal-hide-247');
 
     if (btnOpenSchedulesCount && PAYLOAD.analysis && Array.isArray(PAYLOAD.analysis.scheduleRows)) {
       const schedScriptCount = new Set(PAYLOAD.analysis.scheduleRows.map(r => r.scriptNumber)).size;
@@ -9202,7 +9372,7 @@ export function generateInteractiveCallflowHtml(
 
     document.querySelectorAll('#modal-sched-view-group .seg-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        schedulesModalView = btn.getAttribute('data-sview') || 'profiles';
+        schedulesModalView = btn.getAttribute('data-sview') || 'matrix';
         renderSchedulesModalContent();
       });
     });
@@ -9214,6 +9384,13 @@ export function generateInteractiveCallflowHtml(
       });
     });
 
+    if (btnModalHide247) {
+      btnModalHide247.addEventListener('click', () => {
+        schedulesModalHide247 = !schedulesModalHide247;
+        renderSchedulesModalContent();
+      });
+    }
+
     if (modalSchedSearch) {
       modalSchedSearch.addEventListener('input', () => {
         renderSchedulesModalContent();
@@ -9222,21 +9399,12 @@ export function generateInteractiveCallflowHtml(
 
     if (btnModalMd) {
       btnModalMd.addEventListener('click', () => {
-        const rows = getFilteredScheduleRowsForModal();
-        const mdLines = [
-          '# Öffnungszeiten-Übersicht (Callflow)',
-          '',
-          '| Skript | Regel / Schritt | Öffnungszeiten | Feiertag / Sonderzeit | Überlauf / Aktion |',
-          '| --- | --- | --- | --- | --- |',
-          ...rows.map(r =>
-            '| [' + String(r.scriptNumber || '') + '] ' + String(r.scriptName || '').replace(/\\|/g, '/') +
-            ' | ' + (r.prio ? 'Prio ' + r.prio + ' · ' : '') + String(r.stepName || '').replace(/\\|/g, '/') +
-            ' | ' + String(r.openingHours || '—').replace(/:\\s+/g, ':').replace(/\\|/g, '/') +
-            ' | ' + String(r.hasHoliday ? r.holidayAndSpecial : '—').replace(/\\|/g, '/') +
-            ' | ' + String(r.closedOrOverflowAction || '—').replace(/\\|/g, '/') + ' |'
-          ),
-        ];
-        const mdText = mdLines.join('\\n');
+        const bundle = getOpeningHoursBundle();
+        const includeAlwaysOpen = !schedulesModalHide247;
+        const mdText = bundle
+          ? buildOpeningHoursMarkdownFromBundle(bundle, includeAlwaysOpen)
+          : '';
+        if (!mdText) return;
         const markCopied = () => {
           const orig = btnModalMd.textContent;
           btnModalMd.textContent = 'Kopiert ✓';
@@ -9255,14 +9423,36 @@ export function generateInteractiveCallflowHtml(
       });
     }
 
+    if (btnModalXlsx) {
+      btnModalXlsx.addEventListener('click', () => {
+        const bundle = getOpeningHoursBundle();
+        if (bundle) {
+          downloadOpeningHoursXlsxFromBundle(
+            bundle,
+            !schedulesModalHide247,
+            'callflow-oeffnungszeiten.xlsx'
+          );
+        }
+      });
+    }
+
     if (btnModalCsv) {
       btnModalCsv.addEventListener('click', () => {
-        const rows = getFilteredScheduleRowsForModal();
-        downloadUtf8Csv(
-          'callflow-oeffnungszeiten.csv',
-          SCHEDULE_CSV_HEADERS,
-          rows.map(buildScheduleCsvRow)
-        );
+        const bundle = getOpeningHoursBundle();
+        if (bundle) {
+          downloadUtf8Csv(
+            'callflow-oeffnungszeiten.csv',
+            OH_CSV_HEADERS,
+            buildOpeningHoursCsvRowsFromBundle(bundle, !schedulesModalHide247)
+          );
+        } else {
+          const rows = getFilteredScheduleRowsForModal();
+          downloadUtf8Csv(
+            'callflow-oeffnungszeiten.csv',
+            SCHEDULE_CSV_HEADERS,
+            rows.map(buildScheduleCsvRow)
+          );
+        }
       });
     }
 
