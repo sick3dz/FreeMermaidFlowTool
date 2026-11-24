@@ -1,11 +1,12 @@
 import { ScriptModule } from '../types/mermaidStudio';
 import {
+  buildScriptWorkspace,
   canonicalScriptMatchKey,
   classifyAvayaWaypointTarget,
   detectMasterScriptChecklist,
   isAnnouncementOrEndpointTargetName,
   isValidScriptRef,
-  mergeScriptModules,
+  mergeScriptModulesRaw,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
   promoteEntryModuleToMain,
@@ -180,7 +181,7 @@ export async function importCallflowFile(
     options?.overridePrimaryScriptName?.trim() ||
     dotSMeta.scriptName;
 
-  const modules = parseCallflowTextWithFallback(decodedText, {
+  let modules = parseCallflowTextWithFallback(decodedText, {
     defaultScriptNumber,
     defaultScriptName,
     sourceFilename: file.name,
@@ -188,7 +189,7 @@ export async function importCallflowFile(
     isMasterHint: options?.isMasterHint ?? dotSMeta.isMasterHint,
   }).map((mod, idx, allMods) => {
     const withSource =
-      allMods.length === 1 && !mod.sourceFilename
+      (allMods.length === 1 || isDotS) && !mod.sourceFilename
         ? { ...mod, sourceFilename: file.name }
         : mod;
     if (idx === 0 && dotSMeta.cdnAlias && !withSource.cdnAlias) {
@@ -199,6 +200,48 @@ export async function importCallflowFile(
     }
     return withSource;
   });
+
+  // Guarantee 1:1 registration for any existing Avaya .s file (even empty or comment-only files)
+  if (modules.length === 0 && isDotS) {
+    const fallbackRef =
+      normalizeScriptRef(defaultScriptNumber || stripKnownScriptExtension(file.name)) ||
+      stripKnownScriptExtension(file.name) ||
+      file.name;
+    const fallbackName = defaultScriptName || stripKnownScriptExtension(file.name) || fallbackRef;
+    const isAnn =
+      isAnnouncementOrEndpointTargetName(fallbackRef) ||
+      isAnnouncementOrEndpointTargetName(fallbackName);
+    modules = [
+      {
+        scriptNumber: options?.isMasterHint ? 'Main' : fallbackRef,
+        scriptName: options?.isMasterHint ? 'Main' : fallbackName,
+        cdnAlias:
+          options?.isMasterHint && canonicalScriptMatchKey(fallbackRef) !== 'main'
+            ? fallbackRef
+            : dotSMeta.cdnAlias,
+        isMaster: Boolean(options?.isMasterHint || dotSMeta.isMasterHint),
+        isAnnouncementEndpoint: isAnn || undefined,
+        origin: 'legacy-text',
+        sourceFilename: file.name,
+        rawText: decodedText,
+        rules: [
+          {
+            id: `${fallbackRef}-empty-1`,
+            prio: 1,
+            stepName: isAnn
+              ? `Sonderansage / Endpunkt (${fallbackName})`
+              : `Skript (${fallbackName})`,
+            sourceNumber: options?.isMasterHint ? 'Main' : fallbackRef,
+            announcement: isAnn ? fallbackName : undefined,
+            isDisconnect: true,
+            choices: [],
+            rawLine: decodedText.trim().split(/\r?\n/)[0]?.trim() || file.name,
+          },
+        ],
+        outgoingNumbers: [],
+      },
+    ];
+  }
 
   return {
     modules,
@@ -238,12 +281,16 @@ export interface FolderUnusedFileEntry {
 }
 
 export interface FolderAutoResolveSummary {
+  mode?: 'all' | 'connected';
   modules: ScriptModule[];
   loadedScriptNumbers: string[];
   loadedFilenames: string[];
   matchedEntries: FolderMatchedEntry[];
   unmatchedTargetRefs: string[];
   unusedFolderFiles: FolderUnusedFileEntry[];
+  standaloneScriptNumbers?: string[];
+  connectedScriptCount?: number;
+  unreadableFilenames?: string[];
   totalPoolFiles: number;
   skippedLegacyFilesCount: number;
   folderName: string;
@@ -470,7 +517,7 @@ export async function autoResolveConnectedScriptsFromFolder(
         });
 
         if (imported.modules.length > 0) {
-          currentModules = mergeScriptModules(currentModules, imported.modules);
+          currentModules = mergeScriptModulesRaw(currentModules, imported.modules);
           loadedAnyInThisRound = true;
           unmatchedTargetRefsMap.delete(targetKey);
 
@@ -507,6 +554,15 @@ export async function autoResolveConnectedScriptsFromFolder(
     }
   }
 
+  // Run a single O(N) normalization pass once all rounds complete
+  const normalizedWorkspace = buildScriptWorkspace(currentModules, {
+    externalEndpoints: options?.externalEndpoints,
+    ignoredChecklistTargets: options?.ignoredChecklistTargets,
+    masterScriptNumber: options?.masterScriptNumber,
+    treatUnresolvedAsEndpoint: false,
+  });
+  currentModules = normalizedWorkspace.modules;
+
   const finalPresentKeys = new Set<string>();
   for (const m of currentModules) {
     finalPresentKeys.add(canonicalScriptMatchKey(m.scriptNumber));
@@ -538,14 +594,216 @@ export async function autoResolveConnectedScriptsFromFolder(
   const skippedLegacyFilesCount = unusedFolderFiles.length;
 
   return {
+    mode: 'connected',
     modules: currentModules,
     loadedScriptNumbers,
     loadedFilenames,
     matchedEntries,
     unmatchedTargetRefs,
     unusedFolderFiles,
+    connectedScriptCount: loadedScriptNumbers.length,
+    standaloneScriptNumbers: [],
     totalPoolFiles: pool.totalFilesScanned,
     skippedLegacyFilesCount,
+    folderName: pool.folderName,
+  };
+}
+
+/**
+ * Loads and parses ALL supported script files (.s prioritized) from an assigned folder in
+ * non-blocking batches, binds every single .s file 1:1 under its canonical basename, merges in O(N),
+ * and embeds all modules cleanly into the workspace and Master diagram.
+ */
+export async function loadAllScriptsFromFolder(
+  initialModules: ScriptModule[],
+  pool: FolderScriptPool,
+  options?: {
+    externalEndpoints?: string[];
+    avayaWaypoints?: string[];
+    ignoredChecklistTargets?: string[];
+    masterScriptNumber?: string;
+    onProgress?: (loaded: number, total: number) => void;
+    batchSize?: number;
+  }
+): Promise<FolderAutoResolveSummary> {
+  const existingKeys = new Set<string>();
+  for (const m of initialModules) {
+    existingKeys.add(canonicalScriptMatchKey(m.scriptNumber));
+    if (m.sourceFilename) {
+      existingKeys.add(canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename)));
+    }
+    if (m.cdnAlias) {
+      existingKeys.add(canonicalScriptMatchKey(m.cdnAlias));
+    }
+  }
+
+  // Deduplicate by canonicalKey so .s files take precedence over duplicate .txt/.aacc basenames
+  const uniqueEntries: FolderScriptFileEntry[] = [];
+  const seenEntryKeys = new Set<string>();
+  for (const entry of pool.entries) {
+    if (!entry.canonicalKey || seenEntryKeys.has(entry.canonicalKey)) continue;
+    seenEntryKeys.add(entry.canonicalKey);
+    uniqueEntries.push(entry);
+  }
+
+  const total = uniqueEntries.length;
+  const batchSize = Math.max(5, options?.batchSize ?? 25);
+  const parsedIncoming: ScriptModule[] = [];
+  const loadedScriptNumbers: string[] = [];
+  const loadedFilenames: string[] = [];
+  const matchedEntries: FolderMatchedEntry[] = [];
+  const unreadableFilenames: string[] = [];
+
+  options?.onProgress?.(0, total);
+
+  for (let i = 0; i < uniqueEntries.length; i += batchSize) {
+    const batch = uniqueEntries.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
+      batch.map(async (entry) => {
+        // Keep already-loaded Main / edited module intact if the same file is already in initialModules
+        if (existingKeys.has(entry.canonicalKey)) {
+          return { entry, skippedAlreadyPresent: true as const, modules: [] as ScriptModule[] };
+        }
+        try {
+          const canonicalPrimaryNumber = normalizeScriptRef(entry.baseName) || entry.baseName;
+          const imported = await importCallflowFile(entry.file, {
+            overridePrimaryScriptNumber: canonicalPrimaryNumber,
+            overridePrimaryScriptName: entry.baseName,
+            isMasterHint: false,
+          });
+          return {
+            entry,
+            skippedAlreadyPresent: false as const,
+            modules: imported.modules,
+            failed: imported.modules.length === 0,
+          };
+        } catch {
+          return {
+            entry,
+            skippedAlreadyPresent: false as const,
+            modules: [] as ScriptModule[],
+            failed: true,
+          };
+        }
+      })
+    );
+
+    for (const res of batchResults) {
+      if (res.skippedAlreadyPresent) continue;
+      if (res.modules.length > 0) {
+        parsedIncoming.push(...res.modules);
+        loadedFilenames.push(res.entry.filename);
+        for (const m of res.modules) {
+          if (!loadedScriptNumbers.includes(m.scriptNumber)) {
+            loadedScriptNumbers.push(m.scriptNumber);
+          }
+        }
+        matchedEntries.push({
+          refKey: res.entry.baseName,
+          filename: res.entry.filename,
+          scriptNumber: res.modules[0].scriptNumber,
+          relativePath: res.entry.relativePath,
+        });
+      } else if (res.failed) {
+        unreadableFilenames.push(res.entry.filename);
+      }
+    }
+
+    const processed = Math.min(total, i + batch.length);
+    options?.onProgress?.(processed, total);
+
+    // Yield to browser event loop between batches so the UI stays fluid for 600+ files
+    if (processed < total) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  let mergedRaw = mergeScriptModulesRaw(initialModules, parsedIncoming);
+
+  // If the studio was empty and the folder contains a Main / Master script, promote it cleanly
+  let effectiveMasterNumber = options?.masterScriptNumber;
+  if (initialModules.length === 0 && mergedRaw.length > 0) {
+    const explicitMain = mergedRaw.find(
+      (m) =>
+        /^(?:main|master(?:script)?)$/i.test(canonicalScriptMatchKey(m.scriptNumber)) ||
+        (m.sourceFilename &&
+          /\b(?:main|master(?:script)?)\b/i.test(stripKnownScriptExtension(m.sourceFilename))) ||
+        m.isMaster
+    );
+    if (explicitMain) {
+      mergedRaw = promoteEntryModuleToMain(mergedRaw, explicitMain.scriptNumber);
+      effectiveMasterNumber = 'Main';
+    }
+  }
+
+  const finalWorkspace = buildScriptWorkspace(mergedRaw, {
+    externalEndpoints: options?.externalEndpoints,
+    avayaWaypoints: options?.avayaWaypoints,
+    ignoredChecklistTargets: options?.ignoredChecklistTargets,
+    masterScriptNumber: effectiveMasterNumber,
+    treatUnresolvedAsEndpoint: false,
+  });
+
+  // Compute which loaded modules are connected to Main/chain vs. standalone scripts in the folder
+  const connectedKeys = new Set<string>();
+  const masterKey = finalWorkspace.masterScriptNumber
+    ? canonicalScriptMatchKey(finalWorkspace.masterScriptNumber)
+    : '';
+  if (masterKey) connectedKeys.add(masterKey);
+
+  const checklist = finalWorkspace.masterChecklist || [];
+  for (const item of checklist) {
+    if (item.status === 'present') {
+      connectedKeys.add(canonicalScriptMatchKey(item.refKey));
+      if (item.matchedModuleNumber) {
+        connectedKeys.add(canonicalScriptMatchKey(item.matchedModuleNumber));
+      }
+    }
+  }
+  // Also count modules with incoming or outgoing script links as connected
+  const incomingCounts = new Map<string, number>();
+  for (const m of finalWorkspace.modules) {
+    for (const outRef of m.outgoingNumbers) {
+      const k = canonicalScriptMatchKey(outRef);
+      incomingCounts.set(k, (incomingCounts.get(k) || 0) + 1);
+    }
+  }
+
+  const standaloneScriptNumbers: string[] = [];
+  let connectedScriptCount = 0;
+
+  for (const m of finalWorkspace.modules) {
+    const k = canonicalScriptMatchKey(m.scriptNumber);
+    if (k === masterKey) continue;
+    const isConnected =
+      connectedKeys.has(k) ||
+      (incomingCounts.get(k) || 0) > 0 ||
+      m.outgoingNumbers.length > 0;
+    if (isConnected) {
+      connectedScriptCount++;
+    } else {
+      standaloneScriptNumbers.push(m.scriptNumber);
+    }
+  }
+
+  const unmatchedTargetRefs = finalWorkspace.missingTargets.filter(
+    (ref) =>
+      !isAnnouncementOrEndpointTargetName(ref) && !classifyAvayaWaypointTarget(ref)
+  );
+
+  return {
+    mode: 'all',
+    modules: finalWorkspace.modules,
+    loadedScriptNumbers,
+    loadedFilenames,
+    matchedEntries,
+    unmatchedTargetRefs,
+    unusedFolderFiles: [],
+    standaloneScriptNumbers,
+    connectedScriptCount,
+    unreadableFilenames: unreadableFilenames.length > 0 ? unreadableFilenames : undefined,
+    totalPoolFiles: uniqueEntries.length,
+    skippedLegacyFilesCount: 0,
     folderName: pool.folderName,
   };
 }

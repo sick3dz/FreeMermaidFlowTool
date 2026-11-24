@@ -139,7 +139,8 @@ const SCRIPT_NAME_STOPWORDS = new Set([
 ]);
 
 export function normalizeScriptRef(raw: string): string {
-  const cleaned = raw
+  const cleaned = String(raw || '')
+    .normalize('NFC')
     .trim()
     .replace(/^['"`\[\]()]+|['"`\[\]()]+$/g, '')
     .replace(/\s+/g, '_');
@@ -152,7 +153,11 @@ export const KNOWN_SCRIPT_FILE_EXT_RE =
   /\.(?:s|txt|aacc|vsdx|vdx|svg|xml|csv|tsv|md|log|cfg)$/i;
 
 export function stripKnownScriptExtension(ref: string): string {
-  return String(ref || '').trim().replace(KNOWN_SCRIPT_FILE_EXT_RE, '').trim();
+  return String(ref || '')
+    .normalize('NFC')
+    .trim()
+    .replace(KNOWN_SCRIPT_FILE_EXT_RE, '')
+    .trim();
 }
 
 export function canonicalScriptMatchKey(ref: string): string {
@@ -2559,37 +2564,45 @@ function parseAaccScriptBlocks(
     return start;
   };
 
-  // Detect all script chunk boundaries across full exports (`=== Header ===`, `section Init`, or standalone `CDN <digits>`)
+  // A single Avaya .s file ALWAYS represents exactly one script module keyed by its filename.
+  // Never split a single .s file on decorative divider comments (`===`, `---`, `***`), multiple `section Init`, or inline `CDN` lines.
+  const isSingleDotSFile = Boolean(
+    options?.sourceFilename && /\.s$/i.test(options.sourceFilename.trim())
+  );
+
+  // Detect all script chunk boundaries across pasted/multi-script text bundles
   const rawStartSet = new Set<number>();
 
-  rawLines.forEach((l, idx) => {
-    const t = l.trim();
-    if (!t) return;
+  if (!isSingleDotSFile) {
+    rawLines.forEach((l, idx) => {
+      const t = l.trim();
+      if (!t) return;
 
-    if (/^[=\-*#]{2,}\s*(.+?)\s*[=\-*#]{2,}$/.test(t)) {
-      rawStartSet.add(idx);
-      return;
-    }
-
-    if (/^section\s+["']?init["']?\b/i.test(t)) {
-      rawStartSet.add(findHeaderStartBeforeAnchor(idx, 8));
-      return;
-    }
-
-    if (/^CDN\s*[:=]?\s*\d{3,6}\s*$/i.test(t)) {
-      const hasUpcomingInit = rawLines
-        .slice(idx + 1, Math.min(rawLines.length, idx + 9))
-        .some((nl) => /^\s*section\s+["']?init["']?\b/i.test(nl));
-      if (!hasUpcomingInit) {
-        rawStartSet.add(findHeaderStartBeforeAnchor(idx, 3));
+      if (/^[=\-*#]{2,}\s*(.+?)\s*[=\-*#]{2,}$/.test(t)) {
+        rawStartSet.add(idx);
+        return;
       }
-    }
-  });
+
+      if (/^section\s+["']?init["']?\b/i.test(t)) {
+        rawStartSet.add(findHeaderStartBeforeAnchor(idx, 8));
+        return;
+      }
+
+      if (/^CDN\s*[:=]?\s*\d{3,6}\s*$/i.test(t)) {
+        const hasUpcomingInit = rawLines
+          .slice(idx + 1, Math.min(rawLines.length, idx + 9))
+          .some((nl) => /^\s*section\s+["']?init["']?\b/i.test(nl));
+        if (!hasUpcomingInit) {
+          rawStartSet.add(findHeaderStartBeforeAnchor(idx, 3));
+        }
+      }
+    });
+  }
 
   const sortedStarts = Array.from(rawStartSet).sort((a, b) => a - b);
   const chunks: Array<{ startIdx: number; endIdx: number }> = [];
 
-  if (sortedStarts.length <= 1) {
+  if (isSingleDotSFile || sortedStarts.length <= 1) {
     chunks.push({ startIdx: 0, endIdx: rawLines.length });
   } else {
     // Ensure any leading script (e.g. `Main` before the first sub-script) from line 0 is preserved as Chunk 0
@@ -3904,6 +3917,7 @@ function parseAaccScriptBlocks(
       }
 
       // Handle standalone `assign ... to ...` (or `assign var = val`) lines inside/outside IF blocks
+      // If an inline routing command (e.g. `assign x to y execute SubScript` or `assign x to y; execute SubScript`) follows on the same line, keep processing it!
       if (/^assign\b/i.test(t)) {
         recordAssignVars(t);
         const assigns = extractAssignStatements(t);
@@ -3916,6 +3930,23 @@ function parseAaccScriptBlocks(
             top.orga = applyAssignmentsToOrga(t, top.orga);
           } else {
             applyAssignmentsToOrga(t, {});
+          }
+        }
+        const remainingAfterAssign = t
+          .replace(
+            /\bassign\s+[^\r\n;]+?\s+to\s+[A-Za-z0-9_]+(?=\s*(?:assign\b|end\s*if\b|endif\b|else\b|execute\b|call\b|subscript\b|goto\b|give\b|queue\b|route\b|transfer\b|disconnect\b|drop\b|wait\b|;|$))/gi,
+            ' '
+          )
+          .replace(/\bassign\s+[A-Za-z0-9_]+\s*=\s*[^\r\n;]+/gi, ' ')
+          .replace(/^[;\s]+|[;\s]+$/g, '')
+          .trim();
+        if (remainingAfterAssign) {
+          const segments = remainingAfterAssign
+            .split(/\s*;\s*/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+          for (const seg of segments) {
+            processActionSegment(seg, t);
           }
         }
         continue;
@@ -3989,7 +4020,27 @@ function parseAaccScriptBlocks(
           continue;
         }
 
-        if (processActionSegment(afterColon, t, valueNums, isFaxVal, caseLabel)) {
+        if (/\bassign\b/i.test(afterColon)) {
+          recordAssignVars(afterColon);
+        }
+        const cleanedAfterColon = afterColon
+          .replace(
+            /\bassign\s+[^\r\n;]+?\s+to\s+[A-Za-z0-9_]+(?=\s*(?:assign\b|end\s*if\b|endif\b|else\b|execute\b|call\b|subscript\b|goto\b|give\b|queue\b|route\b|transfer\b|disconnect\b|drop\b|wait\b|;|$))/gi,
+            ' '
+          )
+          .replace(/^[;\s]+|[;\s]+$/g, '')
+          .trim();
+        const valueSegments = (cleanedAfterColon || afterColon)
+          .split(/\s*;\s*/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        let handledValue = false;
+        for (const seg of valueSegments) {
+          if (processActionSegment(seg, t, valueNums, isFaxVal, caseLabel)) {
+            handledValue = true;
+          }
+        }
+        if (handledValue) {
           continue;
         }
       }
@@ -4272,8 +4323,15 @@ export function parseScriptTextBundle(
 ): ScriptModule[] {
   const cleanedRawText = stripScriptCommentsAndNoise(rawText);
 
+  const isSingleDotSFile = Boolean(
+    options?.sourceFilename && /\.s$/i.test(options.sourceFilename.trim())
+  );
+
   if (isAaccScriptText(rawText)) {
     const aaccModules = parseAaccScriptBlocks(rawText, options);
+    if (isSingleDotSFile && aaccModules.length > 0) {
+      return aaccModules;
+    }
     if (aaccModules.length > 1) {
       return aaccModules;
     }
@@ -4848,7 +4906,40 @@ export function parseCallflowTextWithFallback(
     });
 
   if (cleanedLines.length === 0) {
-    return structured.length > 0 ? structured : [];
+    if (structured.length > 0) return structured;
+    if (options?.sourceFilename) {
+      const isAnn =
+        isAnnouncementOrEndpointTargetName(defaultRef) ||
+        isAnnouncementOrEndpointTargetName(defaultName);
+      return [
+        {
+          scriptNumber: defaultRef,
+          scriptName: defaultName,
+          cdnAlias,
+          isMaster,
+          isAnnouncementEndpoint: isAnn || undefined,
+          origin,
+          sourceFilename: options.sourceFilename,
+          rawText: trimmed,
+          rules: [
+            {
+              id: `${toMermaidNodeSuffix(defaultRef)}-fb-1`,
+              prio: 1,
+              stepName: isAnn
+                ? `Sonderansage / Endpunkt (${defaultName})`
+                : `Skript (${defaultName})`,
+              sourceNumber: defaultRef,
+              announcement: isAnn ? defaultName : undefined,
+              isDisconnect: true,
+              choices: [],
+              rawLine: trimmed.split(/\r?\n/)[0]?.trim() || defaultName,
+            },
+          ],
+          outgoingNumbers: [],
+        },
+      ];
+    }
+    return [];
   }
 
   const outMap = new Map<string, string>();
@@ -4958,6 +5049,17 @@ export function detectMasterScriptChecklist(
       const aliasKey = canonicalScriptMatchKey(m.cdnAlias);
       if (aliasKey && !moduleByKey.has(aliasKey)) {
         moduleByKey.set(aliasKey, m);
+      }
+    }
+    const nameToken = (m.scriptName || '').trim().replace(/\s+/g, '_');
+    if (
+      nameToken &&
+      isValidScriptRef(nameToken) &&
+      !/^(?:main|start|skript_)/i.test(nameToken)
+    ) {
+      const nameKey = canonicalScriptMatchKey(nameToken);
+      if (nameKey && !moduleByKey.has(nameKey)) {
+        moduleByKey.set(nameKey, m);
       }
     }
   });
@@ -5074,9 +5176,13 @@ export function detectMasterScriptChecklist(
         isManualWaypoint: resolvedStatus.isManualWaypoint,
       });
 
-      if (matchedMod && !visitedModuleKeys.has(key)) {
-        visitedModuleKeys.add(key);
-        pendingNested.push({ mod: matchedMod, nextDepth: depth + 1 });
+      if (matchedMod) {
+        const matchedCanonKey = canonicalScriptMatchKey(matchedMod.scriptNumber);
+        if (!visitedModuleKeys.has(matchedCanonKey)) {
+          visitedModuleKeys.add(matchedCanonKey);
+          visitedModuleKeys.add(key);
+          pendingNested.push({ mod: matchedMod, nextDepth: depth + 1 });
+        }
       }
     };
 
@@ -5212,9 +5318,13 @@ export function detectMasterScriptChecklist(
         isFaxRoute: agg.isFaxRoute || undefined,
       });
 
-      if (matchedMod && !visitedModuleKeys.has(key)) {
-        visitedModuleKeys.add(key);
-        pendingNested.push({ mod: matchedMod, nextDepth: depth + 1 });
+      if (matchedMod) {
+        const matchedCanonKey = canonicalScriptMatchKey(matchedMod.scriptNumber);
+        if (!visitedModuleKeys.has(matchedCanonKey)) {
+          visitedModuleKeys.add(matchedCanonKey);
+          visitedModuleKeys.add(key);
+          pendingNested.push({ mod: matchedMod, nextDepth: depth + 1 });
+        }
       }
     }
 
@@ -5737,21 +5847,56 @@ export function buildScriptWorkspace(
 }
 
 /**
- * Merges newly imported/parsed modules (text scripts + graphical Visio exports) cleanly by canonical key.
+ * Fast O(N) canonical merge of ScriptModule arrays without running a full buildScriptWorkspace() pass.
+ * Matches incoming modules by scriptNumber, sourceFilename basename, or cdnAlias so re-importing
+ * a Master/Main file from a folder merges cleanly instead of creating duplicates.
  */
-export function mergeScriptModules(
+export function mergeScriptModulesRaw(
   existing: ScriptModule[],
   incoming: ScriptModule[]
 ): ScriptModule[] {
   const merged = new Map<string, ScriptModule>();
-  existing.forEach((m) => merged.set(canonicalScriptMatchKey(m.scriptNumber), m));
+  const aliasToPrimaryKey = new Map<string, string>();
+
+  const registerAliases = (primaryKey: string, m: ScriptModule) => {
+    aliasToPrimaryKey.set(primaryKey, primaryKey);
+    if (m.sourceFilename) {
+      const fKey = canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename));
+      if (fKey && !aliasToPrimaryKey.has(fKey)) aliasToPrimaryKey.set(fKey, primaryKey);
+    }
+    if (m.cdnAlias) {
+      const aKey = canonicalScriptMatchKey(m.cdnAlias);
+      if (aKey && !aliasToPrimaryKey.has(aKey)) aliasToPrimaryKey.set(aKey, primaryKey);
+    }
+  };
+
+  existing.forEach((m) => {
+    const primaryKey = canonicalScriptMatchKey(m.scriptNumber);
+    merged.set(primaryKey, m);
+    registerAliases(primaryKey, m);
+  });
+
   incoming.forEach((m) => {
-    const key = canonicalScriptMatchKey(m.scriptNumber);
+    const incomingPrimaryKey = canonicalScriptMatchKey(m.scriptNumber);
+    const incomingFileKey = m.sourceFilename
+      ? canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename))
+      : '';
+    const incomingAliasKey = m.cdnAlias ? canonicalScriptMatchKey(m.cdnAlias) : '';
+
+    const matchedKey =
+      (merged.has(incomingPrimaryKey) ? incomingPrimaryKey : undefined) ||
+      aliasToPrimaryKey.get(incomingPrimaryKey) ||
+      (incomingFileKey ? aliasToPrimaryKey.get(incomingFileKey) : undefined) ||
+      (incomingAliasKey ? aliasToPrimaryKey.get(incomingAliasKey) : undefined);
+
+    const key = matchedKey || incomingPrimaryKey;
     const prev = merged.get(key);
     if (!prev) {
       merged.set(key, m);
+      registerAliases(key, m);
       return;
     }
+
     const existingKeys = new Set(
       prev.rules.map((r) => `${r.prio}|${r.stepName}|${r.targetNumber || ''}|${r.rawLine}`)
     );
@@ -5772,9 +5917,12 @@ export function mergeScriptModules(
     const mergedOrigin: ScriptOrigin =
       nextOrigin === 'visio-new' ? 'visio-new' : prevOrigin;
 
-    merged.set(key, {
+    const mergedMod: ScriptModule = {
       ...prev,
       origin: mergedOrigin,
+      sourceFilename: prev.sourceFilename || m.sourceFilename,
+      cdnAlias: prev.cdnAlias || m.cdnAlias,
+      commentScheduleHint: prev.commentScheduleHint || m.commentScheduleHint,
       visioPageName: m.visioPageName || prev.visioPageName,
       scriptName:
         m.scriptName && m.scriptName !== `Skript ${m.scriptNumber}`
@@ -5783,10 +5931,25 @@ export function mergeScriptModules(
       isMaster: prev.isMaster || m.isMaster,
       rawText: prev.rawText === m.rawText ? prev.rawText : `${prev.rawText}\n${m.rawText}`,
       rules: combinedRules,
-    });
+      outgoingNumbers: Array.from(
+        new Set([...(prev.outgoingNumbers || []), ...(m.outgoingNumbers || [])])
+      ),
+    };
+    merged.set(key, mergedMod);
+    registerAliases(key, mergedMod);
   });
 
-  return buildScriptWorkspace(Array.from(merged.values())).modules;
+  return Array.from(merged.values());
+}
+
+/**
+ * Merges newly imported/parsed modules (text scripts + graphical Visio exports) cleanly by canonical key.
+ */
+export function mergeScriptModules(
+  existing: ScriptModule[],
+  incoming: ScriptModule[]
+): ScriptModule[] {
+  return buildScriptWorkspace(mergeScriptModulesRaw(existing, incoming)).modules;
 }
 
 /**
@@ -6188,6 +6351,12 @@ export function buildMasterOverviewMermaid(
   const knownKeyToMod = new Map<string, ScriptModule>();
   candidateModules.forEach((m) => {
     knownKeyToMod.set(canonicalScriptMatchKey(m.scriptNumber), m);
+    if (m.sourceFilename) {
+      const fileKey = canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename));
+      if (fileKey && !knownKeyToMod.has(fileKey)) {
+        knownKeyToMod.set(fileKey, m);
+      }
+    }
     if (m.cdnAlias) {
       const aliasKey = canonicalScriptMatchKey(m.cdnAlias);
       if (aliasKey && !knownKeyToMod.has(aliasKey)) {
@@ -6235,28 +6404,17 @@ export function buildMasterOverviewMermaid(
         !/\(deaktiviert\s*=\s*0\)/i.test(r.stepName)
     );
 
-  // In large multi-script exports (>10 modules), keep all scripts that have incoming/outgoing script calls,
-  // active skillset queues, or are referenced by Main while skipping unreferenced legacy ("Altlast") scripts
-  const connectedCandidates = candidateModules.filter((m) => {
-    const mKey = canonicalScriptMatchKey(m.scriptNumber);
-    const inCount = incomingCounts.get(mKey) || 0;
-    const outCount = m.outgoingNumbers.length;
-    return (
-      inCount > 0 ||
-      outCount > 0 ||
-      moduleHasActiveQueue(m) ||
-      calledByDispatcherKeys.has(mKey) ||
-      Boolean(m.entryDnisNumbers && m.entryDnisNumbers.length > 0)
-    );
-  });
-  const activeModules =
-    candidateModules.length > 10 && connectedCandidates.length > 0
-      ? connectedCandidates
-      : candidateModules;
+  // Include ALL loaded non-dispatcher modules in the Master diagram so full-folder imports
+  // never silently hide any loaded .s scripts.
+  const activeModules = candidateModules;
 
   const activeModuleKeySet = new Set<string>();
   activeModules.forEach((m) => {
     activeModuleKeySet.add(canonicalScriptMatchKey(m.scriptNumber));
+    if (m.sourceFilename) {
+      const fileKey = canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename));
+      if (fileKey) activeModuleKeySet.add(fileKey);
+    }
     if (m.cdnAlias) {
       activeModuleKeySet.add(canonicalScriptMatchKey(m.cdnAlias));
     }

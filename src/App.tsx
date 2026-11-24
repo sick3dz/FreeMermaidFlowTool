@@ -166,11 +166,11 @@ import {
   FolderAutoResolveSummary,
   FolderScriptFileEntry,
   FolderScriptPool,
-  autoResolveConnectedScriptsFromFolder,
   extractFilesFromDataTransfer,
   importCallflowFile,
   indexScriptFolderFiles,
   isSupportedCallflowImportFilename,
+  loadAllScriptsFromFolder,
 } from './utils/callflowFileImporter';
 import { ThemeConfigurator } from './components/ThemeConfigurator';
 import { CallflowInspector } from './components/CallflowInspector';
@@ -488,6 +488,10 @@ function OfflineStudioApp() {
   const [lastFolderResolveSummary, setLastFolderResolveSummary] =
     useState<FolderAutoResolveSummary | null>(null);
   const [isAutoResolvingFolder, setIsAutoResolvingFolder] = useState<boolean>(false);
+  const [folderLoadProgress, setFolderLoadProgress] = useState<{
+    loaded: number;
+    total: number;
+  } | null>(null);
   const [isConfirmingClearWorkspace, setIsConfirmingClearWorkspace] = useState<boolean>(false);
 
   // Workspace Mode: 'guided' (default, clutter-free 3-step assistant starting with Main) vs 'free' (full Mermaid Studio)
@@ -3304,13 +3308,15 @@ function OfflineStudioApp() {
       setScriptWorkspace(nextWs);
       refreshDiagramFromWorkspace(nextWs);
 
-      // If a script folder pool is already assigned, automatically resolve connected .s scripts recursively!
+      // If a script folder pool is already assigned, ensure all remaining .s scripts from the folder are loaded
       if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
         setIsAutoResolvingFolder(true);
-        void autoResolveConnectedScriptsFromFolder(merged, assignedFolderPool, {
+        void loadAllScriptsFromFolder(merged, assignedFolderPool, {
           externalEndpoints: nextWs.externalEndpoints,
+          avayaWaypoints: nextWs.avayaWaypoints,
           ignoredChecklistTargets: nextWs.ignoredChecklistTargets,
           masterScriptNumber: nextWs.masterScriptNumber,
+          onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
         })
           .then((summary) => {
             setLastFolderResolveSummary(summary);
@@ -3325,6 +3331,7 @@ function OfflineStudioApp() {
           })
           .finally(() => {
             setIsAutoResolvingFolder(false);
+            setFolderLoadProgress(null);
           });
       }
 
@@ -3363,19 +3370,22 @@ function OfflineStudioApp() {
         if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
           setIsAutoResolvingFolder(true);
           try {
-            const summary = await autoResolveConnectedScriptsFromFolder(
+            const summary = await loadAllScriptsFromFolder(
               merged,
               assignedFolderPool,
               {
                 externalEndpoints: scriptWorkspace.externalEndpoints,
+                avayaWaypoints: scriptWorkspace.avayaWaypoints,
                 ignoredChecklistTargets: nextIgnored,
                 masterScriptNumber: effectiveMaster,
+                onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
               }
             );
             merged = summary.modules;
             setLastFolderResolveSummary(summary);
           } finally {
             setIsAutoResolvingFolder(false);
+            setFolderLoadProgress(null);
           }
         }
 
@@ -3426,23 +3436,19 @@ function OfflineStudioApp() {
       }
       setAssignedFolderPool(pool);
 
-      if (scriptWorkspace.modules.length === 0) {
-        showCanvasDropBanner(
-          'success',
-          `Ordner „${pool.folderName}“ mit ${pool.totalFilesScanned} Skript-Dateien verbunden. Wählen Sie rechts Ihr Einstiegsskript (Main) aus.`
-        );
-        return;
-      }
-
+      const wasEmpty = scriptWorkspace.modules.length === 0;
       setIsAutoResolvingFolder(true);
+      setFolderLoadProgress({ loaded: 0, total: pool.totalFilesScanned });
       try {
-        const summary = await autoResolveConnectedScriptsFromFolder(
+        const summary = await loadAllScriptsFromFolder(
           scriptWorkspace.modules,
           pool,
           {
             externalEndpoints: scriptWorkspace.externalEndpoints,
+            avayaWaypoints: scriptWorkspace.avayaWaypoints,
             ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
             masterScriptNumber: scriptWorkspace.masterScriptNumber,
+            onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
           }
         );
         setLastFolderResolveSummary(summary);
@@ -3454,34 +3460,54 @@ function OfflineStudioApp() {
           resolvedIssues: scriptWorkspace.resolvedIssues,
           manualQuestions: scriptWorkspace.manualQuestions,
           manualLinks: scriptWorkspace.manualLinks,
-          masterScriptNumber: scriptWorkspace.masterScriptNumber,
+          masterScriptNumber: wasEmpty
+            ? summary.modules.find((m) => m.isMaster)?.scriptNumber
+            : scriptWorkspace.masterScriptNumber,
           nodeOffsets: scriptWorkspace.nodeOffsets,
           treatUnresolvedAsEndpoint: false,
         });
 
         pendingAutoFitRef.current = true;
+        if (wasEmpty) {
+          setIsVisualEditMode(true);
+          if (workspaceMode === 'guided' && guidedStep === 1) {
+            setGuidedStep(2);
+          }
+        }
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
 
+        const connectedCount = summary.connectedScriptCount ?? 0;
+        const standaloneCount = summary.standaloneScriptNumbers?.length ?? 0;
         const missingSuffix =
           nextWs.missingTargets.length > 0
-            ? ` · ${nextWs.missingTargets.length} fehlend im Import`
+            ? ` · ${nextWs.missingTargets.length} echt fehlend`
             : ' · 0 fehlend';
+        const standaloneSuffix =
+          standaloneCount > 0 ? `, ${standaloneCount} eigenständig` : '';
         showCanvasDropBanner(
           'success',
-          `Ordner „${pool.folderName}“ abgeglichen: ${summary.loadedScriptNumbers.length} Folgeskripte exakt geladen${missingSuffix} · ${summary.skippedLegacyFilesCount} ungenutzt im Ordner.`
+          `Ordner „${pool.folderName}“ vollständig geladen: ${nextWs.modules.length} Skripte im Diagramm (${connectedCount} verknüpft${standaloneSuffix})${missingSuffix}.`
         );
       } finally {
         setIsAutoResolvingFolder(false);
+        setFolderLoadProgress(null);
       }
     },
-    [scriptWorkspace, refreshDiagramFromWorkspace, showCanvasDropBanner]
+    [
+      scriptWorkspace,
+      workspaceMode,
+      guidedStep,
+      refreshDiagramFromWorkspace,
+      showCanvasDropBanner,
+    ]
   );
 
   const handleSelectStartScriptFromAssignedFolder = useCallback(
     async (entry: FolderScriptFileEntry) => {
       if (!assignedFolderPool) return;
       setIsAutoResolvingFolder(true);
+      setFolderLoadProgress({ loaded: 0, total: assignedFolderPool.totalFilesScanned });
       try {
         const startRes = await importCallflowFile(entry.file, {
           isMasterHint: true,
@@ -3498,11 +3524,12 @@ function OfflineStudioApp() {
           startRes.modules[0].scriptNumber
         );
         const primaryNumber = 'Main';
-        const summary = await autoResolveConnectedScriptsFromFolder(
+        const summary = await loadAllScriptsFromFolder(
           normalizedModules,
           assignedFolderPool,
           {
             masterScriptNumber: primaryNumber,
+            onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
           }
         );
         setLastFolderResolveSummary(summary);
@@ -3514,26 +3541,41 @@ function OfflineStudioApp() {
         });
         pendingAutoFitRef.current = true;
         setIsVisualEditMode(true);
+        if (workspaceMode === 'guided' && guidedStep === 1) {
+          setGuidedStep(2);
+        }
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
+        const connectedCount = summary.connectedScriptCount ?? 0;
+        const standaloneCount = summary.standaloneScriptNumbers?.length ?? 0;
         const missingSuffix =
           nextWs.missingTargets.length > 0
-            ? ` · ${nextWs.missingTargets.length} fehlend`
+            ? ` · ${nextWs.missingTargets.length} echt fehlend`
             : ' · 0 fehlend';
+        const standaloneSuffix =
+          standaloneCount > 0 ? `, ${standaloneCount} eigenständig` : '';
         showCanvasDropBanner(
           'success',
-          `Main (aus „${entry.filename}“) + ${summary.loadedScriptNumbers.length} exakt zugeordnete Skripte geladen${missingSuffix} (${summary.skippedLegacyFilesCount} ungenutzt im Ordner).`
+          `Main (aus „${entry.filename}“) + alle ${nextWs.modules.length - 1} Ordner-Skripte eingebunden (${connectedCount} verknüpft${standaloneSuffix})${missingSuffix}.`
         );
       } finally {
         setIsAutoResolvingFolder(false);
+        setFolderLoadProgress(null);
       }
     },
-    [assignedFolderPool, refreshDiagramFromWorkspace, showCanvasDropBanner]
+    [
+      assignedFolderPool,
+      workspaceMode,
+      guidedStep,
+      refreshDiagramFromWorkspace,
+      showCanvasDropBanner,
+    ]
   );
 
   const handleClearAssignedFolder = useCallback(() => {
     setAssignedFolderPool(null);
     setLastFolderResolveSummary(null);
+    setFolderLoadProgress(null);
   }, []);
 
   const handleCanvasFilesDrop = useCallback(
@@ -3594,15 +3636,18 @@ function OfflineStudioApp() {
       let autoLoadedFromFolderCount = 0;
       const nextExternalEndpoints = [...(scriptWorkspace.externalEndpoints || [])];
       if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
-        const summary = await autoResolveConnectedScriptsFromFolder(
+        const summary = await loadAllScriptsFromFolder(
           currentModules,
           assignedFolderPool,
           {
             externalEndpoints: scriptWorkspace.externalEndpoints,
+            avayaWaypoints: scriptWorkspace.avayaWaypoints,
             ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
             masterScriptNumber: wasEmpty ? 'Main' : scriptWorkspace.masterScriptNumber,
+            onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
           }
         );
+        setFolderLoadProgress(null);
         currentModules = summary.modules;
         autoLoadedFromFolderCount = summary.loadedScriptNumbers.length;
         setLastFolderResolveSummary(summary);
@@ -7565,6 +7610,7 @@ function OfflineStudioApp() {
               assignedFolderPool={assignedFolderPool}
               lastFolderResolveSummary={lastFolderResolveSummary}
               isAutoResolvingFolder={isAutoResolvingFolder}
+              folderLoadProgress={folderLoadProgress}
               onAssignFolderAndAutoResolve={handleAssignFolderAndAutoResolve}
               onSelectStartScriptFromAssignedFolder={handleSelectStartScriptFromAssignedFolder}
               onClearAssignedFolder={handleClearAssignedFolder}
@@ -7677,6 +7723,7 @@ function OfflineStudioApp() {
                   assignedFolderPool={assignedFolderPool}
                   lastFolderResolveSummary={lastFolderResolveSummary}
                   isAutoResolvingFolder={isAutoResolvingFolder}
+                  folderLoadProgress={folderLoadProgress}
                   onAssignFolderAndAutoResolve={handleAssignFolderAndAutoResolve}
                   onSelectStartScriptFromAssignedFolder={handleSelectStartScriptFromAssignedFolder}
                   onClearAssignedFolder={handleClearAssignedFolder}

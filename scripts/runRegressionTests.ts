@@ -47,6 +47,7 @@ import { buildWorkspaceGlobalSearchIndex } from '../src/utils/globalSearchEngine
 import {
   autoResolveConnectedScriptsFromFolder,
   indexScriptFolderFiles,
+  loadAllScriptsFromFolder,
 } from '../src/utils/callflowFileImporter';
 import { AUDIT_APP_VERSION } from '../src/utils/offlineAuditEngine';
 
@@ -1112,6 +1113,164 @@ async function finalizeSuite() {
       const supportUndone = (wsUndone.masterChecklist || []).find((c) => c.refKey === 'Support_Team');
       assert.equal(supportUndone?.status, 'missing', 'Unmarking manual waypoint must restore status "missing"');
       assert.ok(wsUndone.missingTargets.includes('Support_Team'), 'Unmarked script must return to missingTargets');
+    }
+  );
+
+  // 14. Full-folder .s loading, 1:1 divider-safe parsing, 5-level deep nesting, inline assign+execute, minimal .s & NFC/NFD Unicode matching
+  await runAsyncTest(
+    '14. Full-folder .s loader: 1:1 divider-safe identity, 5-level deep nesting, inline assign+execute, minimal .s, NFC/NFD & full Master diagram',
+    async () => {
+      const makeVirtualFile = (name: string, content: string): File =>
+        ({
+          name,
+          webkitRelativePath: `FullFolder/${name}`,
+          arrayBuffer: async () => new TextEncoder().encode(content).buffer,
+        }) as unknown as File;
+
+      const mainS = [
+        'section Init',
+        'WHERE DNIS EQUALS',
+        '  VALUE 1001: EXECUTE Ebene1_Einstieg',
+        '  VALUE 1002: assign 1 to gv_flag execute Ebene1_Inline',
+        'END WHERE',
+      ].join('\n');
+
+      // Single .s file containing decorative === / --- dividers and standalone CDN lines (must NEVER split into 9000/9001!)
+      const ebene1S = [
+        '/* Header */',
+        '=== Teil 1 Eingang ===',
+        'CDN 4010',
+        'section Init',
+        '--- Weiterleitung ---',
+        'IF DAY OF WEEK EQUALS MONDAY..FRIDAY THEN',
+        '  EXECUTE Ebene2_Verteiler',
+        'END IF',
+      ].join('\n');
+
+      const ebene1InlineS = [
+        'section Init',
+        'assign 42 to gv_test; execute Ebene2_Verteiler',
+      ].join('\n');
+
+      const ebene2S = [
+        'section Init',
+        'EXECUTE Ebene3_Tiefe',
+      ].join('\n');
+
+      // Calls an umlaut target in NFC while the file on disk uses macOS NFD decomposition (`U\u0308bersicht_Ebene4.s`)
+      const ebene3S = [
+        'section Init',
+        'EXECUTE Übersicht_Ebene4',
+      ].join('\n');
+
+      const ebene4NfdName = 'U\u0308bersicht_Ebene4.s';
+      const ebene4S = [
+        'section Init',
+        'EXECUTE Ebene5_Minimal',
+      ].join('\n');
+
+      // Minimal / comment-only .s file that still exists 1:1 in the folder
+      const ebene5MinimalS = '/* Nur Platzhalter / Sonderlogik im Kommentar */\n';
+
+      // Standalone .s scripts NOT referenced by Main (must STILL be loaded and embedded in the Master diagram!)
+      const standaloneFiles: File[] = [];
+      for (let i = 1; i <= 12; i++) {
+        standaloneFiles.push(
+          makeVirtualFile(
+            `Standalone_Archiv_${i}.s`,
+            `section Init\nGIVE RAN ${900 + i}\nDISCONNECT\n`
+          )
+        );
+      }
+
+      const pool = indexScriptFolderFiles([
+        makeVirtualFile('Main.s', mainS),
+        makeVirtualFile('Ebene1_Einstieg.s', ebene1S),
+        makeVirtualFile('Ebene1_Inline.s', ebene1InlineS),
+        makeVirtualFile('Ebene2_Verteiler.s', ebene2S),
+        makeVirtualFile('Ebene3_Tiefe.s', ebene3S),
+        makeVirtualFile(ebene4NfdName, ebene4S),
+        makeVirtualFile('Ebene5_Minimal.s', ebene5MinimalS),
+        ...standaloneFiles,
+      ]);
+
+      const initialMaster = parseCallflowTextWithFallback(mainS, {
+        sourceFilename: 'Main.s',
+        isMasterHint: true,
+      });
+
+      let progressCalls = 0;
+      const summary = await loadAllScriptsFromFolder(initialMaster, pool, {
+        masterScriptNumber: 'Main',
+        batchSize: 5,
+        onProgress: () => {
+          progressCalls += 1;
+        },
+      });
+
+      assert.equal(summary.mode, 'all', 'Full-folder loader must set mode="all"');
+      assert.ok(progressCalls >= 2, 'Full-folder loader must report incremental progress');
+
+      const ws = buildScriptWorkspace(summary.modules, {
+        masterScriptNumber: 'Main',
+        treatUnresolvedAsEndpoint: false,
+      });
+
+      // Zero false-positive missing targets across all 5 nesting levels!
+      assert.deepEqual(
+        ws.missingTargets,
+        [],
+        `Expected 0 missing targets for 1:1 folder files, got: ${ws.missingTargets.join(', ')}`
+      );
+
+      // Divider-heavy Ebene1_Einstieg.s must NOT have been split into 9000/9001
+      assert.equal(
+        ws.modules.some((m) => /^900\d$/.test(m.scriptNumber)),
+        false,
+        'Single .s file with === / --- dividers must NEVER produce anonymous 9000/9001 modules'
+      );
+      for (const expectedName of [
+        'Main',
+        'Ebene1_Einstieg',
+        'Ebene1_Inline',
+        'Ebene2_Verteiler',
+        'Ebene3_Tiefe',
+        'Übersicht_Ebene4',
+        'Ebene5_Minimal',
+      ]) {
+        assert.ok(
+          ws.modules.some((m) => m.scriptNumber.normalize('NFC') === expectedName.normalize('NFC')),
+          `Expected loaded module "${expectedName}" in workspace`
+        );
+      }
+
+      // Every single checklist item across depth 1..5 must be "present"
+      const checklist = ws.masterChecklist || [];
+      assert.ok(checklist.length >= 6, `Expected >= 6 checklist items across deep chain, got ${checklist.length}`);
+      const notPresent = checklist.filter((c) => c.status !== 'present');
+      assert.equal(
+        notPresent.length,
+        0,
+        `Every 1:1 nested script must be present, found non-present: ${notPresent.map((c) => `${c.refKey}:${c.status}`).join(', ')}`
+      );
+
+      // All 12 standalone .s files must be loaded AND embedded in the Master Overview diagram
+      assert.equal(
+        summary.standaloneScriptNumbers?.length,
+        12,
+        `Expected 12 standalone scripts tracked, got ${summary.standaloneScriptNumbers?.length}`
+      );
+      const masterMermaid = buildMasterOverviewMermaid(ws, 'LR', { compact: true });
+      for (let i = 1; i <= 12; i++) {
+        assert.ok(
+          masterMermaid.includes(`Standalone_Archiv_${i}`),
+          `Standalone script Standalone_Archiv_${i} must be embedded in the Master diagram`
+        );
+      }
+      assert.ok(
+        masterMermaid.includes('Ebene5_Minimal'),
+        'Deeply nested Ebene5_Minimal must be embedded in the Master diagram'
+      );
     }
   );
 

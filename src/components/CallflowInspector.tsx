@@ -125,6 +125,7 @@ interface CallflowInspectorProps {
   assignedFolderPool?: FolderScriptPool | null;
   lastFolderResolveSummary?: FolderAutoResolveSummary | null;
   isAutoResolvingFolder?: boolean;
+  folderLoadProgress?: { loaded: number; total: number } | null;
   onAssignFolderAndAutoResolve?: (files: FileList | File[]) => Promise<void>;
   onSelectStartScriptFromAssignedFolder?: (entry: FolderScriptFileEntry) => Promise<void>;
   onClearAssignedFolder?: () => void;
@@ -178,6 +179,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
   assignedFolderPool = null,
   lastFolderResolveSummary = null,
   isAutoResolvingFolder = false,
+  folderLoadProgress = null,
   onAssignFolderAndAutoResolve,
   onSelectStartScriptFromAssignedFolder,
   onClearAssignedFolder,
@@ -544,9 +546,19 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
     nestedMissingCount,
     syncPercent,
   } = useMemo(() => {
-    const loadedModuleKeys = new Set(
-      scriptWorkspace.modules.map((m) => canonicalScriptMatchKey(m.scriptNumber))
-    );
+    const loadedModuleKeys = new Set<string>();
+    scriptWorkspace.modules.forEach((m) => {
+      const numKey = canonicalScriptMatchKey(m.scriptNumber);
+      if (numKey) loadedModuleKeys.add(numKey);
+      if (m.sourceFilename) {
+        const fileKey = canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename));
+        if (fileKey) loadedModuleKeys.add(fileKey);
+      }
+      if (m.cdnAlias) {
+        const aliasKey = canonicalScriptMatchKey(m.cdnAlias);
+        if (aliasKey) loadedModuleKeys.add(aliasKey);
+      }
+    });
     const externalKeys = new Set(
       (scriptWorkspace.externalEndpoints || []).map(canonicalScriptMatchKey)
     );
@@ -626,6 +638,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
     reconcileMissingItems,
     reconcileWaypointItems,
     reconcileUnusedFolderEntries,
+    reconcileStandaloneModules,
   } = useMemo(() => {
     const modByCanon = new Map<string, (typeof scriptWorkspace.modules)[number]>();
     const loadedFileNamesLower = new Set<string>();
@@ -736,11 +749,30 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
           relativePath: entry.relativePath,
         }));
 
+    const standaloneLoadedModules: Array<{
+      scriptNumber: string;
+      filename: string;
+    }> = (() => {
+      if (lastFolderResolveSummary?.mode !== 'all') return [];
+      const standaloneSet = new Set(
+        (lastFolderResolveSummary.standaloneScriptNumbers || []).map(canonicalScriptMatchKey)
+      );
+      if (standaloneSet.size === 0) return [];
+      return scriptWorkspace.modules
+        .filter((m) => standaloneSet.has(canonicalScriptMatchKey(m.scriptNumber)))
+        .map((m) => ({
+          scriptNumber: m.scriptNumber,
+          filename: m.sourceFilename || `${m.scriptNumber}.s`,
+        }))
+        .sort((a, b) => a.scriptNumber.localeCompare(b.scriptNumber, undefined, { numeric: true }));
+    })();
+
     return {
       reconcileFoundItems: found,
       reconcileMissingItems: missing,
       reconcileWaypointItems: waypoints,
       reconcileUnusedFolderEntries: unused,
+      reconcileStandaloneModules: standaloneLoadedModules,
     };
   }, [masterChecklist, scriptWorkspace.modules, assignedFolderPool, lastFolderResolveSummary]);
 
@@ -1440,10 +1472,12 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                       <FolderSearch className="w-3.5 h-3.5 text-indigo-300 shrink-0" />
                       <span>
                         {isAutoResolvingFolder
-                          ? 'Gleiche Skript-Ordner ab...'
+                          ? folderLoadProgress
+                            ? `Lade .s-Skripte (${folderLoadProgress.loaded} / ${folderLoadProgress.total})...`
+                            : 'Lade alle .s-Skripte aus Ordner...'
                           : assignedFolderPool
                           ? `Ordner „${assignedFolderPool.folderName}“ (${assignedFolderPool.totalFilesScanned} .s) wechseln`
-                          : 'Skript-Ordner zuweisen (600+ .s automatisch abgleichen)'}
+                          : 'Skript-Ordner zuweisen (alle .s komplett laden)'}
                       </span>
                     </button>
 
@@ -2779,7 +2813,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
             )}
           </div>
 
-          {/* 1-Click Folder Assignment & Automatic Recursive .s Script Discovery */}
+          {/* 1-Click Folder Assignment & Complete .s Script Folder Loader */}
           {onAssignFolderAndAutoResolve && (
             <div className="p-2.5 rounded-lg bg-slate-900/90 border border-indigo-500/40 space-y-2">
               <div className="flex items-center justify-between gap-2">
@@ -2789,12 +2823,11 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                     <span className="truncate">
                       {assignedFolderPool
                         ? `Ordner „${assignedFolderPool.folderName}“ (${assignedFolderPool.totalFilesScanned} Dateien)`
-                        : 'Automatische Ordnersuche (Scriptname.s)'}
+                        : 'Vollständiger Skript-Ordner-Import (.s)'}
                     </span>
                   </div>
                   <p className="text-[10px] text-slate-400 leading-snug mt-0.5">
-                    Gleicht den Ordner automatisch mit allen in Main (Einstiegsskript) &amp; Folgeskripten
-                    aufgerufenen Zielen ab und lädt nur aktive <code className="font-mono text-slate-300">.s</code>-Dateien rekursiv nach (Altlasten werden ignoriert).
+                    Lädt alle <code className="font-mono text-slate-300">.s</code>-Skripte des Ordners 1:1 per Dateiname (inkl. tief verschachtelter Unterskripte) und bindet sie komplett im Diagramm ein.
                   </p>
                 </div>
               </div>
@@ -2809,28 +2842,76 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                   <FolderSearch className="w-3.5 h-3.5 shrink-0" />
                   <span>
                     {isAutoResolvingFolder
-                      ? 'Suche & lade verknüpfte .s-Skripte...'
+                      ? folderLoadProgress
+                        ? `Lade .s-Skripte (${folderLoadProgress.loaded} / ${folderLoadProgress.total})...`
+                        : 'Lade alle .s-Skripte...'
                       : assignedFolderPool
-                      ? 'Anderen Skript-Ordner wählen & abgleichen'
-                      : 'Skript-Ordner zuweisen & .s automatisch laden'}
+                      ? 'Anderen Skript-Ordner wählen & alle .s laden'
+                      : 'Skript-Ordner zuweisen & alle .s laden'}
                   </span>
                 </button>
               </div>
 
-              {lastFolderResolveSummary && (
+              {isAutoResolvingFolder && folderLoadProgress && folderLoadProgress.total > 0 && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[10px] font-mono tabular-nums text-indigo-300">
+                    <span>Lade &amp; prüfe .s-Skripte...</span>
+                    <span>
+                      {folderLoadProgress.loaded} / {folderLoadProgress.total} (
+                      {Math.round((folderLoadProgress.loaded / folderLoadProgress.total) * 100)}%)
+                    </span>
+                  </div>
+                  <div className="w-full h-1.5 rounded-full bg-slate-950 border border-slate-800 overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-500 transition-all duration-150"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          Math.round((folderLoadProgress.loaded / folderLoadProgress.total) * 100)
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {lastFolderResolveSummary && !isAutoResolvingFolder && (
                 <div className="px-2.5 py-1.5 rounded bg-emerald-950/35 border border-emerald-500/35 text-[10px] font-mono tabular-nums text-emerald-200 space-y-0.5">
-                  <div>
-                    ✓ <strong>{lastFolderResolveSummary.loadedScriptNumbers.length}</strong> Folgeskripte exakt per Dateiname geladen
-                    {reconcileMissingItems.length > 0 && (
-                      <span className="text-rose-300">
-                        {' '}· <strong>{reconcileMissingItems.length}</strong> fehlend
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-slate-400">
-                    {reconcileUnusedFolderEntries.length} von{' '}
-                    {lastFolderResolveSummary.totalPoolFiles} Dateien im Ordner nicht vom Master aufgerufen
-                  </div>
+                  {lastFolderResolveSummary.mode === 'all' ? (
+                    <>
+                      <div>
+                        ✓ <strong>{scriptWorkspace.modules.length}</strong> Skripte komplett im Diagramm eingebunden
+                        {reconcileMissingItems.length > 0 ? (
+                          <span className="text-rose-300">
+                            {' '}· <strong>{reconcileMissingItems.length}</strong> echt fehlend
+                          </span>
+                        ) : (
+                          <span className="text-emerald-300"> · 0 fehlend</span>
+                        )}
+                      </div>
+                      <div className="text-slate-400">
+                        {lastFolderResolveSummary.connectedScriptCount ?? 0} verknüpft
+                        {reconcileStandaloneModules.length > 0
+                          ? ` · ${reconcileStandaloneModules.length} eigenständige .s-Skripte im Ordner`
+                          : ''}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div>
+                        ✓ <strong>{lastFolderResolveSummary.loadedScriptNumbers.length}</strong> Folgeskripte exakt per Dateiname geladen
+                        {reconcileMissingItems.length > 0 && (
+                          <span className="text-rose-300">
+                            {' '}· <strong>{reconcileMissingItems.length}</strong> fehlend
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-slate-400">
+                        {reconcileUnusedFolderEntries.length} von{' '}
+                        {lastFolderResolveSummary.totalPoolFiles} Dateien im Ordner nicht vom Master aufgerufen
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -3084,9 +3165,13 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             : 'bg-slate-950/70 border-slate-800 hover:border-slate-700'
                         }`}
                       >
-                        <div className="text-[9.5px] text-slate-400 truncate">Ungenutzt</div>
+                        <div className="text-[9.5px] text-slate-400 truncate">
+                          {lastFolderResolveSummary?.mode === 'all' ? 'Eigenständig' : 'Ungenutzt'}
+                        </div>
                         <div className="text-xs font-mono font-semibold tabular-nums text-slate-300">
-                          {assignedFolderPool || lastFolderResolveSummary
+                          {lastFolderResolveSummary?.mode === 'all'
+                            ? reconcileStandaloneModules.length
+                            : assignedFolderPool || lastFolderResolveSummary
                             ? reconcileUnusedFolderEntries.length
                             : '—'}
                         </div>
@@ -3302,9 +3387,55 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
 
                         {reconcileTab === 'unused' && (
                           <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
-                            {!assignedFolderPool && !lastFolderResolveSummary ? (
+                            {lastFolderResolveSummary?.mode === 'all' ? (
+                              reconcileStandaloneModules.length === 0 ? (
+                                <div className="text-[11px] text-emerald-300 py-1.5 text-center">
+                                  Alle geladenen .s-Skripte sind direkt oder indirekt verknüpft.
+                                </div>
+                              ) : (
+                                <>
+                                  {reconcileStandaloneModules
+                                    .filter((it) => {
+                                      const q = reconcileSearch.trim().toLowerCase();
+                                      if (!q) return true;
+                                      return (
+                                        it.scriptNumber.toLowerCase().includes(q) ||
+                                        it.filename.toLowerCase().includes(q)
+                                      );
+                                    })
+                                    .slice(0, 120)
+                                    .map((it) => (
+                                      <button
+                                        key={`rec-standalone-${it.scriptNumber}`}
+                                        type="button"
+                                        onClick={() =>
+                                          jumpToScriptInInspector(it.scriptNumber, true, true)
+                                        }
+                                        className="w-full text-left px-2 py-1 rounded bg-slate-950/75 hover:bg-slate-900 border border-slate-800/90 flex items-center justify-between gap-2 cursor-pointer"
+                                      >
+                                        <div className="min-w-0">
+                                          <div className="text-[11px] font-mono text-indigo-200 truncate">
+                                            {it.scriptNumber}
+                                          </div>
+                                          <div className="text-[9.5px] font-mono text-slate-500 truncate">
+                                            {it.filename} · im Diagramm eingebunden
+                                          </div>
+                                        </div>
+                                        <span className="text-[10px] text-indigo-300 shrink-0">
+                                          Öffnen →
+                                        </span>
+                                      </button>
+                                    ))}
+                                  {reconcileStandaloneModules.length > 120 && (
+                                    <div className="text-[10px] text-slate-500 text-center pt-0.5">
+                                      Zeige erste 120 von {reconcileStandaloneModules.length} – bitte Suchfilter nutzen.
+                                    </div>
+                                  )}
+                                </>
+                              )
+                            ) : !assignedFolderPool && !lastFolderResolveSummary ? (
                               <div className="text-[11px] text-slate-400 py-1.5 text-center">
-                                Weisen Sie oben einen Skript-Ordner zu, um nicht aufgerufene Dateien anzuzeigen.
+                                Weisen Sie oben einen Skript-Ordner zu, um alle .s-Dateien anzuzeigen.
                               </div>
                             ) : reconcileUnusedFolderEntries.length === 0 ? (
                               <div className="text-[11px] text-emerald-300 py-1.5 text-center">
@@ -3350,11 +3481,12 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                                   </div>
                                 ))
                             )}
-                            {reconcileUnusedFolderEntries.length > 120 && (
-                              <div className="text-[10px] text-slate-500 text-center pt-0.5">
-                                Zeige erste 120 von {reconcileUnusedFolderEntries.length} – bitte Suchfilter nutzen.
-                              </div>
-                            )}
+                            {lastFolderResolveSummary?.mode !== 'all' &&
+                              reconcileUnusedFolderEntries.length > 120 && (
+                                <div className="text-[10px] text-slate-500 text-center pt-0.5">
+                                  Zeige erste 120 von {reconcileUnusedFolderEntries.length} – bitte Suchfilter nutzen.
+                                </div>
+                              )}
                           </div>
                         )}
                       </div>

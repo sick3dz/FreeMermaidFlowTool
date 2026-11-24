@@ -36,10 +36,10 @@ import {
   FolderAutoResolveSummary,
   FolderScriptFileEntry,
   FolderScriptPool,
-  autoResolveConnectedScriptsFromFolder,
   extractFilesFromDataTransfer,
   importCallflowFile,
   indexScriptFolderFiles,
+  loadAllScriptsFromFolder,
 } from '../utils/callflowFileImporter';
 
 export type MasterTargetDecision = 'request' | 'external' | 'ignore' | 'present';
@@ -147,7 +147,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     let resolveSummary: FolderAutoResolveSummary | null = null;
 
     if (effectivePool && effectivePool.entries.length > 0) {
-      resolveSummary = await autoResolveConnectedScriptsFromFolder(
+      resolveSummary = await loadAllScriptsFromFolder(
         normalizedModules,
         effectivePool,
         {
