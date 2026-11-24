@@ -3077,7 +3077,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                           Master ↔ Import Abgleich
                         </div>
                         <div className="text-[10px] text-slate-400">
-                          Regel: Name im Skript (Leerzeichen → <code className="font-mono text-slate-300">_</code>) = Dateiname · Avaya/FlixCheck = Wegweiser
+                          Regel: Name im Skript (Leerzeichen → <code className="font-mono text-slate-300">_</code>) = Dateiname · Avaya/FlixCheck/Oracle/Queuing = Wegweiser
                         </div>
                       </div>
                       {reconcileTab !== 'none' && (
@@ -3379,7 +3379,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                               ))}
                             {reconcileWaypointItems.length === 0 && (
                               <div className="text-[11px] text-slate-500 py-1.5 text-center">
-                                Keine Avaya-Wegweiser / FlixCheck- oder Nummern-Ziele erkannt.
+                                Keine Avaya-, FlixCheck-, Oracle- oder Queuing-Wegweiser erkannt.
                               </div>
                             )}
                           </div>

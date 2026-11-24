@@ -136,6 +136,109 @@ const SCRIPT_NAME_STOPWORDS = new Set([
   'offen',
   'keine',
   'kein',
+  // English & German OCL grammar / call-state words that must never be mistaken for script names
+  'has',
+  'have',
+  'had',
+  'was',
+  'were',
+  'are',
+  'been',
+  'not',
+  'from',
+  'with',
+  'for',
+  'the',
+  'this',
+  'that',
+  'then',
+  'else',
+  'and',
+  'but',
+  'into',
+  'onto',
+  'until',
+  'while',
+  'when',
+  'where',
+  'select',
+  'case',
+  'value',
+  'equals',
+  'contains',
+  'exists',
+  'empty',
+  'abandoned',
+  'answered',
+  'queued',
+  'dropped',
+  'ended',
+  'disconnected',
+  'terminated',
+  'offered',
+  'delivered',
+  'transferred',
+  'routed',
+  'held',
+  'variable',
+  'data',
+  'status',
+  'state',
+  'error',
+  'failed',
+  'event',
+  'handler',
+  'print',
+  'log',
+  'wait',
+  'open',
+  'close',
+  'send',
+  'receive',
+  'readvar',
+  'host',
+  'request',
+  'response',
+  'script',
+  'skript',
+  'target',
+  'next',
+  'goto',
+  'execute',
+  'subscript',
+  'transfer',
+  'disconnect',
+  'drop',
+  'hat',
+  'ist',
+  'war',
+  'nicht',
+  'und',
+  'oder',
+  'von',
+  'mit',
+  'fuer',
+  'für',
+  'bei',
+  'zum',
+  'zur',
+  'nach',
+  'ueber',
+  'über',
+  'unter',
+  'durch',
+  'ohne',
+  'bis',
+  'seit',
+  'vor',
+  'als',
+  'wie',
+  'wenn',
+  'dann',
+  'sonst',
+  'anruf',
+  'gespraech',
+  'gespräch',
 ]);
 
 export function normalizeScriptRef(raw: string): string {
@@ -244,7 +347,31 @@ export function classifyAvayaWaypointTarget(
     return 'FlixCheck-Wegweiser';
   }
 
-  // 2. Avaya-Menü / Orchestration Flow / IVR-Applikation (e.g. Menu, Menü, flow_1, Flow2, VoicePortal, AEP, VRU, Vector)
+  // 2. Oracle-Anbindung & Oracle Agent-Queuing (z. B. Agent_Queuing_Oracle, Oracle_CRM, *_Oracle)
+  if (/(?:^|[_.\-\s])oracle(?:$|[_.\-\s\d])/i.test(clean) || /oracle/i.test(clean)) {
+    if (/(?:agent[\s_.-]*queu(?:e|ing|eing)|queuing|queueing)/i.test(clean)) {
+      return 'Oracle Agent-Queuing (System)';
+    }
+    return 'Oracle-Anbindung (System)';
+  }
+
+  // 3. Avaya Agent-/Skillset-Queuing & allgemeine Queuing-/Loop-Routinen (z. B. Agent_Queuing, Skillset_Queuing, *_Queuing, *_Loop)
+  if (
+    /(?:^|[_.\-\s])(?:agent[\s_.-]*queu(?:e|ing|eing)|skillset[\s_.-]*queu(?:e|ing|eing)|preferred[\s_.-]*agent|direct[\s_.-]*agent)(?:$|[_.\-\s\d])/i.test(
+      clean
+    )
+  ) {
+    return 'Agent-/Skillset-Queuing (Avaya)';
+  }
+  if (
+    /(?:^|[_.\-\s])(?:queuing|queueing|queue[\s_.-]*loop|wait[\s_.-]*loop|hold[\s_.-]*loop|loop)(?:$|[_.\-\s\d])/i.test(
+      clean
+    )
+  ) {
+    return 'Queuing-/Loop-Routine (Avaya)';
+  }
+
+  // 4. Avaya-Menü / Orchestration Flow / IVR-Applikation (e.g. Menu, Menü, flow_1, Flow2, VoicePortal, AEP, VRU, Vector)
   if (
     /^(?:flow|subflow|men[uü])(?:[_.\-\s]?\d+|[A-Za-zÄÖÜäöüß0-9_.-]*)$/i.test(clean) ||
     /(?:^|[_.\-\s])(?:men[uü]|hauptmen[uü]|sprachmen[uü]|auswahlmen[uü]|submen[uü]|untermen[uü]|flow|subflow|voice[\s_-]*portal|aep|aaep|orchestration|auto[\s_-]*attendant|vru|vector|vektor|route[\s_-]*point|application)(?:$|[_.\-\s\d])/i.test(
@@ -254,13 +381,13 @@ export function classifyAvayaWaypointTarget(
     return 'Menü / Flow (Avaya-only)';
   }
 
-  // 3. Reine Nummern (CDNs, VDNs, Durchwahlen, Rufnummern wie 100, 4910, 5010, 0800...)
+  // 5. Reine Nummern (CDNs, VDNs, Durchwahlen, Rufnummern wie 100, 4910, 5010, 0800...)
   // Hinweis: Greift nur, wenn KEIN geladenes Modul unter dieser Nummer / cdnAlias existiert!
   if (/^\+?\d{2,16}$/.test(clean)) {
     return 'Avaya-Nummer / CDN';
   }
 
-  // 4. Explizite Avaya-Weiterleitung (TRANSFER TO, GIVE CDN, ROUTE CALL) ohne lokales .s-Skript
+  // 6. Explizite Avaya-Weiterleitung (TRANSFER TO, GIVE CDN, ROUTE CALL) ohne lokales .s-Skript
   if (options?.isAvayaRouteCmd) {
     return 'Avaya-Weiterleitung (Transfer/CDN)';
   }
@@ -1235,9 +1362,10 @@ function extractInlineKeyValuesFromText(
 
   const cleanLineForDigits = stripNumericNoiseForFreeText(lineWithoutChoices);
 
+  const cleanLineNoQuotedCall = cleanLineForDigits.replace(/(["'])(?:\\.|[^"'\\])*\1/g, ' ');
   const explicitTarget =
-    cleanLineForDigits.match(
-      /\b(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|weiter(?:leitung)?|next|goto|execute(?:\s+script)?|call(?:\s+script)?|run|sub(?:script)?|skript|script)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/i
+    cleanLineNoQuotedCall.match(
+      /\b(?:wohin|ziel(?:nummer)?|sprung(?:ziel)?|weiter(?:leitung)?|next|goto|execute(?:\s+script)?|call\s+script|run|sub(?:script)?|skript|script)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/i
     ) ||
     cleanLineForDigits.match(
       /(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/
@@ -3311,9 +3439,34 @@ function parseAaccScriptBlocks(
           ? actionSegment.match(/\b(?:fax(?:routing)?\s*(?:cdn)?|cdn)\s*[:=]?\s*(\d{4})\b/i)
           : actionSegment.match(/\bfax(?:routing)?\s*(?:cdn)?\s*[:=]?\s*(\d{4})\b/i);
 
-      const execCmd = actionSegment.match(
-        /\b(execute(?:\s+script)?|call(?:\s+script)?|subscript|give\s+script|goto)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
+      // Guard against false script matches inside messaging/host/logging statements or string literals (e.g. `SEND INFO "The call has ..."` or `IF CALL HAS ...`)
+      const isNonExecMessageStmt =
+        /^\s*(?:send\s+(?:info|request)|get\s+response|(?:open|send|receive)\s+host|readvar|log|print|syslog|event|disconnect|drop\s+call|route\s+end)\b/i.test(
+          actionSegment
+        );
+      // Strip string literals that are NOT the direct argument of an explicit script-execution keyword
+      const actionForExecScan = actionSegment.replace(
+        /(["'])(?:\\.|[^"'\\])*\1/g,
+        (quoted, _q, offset: number, full: string) => {
+          const before = full.slice(0, offset);
+          if (
+            /(?:\b(?:execute(?:\s+script)?|call\s+script|subscript|give\s+script|goto)|^\s*call)\s+$/i.test(
+              before
+            )
+          ) {
+            return quoted;
+          }
+          return ' ';
+        }
       );
+      const execCmd = isNonExecMessageStmt
+        ? null
+        : actionForExecScan.match(
+            /\b(execute(?:\s+script)?|call\s+script|subscript|give\s+script|goto)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
+          ) ||
+          actionForExecScan.match(
+            /^\s*(call)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
+          );
       const queueCmd = actionSegment.match(
         /\bqueue\s+to\s+(?:(network\s+skillset|skillset|agent|cdn)\s+)?(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))(?:\s+with\s+priority\s+(\d{1,3}))?/i
       );
@@ -3972,8 +4125,11 @@ function parseAaccScriptBlocks(
 
         // If inside a DTMF collect menu, attach direct target as a choice branch on ruleTracking.lastCollect
         if (singleDtmfKey && ruleTracking.lastCollect && afterColon) {
-          const dtmfTarget = afterColon.match(
-            /\b(?:execute(?:\s+script)?|call(?:\s+script)?|route\s+call(?:\s+to)?|transfer(?:\s+to)?|goto)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+          const dtmfTarget = (
+            afterColon.match(
+              /\b(?:execute(?:\s+script)?|call\s+script|route\s+call(?:\s+to)?|transfer(?:\s+to)?|goto)\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i
+            ) ||
+            afterColon.match(/^\s*call\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i)
           )?.[1];
           if (dtmfTarget && isValidScriptRef(dtmfTarget) && !localSectionNames.has(canonicalScriptMatchKey(dtmfTarget))) {
             const normTarget = normalizeScriptRef(dtmfTarget);
@@ -4946,9 +5102,14 @@ export function parseCallflowTextWithFallback(
   const rules: ScriptRule[] = cleanedLines.map((line, idx) => {
     const withoutNoise = stripNumericNoiseForFreeText(line).trim();
     const numMatch = withoutNoise.match(/\b(\d{3,6})\b/);
-    const arrowMatch = withoutNoise.match(
-      /(?:->|=>|\b(?:wohin|ziel|sprung|execute(?:\s+script)?|call(?:\s+script)?|script|skript)\s*[:=]?)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
-    );
+    const withoutQuoted = withoutNoise.replace(/(["'])(?:\\.|[^"'\\])*\1/g, ' ');
+    const arrowMatch =
+      withoutNoise.match(
+        /(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
+      ) ||
+      withoutQuoted.match(
+        /\b(?:wohin|ziel|sprung|execute(?:\s+script)?|call\s+script|script|skript)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
+      );
     const namedMatch = withoutNoise.match(
       /\b([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
     );

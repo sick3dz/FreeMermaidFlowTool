@@ -481,7 +481,7 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.2.4', 'Expected release version 1.2.4');
+  assert.equal(AUDIT_APP_VERSION, '1.2.5', 'Expected release version 1.2.5');
 });
 
 async function finalizeSuite() {
@@ -1270,6 +1270,133 @@ async function finalizeSuite() {
       assert.ok(
         masterMermaid.includes('Ebene5_Minimal'),
         'Deeply nested Ebene5_Minimal must be embedded in the Master diagram'
+      );
+    }
+  );
+
+  // 15. OCL 'has' false-positive prevention & Oracle / Agent_Queuing / Skillset_Queuing / Loop waypoint classification
+  await runAsyncTest(
+    '15. OCL "has" false-positive prevention & Oracle / Agent_Queuing / Skillset_Queuing / Loop waypoints (with .s precedence)',
+    async () => {
+      const makeVirtualFile = (name: string, content: string): File =>
+        ({
+          name,
+          webkitRelativePath: `OracleCheck/${name}`,
+          arrayBuffer: async () => new TextEncoder().encode(content).buffer,
+        }) as unknown as File;
+
+      const mainWithCallHasAndOracle = [
+        'section Init',
+        'EVENT CALL HAS ABANDONED',
+        '  SEND INFO "The call has been abandoned while queued"',
+        'END EVENT',
+        'IF CALL HAS PRIORITY THEN',
+        '  SEND INFO "call has priority and call was routed"',
+        '  EXECUTE Agent_Queuing_Oracle',
+        'ELSE',
+        '  EXECUTE Agent_Queuing',
+        '  EXECUTE Skillset_Queuing',
+        '  EXECUTE Oracle_CRM',
+        '  EXECUTE Wait_Loop',
+        '  EXECUTE Custom_Queuing',
+        '  EXECUTE Echtes_Fehlendes_Skript',
+        'END IF',
+      ].join('\n');
+
+      const parsedNoLocal = parseCallflowTextWithFallback(mainWithCallHasAndOracle, {
+        sourceFilename: 'Main.s',
+        isMasterHint: true,
+      });
+      const wsNoLocal = buildScriptWorkspace(parsedNoLocal, {
+        masterScriptNumber: 'Main',
+        treatUnresolvedAsEndpoint: false,
+      });
+
+      // 1. "has" / "was" / "abandoned" must NEVER be extracted as targets
+      const allChecklistKeys = (wsNoLocal.masterChecklist || []).map((c) => c.refKey.toLowerCase());
+      for (const bogus of ['has', 'was', 'abandoned', 'priority', 'queued']) {
+        assert.equal(
+          allChecklistKeys.includes(bogus),
+          false,
+          `Bogus OCL word "${bogus}" must NEVER appear in masterChecklist`
+        );
+        assert.equal(
+          wsNoLocal.missingTargets.some((t) => t.toLowerCase() === bogus),
+          false,
+          `Bogus OCL word "${bogus}" must NEVER appear in missingTargets`
+        );
+      }
+
+      // 2. Oracle, Agent_Queuing, Skillset_Queuing, Wait_Loop & Custom_Queuing -> automatic Wegweiser (0 offen)
+      const expectedWaypoints: Array<{ ref: string; reasonPart: string }> = [
+        { ref: 'Agent_Queuing_Oracle', reasonPart: 'Oracle Agent-Queuing' },
+        { ref: 'Oracle_CRM', reasonPart: 'Oracle-Anbindung' },
+        { ref: 'Agent_Queuing', reasonPart: 'Agent-/Skillset-Queuing' },
+        { ref: 'Skillset_Queuing', reasonPart: 'Agent-/Skillset-Queuing' },
+        { ref: 'Wait_Loop', reasonPart: 'Queuing-/Loop-Routine' },
+        { ref: 'Custom_Queuing', reasonPart: 'Queuing-/Loop-Routine' },
+      ];
+      for (const exp of expectedWaypoints) {
+        const item = (wsNoLocal.masterChecklist || []).find(
+          (c) => c.refKey.toLowerCase() === exp.ref.toLowerCase()
+        );
+        assert.ok(item, `Expected "${exp.ref}" in masterChecklist`);
+        assert.equal(
+          item?.status,
+          'waypoint',
+          `Expected "${exp.ref}" to be classified as "waypoint", got "${item?.status}"`
+        );
+        assert.ok(
+          item?.waypointReason?.includes(exp.reasonPart),
+          `Expected waypointReason for "${exp.ref}" to include "${exp.reasonPart}", got "${item?.waypointReason}"`
+        );
+        assert.equal(
+          wsNoLocal.missingTargets.some((t) => t.toLowerCase() === exp.ref.toLowerCase()),
+          false,
+          `"${exp.ref}" must NOT appear in missingTargets`
+        );
+      }
+
+      // Only Echtes_Fehlendes_Skript remains missing
+      assert.deepEqual(
+        wsNoLocal.missingTargets,
+        ['Echtes_Fehlendes_Skript'],
+        `Only genuine missing script should remain in missingTargets, got: ${wsNoLocal.missingTargets.join(', ')}`
+      );
+
+      const masterMermaid = buildMasterOverviewMermaid(wsNoLocal, 'LR', { compact: false });
+      assert.ok(
+        masterMermaid.includes('Agent_Queuing_Oracle') && masterMermaid.includes(':::avayaWaypoint'),
+        'Master diagram must render Agent_Queuing_Oracle as :::avayaWaypoint'
+      );
+
+      // 3. Strict 1:1 .s precedence: if Agent_Queuing.s IS in the folder, it MUST load as "present" (never waypoint)
+      const poolWithRealAgentQueuing = indexScriptFolderFiles([
+        makeVirtualFile('Main.s', mainWithCallHasAndOracle),
+        makeVirtualFile('Agent_Queuing.s', 'section Init\nQUEUE TO AGENT gv_agent\nWAIT 30\n'),
+      ]);
+      const fullSummary = await loadAllScriptsFromFolder(parsedNoLocal, poolWithRealAgentQueuing, {
+        masterScriptNumber: 'Main',
+      });
+      const wsWithLocal = buildScriptWorkspace(fullSummary.modules, {
+        masterScriptNumber: 'Main',
+        treatUnresolvedAsEndpoint: false,
+      });
+      const agentItem = (wsWithLocal.masterChecklist || []).find(
+        (c) => c.refKey === 'Agent_Queuing'
+      );
+      assert.equal(
+        agentItem?.status,
+        'present',
+        'When Agent_Queuing.s exists locally in folder, it must have status "present" instead of "waypoint"'
+      );
+      const oracleItem = (wsWithLocal.masterChecklist || []).find(
+        (c) => c.refKey === 'Agent_Queuing_Oracle'
+      );
+      assert.equal(
+        oracleItem?.status,
+        'waypoint',
+        'Agent_Queuing_Oracle without local .s file must remain "waypoint"'
       );
     }
   );
