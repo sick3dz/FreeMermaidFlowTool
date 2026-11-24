@@ -56,6 +56,7 @@ import {
   extractScriptSpecialParameters,
   extractWorkspaceResourceRegistry,
   formatScriptDisplayLabel,
+  stripKnownScriptExtension,
   toMermaidNodeSuffix,
 } from '../utils/scriptCallflowParser';
 import {
@@ -222,6 +223,8 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
 
   const [activeChecklistRef, setActiveChecklistRef] = useState<string | null>(null);
   const [checklistFilter, setChecklistFilter] = useState<'all' | 'todo' | 'synced'>('all');
+  const [reconcileTab, setReconcileTab] = useState<'none' | 'found' | 'missing' | 'unused'>('none');
+  const [reconcileSearch, setReconcileSearch] = useState('');
   const [checklistDraftText, setChecklistDraftText] = useState('');
   const [checklistFeedback, setChecklistFeedback] = useState<string | null>(null);
   const [isEditingCompletedItem, setIsEditingCompletedItem] = useState(false);
@@ -596,6 +599,113 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
     scriptWorkspace.modules,
     scriptWorkspace.externalEndpoints,
   ]);
+
+  // Live Master <-> Import reconciliation breakdown (Gefunden / Fehlend / Ungenutzt im Ordner)
+  const {
+    reconcileFoundItems,
+    reconcileMissingItems,
+    reconcileUnusedFolderEntries,
+  } = useMemo(() => {
+    const modByCanon = new Map<string, (typeof scriptWorkspace.modules)[number]>();
+    const loadedFileNamesLower = new Set<string>();
+    const loadedCanonKeys = new Set<string>();
+
+    scriptWorkspace.modules.forEach((m) => {
+      const numKey = canonicalScriptMatchKey(m.scriptNumber);
+      if (numKey) {
+        modByCanon.set(numKey, m);
+        loadedCanonKeys.add(numKey);
+      }
+      if (m.sourceFilename) {
+        loadedFileNamesLower.add(m.sourceFilename.toLowerCase());
+        const fileKey = canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename));
+        if (fileKey) {
+          loadedCanonKeys.add(fileKey);
+          if (!modByCanon.has(fileKey)) modByCanon.set(fileKey, m);
+        }
+      }
+      if (m.cdnAlias) {
+        const aliasKey = canonicalScriptMatchKey(m.cdnAlias);
+        if (aliasKey) {
+          loadedCanonKeys.add(aliasKey);
+          if (!modByCanon.has(aliasKey)) modByCanon.set(aliasKey, m);
+        }
+      }
+    });
+
+    const found: Array<{
+      refKey: string;
+      matchedScriptNumber: string;
+      matchedFilename: string;
+      callerScriptNumber: string;
+      depth: number;
+    }> = [];
+    const missing: Array<{
+      refKey: string;
+      expectedFilename: string;
+      callerScriptNumber: string;
+      contextLabel: string;
+      depth: number;
+    }> = [];
+
+    masterChecklist.forEach((item) => {
+      const k = canonicalScriptMatchKey(item.refKey);
+      const matchedMod =
+        (item.matchedModuleNumber ? modByCanon.get(canonicalScriptMatchKey(item.matchedModuleNumber)) : undefined) ||
+        modByCanon.get(k);
+      if (item.status === 'present' || matchedMod) {
+        const modNum = matchedMod?.scriptNumber || item.matchedModuleNumber || item.refKey;
+        const matchedFile =
+          item.matchedSourceFilename || matchedMod?.sourceFilename || `${modNum}.s`;
+        found.push({
+          refKey: item.refKey,
+          matchedScriptNumber: modNum,
+          matchedFilename: matchedFile,
+          callerScriptNumber: item.callerScriptNumber,
+          depth: item.depth || 1,
+        });
+      } else if (item.status === 'missing') {
+        missing.push({
+          refKey: item.refKey,
+          expectedFilename: `${item.refKey}.s`,
+          callerScriptNumber: item.callerScriptNumber,
+          contextLabel: item.contextLabel,
+          depth: item.depth || 1,
+        });
+      }
+    });
+
+    const unused: Array<{
+      filename: string;
+      baseName: string;
+      relativePath: string;
+      file?: File;
+    }> = assignedFolderPool
+      ? assignedFolderPool.entries
+          .filter(
+            (entry) =>
+              !loadedFileNamesLower.has(entry.filename.toLowerCase()) &&
+              !loadedCanonKeys.has(entry.canonicalKey)
+          )
+          .map((entry) => ({
+            filename: entry.filename,
+            baseName: entry.baseName,
+            relativePath: entry.relativePath,
+            file: entry.file,
+          }))
+          .sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }))
+      : (lastFolderResolveSummary?.unusedFolderFiles || []).map((entry) => ({
+          filename: entry.filename,
+          baseName: entry.baseName,
+          relativePath: entry.relativePath,
+        }));
+
+    return {
+      reconcileFoundItems: found,
+      reconcileMissingItems: missing,
+      reconcileUnusedFolderEntries: unused,
+    };
+  }, [masterChecklist, scriptWorkspace.modules, assignedFolderPool, lastFolderResolveSummary]);
 
   const diagramNodeChecklistScope = useMemo(() => {
     if (!selectedNodeId || viewLevel.level !== 'master') return null;
@@ -1660,7 +1770,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             {finding.recommendation}
                           </div>
 
-                          <div className="flex items-center gap-1.5 pt-0.5">
+                          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                             <button
                               type="button"
                               onClick={() =>
@@ -1679,6 +1789,25 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             >
                               Ebene 2 öffnen ([{finding.scriptNumber}])
                             </button>
+                            {finding.category === 'missing-script' && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const missingRef = finding.id.replace(/^health:missing-script:/, '');
+                                  const matchedItem = masterChecklist.find(
+                                    (it) => canonicalScriptMatchKey(it.refKey) === missingRef
+                                  );
+                                  setInspectorTab('overview');
+                                  setReconcileTab('missing');
+                                  if (matchedItem) {
+                                    setActiveChecklistRef(matchedItem.refKey);
+                                  }
+                                }}
+                                className="px-2.5 py-1 rounded bg-rose-900/50 hover:bg-rose-800/60 border border-rose-500/40 text-[11px] font-medium text-rose-200 transition-colors cursor-pointer"
+                              >
+                                In Master-Abgleich öffnen
+                              </button>
+                            )}
                           </div>
                         </div>
                       );
@@ -2633,11 +2762,16 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
               {lastFolderResolveSummary && (
                 <div className="px-2.5 py-1.5 rounded bg-emerald-950/35 border border-emerald-500/35 text-[10px] font-mono tabular-nums text-emerald-200 space-y-0.5">
                   <div>
-                    ✓ <strong>{lastFolderResolveSummary.loadedScriptNumbers.length}</strong> aktive Folgeskripte (.s) automatisch entlang der Kette geladen
+                    ✓ <strong>{lastFolderResolveSummary.loadedScriptNumbers.length}</strong> Folgeskripte exakt per Dateiname geladen
+                    {reconcileMissingItems.length > 0 && (
+                      <span className="text-rose-300">
+                        {' '}· <strong>{reconcileMissingItems.length}</strong> fehlend
+                      </span>
+                    )}
                   </div>
                   <div className="text-slate-400">
-                    {lastFolderResolveSummary.skippedLegacyFilesCount} von{' '}
-                    {lastFolderResolveSummary.totalPoolFiles} Dateien im Ordner als ungenutzte Altlast übersprungen
+                    {reconcileUnusedFolderEntries.length} von{' '}
+                    {lastFolderResolveSummary.totalPoolFiles} Dateien im Ordner nicht vom Master aufgerufen
                   </div>
                 </div>
               )}
@@ -2785,6 +2919,280 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                     </div>
                   </div>
 
+                  {/* Master <-> Import Abgleich-Block (Gefunden / Fehlend / Ungenutzt im Ordner) */}
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/75 p-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-semibold text-slate-200">
+                          Master ↔ Import Abgleich
+                        </div>
+                        <div className="text-[10px] text-slate-400">
+                          Regel: Name im Skript (Leerzeichen → <code className="font-mono text-slate-300">_</code>) = Dateiname
+                        </div>
+                      </div>
+                      {reconcileTab !== 'none' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setReconcileTab('none');
+                            setReconcileSearch('');
+                          }}
+                          className="text-[10px] text-slate-400 hover:text-slate-200 px-1.5 py-0.5 rounded hover:bg-slate-800 cursor-pointer"
+                        >
+                          Zuklappen
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setReconcileTab((prev) => (prev === 'found' ? 'none' : 'found'))
+                        }
+                        className={`p-1.5 rounded-md border text-left transition-colors cursor-pointer ${
+                          reconcileTab === 'found'
+                            ? 'bg-emerald-950/55 border-emerald-400/70'
+                            : 'bg-slate-950/70 border-slate-800 hover:border-emerald-500/40'
+                        }`}
+                      >
+                        <div className="text-[10px] text-slate-400">Gefunden</div>
+                        <div className="text-xs font-mono font-semibold tabular-nums text-emerald-400">
+                          {reconcileFoundItems.length}
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setReconcileTab((prev) => (prev === 'missing' ? 'none' : 'missing'))
+                        }
+                        className={`p-1.5 rounded-md border text-left transition-colors cursor-pointer ${
+                          reconcileTab === 'missing'
+                            ? 'bg-rose-950/55 border-rose-400/70'
+                            : reconcileMissingItems.length > 0
+                            ? 'bg-rose-950/20 border-rose-500/40 hover:border-rose-400/60'
+                            : 'bg-slate-950/70 border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="text-[10px] text-slate-400">Fehlend</div>
+                        <div
+                          className={`text-xs font-mono font-semibold tabular-nums ${
+                            reconcileMissingItems.length > 0 ? 'text-rose-300' : 'text-emerald-400'
+                          }`}
+                        >
+                          {reconcileMissingItems.length}
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setReconcileTab((prev) => (prev === 'unused' ? 'none' : 'unused'))
+                        }
+                        className={`p-1.5 rounded-md border text-left transition-colors cursor-pointer ${
+                          reconcileTab === 'unused'
+                            ? 'bg-indigo-950/55 border-indigo-400/70'
+                            : 'bg-slate-950/70 border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="text-[10px] text-slate-400 truncate">Ungenutzt</div>
+                        <div className="text-xs font-mono font-semibold tabular-nums text-slate-300">
+                          {assignedFolderPool || lastFolderResolveSummary
+                            ? reconcileUnusedFolderEntries.length
+                            : '—'}
+                        </div>
+                      </button>
+                    </div>
+
+                    {reconcileTab !== 'none' && (
+                      <div className="space-y-1.5 pt-1 border-t border-slate-800/90">
+                        <div className="relative">
+                          <Search className="w-3 h-3 text-slate-500 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                          <input
+                            type="text"
+                            value={reconcileSearch}
+                            onChange={(e) => setReconcileSearch(e.target.value)}
+                            placeholder="Skript- oder Dateiname filtern..."
+                            className="w-full pl-6 pr-2 py-1 bg-slate-950 border border-slate-800 rounded text-[11px] text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+
+                        {reconcileTab === 'found' && (
+                          <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
+                            {reconcileFoundItems
+                              .filter((it) => {
+                                const q = reconcileSearch.trim().toLowerCase();
+                                if (!q) return true;
+                                return (
+                                  it.refKey.toLowerCase().includes(q) ||
+                                  it.matchedFilename.toLowerCase().includes(q) ||
+                                  it.callerScriptNumber.toLowerCase().includes(q)
+                                );
+                              })
+                              .map((it) => (
+                                <button
+                                  key={`rec-found-${it.refKey}`}
+                                  type="button"
+                                  onClick={() =>
+                                    jumpToScriptInInspector(it.matchedScriptNumber, true, true)
+                                  }
+                                  className="w-full text-left px-2 py-1.5 rounded bg-slate-950/80 hover:bg-slate-900 border border-slate-800/90 flex items-center justify-between gap-2 cursor-pointer"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="text-[11px] font-mono text-emerald-300 truncate">
+                                      {it.refKey}
+                                    </div>
+                                    <div className="text-[10px] font-mono text-slate-400 truncate">
+                                      Datei: {it.matchedFilename}
+                                    </div>
+                                  </div>
+                                  <span className="text-[10px] text-indigo-300 shrink-0">
+                                    Öffnen →
+                                  </span>
+                                </button>
+                              ))}
+                            {reconcileFoundItems.length === 0 && (
+                              <div className="text-[11px] text-slate-500 py-1.5 text-center">
+                                Noch keine zugeordneten Folgeskripte geladen.
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {reconcileTab === 'missing' && (
+                          <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
+                            {reconcileMissingItems
+                              .filter((it) => {
+                                const q = reconcileSearch.trim().toLowerCase();
+                                if (!q) return true;
+                                return (
+                                  it.refKey.toLowerCase().includes(q) ||
+                                  it.expectedFilename.toLowerCase().includes(q) ||
+                                  it.callerScriptNumber.toLowerCase().includes(q)
+                                );
+                              })
+                              .map((it) => (
+                                <div
+                                  key={`rec-miss-${it.refKey}`}
+                                  className="px-2 py-1.5 rounded bg-rose-950/20 border border-rose-500/35 flex items-center justify-between gap-2"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="text-[11px] font-mono font-semibold text-rose-200 truncate">
+                                      {it.refKey}
+                                    </div>
+                                    <div className="text-[10px] font-mono text-slate-400 truncate">
+                                      Erwartet: {it.expectedFilename} · aus [{it.callerScriptNumber}]
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setActiveChecklistRef(it.refKey);
+                                        setChecklistFeedback(null);
+                                        setIsEditingCompletedItem(false);
+                                      }}
+                                      className="px-1.5 py-0.5 rounded bg-indigo-600/80 hover:bg-indigo-500 text-[10px] font-medium text-white cursor-pointer"
+                                    >
+                                      Nachladen
+                                    </button>
+                                    {onResolveIssue && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const syntheticIssue: CallflowOpenIssue = {
+                                            id: `missing:${canonicalScriptMatchKey(it.refKey)}`,
+                                            type: 'missing-script',
+                                            status: 'open',
+                                            sourceScriptNumber: it.callerScriptNumber,
+                                            targetNumber: it.refKey,
+                                            title: `Fehlendes Skript [${it.refKey}]`,
+                                            question: '',
+                                            createdAt: Date.now(),
+                                          };
+                                          onResolveIssue(syntheticIssue, {
+                                            resolution: 'external-endpoint',
+                                            note: 'Über Master-Abgleich als Extern / Ende bestätigt',
+                                          });
+                                        }}
+                                        className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 cursor-pointer"
+                                      >
+                                        Extern
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            {reconcileMissingItems.length === 0 && (
+                              <div className="text-[11px] text-emerald-300 py-1.5 text-center">
+                                Keine fehlenden Skripte – alle Referenzen im Import vorhanden.
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {reconcileTab === 'unused' && (
+                          <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
+                            {!assignedFolderPool && !lastFolderResolveSummary ? (
+                              <div className="text-[11px] text-slate-400 py-1.5 text-center">
+                                Weisen Sie oben einen Skript-Ordner zu, um nicht aufgerufene Dateien anzuzeigen.
+                              </div>
+                            ) : reconcileUnusedFolderEntries.length === 0 ? (
+                              <div className="text-[11px] text-emerald-300 py-1.5 text-center">
+                                Alle Dateien im Ordner sind aktiv im Callflow eingebunden.
+                              </div>
+                            ) : (
+                              reconcileUnusedFolderEntries
+                                .filter((it) => {
+                                  const q = reconcileSearch.trim().toLowerCase();
+                                  if (!q) return true;
+                                  return (
+                                    it.filename.toLowerCase().includes(q) ||
+                                    it.relativePath.toLowerCase().includes(q)
+                                  );
+                                })
+                                .slice(0, 120)
+                                .map((it) => (
+                                  <div
+                                    key={`rec-unused-${it.relativePath}`}
+                                    className="px-2 py-1 rounded bg-slate-950/75 border border-slate-800/90 flex items-center justify-between gap-2"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="text-[11px] font-mono text-slate-300 truncate">
+                                        {it.filename}
+                                      </div>
+                                      {it.relativePath !== it.filename && (
+                                        <div className="text-[9.5px] font-mono text-slate-500 truncate">
+                                          {it.relativePath}
+                                        </div>
+                                      )}
+                                    </div>
+                                    {it.file && onSubmitChecklistVisioFile && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          void onSubmitChecklistVisioFile(it.baseName, it.file!);
+                                        }}
+                                        className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-200 shrink-0 cursor-pointer"
+                                      >
+                                        Laden
+                                      </button>
+                                    )}
+                                  </div>
+                                ))
+                            )}
+                            {reconcileUnusedFolderEntries.length > 120 && (
+                              <div className="text-[10px] text-slate-500 text-center pt-0.5">
+                                Zeige erste 120 von {reconcileUnusedFolderEntries.length} – bitte Suchfilter nutzen.
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
                   {/* Guided Top-Down Active Step Card */}
                   {activeChecklistItem && (
                     <div
@@ -2827,11 +3235,17 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                                 {activeChecklistItem.triggeredNumbers.join(', ')}
                               </div>
                             )}
+                          {activeChecklistItem.status === 'present' &&
+                            activeChecklistItem.matchedSourceFilename && (
+                              <div className="text-[10px] font-mono text-emerald-400/90 mt-0.5 truncate">
+                                Exakt zugeordnete Datei: {activeChecklistItem.matchedSourceFilename}
+                              </div>
+                            )}
                           {activeChecklistItem.status === 'missing' && (
                             <div className="text-[10px] font-mono text-rose-300 mt-0.5 truncate">
-                              Ausstehende Referenz ·{' '}
+                              Erwartete Datei: {activeChecklistItem.refKey}.s ·{' '}
                               {(activeChecklistItem.depth || 1) === 1 ? 'Direkt aus ' : 'Aufgerufen in '}
-                              {activeChecklistItem.parentScriptNumber || mainScriptLabel}, lokal
+                              {activeChecklistItem.parentScriptNumber || mainScriptLabel}, im Import
                               fehlend
                             </div>
                           )}

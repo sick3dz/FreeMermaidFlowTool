@@ -97,7 +97,7 @@ export const MultiScriptModal: React.FC<MultiScriptModalProps> = ({
       manualQuestions: workspace.manualQuestions,
       manualLinks: workspace.manualLinks,
       masterScriptNumber: workspace.masterScriptNumber,
-      treatUnresolvedAsEndpoint: workspace.treatUnresolvedAsEndpoint || modules.length >= 2,
+      treatUnresolvedAsEndpoint: false,
     });
 
   const handleImportText = () => {

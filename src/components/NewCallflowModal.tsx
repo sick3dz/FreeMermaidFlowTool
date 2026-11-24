@@ -168,16 +168,11 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       []
     );
 
-    const isFullExportOrFolderResolved =
-      Boolean(effectivePool && effectivePool.entries.length > 0) ||
-      normalizedModules.length >= 2;
-
     const targets: DraftConfirmedTarget[] = previewChecklist.masterChecklist.map((item) => {
       const isPresent = item.status === 'present';
       const autoEndpoint =
         !isPresent &&
-        (isFullExportOrFolderResolved ||
-          isAnnouncementOrEndpointTargetName(item.refKey) ||
+        (isAnnouncementOrEndpointTargetName(item.refKey) ||
           isAnnouncementOrEndpointTargetName(item.displayName));
       return {
         refKey: item.refKey,
@@ -392,7 +387,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       ignoredChecklistTargets,
       manualLinks,
       masterScriptNumber: activeMasterNumber,
-      treatUnresolvedAsEndpoint: Boolean(folderPool) || modulesWithConfirmedOrgas.length >= 2,
+      treatUnresolvedAsEndpoint: false,
     });
 
     onStartNewCallflow({

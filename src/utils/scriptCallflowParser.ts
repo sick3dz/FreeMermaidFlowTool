@@ -148,8 +148,15 @@ export function normalizeScriptRef(raw: string): string {
   return cleaned;
 }
 
+export const KNOWN_SCRIPT_FILE_EXT_RE =
+  /\.(?:s|txt|aacc|vsdx|vdx|svg|xml|csv|tsv|md|log|cfg)$/i;
+
+export function stripKnownScriptExtension(ref: string): string {
+  return String(ref || '').trim().replace(KNOWN_SCRIPT_FILE_EXT_RE, '').trim();
+}
+
 export function canonicalScriptMatchKey(ref: string): string {
-  return normalizeScriptRef(ref).replace(/\.s$/i, '').toLowerCase();
+  return normalizeScriptRef(stripKnownScriptExtension(ref)).toLowerCase();
 }
 
 export function toMermaidNodeSuffix(ref: string): string {
@@ -2616,11 +2623,18 @@ function parseAaccScriptBlocks(
 
     const detectedNameToken = detectedName.replace(/\s+/g, '_');
     const isExplicitMainChunkHeader = /^(?:main|master(?:script)?)$/i.test(detectedNameToken);
-    const isPrimarySingleMaster = Boolean(chunks.length === 1 && options?.isMasterHint);
-    const chunkIsMaster =
-      isExplicitMainChunkHeader ||
-      hasAaccMasterRoutingSignals(trimmedChunk) ||
-      isPrimarySingleMaster;
+    const isPrimarySingleMaster = Boolean(chunks.length === 1 && options?.isMasterHint === true);
+    const explicitNotMaster = options?.isMasterHint === false;
+    const hasExplicitNonMainTarget = Boolean(
+      chunks.length === 1 &&
+        options?.defaultScriptNumber?.trim() &&
+        !/^(?:main|master(?:script)?|start)$/i.test(options.defaultScriptNumber.trim())
+    );
+    const chunkIsMaster = explicitNotMaster
+      ? false
+      : isPrimarySingleMaster ||
+        isExplicitMainChunkHeader ||
+        (!hasExplicitNonMainTarget && hasAaccMasterRoutingSignals(trimmedChunk));
     const topCdnHeaderMatch = chunkText.match(/^\s*CDN\s*[:=]?\s*(\d{3,6})\b/im);
     const inlineCdnMatch = chunkIsMaster ? null : chunkText.match(/\bCDN\s*[:=]?\s*(\d{3,6})\b/i);
     const cdnMatch = topCdnHeaderMatch || inlineCdnMatch;
@@ -2633,7 +2647,7 @@ function parseAaccScriptBlocks(
 
     const cleanFileBase =
       chunks.length === 1 && options?.sourceFilename
-        ? options.sourceFilename.replace(/\.[^.]+$/, '').trim()
+        ? stripKnownScriptExtension(options.sourceFilename)
         : '';
     const fileDigitRef = cleanFileBase.match(/(?:^|[\s_-])(\d{3,6})(?:$|[\s_-])/)?.[1];
     const fileTokenRef =
@@ -4880,6 +4894,12 @@ export function detectMasterScriptChecklist(
   const moduleByKey = new Map<string, ScriptModule>();
   modules.forEach((m) => {
     moduleByKey.set(canonicalScriptMatchKey(m.scriptNumber), m);
+    if (m.sourceFilename) {
+      const fileKey = canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename));
+      if (fileKey && !moduleByKey.has(fileKey)) {
+        moduleByKey.set(fileKey, m);
+      }
+    }
     if (m.cdnAlias) {
       const aliasKey = canonicalScriptMatchKey(m.cdnAlias);
       if (aliasKey && !moduleByKey.has(aliasKey)) {
@@ -4964,6 +4984,7 @@ export function detectMasterScriptChecklist(
           depth > 1 ? `aus [${mod.scriptNumber}] · ${contextLabel}` : contextLabel,
         status,
         matchedModuleNumber: matchedMod?.scriptNumber,
+        matchedSourceFilename: matchedMod?.sourceFilename,
       });
 
       if (matchedMod && !visitedModuleKeys.has(key)) {
@@ -5089,6 +5110,7 @@ export function detectMasterScriptChecklist(
           depth > 1 ? `aus [${mod.scriptNumber}] · ${contextLabel}` : contextLabel,
         status,
         matchedModuleNumber: matchedMod?.scriptNumber,
+        matchedSourceFilename: matchedMod?.sourceFilename,
         triggeredNumbers: agg.valueNumbers.length > 0 ? agg.valueNumbers : undefined,
         organizationNames: agg.orgaLabels.length > 0 ? agg.orgaLabels : undefined,
         brandNames: agg.brandNames.length > 0 ? agg.brandNames : undefined,
@@ -5401,13 +5423,19 @@ export function buildScriptWorkspace(
   const resolvedIssues = prevState?.resolvedIssues || {};
   const manualQuestions = prevState?.manualQuestions || [];
   const treatUnresolvedAsEndpoint =
-    prevState?.treatUnresolvedAsEndpoint ?? modules.length >= 2;
+    prevState?.treatUnresolvedAsEndpoint ?? false;
 
   const knownKeyToDisplay = new Map<string, string>();
   modules.forEach((m) => {
     const primaryKey = canonicalScriptMatchKey(m.scriptNumber);
     if (primaryKey) {
       knownKeyToDisplay.set(primaryKey, m.scriptNumber);
+    }
+    if (m.sourceFilename) {
+      const fileKey = canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename));
+      if (fileKey && !knownKeyToDisplay.has(fileKey)) {
+        knownKeyToDisplay.set(fileKey, m.scriptNumber);
+      }
     }
     if (m.cdnAlias) {
       const aliasKey = canonicalScriptMatchKey(m.cdnAlias);
@@ -6640,8 +6668,7 @@ export function rehydrateAndUpgradeWorkspace(rawWorkspace: ScriptWorkspace): Scr
     manualLinks: rawWorkspace.manualLinks,
     masterScriptNumber: rawWorkspace.masterScriptNumber,
     nodeOffsets: rawWorkspace.nodeOffsets,
-    treatUnresolvedAsEndpoint:
-      rawWorkspace.treatUnresolvedAsEndpoint ?? deduped.length >= 2,
+    treatUnresolvedAsEndpoint: false,
   });
 }
 
@@ -7133,7 +7160,7 @@ export function analyzeWorkspaceLogicHealth(
       registerModuleAlias(m.visioPageName, primaryKey);
     }
     if (m.sourceFilename) {
-      const baseFile = m.sourceFilename.replace(/\.[^.]+$/, '').trim();
+      const baseFile = stripKnownScriptExtension(m.sourceFilename);
       if (baseFile.length >= 3) {
         registerModuleAlias(baseFile, primaryKey);
       }
@@ -7633,6 +7660,67 @@ export function analyzeWorkspaceLogicHealth(
     // 2c. Offline FlixCheck API v7 & AACC HDX logic/security checks
     findings.push(...analyzeModuleExternalApiHealth(mod));
   }
+
+  // 3. Missing referenced scripts (Master <-> Import reconciliation findings)
+  const ignoredHealthKeys = new Set(
+    (workspace.ignoredChecklistTargets || []).map(canonicalScriptMatchKey)
+  );
+  const resolvedIssuesMap = workspace.resolvedIssues || {};
+  const reportedMissingKeys = new Set<string>();
+
+  const registerMissingHealthFinding = (targetRef: string, explicitCaller?: string) => {
+    const cleanTarget = normalizeScriptRef(targetRef);
+    const tKey = resolveModuleKey(cleanTarget);
+    if (
+      !cleanTarget ||
+      !tKey ||
+      reportedMissingKeys.has(tKey) ||
+      moduleByKey.has(tKey) ||
+      externalEndpointKeys.has(tKey) ||
+      ignoredHealthKeys.has(tKey) ||
+      isAnnouncementOrEndpointTargetName(cleanTarget) ||
+      isDeactivatedSentinelTarget(cleanTarget)
+    ) {
+      return;
+    }
+    const issueRec = resolvedIssuesMap[`missing:${tKey}`] || resolvedIssuesMap[`missing:${cleanTarget}`];
+    if (issueRec) return;
+
+    reportedMissingKeys.add(tKey);
+    const callerRefs = Array.from(callersByTarget.get(tKey) || []);
+    const callerMods = callerRefs
+      .map((cr) => moduleByKey.get(resolveModuleKey(cr)))
+      .filter((m): m is ScriptModule => Boolean(m));
+    const primaryCaller =
+      callerMods[0] ||
+      (explicitCaller ? moduleByKey.get(resolveModuleKey(explicitCaller)) : undefined) ||
+      modules[0];
+    const callerLabels =
+      callerMods.length > 0
+        ? callerMods.map((m) => `[${m.scriptNumber}]`).join(', ')
+        : explicitCaller
+        ? `[${explicitCaller}]`
+        : '[Main]';
+    const expectedFilename = `${cleanTarget}.s`;
+
+    findings.push({
+      id: `health:missing-script:${tKey}`,
+      severity: 'warning',
+      category: 'missing-script',
+      scriptNumber: primaryCaller ? primaryCaller.scriptNumber : cleanTarget,
+      scriptName: primaryCaller ? primaryCaller.scriptName : cleanTarget,
+      title: `Fehlendes Skript [${cleanTarget}] nicht im Import gefunden`,
+      description: `Aufgerufen von ${callerLabels}. Im Import fehlt die zugehörige Datei „${expectedFilename}“ (Abgleich: Name im Skript mit Leerzeichen → „_“ = Dateiname).`,
+      recommendation: `Datei „${expectedFilename}“ über die Master-Checkliste nachladen oder das Ziel bewusst als externen Endpunkt bestätigen.`,
+    });
+  };
+
+  (workspace.missingTargets || []).forEach((ref) => registerMissingHealthFinding(ref));
+  (workspace.masterChecklist || []).forEach((item) => {
+    if (item.status === 'missing') {
+      registerMissingHealthFinding(item.refKey, item.callerScriptNumber);
+    }
+  });
 
   const severityOrder: Record<string, number> = { error: 0, warning: 1, info: 2 };
   return findings.sort(

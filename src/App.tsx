@@ -3292,14 +3292,11 @@ function OfflineStudioApp() {
         })
           .then((summary) => {
             setLastFolderResolveSummary(summary);
-            const combinedEndpoints = Array.from(
-              new Set([...(nextWs.externalEndpoints || []), ...summary.unmatchedTargetRefs])
-            );
             const autoWs = buildScriptWorkspace(summary.modules, {
               ...nextWs,
-              externalEndpoints: combinedEndpoints,
+              externalEndpoints: nextWs.externalEndpoints,
               masterScriptNumber: nextWs.masterScriptNumber,
-              treatUnresolvedAsEndpoint: true,
+              treatUnresolvedAsEndpoint: false,
             });
             setScriptWorkspace(autoWs);
             refreshDiagramFromWorkspace(autoWs);
@@ -3340,7 +3337,7 @@ function OfflineStudioApp() {
         }
         const effectiveMaster = wasEmpty ? 'Main' : scriptWorkspace.masterScriptNumber;
 
-        let nextExternalEndpoints = [...(scriptWorkspace.externalEndpoints || [])];
+        const nextExternalEndpoints = [...(scriptWorkspace.externalEndpoints || [])];
         if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
           setIsAutoResolvingFolder(true);
           try {
@@ -3354,9 +3351,6 @@ function OfflineStudioApp() {
               }
             );
             merged = summary.modules;
-            nextExternalEndpoints = Array.from(
-              new Set([...nextExternalEndpoints, ...summary.unmatchedTargetRefs])
-            );
             setLastFolderResolveSummary(summary);
           } finally {
             setIsAutoResolvingFolder(false);
@@ -3368,9 +3362,7 @@ function OfflineStudioApp() {
           externalEndpoints: nextExternalEndpoints,
           masterScriptNumber: effectiveMaster,
           ignoredChecklistTargets: nextIgnored,
-          treatUnresolvedAsEndpoint:
-            Boolean(assignedFolderPool && assignedFolderPool.entries.length > 0) ||
-            merged.length >= 2,
+          treatUnresolvedAsEndpoint: false,
         });
         if (wasEmpty) {
           pendingAutoFitRef.current = true;
@@ -3433,28 +3425,28 @@ function OfflineStudioApp() {
         );
         setLastFolderResolveSummary(summary);
 
-        const combinedEndpoints = Array.from(
-          new Set([...(scriptWorkspace.externalEndpoints || []), ...summary.unmatchedTargetRefs])
-        );
-
         const nextWs = buildScriptWorkspace(summary.modules, {
-          externalEndpoints: combinedEndpoints,
+          externalEndpoints: scriptWorkspace.externalEndpoints,
           ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
           resolvedIssues: scriptWorkspace.resolvedIssues,
           manualQuestions: scriptWorkspace.manualQuestions,
           manualLinks: scriptWorkspace.manualLinks,
           masterScriptNumber: scriptWorkspace.masterScriptNumber,
           nodeOffsets: scriptWorkspace.nodeOffsets,
-          treatUnresolvedAsEndpoint: true,
+          treatUnresolvedAsEndpoint: false,
         });
 
         pendingAutoFitRef.current = true;
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
 
+        const missingSuffix =
+          nextWs.missingTargets.length > 0
+            ? ` · ${nextWs.missingTargets.length} fehlend im Import`
+            : ' · 0 fehlend';
         showCanvasDropBanner(
           'success',
-          `Ordner „${pool.folderName}“ abgeglichen: ${summary.loadedScriptNumbers.length} aktive Folgeskripte (.s) automatisch entlang der Kette geladen · ${summary.skippedLegacyFilesCount} Altlast-Dateien übersprungen.`
+          `Ordner „${pool.folderName}“ abgeglichen: ${summary.loadedScriptNumbers.length} Folgeskripte exakt geladen${missingSuffix} · ${summary.skippedLegacyFilesCount} ungenutzt im Ordner.`
         );
       } finally {
         setIsAutoResolvingFolder(false);
@@ -3493,17 +3485,21 @@ function OfflineStudioApp() {
         setLastFolderResolveSummary(summary);
 
         const nextWs = buildScriptWorkspace(summary.modules, {
-          externalEndpoints: summary.unmatchedTargetRefs,
+          externalEndpoints: [],
           masterScriptNumber: primaryNumber,
-          treatUnresolvedAsEndpoint: true,
+          treatUnresolvedAsEndpoint: false,
         });
         pendingAutoFitRef.current = true;
         setIsVisualEditMode(true);
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
+        const missingSuffix =
+          nextWs.missingTargets.length > 0
+            ? ` · ${nextWs.missingTargets.length} fehlend`
+            : ' · 0 fehlend';
         showCanvasDropBanner(
           'success',
-          `Einstiegsskript Main (aus „${entry.filename}“) + ${summary.loadedScriptNumbers.length} verknüpfte .s-Skripte automatisch geladen (${summary.skippedLegacyFilesCount} Altlasten ignoriert).`
+          `Main (aus „${entry.filename}“) + ${summary.loadedScriptNumbers.length} exakt zugeordnete Skripte geladen${missingSuffix} (${summary.skippedLegacyFilesCount} ungenutzt im Ordner).`
         );
       } finally {
         setIsAutoResolvingFolder(false);
@@ -3573,7 +3569,7 @@ function OfflineStudioApp() {
       }
 
       let autoLoadedFromFolderCount = 0;
-      let nextExternalEndpoints = [...(scriptWorkspace.externalEndpoints || [])];
+      const nextExternalEndpoints = [...(scriptWorkspace.externalEndpoints || [])];
       if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
         const summary = await autoResolveConnectedScriptsFromFolder(
           currentModules,
@@ -3586,9 +3582,6 @@ function OfflineStudioApp() {
         );
         currentModules = summary.modules;
         autoLoadedFromFolderCount = summary.loadedScriptNumbers.length;
-        nextExternalEndpoints = Array.from(
-          new Set([...nextExternalEndpoints, ...summary.unmatchedTargetRefs])
-        );
         setLastFolderResolveSummary(summary);
       }
 
@@ -3600,9 +3593,7 @@ function OfflineStudioApp() {
         manualLinks: scriptWorkspace.manualLinks,
         masterScriptNumber: wasEmpty ? 'Main' : scriptWorkspace.masterScriptNumber,
         nodeOffsets: scriptWorkspace.nodeOffsets,
-        treatUnresolvedAsEndpoint:
-          Boolean(assignedFolderPool && assignedFolderPool.entries.length > 0) ||
-          currentModules.length >= 2,
+        treatUnresolvedAsEndpoint: false,
       });
 
       if (wasEmpty) {
@@ -3919,11 +3910,10 @@ function OfflineStudioApp() {
         mode === 'merge'
           ? {
               ...scriptWorkspace,
-              treatUnresolvedAsEndpoint:
-                scriptWorkspace.treatUnresolvedAsEndpoint || combinedModules.length >= 2,
+              treatUnresolvedAsEndpoint: false,
             }
           : {
-              treatUnresolvedAsEndpoint: combinedModules.length >= 2,
+              treatUnresolvedAsEndpoint: false,
             }
       );
       skipAutoConvertRef.current = false;

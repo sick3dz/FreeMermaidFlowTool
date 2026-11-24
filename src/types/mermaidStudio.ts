@@ -249,6 +249,7 @@ export interface MasterScriptChecklistItem {
   contextLabel: string;
   status: MasterChecklistItemStatus;
   matchedModuleNumber?: string;
+  matchedSourceFilename?: string;
   triggeredNumbers?: string[];
   organizationNames?: string[];
   brandNames?: string[];
@@ -354,6 +355,7 @@ export type CallflowHealthSeverity = 'error' | 'warning' | 'info';
 
 export type CallflowHealthCategory =
   | 'cycle'
+  | 'missing-script'
   | 'dead-end-rule'
   | 'dead-end-module'
   | 'orphan-module'

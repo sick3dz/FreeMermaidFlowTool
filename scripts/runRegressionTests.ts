@@ -41,6 +41,10 @@ import {
   renderElkWorkerFlowchartSvg,
 } from '../src/utils/elkWorkerLayout';
 import { buildWorkspaceGlobalSearchIndex } from '../src/utils/globalSearchEngine';
+import {
+  autoResolveConnectedScriptsFromFolder,
+  indexScriptFolderFiles,
+} from '../src/utils/callflowFileImporter';
 import { AUDIT_APP_VERSION } from '../src/utils/offlineAuditEngine';
 
 interface TestResult {
@@ -473,7 +477,7 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.2.2', 'Expected release version 1.2.2');
+  assert.equal(AUDIT_APP_VERSION, '1.2.3', 'Expected release version 1.2.3');
 });
 
 async function finalizeSuite() {
@@ -802,6 +806,143 @@ async function finalizeSuite() {
       new Function(scriptMatches[scriptMatches.length - 1][1]);
       assert.ok(html.includes('FlixCheck / APIs'), 'Callflow.html must render FlixCheck / APIs registry tab');
       assert.ok(!html.includes(syntheticSecret), 'Callflow.html must NEVER leak hardcoded API key');
+    }
+  );
+
+  // 10. Strict Master <-> Import reconciliation (Space->_, dot preservation, no _alt false matches, Sub-Dispatcher Main guard, missing in Checklist & Logic Health)
+  await runAsyncTest(
+    '10. Strict Master <-> Import matching (Space->_, no fuzzy _alt, Sub-Dispatcher guard, missing-script Health)',
+    async () => {
+      const makeVirtualFile = (name: string, content: string): File => {
+        const f = new File([content], name, { type: 'text/plain' });
+        Object.defineProperty(f, 'webkitRelativePath', {
+          value: `AACC_Export/${name}`,
+          configurable: true,
+        });
+        return f;
+      };
+
+      const mainText = [
+        'WHERE CLID EQUALS',
+        '  VALUE 49301001: EXECUTE "Kunden Service"',
+        '  VALUE 49301002: EXECUTE FlixCheck.V2',
+        '  VALUE 49301003: EXECUTE Sub_Dispatcher',
+        '  VALUE 49301004: EXECUTE Support_Team',
+        'END WHERE',
+      ].join('\n');
+
+      const kundenServiceText = [
+        '/* Kunden Service */',
+        'GIVE RAN 5101',
+        'QUEUE TO SKILLSET sk_kunden_service',
+      ].join('\n');
+
+      const flixV2Text = [
+        '/* FlixCheck V2 */',
+        'GIVE RAN 5102',
+        'DISCONNECT',
+      ].join('\n');
+
+      const subDispatcherText = [
+        '/* Unter-Dispatcher mit eigenen VALUE-Regeln — darf NIE Main überschreiben! */',
+        'WHERE CLID EQUALS',
+        '  VALUE 49309901: EXECUTE "Kunden Service"',
+        '  VALUE 49309902: EXECUTE FlixCheck.V2',
+        'END WHERE',
+      ].join('\n');
+
+      const altFalseMatchText = [
+        '/* Veraltete Kopie — darf NICHT für Support_Team geladen werden */',
+        'QUEUE TO SKILLSET sk_alt_falsch',
+      ].join('\n');
+
+      const unusedLegacyText = [
+        '/* Ungenutzte Altlast im Ordner */',
+        'GIVE RAN 9999',
+        'DISCONNECT',
+      ].join('\n');
+
+      const folderFiles = [
+        makeVirtualFile('Main.s', mainText),
+        makeVirtualFile('Kunden_Service.s', kundenServiceText),
+        makeVirtualFile('FlixCheck.V2.s', flixV2Text),
+        makeVirtualFile('Sub_Dispatcher.s', subDispatcherText),
+        makeVirtualFile('Support_Team_alt.s', altFalseMatchText),
+        makeVirtualFile('Legacy_4910_Test.s', unusedLegacyText),
+      ];
+
+      const pool = indexScriptFolderFiles(folderFiles);
+      const initialMaster = parseCallflowTextWithFallback(mainText, {
+        sourceFilename: 'Main.s',
+        isMasterHint: true,
+      });
+
+      const summary = await autoResolveConnectedScriptsFromFolder(initialMaster, pool, {
+        masterScriptNumber: 'Main',
+      });
+
+      const ws = buildScriptWorkspace(summary.modules, {
+        masterScriptNumber: 'Main',
+        treatUnresolvedAsEndpoint: false,
+      });
+
+      // Exact Space->_ and dot-preserving matches must be loaded
+      assert.ok(
+        ws.modules.some((m) => m.scriptNumber === 'Kunden_Service' && m.sourceFilename === 'Kunden_Service.s'),
+        'Space in Master ("Kunden Service") must strictly match "Kunden_Service.s"'
+      );
+      assert.ok(
+        ws.modules.some((m) => m.scriptNumber === 'FlixCheck.V2' && m.sourceFilename === 'FlixCheck.V2.s'),
+        'Dots in script names ("FlixCheck.V2") must be preserved and matched against "FlixCheck.V2.s"'
+      );
+
+      // Sub-Dispatcher with VALUE...EXECUTE must keep its own scriptNumber and NOT merge into Main!
+      assert.ok(
+        ws.modules.some((m) => m.scriptNumber === 'Sub_Dispatcher' && !m.isMaster),
+        'Sub_Dispatcher with VALUE...EXECUTE must stay a separate non-master module'
+      );
+
+      // Support_Team_alt.s must NEVER be falsely matched to Support_Team!
+      assert.equal(
+        ws.modules.some((m) => m.sourceFilename === 'Support_Team_alt.s'),
+        false,
+        'Strict matcher must NEVER load Support_Team_alt.s for Support_Team'
+      );
+
+      // Missing script must remain genuinely missing in missingTargets, masterChecklist, and Logic Health!
+      assert.ok(
+        ws.missingTargets.includes('Support_Team'),
+        'Missing Support_Team must stay in ws.missingTargets (not hidden as external endpoint)'
+      );
+      const checklistSupport = (ws.masterChecklist || []).find((c) => c.refKey === 'Support_Team');
+      assert.equal(
+        checklistSupport?.status,
+        'missing',
+        'Support_Team must have status "missing" in masterChecklist'
+      );
+      const checklistKunden = (ws.masterChecklist || []).find((c) => c.refKey === 'Kunden_Service');
+      assert.equal(checklistKunden?.status, 'present', 'Kunden_Service must be "present" in masterChecklist');
+      assert.equal(
+        checklistKunden?.matchedSourceFilename,
+        'Kunden_Service.s',
+        'masterChecklist must record matchedSourceFilename'
+      );
+
+      const health = analyzeWorkspaceLogicHealth(ws);
+      assert.ok(
+        health.some(
+          (h) => h.category === 'missing-script' && h.title.includes('[Support_Team]')
+        ),
+        'Logic Health must report Support_Team under category "missing-script"'
+      );
+
+      // Unused folder files must list exactly Support_Team_alt.s and Legacy_4910_Test.s (never Main.s or loaded files)
+      const unusedNames = summary.unusedFolderFiles.map((u) => u.filename).sort();
+      assert.deepEqual(
+        unusedNames,
+        ['Legacy_4910_Test.s', 'Support_Team_alt.s'],
+        'unusedFolderFiles must list exactly unreferenced folder scripts'
+      );
     }
   );
 

@@ -2,11 +2,13 @@ import { ScriptModule } from '../types/mermaidStudio';
 import {
   canonicalScriptMatchKey,
   detectMasterScriptChecklist,
+  isAnnouncementOrEndpointTargetName,
   isValidScriptRef,
   mergeScriptModules,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
   promoteEntryModuleToMain,
+  stripKnownScriptExtension,
 } from './scriptCallflowParser';
 import { isVisioFilename, parseVisioFileToModules } from './visioParser';
 
@@ -87,7 +89,7 @@ export function extractDotSHeaderMetadata(
   )?.[1]?.trim();
 
   const cleanBasename = filename
-    ? filename.replace(/\.[^.]+$/, '').trim()
+    ? stripKnownScriptExtension(filename)
     : '';
   const numFromFilename = cleanBasename.match(/(?:^|[\s_-])(\d{3,6})(?:$|[\s_-])/)?.[1];
   const looksMasterFile = /\b(?:main|master(?:script)?)\b/i.test(cleanBasename);
@@ -217,48 +219,29 @@ export interface FolderScriptPool {
   byNormalizedAlias: Map<string, FolderScriptFileEntry>;
 }
 
+export interface FolderMatchedEntry {
+  refKey: string;
+  filename: string;
+  scriptNumber: string;
+  relativePath: string;
+}
+
+export interface FolderUnusedFileEntry {
+  filename: string;
+  baseName: string;
+  relativePath: string;
+}
+
 export interface FolderAutoResolveSummary {
   modules: ScriptModule[];
   loadedScriptNumbers: string[];
   loadedFilenames: string[];
+  matchedEntries: FolderMatchedEntry[];
   unmatchedTargetRefs: string[];
+  unusedFolderFiles: FolderUnusedFileEntry[];
   totalPoolFiles: number;
   skippedLegacyFilesCount: number;
   folderName: string;
-}
-
-function buildNormalizedFolderAliases(baseName: string): string[] {
-  const aliases = new Set<string>();
-  const trimmed = baseName.trim();
-  if (!trimmed) return [];
-
-  const canonical = canonicalScriptMatchKey(trimmed);
-  if (canonical) aliases.add(canonical);
-
-  const normRef = canonicalScriptMatchKey(normalizeScriptRef(trimmed));
-  if (normRef) aliases.add(normRef);
-
-  const collapsed = trimmed.toLowerCase().replace(/[\s_-]+/g, '');
-  if (collapsed) aliases.add(collapsed);
-
-  // Strip common prefix/suffix patterns like "script_4910", "skript-4910", "cdn_4910", "4910_script"
-  const stripped = trimmed
-    .replace(/^(?:avaya[\s_-]*)?(?:script|skript|cdn|flow|sub|modul)[\s_-]+/i, '')
-    .replace(/[\s_-]+(?:script|skript|flow|neu|alt|prod|v\d+)$/i, '')
-    .trim();
-  if (stripped) {
-    aliases.add(canonicalScriptMatchKey(stripped));
-    const strippedCollapsed = stripped.toLowerCase().replace(/[\s_-]+/g, '');
-    if (strippedCollapsed) aliases.add(strippedCollapsed);
-  }
-
-  // If the basename contains a standalone 3-6 digit script number, register it as a fallback alias
-  const numMatch = trimmed.match(/(?:^|[\s_-])0*(\d{3,6})(?:$|[\s_-])/);
-  if (numMatch?.[1]) {
-    aliases.add(numMatch[1]);
-  }
-
-  return Array.from(aliases).filter(Boolean);
 }
 
 /**
@@ -291,7 +274,7 @@ export function indexScriptFolderFiles(files: FileList | File[]): FolderScriptPo
 
   for (const file of sorted) {
     const filename = file.name.trim();
-    const baseName = filename.replace(/\.[^.]+$/, '').trim();
+    const baseName = stripKnownScriptExtension(filename);
     if (!baseName) continue;
     const canonicalKey = canonicalScriptMatchKey(baseName);
     if (!canonicalKey) continue;
@@ -310,13 +293,7 @@ export function indexScriptFolderFiles(files: FileList | File[]): FolderScriptPo
 
     if (!byCanonicalKey.has(canonicalKey)) {
       byCanonicalKey.set(canonicalKey, entry);
-    }
-
-    const aliases = buildNormalizedFolderAliases(baseName);
-    for (const alias of aliases) {
-      if (!byNormalizedAlias.has(alias)) {
-        byNormalizedAlias.set(alias, entry);
-      }
+      byNormalizedAlias.set(canonicalKey, entry);
     }
   }
 
@@ -330,36 +307,19 @@ export function indexScriptFolderFiles(files: FileList | File[]): FolderScriptPo
 }
 
 /**
- * Looks up `<Scriptname>.s` (or a normalized match) in the assigned FolderScriptPool.
+ * Looks up `<Scriptname>.s` strictly by canonical filename key (spaces normalized to `_`,
+ * case-insensitive, only known file extensions stripped — never fuzzy `_alt`/`_v2` or bare digit collisions).
  */
 export function findMatchingFileInFolderPool(
   pool: FolderScriptPool,
   targetRef: string
 ): FolderScriptFileEntry | null {
-  const cleanRef = targetRef.trim().replace(/\.[^.]+$/, '').trim();
+  const cleanRef = stripKnownScriptExtension(targetRef);
   if (!cleanRef) return null;
 
   const exactKey = canonicalScriptMatchKey(cleanRef);
   if (exactKey && pool.byCanonicalKey.has(exactKey)) {
     return pool.byCanonicalKey.get(exactKey)!;
-  }
-
-  const normalizedKey = canonicalScriptMatchKey(normalizeScriptRef(cleanRef));
-  if (normalizedKey && pool.byCanonicalKey.has(normalizedKey)) {
-    return pool.byCanonicalKey.get(normalizedKey)!;
-  }
-
-  const candidateAliases = buildNormalizedFolderAliases(cleanRef);
-  for (const alias of candidateAliases) {
-    if (pool.byCanonicalKey.has(alias)) {
-      return pool.byCanonicalKey.get(alias)!;
-    }
-  }
-
-  for (const alias of candidateAliases) {
-    if (pool.byNormalizedAlias.has(alias)) {
-      return pool.byNormalizedAlias.get(alias)!;
-    }
   }
 
   return null;
@@ -389,14 +349,22 @@ export async function autoResolveConnectedScriptsFromFolder(
 
   const attemptedRefKeys = new Set<string>();
   const loadedFilesSet = new Set<string>();
+  const loadedCanonicalKeysSet = new Set<string>();
   const loadedScriptNumbers: string[] = [];
   const loadedFilenames: string[] = [];
+  const matchedEntries: FolderMatchedEntry[] = [];
+  const matchedEntryKeys = new Set<string>();
   const unmatchedTargetRefsMap = new Map<string, string>();
 
-  // Mark already-loaded modules so we don't re-parse their own files unless needed
+  // Mark already-loaded modules (including Master script) so they are not flagged as unused folder files
   for (const mod of currentModules) {
     if (mod.sourceFilename) {
       loadedFilesSet.add(mod.sourceFilename.toLowerCase());
+      loadedCanonicalKeysSet.add(canonicalScriptMatchKey(stripKnownScriptExtension(mod.sourceFilename)));
+    }
+    loadedCanonicalKeysSet.add(canonicalScriptMatchKey(mod.scriptNumber));
+    if (mod.cdnAlias) {
+      loadedCanonicalKeysSet.add(canonicalScriptMatchKey(mod.cdnAlias));
     }
   }
 
@@ -409,6 +377,9 @@ export async function autoResolveConnectedScriptsFromFolder(
     const presentKeys = new Set<string>();
     for (const m of currentModules) {
       presentKeys.add(canonicalScriptMatchKey(m.scriptNumber));
+      if (m.sourceFilename) {
+        presentKeys.add(canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename)));
+      }
       if (m.cdnAlias) {
         presentKeys.add(canonicalScriptMatchKey(m.cdnAlias));
       }
@@ -475,13 +446,16 @@ export async function autoResolveConnectedScriptsFromFolder(
 
       const matchedEntry = findMatchingFileInFolderPool(pool, targetRef);
       if (!matchedEntry) {
-        unmatchedTargetRefsMap.set(targetKey, targetRef);
+        if (!isAnnouncementOrEndpointTargetName(targetRef)) {
+          unmatchedTargetRefsMap.set(targetKey, targetRef);
+        }
         continue;
       }
 
       try {
+        const canonicalPrimaryNumber = normalizeScriptRef(matchedEntry.baseName) || targetRef;
         const imported = await importCallflowFile(matchedEntry.file, {
-          overridePrimaryScriptNumber: matchedEntry.baseName || targetRef,
+          overridePrimaryScriptNumber: canonicalPrimaryNumber,
           overridePrimaryScriptName: matchedEntry.baseName || targetRef,
           isMasterHint: false,
         });
@@ -501,6 +475,16 @@ export async function autoResolveConnectedScriptsFromFolder(
             loadedFilesSet.add(lowerFile);
             loadedFilenames.push(matchedEntry.filename);
           }
+          loadedCanonicalKeysSet.add(matchedEntry.canonicalKey);
+          if (!matchedEntryKeys.has(targetKey)) {
+            matchedEntryKeys.add(targetKey);
+            matchedEntries.push({
+              refKey: targetRef,
+              filename: matchedEntry.filename,
+              scriptNumber: imported.modules[0].scriptNumber,
+              relativePath: matchedEntry.relativePath,
+            });
+          }
         } else {
           unmatchedTargetRefsMap.set(targetKey, targetRef);
         }
@@ -517,6 +501,9 @@ export async function autoResolveConnectedScriptsFromFolder(
   const finalPresentKeys = new Set<string>();
   for (const m of currentModules) {
     finalPresentKeys.add(canonicalScriptMatchKey(m.scriptNumber));
+    if (m.sourceFilename) {
+      finalPresentKeys.add(canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename)));
+    }
     if (m.cdnAlias) {
       finalPresentKeys.add(canonicalScriptMatchKey(m.cdnAlias));
     }
@@ -525,17 +512,29 @@ export async function autoResolveConnectedScriptsFromFolder(
     .filter(([k]) => !finalPresentKeys.has(k))
     .map(([, ref]) => ref);
 
-  const activeTotalFilesUsed = Math.min(
-    pool.totalFilesScanned,
-    Math.max(loadedFilesSet.size, currentModules.length)
-  );
-  const skippedLegacyFilesCount = Math.max(0, pool.totalFilesScanned - activeTotalFilesUsed);
+  const unusedFolderFiles: FolderUnusedFileEntry[] = pool.entries
+    .filter(
+      (entry) =>
+        !loadedFilesSet.has(entry.filename.toLowerCase()) &&
+        !loadedCanonicalKeysSet.has(entry.canonicalKey) &&
+        !finalPresentKeys.has(entry.canonicalKey)
+    )
+    .map((entry) => ({
+      filename: entry.filename,
+      baseName: entry.baseName,
+      relativePath: entry.relativePath,
+    }))
+    .sort((a, b) => a.filename.localeCompare(b.filename, undefined, { numeric: true }));
+
+  const skippedLegacyFilesCount = unusedFolderFiles.length;
 
   return {
     modules: currentModules,
     loadedScriptNumbers,
     loadedFilenames,
+    matchedEntries,
     unmatchedTargetRefs,
+    unusedFolderFiles,
     totalPoolFiles: pool.totalFilesScanned,
     skippedLegacyFilesCount,
     folderName: pool.folderName,
