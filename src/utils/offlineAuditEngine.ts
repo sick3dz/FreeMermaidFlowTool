@@ -777,8 +777,8 @@ export const SBOM_PACKAGES: SbomPackageItem[] = [
     corporateNote: 'Reiner Build-Time-Typechecker unter Apache-2.0.',
   },
   {
-    name: 'esbuild',
-    versionSpec: '^0.25.0',
+    name: 'rolldown / oxc (Vite 8)',
+    versionSpec: 'integriert in vite ^8.3.0',
     license: 'MIT',
     scope: 'build-only',
     scopeLabel: 'Nur Build-Zeit',
