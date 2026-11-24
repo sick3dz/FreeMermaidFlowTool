@@ -28,6 +28,9 @@ import {
   createWorkspaceInspectContext,
   inspectWorkspaceNodeForEdit,
   updateWorkspaceNodeFromEdit,
+  classifyAvayaWaypointTarget,
+  markAvayaWaypointsInWorkspace,
+  unmarkAvayaWaypointInWorkspace,
 } from '../src/utils/scriptCallflowParser';
 import {
   buildDeterministicFlowchartSvg,
@@ -477,7 +480,7 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.2.3', 'Expected release version 1.2.3');
+  assert.equal(AUDIT_APP_VERSION, '1.2.4', 'Expected release version 1.2.4');
 });
 
 async function finalizeSuite() {
@@ -943,6 +946,172 @@ async function finalizeSuite() {
         ['Legacy_4910_Test.s', 'Support_Team_alt.s'],
         'unusedFolderFiles must list exactly unreferenced folder scripts'
       );
+    }
+  );
+
+  // 11. Avaya-only / FlixCheck / Menu / flow_1 / numeric / TRANSFER / GIVE CDN Waypoints & real .s precedence
+  await runAsyncTest(
+    '11. Avaya-only Wegweiser (Menu, FlixCheck, flow_1, Nummern, TRANSFER/CDN, spaced SECTION) & manuelle Markierung',
+    async () => {
+      // Unit assertions for classifyAvayaWaypointTarget
+      assert.equal(classifyAvayaWaypointTarget('FlixCheck'), 'FlixCheck-Wegweiser');
+      assert.equal(classifyAvayaWaypointTarget('Menu'), 'Menü / Flow (Avaya-only)');
+      assert.equal(classifyAvayaWaypointTarget('Menü_Haupt'), 'Menü / Flow (Avaya-only)');
+      assert.equal(classifyAvayaWaypointTarget('flow_1'), 'Menü / Flow (Avaya-only)');
+      assert.equal(classifyAvayaWaypointTarget('4910'), 'Avaya-Nummer / CDN');
+      assert.equal(classifyAvayaWaypointTarget('0800123456'), 'Avaya-Nummer / CDN');
+      assert.equal(
+        classifyAvayaWaypointTarget('Extern_Hotline_XYZ', { isAvayaRouteCmd: true }),
+        'Avaya-Weiterleitung (Transfer/CDN)'
+      );
+      assert.equal(
+        classifyAvayaWaypointTarget('Support_Team'),
+        null,
+        'Ordinary missing named script Support_Team must NOT be auto-classified as waypoint'
+      );
+
+      const makeVirtualFile = (name: string, content: string): File => {
+        const f = new File([content], name, { type: 'text/plain' });
+        Object.defineProperty(f, 'webkitRelativePath', {
+          value: `Avaya_Prod/${name}`,
+          configurable: true,
+        });
+        return f;
+      };
+
+      const mainText = [
+        'WHERE CLID EQUALS',
+        '  VALUE 49301001: EXECUTE Menu',
+        '  VALUE 49301002: EXECUTE FlixCheck',
+        '  VALUE 49301003: EXECUTE flow_1',
+        '  VALUE 49301004: EXECUTE flow_2',
+        '  VALUE 49301005: EXECUTE 4910',
+        '  VALUE 49301006: TRANSFER TO Extern_Hotline_XYZ',
+        '  VALUE 49301007: GIVE CDN 5500',
+        '  VALUE 49301008: EXECUTE Support_Team',
+        '  DEFAULT: GOTO "Menu Auswahl"',
+        'END WHERE',
+        '',
+        'SECTION "Menu Auswahl"',
+        '  GIVE RAN 3001',
+        '  DISCONNECT',
+      ].join('\n');
+
+      // Real .s file exists for flow_2 -> MUST beat waypoint heuristic and load as present!
+      const flow2Text = [
+        '/* Echtes vorhandenes flow_2.s Skript */',
+        'IF TIME OF DAY 08:00..17:00 THEN',
+        '  GIVE RAN 3002',
+        '  QUEUE TO SKILLSET sk_flow2_live',
+        'ELSE',
+        '  EXECUTE FlixCheck',
+        'END IF',
+      ].join('\n');
+
+      const pool = indexScriptFolderFiles([
+        makeVirtualFile('Main.s', mainText),
+        makeVirtualFile('flow_2.s', flow2Text),
+      ]);
+
+      const initialMaster = parseCallflowTextWithFallback(mainText, {
+        sourceFilename: 'Main.s',
+        isMasterHint: true,
+      });
+
+      const summary = await autoResolveConnectedScriptsFromFolder(initialMaster, pool, {
+        masterScriptNumber: 'Main',
+      });
+
+      const ws = buildScriptWorkspace(summary.modules, {
+        masterScriptNumber: 'Main',
+        treatUnresolvedAsEndpoint: false,
+      });
+
+      // Strict precedence: real flow_2.s MUST be loaded and marked as present (never waypoint)
+      assert.ok(
+        ws.modules.some((m) => m.scriptNumber === 'flow_2' && m.sourceFilename === 'flow_2.s'),
+        'Real flow_2.s in folder must always be loaded even though flow_* matches waypoint heuristic'
+      );
+      const itemFlow2 = (ws.masterChecklist || []).find((c) => c.refKey === 'flow_2');
+      assert.equal(itemFlow2?.status, 'present', 'Loaded flow_2.s must have status "present"');
+
+      // Auto-detected Avaya-only waypoints MUST have status "waypoint" and NEVER appear in missingTargets
+      for (const expectedWp of ['Menu', 'FlixCheck', 'flow_1', '4910', 'Extern_Hotline_XYZ', '5500']) {
+        const entry = (ws.masterChecklist || []).find(
+          (c) => c.refKey.toLowerCase() === expectedWp.toLowerCase()
+        );
+        assert.ok(entry, `Expected "${expectedWp}" in masterChecklist`);
+        assert.equal(
+          entry?.status,
+          'waypoint',
+          `Unresolved Avaya target "${expectedWp}" must be classified as "waypoint", got "${entry?.status}"`
+        );
+        assert.ok(entry?.waypointReason, `Waypoint "${expectedWp}" must include a descriptive waypointReason`);
+        assert.equal(
+          ws.missingTargets.some((t) => t.toLowerCase() === expectedWp.toLowerCase()),
+          false,
+          `Waypoint "${expectedWp}" must NOT be listed in ws.missingTargets`
+        );
+      }
+
+      // Local SECTION "Menu Auswahl" must NOT be flagged as missing or in masterChecklist
+      assert.equal(
+        ws.missingTargets.some((t) => /menu.*auswahl/i.test(t)),
+        false,
+        'Local space-containing SECTION "Menu Auswahl" must not appear in missingTargets'
+      );
+      assert.equal(
+        (ws.masterChecklist || []).some((c) => /menu.*auswahl/i.test(c.refKey)),
+        false,
+        'Local space-containing SECTION "Menu Auswahl" must not appear in masterChecklist'
+      );
+
+      // Genuine missing named script Support_Team MUST remain missing & flagged in Logic Health
+      const itemSupport = (ws.masterChecklist || []).find((c) => c.refKey === 'Support_Team');
+      assert.equal(itemSupport?.status, 'missing', 'Genuine missing Support_Team must stay "missing"');
+      assert.ok(ws.missingTargets.includes('Support_Team'), 'Support_Team must be in ws.missingTargets');
+
+      const healthBefore = analyzeWorkspaceLogicHealth(ws);
+      const missingHealthBefore = healthBefore.filter((h) => h.category === 'missing-script');
+      assert.equal(
+        missingHealthBefore.length,
+        1,
+        `Only Support_Team should trigger missing-script in Logic Health, got: ${missingHealthBefore.map((h) => h.title).join(', ')}`
+      );
+      assert.ok(missingHealthBefore[0].title.includes('[Support_Team]'));
+
+      // Master Overview Mermaid must render waypoints with avayaWaypoint styling (not missingScript)
+      const masterMermaid = buildMasterOverviewMermaid(ws, 'LR', { compact: false });
+      assert.ok(masterMermaid.includes(':::avayaWaypoint'), 'Master overview must emit :::avayaWaypoint nodes');
+      assert.ok(masterMermaid.includes('classDef avayaWaypoint'), 'Master overview must define classDef avayaWaypoint');
+
+      // Manual waypoint marking + rehydrate persistence + undo
+      const wsMarked = markAvayaWaypointsInWorkspace(ws, ['Support_Team']);
+      const supportAfterMark = (wsMarked.masterChecklist || []).find((c) => c.refKey === 'Support_Team');
+      assert.equal(supportAfterMark?.status, 'waypoint', 'Manually marked Support_Team must become "waypoint"');
+      assert.equal(supportAfterMark?.isManualWaypoint, true, 'Manual waypoint must set isManualWaypoint=true');
+      assert.equal(wsMarked.missingTargets.length, 0, 'Manual waypoint must clear Support_Team from missingTargets');
+      assert.equal(
+        analyzeWorkspaceLogicHealth(wsMarked).filter((h) => h.category === 'missing-script').length,
+        0,
+        'Manual waypoint must clear missing-script from Logic Health'
+      );
+
+      // Rehydration persistence check
+      const wsRehydrated = rehydrateAndUpgradeWorkspace(JSON.parse(JSON.stringify(wsMarked)));
+      const supportRehydrated = (wsRehydrated.masterChecklist || []).find((c) => c.refKey === 'Support_Team');
+      assert.equal(
+        supportRehydrated?.status,
+        'waypoint',
+        'Manual waypoint must survive workspace serialization & rehydration'
+      );
+      assert.equal(supportRehydrated?.isManualWaypoint, true);
+
+      // Undo manual waypoint
+      const wsUndone = unmarkAvayaWaypointInWorkspace(wsRehydrated, 'Support_Team');
+      const supportUndone = (wsUndone.masterChecklist || []).find((c) => c.refKey === 'Support_Team');
+      assert.equal(supportUndone?.status, 'missing', 'Unmarking manual waypoint must restore status "missing"');
+      assert.ok(wsUndone.missingTargets.includes('Support_Team'), 'Unmarked script must return to missingTargets');
     }
   );
 

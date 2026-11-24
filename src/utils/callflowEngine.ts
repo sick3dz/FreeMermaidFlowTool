@@ -8189,8 +8189,9 @@ export function generateInteractiveCallflowHtml(
             const el = document.createElement('div');
             el.className = 'an-item';
             const stCls = cr.status === 'missing' ? 'err' : cr.status === 'present' || cr.status === 'master' ? 'ok' : '';
+            const stLabel = cr.status === 'master' ? 'Master' : cr.status === 'present' ? 'Geladen' : cr.status === 'waypoint' ? 'Wegweiser' : cr.status === 'external' ? 'Extern' : 'Fehlend';
             el.innerHTML =
-              '<div class="row-between"><span class="an-item-title">' + esc(cr.displayName) + '</span><span class="an-tag ' + stCls + '">' + esc(cr.status) + '</span></div>' +
+              '<div class="row-between"><span class="an-item-title">' + esc(cr.displayName) + '</span><span class="an-tag ' + stCls + '">' + esc(stLabel) + '</span></div>' +
               '<div class="an-item-desc">Aufrufer: ' + esc(cr.callers.join(', ') || '—') + ' | Ziele: ' + esc(cr.callees.join(', ') || '—') + '</div>' +
               '<button class="node-chip"><span>Skript / Ziel im Graph öffnen</span><span class="badge">Fokus →</span></button>';
             el.querySelector('button').onclick = () => jumpToScriptOrNode(cr.refKey, cr.refKey);

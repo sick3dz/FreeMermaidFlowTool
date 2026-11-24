@@ -234,7 +234,7 @@ export interface ResolvedIssueRecord {
   resolvedAt: number;
 }
 
-export type MasterChecklistItemStatus = 'present' | 'missing' | 'external';
+export type MasterChecklistItemStatus = 'present' | 'missing' | 'external' | 'waypoint';
 
 export interface MasterScriptChecklistItem {
   id: string;
@@ -250,6 +250,8 @@ export interface MasterScriptChecklistItem {
   status: MasterChecklistItemStatus;
   matchedModuleNumber?: string;
   matchedSourceFilename?: string;
+  waypointReason?: string;
+  isManualWaypoint?: boolean;
   triggeredNumbers?: string[];
   organizationNames?: string[];
   brandNames?: string[];
@@ -273,6 +275,7 @@ export interface ScriptWorkspace {
   modules: ScriptModule[];
   missingTargets: string[];
   externalEndpoints?: string[];
+  avayaWaypoints?: string[];
   ignoredChecklistTargets?: string[];
   resolvedIssues?: Record<string, ResolvedIssueRecord>;
   manualQuestions?: CallflowOpenIssue[];
@@ -427,7 +430,7 @@ export interface CallflowScriptParameterItem {
 export interface CallflowCrossRefRegistryItem {
   refKey: string;
   displayName: string;
-  status: 'present' | 'missing' | 'external' | 'master';
+  status: 'present' | 'missing' | 'external' | 'waypoint' | 'master';
   callers: string[];
   callees: string[];
   ruleCount: number;

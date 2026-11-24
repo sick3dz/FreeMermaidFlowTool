@@ -211,11 +211,56 @@ export function isAnnouncementOrEndpointTargetName(token: string): boolean {
   const clean = normalizeScriptRef(token);
   if (!clean) return false;
   if (isDynamicAvayaVariableTarget(clean)) return true;
-  if (/^(?:\+\d{5,}|00\d{5,}|0\d{6,}|\d{7,})$/.test(clean)) return true;
   if (/\.(?:wav|mp3|ogg|ulaw|alaw|vox|au)$/i.test(clean)) return true;
   return /(?:^|[_.\-\s])(?:sonderansage|ansage|ansagen|ran|prompt|voice(?:[\s_-]*segment)?|wav|audio|musik|music|wartemusik|treatment|busy|ringback|disconnect|drop|abwurf|mailbox|voicemail|anrufbeantworter|ab|fax|ivr|skillset|queue|warteschlange|hunt|trunk|pilot|extern|external|hotline|vdn|acd|geschlossen|nacht(?:schaltung)?|feiertag(?:sansage)?|st[oö]rung(?:sansage)?|stoerung(?:sansage)?|wartung(?:sansage)?|info(?:ansage|text)?|text(?:ansage)?|ende|endpunkt)(?:$|[_.\-\s\d])/i.test(
     clean
   );
+}
+
+/**
+ * Classifies an unresolved target (one with NO matching .s script module in the workspace)
+ * as an Avaya-only / FlixCheck / Menu / Flow / Numeric / Transfer-CDN waypoint.
+ * Returns a human-readable German reason tag, or null if the target looks like a genuine missing script.
+ */
+export function classifyAvayaWaypointTarget(
+  token: string,
+  options?: { isAvayaRouteCmd?: boolean }
+): string | null {
+  const clean = normalizeScriptRef(token);
+  if (!clean) return null;
+
+  // 1. FlixCheck / Call-Deflection / Digital Bot Wegweiser
+  if (
+    /flix[\s_.-]*check/i.test(clean) ||
+    /(?:^|[_.\-\s])(?:flix|call[\s_-]*deflection|deflection|voice[\s_-]*bot|chat[\s_-]*bot|web[\s_-]*form|sms[\s_-]*check|whatsapp)(?:$|[_.\-\s\d])/i.test(
+      clean
+    )
+  ) {
+    return 'FlixCheck-Wegweiser';
+  }
+
+  // 2. Avaya-Menü / Orchestration Flow / IVR-Applikation (e.g. Menu, Menü, flow_1, Flow2, VoicePortal, AEP, VRU, Vector)
+  if (
+    /^(?:flow|subflow|men[uü])(?:[_.\-\s]?\d+|[A-Za-zÄÖÜäöüß0-9_.-]*)$/i.test(clean) ||
+    /(?:^|[_.\-\s])(?:men[uü]|hauptmen[uü]|sprachmen[uü]|auswahlmen[uü]|submen[uü]|untermen[uü]|flow|subflow|voice[\s_-]*portal|aep|aaep|orchestration|auto[\s_-]*attendant|vru|vector|vektor|route[\s_-]*point|application)(?:$|[_.\-\s\d])/i.test(
+      clean
+    )
+  ) {
+    return 'Menü / Flow (Avaya-only)';
+  }
+
+  // 3. Reine Nummern (CDNs, VDNs, Durchwahlen, Rufnummern wie 100, 4910, 5010, 0800...)
+  // Hinweis: Greift nur, wenn KEIN geladenes Modul unter dieser Nummer / cdnAlias existiert!
+  if (/^\+?\d{2,16}$/.test(clean)) {
+    return 'Avaya-Nummer / CDN';
+  }
+
+  // 4. Explizite Avaya-Weiterleitung (TRANSFER TO, GIVE CDN, ROUTE CALL) ohne lokales .s-Skript
+  if (options?.isAvayaRouteCmd) {
+    return 'Avaya-Weiterleitung (Transfer/CDN)';
+  }
+
+  return null;
 }
 
 export function formatScriptDisplayLabel(
@@ -2894,9 +2939,12 @@ function parseAaccScriptBlocks(
     // Procedural body, OCL SECTION / EVENT / VOICE SESSION / IF-ELSE / WHERE / VALUE / QUEUE / DISCONNECT blocks
     const localSectionNames = new Set<string>();
     for (const sl of sliceLines) {
-      const secDecl = sl.trim().match(/^section\s+["']?([A-Za-z0-9ÄÖÜäöüß_.-]+)["']?/i);
-      if (secDecl && secDecl[1]) {
-        localSectionNames.add(canonicalScriptMatchKey(secDecl[1]));
+      const secDecl = sl
+        .trim()
+        .match(/^section\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.\-\s]+?))(?:\s*(?:\/\*|\/\/|--|:|$))/i);
+      const secRaw = secDecl ? (secDecl[1] || secDecl[2] || secDecl[3] || '').trim() : '';
+      if (secRaw) {
+        localSectionNames.add(canonicalScriptMatchKey(secRaw));
       }
     }
 
@@ -3245,9 +3293,10 @@ function parseAaccScriptBlocks(
       const stackFax = conditionStack.some((f) => f.isFaxCond);
       const lineHasFaxKeyword = /\bfax(?:routing)?\b/i.test(actionSegment);
       const has4DigitValue = valueNumbers.some((v) => /^\d{4}$/.test(v));
-      const faxCdnMatch = actionSegment.match(
-        /\b(?:fax(?:routing)?\s*(?:cdn)?|cdn)\s*[:=]?\s*(\d{4})\b/i
-      );
+      const faxCdnMatch =
+        lineHasFaxKeyword || stackFax || explicitIsFax || pendingValueTrigger?.isFax
+          ? actionSegment.match(/\b(?:fax(?:routing)?\s*(?:cdn)?|cdn)\s*[:=]?\s*(\d{4})\b/i)
+          : actionSegment.match(/\bfax(?:routing)?\s*(?:cdn)?\s*[:=]?\s*(\d{4})\b/i);
 
       const execCmd = actionSegment.match(
         /\b(execute(?:\s+script)?|call(?:\s+script)?|subscript|give\s+script|goto)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
@@ -3325,14 +3374,14 @@ function parseAaccScriptBlocks(
         : '';
       const isPhoneOrExtTarget =
         Boolean(rawRouteToken) &&
-        /^route\s+(?:call|target)/.test(routeKeyword) &&
+        /^(?:route\s+(?:call|target)|transfer|give\s+cdn)/.test(routeKeyword) &&
         /^\+?\d{2,16}$/.test(rawRouteToken);
       const routeTarget =
         rawRouteToken && !isFaxRoute && (isValidScriptRef(rawRouteToken) || isPhoneOrExtTarget)
           ? normalizeScriptRef(rawRouteToken)
           : undefined;
       const isExternalRouteCall = Boolean(
-        routeTarget && /^route\s+(?:call|target)/.test(routeKeyword)
+        routeTarget && /^(?:route\s+(?:call|target)|transfer|give\s+cdn)/.test(routeKeyword)
       );
       const resolvedTarget = execTarget || routeTarget;
 
@@ -4309,10 +4358,13 @@ export function parseScriptTextBundle(
     }
     if (currentSec) explicitSections.push(currentSec);
 
-    const namedHeadersCount = explicitSections.filter((s) => Boolean(s.num)).length;
-    if (namedHeadersCount >= 2 && explicitSections.length >= 2) {
+    const nonEmptyExplicitSections = explicitSections.filter(
+      (s) => s.lines.join('\n').trim().length > 0
+    );
+    const namedHeadersCount = nonEmptyExplicitSections.filter((s) => Boolean(s.num)).length;
+    if (namedHeadersCount >= 2 && nonEmptyExplicitSections.length >= 2) {
       const merged = new Map<string, ScriptModule>();
-      for (const sec of explicitSections) {
+      for (const sec of nonEmptyExplicitSections) {
         const secText = sec.lines.join('\n').trim();
         if (!secText) continue;
         const secOpts = {
@@ -4863,6 +4915,7 @@ export function parseCallflowTextWithFallback(
 
 export interface WorkspaceResolutionState {
   externalEndpoints?: string[];
+  avayaWaypoints?: string[];
   ignoredChecklistTargets?: string[];
   resolvedIssues?: Record<string, ResolvedIssueRecord>;
   manualQuestions?: CallflowOpenIssue[];
@@ -4882,7 +4935,8 @@ export function detectMasterScriptChecklist(
   externalEndpoints: string[] = [],
   manualLinks: ScriptManualLink[] = [],
   preferredMasterNumber?: string,
-  ignoredChecklistTargets: string[] = []
+  ignoredChecklistTargets: string[] = [],
+  avayaWaypoints: string[] = []
 ): {
   masterScriptNumber?: string;
   masterChecklist: MasterScriptChecklistItem[];
@@ -4940,6 +4994,7 @@ export function detectMasterScriptChecklist(
 
   const masterKey = canonicalScriptMatchKey(masterMod.scriptNumber);
   const externalKeys = new Set(externalEndpoints.map(canonicalScriptMatchKey));
+  const manualWaypointKeys = new Set(avayaWaypoints.map(canonicalScriptMatchKey));
   const ignoredKeys = new Set(ignoredChecklistTargets.map(canonicalScriptMatchKey));
   const seenTargetKeys = new Set<string>([masterKey]);
   if (masterMod.cdnAlias) {
@@ -4947,6 +5002,40 @@ export function detectMasterScriptChecklist(
   }
   const visitedModuleKeys = new Set<string>([masterKey]);
   const checklist: MasterScriptChecklistItem[] = [];
+
+  const resolveChecklistStatus = (
+    cleanRef: string,
+    key: string,
+    matchedMod: ScriptModule | undefined,
+    isAvayaRouteCmd = false
+  ): {
+    status: MasterScriptChecklistItem['status'];
+    waypointReason?: string;
+    isManualWaypoint?: boolean;
+  } => {
+    if (matchedMod) {
+      return { status: 'present' };
+    }
+    if (manualWaypointKeys.has(key)) {
+      return {
+        status: 'waypoint',
+        waypointReason: 'Manuell als Wegweiser',
+        isManualWaypoint: true,
+      };
+    }
+    const autoWaypointReason = classifyAvayaWaypointTarget(cleanRef, { isAvayaRouteCmd });
+    if (autoWaypointReason) {
+      return {
+        status: 'waypoint',
+        waypointReason: autoWaypointReason,
+        isManualWaypoint: false,
+      };
+    }
+    if (externalKeys.has(key)) {
+      return { status: 'external' };
+    }
+    return { status: 'missing' };
+  };
 
   const traverseModule = (mod: ScriptModule, depth: number) => {
     const modKey = canonicalScriptMatchKey(mod.scriptNumber);
@@ -4964,11 +5053,7 @@ export function detectMasterScriptChecklist(
       seenTargetKeys.add(key);
 
       const matchedMod = moduleByKey.get(key);
-      const status = matchedMod
-        ? 'present'
-        : externalKeys.has(key)
-        ? 'external'
-        : 'missing';
+      const resolvedStatus = resolveChecklistStatus(cleanRef, key, matchedMod, false);
 
       checklist.push({
         id: `mchk:${masterKey}:${checklist.length + 1}:${key}`,
@@ -4982,9 +5067,11 @@ export function detectMasterScriptChecklist(
         prio,
         contextLabel:
           depth > 1 ? `aus [${mod.scriptNumber}] · ${contextLabel}` : contextLabel,
-        status,
+        status: resolvedStatus.status,
         matchedModuleNumber: matchedMod?.scriptNumber,
         matchedSourceFilename: matchedMod?.sourceFilename,
+        waypointReason: resolvedStatus.waypointReason,
+        isManualWaypoint: resolvedStatus.isManualWaypoint,
       });
 
       if (matchedMod && !visitedModuleKeys.has(key)) {
@@ -5005,6 +5092,7 @@ export function detectMasterScriptChecklist(
       orgaLabels: string[];
       brandNames: string[];
       isFaxRoute: boolean;
+      isAvayaRouteCmd: boolean;
     }
 
     const aggregatedMap = new Map<string, AggregatedTargetRef>();
@@ -5030,6 +5118,7 @@ export function detectMasterScriptChecklist(
           orgaLabels: [],
           brandNames: [],
           isFaxRoute: false,
+          isAvayaRouteCmd: false,
         };
         aggregatedMap.set(key, entry);
       }
@@ -5052,6 +5141,9 @@ export function detectMasterScriptChecklist(
       if (rule.isFaxRoute) {
         entry.isFaxRoute = true;
       }
+      if (rule.isExternalRouteCall) {
+        entry.isAvayaRouteCmd = true;
+      }
     };
 
     sortedRules.forEach((rule) => {
@@ -5073,11 +5165,12 @@ export function detectMasterScriptChecklist(
       seenTargetKeys.add(key);
 
       const matchedMod = moduleByKey.get(key);
-      const status = matchedMod
-        ? 'present'
-        : externalKeys.has(key)
-        ? 'external'
-        : 'missing';
+      const resolvedStatus = resolveChecklistStatus(
+        cleanRef,
+        key,
+        matchedMod,
+        agg.isAvayaRouteCmd
+      );
 
       let contextLabel: string;
       if (agg.valueNumbers.length > 0 || agg.orgaLabels.length > 0 || agg.isFaxRoute) {
@@ -5108,9 +5201,11 @@ export function detectMasterScriptChecklist(
         prio: agg.firstPrio,
         contextLabel:
           depth > 1 ? `aus [${mod.scriptNumber}] · ${contextLabel}` : contextLabel,
-        status,
+        status: resolvedStatus.status,
         matchedModuleNumber: matchedMod?.scriptNumber,
         matchedSourceFilename: matchedMod?.sourceFilename,
+        waypointReason: resolvedStatus.waypointReason,
+        isManualWaypoint: resolvedStatus.isManualWaypoint,
         triggeredNumbers: agg.valueNumbers.length > 0 ? agg.valueNumbers : undefined,
         organizationNames: agg.orgaLabels.length > 0 ? agg.orgaLabels : undefined,
         brandNames: agg.brandNames.length > 0 ? agg.brandNames : undefined,
@@ -5169,6 +5264,7 @@ export function detectWorkspaceIssues(
 ): CallflowOpenIssue[] {
   const resolvedMap = state?.resolvedIssues || {};
   const externalKeySet = new Set((state?.externalEndpoints || []).map(canonicalScriptMatchKey));
+  const waypointKeySet = new Set((state?.avayaWaypoints || []).map(canonicalScriptMatchKey));
   const ignoredKeySet = new Set((state?.ignoredChecklistTargets || []).map(canonicalScriptMatchKey));
   const manualLinks = state?.manualLinks || [];
   const issues: CallflowOpenIssue[] = [];
@@ -5187,7 +5283,14 @@ export function detectWorkspaceIssues(
   // 1. Missing targets (free script names or 4-digit numbers)
   missingTargets.forEach((targetRef) => {
     const tKey = canonicalScriptMatchKey(targetRef);
-    if (externalKeySet.has(tKey) || ignoredKeySet.has(tKey)) return;
+    if (
+      externalKeySet.has(tKey) ||
+      waypointKeySet.has(tKey) ||
+      ignoredKeySet.has(tKey) ||
+      classifyAvayaWaypointTarget(targetRef)
+    ) {
+      return;
+    }
     const callers = Array.from(callersByTargetKey.get(tKey) || []);
     const primaryCaller = callers[0] || targetRef;
     const id = `missing:${tKey}`;
@@ -5416,8 +5519,10 @@ export function buildScriptWorkspace(
   prevState?: WorkspaceResolutionState
 ): ScriptWorkspace {
   const baseExternalEndpoints = dedupeRefsByCanonicalKey(prevState?.externalEndpoints);
+  const manualAvayaWaypoints = dedupeRefsByCanonicalKey(prevState?.avayaWaypoints);
   const ignoredChecklistTargets = dedupeRefsByCanonicalKey(prevState?.ignoredChecklistTargets);
   const externalKeySet = new Set(baseExternalEndpoints.map(canonicalScriptMatchKey));
+  const manualWaypointKeySet = new Set(manualAvayaWaypoints.map(canonicalScriptMatchKey));
   const ignoredKeySet = new Set(ignoredChecklistTargets.map(canonicalScriptMatchKey));
   const manualLinks = prevState?.manualLinks || [];
   const resolvedIssues = prevState?.resolvedIssues || {};
@@ -5530,11 +5635,17 @@ export function buildScriptWorkspace(
         }
 
         if (!knownKeyToDisplay.has(tKey) && !externalKeySet.has(tKey)) {
-          // Automatically classify Sonderansagen / announcement endpoints, dynamic Avaya variables,
-          // external phone/Fax/IVR/Skillset targets, ROUTE CALL external targets, or unresolvable targets
-          // in a multi-script export as endpoints rather than missing-script errors
+          // Priority:
+          // 1. Manual or auto-detected Avaya-only / FlixCheck / Menu / Flow / Numeric / Transfer-CDN waypoint
+          //    -> never flagged as a missing .s script!
+          // 2. Sonderansagen / announcement endpoints, dynamic Avaya variables, audio/skillset targets -> external endpoint
+          // 3. Everything else (named script genuinely absent from import) -> missing target
           if (
-            isExternalRoute ||
+            manualWaypointKeySet.has(tKey) ||
+            Boolean(classifyAvayaWaypointTarget(canonicalDisplay, { isAvayaRouteCmd: isExternalRoute }))
+          ) {
+            missingByKey.delete(tKey);
+          } else if (
             isAnnouncementOrEndpointTargetName(canonicalDisplay) ||
             treatUnresolvedAsEndpoint
           ) {
@@ -5587,6 +5698,7 @@ export function buildScriptWorkspace(
   const missingTargets = Array.from(missingByKey.values());
   const issues = detectWorkspaceIssues(normalizedModules, missingTargets, {
     externalEndpoints,
+    avayaWaypoints: manualAvayaWaypoints,
     ignoredChecklistTargets,
     resolvedIssues,
     manualQuestions,
@@ -5599,7 +5711,8 @@ export function buildScriptWorkspace(
     externalEndpoints,
     manualLinks,
     prevState?.masterScriptNumber,
-    ignoredChecklistTargets
+    ignoredChecklistTargets,
+    manualAvayaWaypoints
   );
 
   const openIssueCount = issues.filter((i) => i.status === 'open').length;
@@ -5608,6 +5721,7 @@ export function buildScriptWorkspace(
     modules: normalizedModules,
     missingTargets,
     externalEndpoints,
+    avayaWaypoints: manualAvayaWaypoints,
     ignoredChecklistTargets,
     resolvedIssues,
     manualQuestions,
@@ -5759,6 +5873,7 @@ export function applyIssueResolutionToWorkspace(
 
   return buildScriptWorkspace(nextModules, {
     externalEndpoints: Array.from(nextExternalMap.values()),
+    avayaWaypoints: workspace.avayaWaypoints,
     ignoredChecklistTargets: workspace.ignoredChecklistTargets,
     resolvedIssues: nextResolved,
     manualQuestions: nextManualQuestions,
@@ -5805,6 +5920,7 @@ export function reopenIssueInWorkspace(
 
   return buildScriptWorkspace(workspace.modules, {
     externalEndpoints: Array.from(nextExternal),
+    avayaWaypoints: workspace.avayaWaypoints,
     ignoredChecklistTargets: workspace.ignoredChecklistTargets,
     resolvedIssues: nextResolved,
     manualQuestions: nextManualQuestions,
@@ -5827,12 +5943,73 @@ export function unignoreChecklistTargetInWorkspace(
   );
   return buildScriptWorkspace(workspace.modules, {
     externalEndpoints: workspace.externalEndpoints,
+    avayaWaypoints: workspace.avayaWaypoints,
     ignoredChecklistTargets: nextIgnored,
     resolvedIssues: workspace.resolvedIssues,
     manualQuestions: workspace.manualQuestions,
     manualLinks: workspace.manualLinks,
     masterScriptNumber: workspace.masterScriptNumber,
     nodeOffsets: workspace.nodeOffsets,
+  });
+}
+
+/**
+ * Marks one or more unresolved targets as manual Avaya-only / FlixCheck waypoints
+ * so they appear in the dedicated Wegweiser category and never as missing scripts.
+ */
+export function markAvayaWaypointsInWorkspace(
+  workspace: ScriptWorkspace,
+  targetRefs: string[]
+): ScriptWorkspace {
+  const cleanedIncoming = targetRefs
+    .map((t) => normalizeScriptRef(t))
+    .filter((t) => Boolean(t));
+  if (cleanedIncoming.length === 0) return workspace;
+
+  const incomingKeySet = new Set(cleanedIncoming.map(canonicalScriptMatchKey));
+  const nextWaypoints = dedupeRefsByCanonicalKey([
+    ...(workspace.avayaWaypoints || []),
+    ...cleanedIncoming,
+  ]);
+  const nextExternal = (workspace.externalEndpoints || []).filter(
+    (e) => !incomingKeySet.has(canonicalScriptMatchKey(e))
+  );
+
+  return buildScriptWorkspace(workspace.modules, {
+    externalEndpoints: nextExternal,
+    avayaWaypoints: nextWaypoints,
+    ignoredChecklistTargets: workspace.ignoredChecklistTargets,
+    resolvedIssues: workspace.resolvedIssues,
+    manualQuestions: workspace.manualQuestions,
+    manualLinks: workspace.manualLinks,
+    masterScriptNumber: workspace.masterScriptNumber,
+    nodeOffsets: workspace.nodeOffsets,
+    treatUnresolvedAsEndpoint: workspace.treatUnresolvedAsEndpoint,
+  });
+}
+
+/**
+ * Removes a target from the manual Avaya waypoints list so it returns to 'missing' (open).
+ */
+export function unmarkAvayaWaypointInWorkspace(
+  workspace: ScriptWorkspace,
+  targetRef: string
+): ScriptWorkspace {
+  const targetKey = canonicalScriptMatchKey(targetRef);
+  if (!targetKey) return workspace;
+  const nextWaypoints = (workspace.avayaWaypoints || []).filter(
+    (t) => canonicalScriptMatchKey(t) !== targetKey
+  );
+  return buildScriptWorkspace(workspace.modules, {
+    externalEndpoints: workspace.externalEndpoints,
+    avayaWaypoints: nextWaypoints,
+    ignoredChecklistTargets: workspace.ignoredChecklistTargets,
+    resolvedIssues: workspace.resolvedIssues,
+    manualQuestions: workspace.manualQuestions,
+    manualLinks: workspace.manualLinks,
+    masterScriptNumber: workspace.masterScriptNumber,
+    nodeOffsets: workspace.nodeOffsets,
+    treatUnresolvedAsEndpoint: workspace.treatUnresolvedAsEndpoint,
   });
 }
 
@@ -5930,6 +6107,9 @@ export function buildMasterOverviewMermaid(
   const lines: string[] = [`flowchart ${direction}`];
   const incomingCounts = new Map<string, number>();
   const externalKeySet = new Set((workspace.externalEndpoints || []).map(canonicalScriptMatchKey));
+  const manualWaypointKeySet = new Set(
+    (workspace.avayaWaypoints || []).map(canonicalScriptMatchKey)
+  );
   const ignoredKeySet = new Set(
     (workspace.ignoredChecklistTargets || []).map(canonicalScriptMatchKey)
   );
@@ -6083,6 +6263,7 @@ export function buildMasterOverviewMermaid(
   });
 
   const referencedExternalTargets = new Map<string, string>();
+  const referencedWaypointTargets = new Map<string, { ref: string; reason: string }>();
   const referencedMissingTargets = new Map<string, string>();
   const externalRouteTargetKeys = new Set<string>();
   const skillsetsMap = new Map<
@@ -6107,9 +6288,18 @@ export function buildMasterOverviewMermaid(
       const tKey = canonicalScriptMatchKey(resolvedRef);
       if (ignoredKeySet.has(tKey)) return;
       if (!activeModuleKeySet.has(tKey)) {
-        if (
+        const autoWaypointReason = classifyAvayaWaypointTarget(resolvedRef, {
+          isAvayaRouteCmd: externalRouteTargetKeys.has(tKey),
+        });
+        if (manualWaypointKeySet.has(tKey) || autoWaypointReason) {
+          referencedWaypointTargets.set(tKey, {
+            ref: resolvedRef,
+            reason: manualWaypointKeySet.has(tKey)
+              ? 'Avaya-Wegweiser'
+              : autoWaypointReason || 'Avaya-Wegweiser',
+          });
+        } else if (
           externalKeySet.has(tKey) ||
-          externalRouteTargetKeys.has(tKey) ||
           workspace.treatUnresolvedAsEndpoint ||
           isAnnouncementOrEndpointTargetName(resolvedRef)
         ) {
@@ -6339,6 +6529,13 @@ export function buildMasterOverviewMermaid(
   });
 
   if (!isCompactMode) {
+    referencedWaypointTargets.forEach(({ ref, reason }) => {
+      const suffix = toMermaidNodeSuffix(ref);
+      const safeRef = sanitizeMermaidText(ref);
+      const safeReason = sanitizeMermaidText(reason);
+      lines.push(`    S_${suffix}(["↗ ${safeRef} · ${safeReason}"]):::avayaWaypoint`);
+    });
+
     referencedExternalTargets.forEach((targetRef) => {
       const tKey = canonicalScriptMatchKey(targetRef);
       const suffix = toMermaidNodeSuffix(targetRef);
@@ -6501,13 +6698,22 @@ export function buildMasterOverviewMermaid(
     lines.push(`    ${edge.fromNodeId} ${arrow}${labelPart} ${edge.toNodeId}`);
   }
 
-  if (referencedMissingTargets.size > 0 || hasOpenIssueNodes) {
+  if (
+    referencedMissingTargets.size > 0 ||
+    referencedWaypointTargets.size > 0 ||
+    hasOpenIssueNodes
+  ) {
     lines.push('');
     if (hasOpenIssueNodes) {
       lines.push('    classDef openIssue stroke:#ef4444,stroke-width:2.5px;');
     }
     if (referencedMissingTargets.size > 0) {
       lines.push('    classDef missingScript stroke-dasharray: 5 5,stroke:#ef4444;');
+    }
+    if (referencedWaypointTargets.size > 0) {
+      lines.push(
+        '    classDef avayaWaypoint fill:#0c4a6e,stroke:#38bdf8,color:#e0f2fe,stroke-width:1.5px;'
+      );
     }
   }
 
@@ -6662,6 +6868,7 @@ export function rehydrateAndUpgradeWorkspace(rawWorkspace: ScriptWorkspace): Scr
 
   return buildScriptWorkspace(deduped, {
     externalEndpoints: rawWorkspace.externalEndpoints,
+    avayaWaypoints: rawWorkspace.avayaWaypoints,
     ignoredChecklistTargets: rawWorkspace.ignoredChecklistTargets,
     resolvedIssues: rawWorkspace.resolvedIssues,
     manualQuestions: rawWorkspace.manualQuestions,
@@ -7665,6 +7872,18 @@ export function analyzeWorkspaceLogicHealth(
   const ignoredHealthKeys = new Set(
     (workspace.ignoredChecklistTargets || []).map(canonicalScriptMatchKey)
   );
+  const manualWaypointHealthKeys = new Set(
+    (workspace.avayaWaypoints || []).map(canonicalScriptMatchKey)
+  );
+  const avayaRouteTargetKeys = new Set<string>();
+  modules.forEach((m) => {
+    m.rules.forEach((r) => {
+      if (r.isExternalRouteCall && r.targetNumber) {
+        const k = resolveModuleKey(r.targetNumber);
+        if (k) avayaRouteTargetKeys.add(k);
+      }
+    });
+  });
   const resolvedIssuesMap = workspace.resolvedIssues || {};
   const reportedMissingKeys = new Set<string>();
 
@@ -7677,7 +7896,13 @@ export function analyzeWorkspaceLogicHealth(
       reportedMissingKeys.has(tKey) ||
       moduleByKey.has(tKey) ||
       externalEndpointKeys.has(tKey) ||
+      manualWaypointHealthKeys.has(tKey) ||
       ignoredHealthKeys.has(tKey) ||
+      Boolean(
+        classifyAvayaWaypointTarget(cleanTarget, {
+          isAvayaRouteCmd: avayaRouteTargetKeys.has(tKey),
+        })
+      ) ||
       isAnnouncementOrEndpointTargetName(cleanTarget) ||
       isDeactivatedSentinelTarget(cleanTarget)
     ) {
@@ -8306,6 +8531,9 @@ export function extractWorkspaceResourceRegistry(
   const externalKeys = new Set(
     (workspace.externalEndpoints || []).map(canonicalScriptMatchKey)
   );
+  const waypointKeys = new Set(
+    (workspace.avayaWaypoints || []).map(canonicalScriptMatchKey)
+  );
   const masterKey = workspace.masterScriptNumber
     ? canonicalScriptMatchKey(workspace.masterScriptNumber)
     : modules.find((m) => m.isMaster)
@@ -8356,11 +8584,13 @@ export function extractWorkspaceResourceRegistry(
   const crossRefs: CallflowCrossRefRegistryItem[] = allRefKeysOrder.map((k) => {
     const info = displayByRefKey.get(k)!;
     const matched = moduleByKey.get(k);
-    const status: 'present' | 'missing' | 'external' | 'master' =
+    const status: 'present' | 'missing' | 'external' | 'waypoint' | 'master' =
       k === masterKey || matched?.isMaster
         ? 'master'
         : matched
         ? 'present'
+        : waypointKeys.has(k) || Boolean(classifyAvayaWaypointTarget(info.refKey))
+        ? 'waypoint'
         : externalKeys.has(k)
         ? 'external'
         : 'missing';
@@ -8641,6 +8871,7 @@ export function exportMigrationDocumentationMarkdown(
   const matrix = buildWorkspaceRoutingMatrix(workspace);
   const missingCount = checklist.filter((i) => i.status === 'missing').length;
   const presentCount = checklist.filter((i) => i.status === 'present').length;
+  const waypointCount = checklist.filter((i) => i.status === 'waypoint').length;
   const externalCount = checklist.filter((i) => i.status === 'external').length;
 
   const md: string[] = [];
@@ -8652,7 +8883,7 @@ export function exportMigrationDocumentationMarkdown(
     `- **Hauptskript (Master):** ${workspace.masterScriptNumber || modules[0]?.scriptNumber || 'Main'}`
   );
   md.push(
-    `- **Referenz-Abgleich:** ${presentCount} geladen · ${externalCount} extern · ${missingCount} ausstehend`
+    `- **Referenz-Abgleich:** ${presentCount} geladen · ${waypointCount} Wegweiser / Avaya-only · ${externalCount} extern · ${missingCount} ausstehend`
   );
   const externalApiList = registry.externalApis || [];
   md.push(
@@ -8673,6 +8904,8 @@ export function exportMigrationDocumentationMarkdown(
       const statusLabel =
         item.status === 'present'
           ? 'Vorhanden (Geladen)'
+          : item.status === 'waypoint'
+          ? `Wegweiser / Avaya-only${item.waypointReason ? ` (${item.waypointReason})` : ''}`
           : item.status === 'external'
           ? 'Externes Ziel'
           : 'Ausstehende Referenz';

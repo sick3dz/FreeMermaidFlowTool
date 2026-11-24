@@ -1,6 +1,7 @@
 import { ScriptModule } from '../types/mermaidStudio';
 import {
   canonicalScriptMatchKey,
+  classifyAvayaWaypointTarget,
   detectMasterScriptChecklist,
   isAnnouncementOrEndpointTargetName,
   isValidScriptRef,
@@ -185,14 +186,18 @@ export async function importCallflowFile(
     sourceFilename: file.name,
     origin: 'legacy-text',
     isMasterHint: options?.isMasterHint ?? dotSMeta.isMasterHint,
-  }).map((mod, idx) => {
-    if (idx === 0 && dotSMeta.cdnAlias && !mod.cdnAlias) {
+  }).map((mod, idx, allMods) => {
+    const withSource =
+      allMods.length === 1 && !mod.sourceFilename
+        ? { ...mod, sourceFilename: file.name }
+        : mod;
+    if (idx === 0 && dotSMeta.cdnAlias && !withSource.cdnAlias) {
       return {
-        ...mod,
+        ...withSource,
         cdnAlias: dotSMeta.cdnAlias,
       };
     }
-    return mod;
+    return withSource;
   });
 
   return {
@@ -410,9 +415,10 @@ export async function autoResolveConnectedScriptsFromFolder(
       pendingTargets.push(clean);
     };
 
-    // 1. All missing items from the recursive Masterscript checklist
+    // 1. All missing or waypoint-classified items from the recursive Masterscript checklist
+    // (waypoint names like flow_2 or FlixCheck.V2 must still load if a real .s file exists in the folder!)
     for (const item of checklistState.masterChecklist) {
-      if (item.status === 'missing') {
+      if (item.status === 'missing' || item.status === 'waypoint') {
         enqueueCandidate(item.refKey);
       }
     }
@@ -446,7 +452,10 @@ export async function autoResolveConnectedScriptsFromFolder(
 
       const matchedEntry = findMatchingFileInFolderPool(pool, targetRef);
       if (!matchedEntry) {
-        if (!isAnnouncementOrEndpointTargetName(targetRef)) {
+        if (
+          !isAnnouncementOrEndpointTargetName(targetRef) &&
+          !classifyAvayaWaypointTarget(targetRef)
+        ) {
           unmatchedTargetRefsMap.set(targetKey, targetRef);
         }
         continue;

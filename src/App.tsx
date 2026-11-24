@@ -145,6 +145,7 @@ import {
   formatScriptDisplayLabel,
   inspectWorkspaceNodeForEdit,
   looksLikeRawCallflowScript,
+  markAvayaWaypointsInWorkspace,
   mergeScriptModules,
   normalizeScriptRef,
   parseCallflowTextWithFallback,
@@ -152,6 +153,7 @@ import {
   rehydrateAndUpgradeWorkspace,
   reopenIssueInWorkspace,
   unignoreChecklistTargetInWorkspace,
+  unmarkAvayaWaypointInWorkspace,
   updateEdgeLabelInWorkspace,
   updateWorkspaceNodeFromEdit,
 } from './utils/scriptCallflowParser';
@@ -3197,6 +3199,26 @@ function OfflineStudioApp() {
     [scriptWorkspace, refreshDiagramFromWorkspace]
   );
 
+  const handleMarkAvayaWaypoints = useCallback(
+    (targetRefs: string[]): ScriptWorkspace => {
+      const nextWs = markAvayaWaypointsInWorkspace(scriptWorkspace, targetRefs);
+      setScriptWorkspace(nextWs);
+      refreshDiagramFromWorkspace(nextWs);
+      return nextWs;
+    },
+    [scriptWorkspace, refreshDiagramFromWorkspace]
+  );
+
+  const handleUnmarkAvayaWaypoint = useCallback(
+    (targetRef: string): ScriptWorkspace => {
+      const nextWs = unmarkAvayaWaypointInWorkspace(scriptWorkspace, targetRef);
+      setScriptWorkspace(nextWs);
+      refreshDiagramFromWorkspace(nextWs);
+      return nextWs;
+    },
+    [scriptWorkspace, refreshDiagramFromWorkspace]
+  );
+
   const handleAddManualCallflowQuestion = useCallback(
     (scriptNumber: string, question: string) => {
       const cleanQ = question.trim();
@@ -3427,6 +3449,7 @@ function OfflineStudioApp() {
 
         const nextWs = buildScriptWorkspace(summary.modules, {
           externalEndpoints: scriptWorkspace.externalEndpoints,
+          avayaWaypoints: scriptWorkspace.avayaWaypoints,
           ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
           resolvedIssues: scriptWorkspace.resolvedIssues,
           manualQuestions: scriptWorkspace.manualQuestions,
@@ -3587,6 +3610,7 @@ function OfflineStudioApp() {
 
       const nextWs = buildScriptWorkspace(currentModules, {
         externalEndpoints: nextExternalEndpoints,
+        avayaWaypoints: scriptWorkspace.avayaWaypoints,
         ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
         resolvedIssues: scriptWorkspace.resolvedIssues,
         manualQuestions: scriptWorkspace.manualQuestions,
@@ -7521,6 +7545,8 @@ function OfflineStudioApp() {
               onSubmitChecklistDetailScript={handleSubmitChecklistDetailScript}
               onSubmitChecklistVisioFile={handleSubmitChecklistVisioFile}
               onUnignoreChecklistTarget={handleUnignoreChecklistTarget}
+              onMarkAvayaWaypoints={handleMarkAvayaWaypoints}
+              onUnmarkAvayaWaypoint={handleUnmarkAvayaWaypoint}
               focusChecklistTrigger={checklistFocusTrigger}
               onExportInteractiveHtml={handleExportHtmlFromInspectorCb}
               isExportingHtml={isDownloadingHtml || Boolean(htmlExportProgress?.active)}
@@ -7631,6 +7657,8 @@ function OfflineStudioApp() {
                   onSubmitChecklistDetailScript={handleSubmitChecklistDetailScript}
                   onSubmitChecklistVisioFile={handleSubmitChecklistVisioFile}
                   onUnignoreChecklistTarget={handleUnignoreChecklistTarget}
+                  onMarkAvayaWaypoints={handleMarkAvayaWaypoints}
+                  onUnmarkAvayaWaypoint={handleUnmarkAvayaWaypoint}
                   focusChecklistTrigger={checklistFocusTrigger}
                   onExportInteractiveHtml={handleExportHtmlFromInspectorCb}
                   isExportingHtml={isDownloadingHtml || Boolean(htmlExportProgress?.active)}

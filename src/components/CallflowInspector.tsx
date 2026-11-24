@@ -104,6 +104,8 @@ interface CallflowInspectorProps {
   ) => ScriptWorkspace | null;
   onSubmitChecklistVisioFile?: (targetRef: string, file: File) => Promise<ScriptWorkspace | null>;
   onUnignoreChecklistTarget?: (targetRef: string) => void;
+  onMarkAvayaWaypoints?: (targetRefs: string[]) => ScriptWorkspace | void;
+  onUnmarkAvayaWaypoint?: (targetRef: string) => ScriptWorkspace | void;
   focusChecklistTrigger?: { refKey: string; nonce: number } | null;
   onSwitchViewLevel: (next: CallflowViewLevel) => void;
   onExportInteractiveHtml: () => void;
@@ -155,6 +157,8 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
   onSubmitChecklistDetailScript,
   onSubmitChecklistVisioFile,
   onUnignoreChecklistTarget,
+  onMarkAvayaWaypoints,
+  onUnmarkAvayaWaypoint,
   focusChecklistTrigger,
   onSwitchViewLevel,
   onExportInteractiveHtml,
@@ -223,7 +227,9 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
 
   const [activeChecklistRef, setActiveChecklistRef] = useState<string | null>(null);
   const [checklistFilter, setChecklistFilter] = useState<'all' | 'todo' | 'synced'>('all');
-  const [reconcileTab, setReconcileTab] = useState<'none' | 'found' | 'missing' | 'unused'>('none');
+  const [reconcileTab, setReconcileTab] = useState<
+    'none' | 'found' | 'missing' | 'waypoints' | 'unused'
+  >('none');
   const [reconcileSearch, setReconcileSearch] = useState('');
   const [checklistDraftText, setChecklistDraftText] = useState('');
   const [checklistFeedback, setChecklistFeedback] = useState<string | null>(null);
@@ -531,6 +537,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
   const {
     checklistMissingCount,
     checklistPresentCount,
+    checklistWaypointCount,
     checklistExternalCount,
     checklistDoneCount,
     directMainMissingCount,
@@ -542,6 +549,9 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
     );
     const externalKeys = new Set(
       (scriptWorkspace.externalEndpoints || []).map(canonicalScriptMatchKey)
+    );
+    const manualWaypointKeys = new Set(
+      (scriptWorkspace.avayaWaypoints || []).map(canonicalScriptMatchKey)
     );
     const directMainTargetKeys = new Set<string>();
     if (mainModule) {
@@ -558,6 +568,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
 
     let missing = 0;
     let present = 0;
+    let waypoint = 0;
     let external = 0;
     let directMainMissing = 0;
 
@@ -565,28 +576,36 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
       const refKeyCanon = canonicalScriptMatchKey(item.refKey);
       const isPresentInModules =
         item.status === 'present' || loadedModuleKeys.has(refKeyCanon);
+      const isWaypoint =
+        !isPresentInModules &&
+        (item.status === 'waypoint' || manualWaypointKeys.has(refKeyCanon));
       const isExternal =
-        item.status === 'external' || (!isPresentInModules && externalKeys.has(refKeyCanon));
+        !isPresentInModules &&
+        !isWaypoint &&
+        (item.status === 'external' || externalKeys.has(refKeyCanon));
 
-      if (!isPresentInModules && !isExternal) {
+      if (!isPresentInModules && !isWaypoint && !isExternal) {
         missing += 1;
         if ((item.depth || 1) === 1 || directMainTargetKeys.has(refKeyCanon)) {
           directMainMissing += 1;
         }
       } else if (isPresentInModules) {
         present += 1;
+      } else if (isWaypoint) {
+        waypoint += 1;
       } else {
         external += 1;
       }
     });
 
     const total = masterChecklist.length;
-    const done = present + external;
+    const done = present + waypoint + external;
     const pct = total > 0 ? Math.round((done / total) * 100) : 100;
 
     return {
       checklistMissingCount: missing,
       checklistPresentCount: present,
+      checklistWaypointCount: waypoint,
       checklistExternalCount: external,
       checklistDoneCount: done,
       directMainMissingCount: directMainMissing,
@@ -598,12 +617,14 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
     mainModule,
     scriptWorkspace.modules,
     scriptWorkspace.externalEndpoints,
+    scriptWorkspace.avayaWaypoints,
   ]);
 
-  // Live Master <-> Import reconciliation breakdown (Gefunden / Fehlend / Ungenutzt im Ordner)
+  // Live Master <-> Import reconciliation breakdown (Gefunden / Fehlend / Wegweiser / Ungenutzt im Ordner)
   const {
     reconcileFoundItems,
     reconcileMissingItems,
+    reconcileWaypointItems,
     reconcileUnusedFolderEntries,
   } = useMemo(() => {
     const modByCanon = new Map<string, (typeof scriptWorkspace.modules)[number]>();
@@ -647,6 +668,13 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
       contextLabel: string;
       depth: number;
     }> = [];
+    const waypoints: Array<{
+      refKey: string;
+      callerScriptNumber: string;
+      reason: string;
+      isManual: boolean;
+      depth: number;
+    }> = [];
 
     masterChecklist.forEach((item) => {
       const k = canonicalScriptMatchKey(item.refKey);
@@ -662,6 +690,14 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
           matchedScriptNumber: modNum,
           matchedFilename: matchedFile,
           callerScriptNumber: item.callerScriptNumber,
+          depth: item.depth || 1,
+        });
+      } else if (item.status === 'waypoint') {
+        waypoints.push({
+          refKey: item.refKey,
+          callerScriptNumber: item.callerScriptNumber,
+          reason: item.waypointReason || 'Avaya-only / Wegweiser',
+          isManual: Boolean(item.isManualWaypoint),
           depth: item.depth || 1,
         });
       } else if (item.status === 'missing') {
@@ -703,6 +739,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
     return {
       reconcileFoundItems: found,
       reconcileMissingItems: missing,
+      reconcileWaypointItems: waypoints,
       reconcileUnusedFolderEntries: unused,
     };
   }, [masterChecklist, scriptWorkspace.modules, assignedFolderPool, lastFolderResolveSummary]);
@@ -1790,23 +1827,40 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                               Ebene 2 öffnen ([{finding.scriptNumber}])
                             </button>
                             {finding.category === 'missing-script' && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const missingRef = finding.id.replace(/^health:missing-script:/, '');
-                                  const matchedItem = masterChecklist.find(
-                                    (it) => canonicalScriptMatchKey(it.refKey) === missingRef
-                                  );
-                                  setInspectorTab('overview');
-                                  setReconcileTab('missing');
-                                  if (matchedItem) {
-                                    setActiveChecklistRef(matchedItem.refKey);
-                                  }
-                                }}
-                                className="px-2.5 py-1 rounded bg-rose-900/50 hover:bg-rose-800/60 border border-rose-500/40 text-[11px] font-medium text-rose-200 transition-colors cursor-pointer"
-                              >
-                                In Master-Abgleich öffnen
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const missingRef = finding.id.replace(/^health:missing-script:/, '');
+                                    const matchedItem = masterChecklist.find(
+                                      (it) => canonicalScriptMatchKey(it.refKey) === missingRef
+                                    );
+                                    setInspectorTab('overview');
+                                    setReconcileTab('missing');
+                                    if (matchedItem) {
+                                      setActiveChecklistRef(matchedItem.refKey);
+                                    }
+                                  }}
+                                  className="px-2.5 py-1 rounded bg-rose-900/50 hover:bg-rose-800/60 border border-rose-500/40 text-[11px] font-medium text-rose-200 transition-colors cursor-pointer"
+                                >
+                                  In Master-Abgleich öffnen
+                                </button>
+                                {onMarkAvayaWaypoints && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const missingRef = finding.id.replace(/^health:missing-script:/, '');
+                                      const matchedItem = masterChecklist.find(
+                                        (it) => canonicalScriptMatchKey(it.refKey) === missingRef
+                                      );
+                                      onMarkAvayaWaypoints([matchedItem ? matchedItem.refKey : missingRef]);
+                                    }}
+                                    className="px-2.5 py-1 rounded bg-sky-900/50 hover:bg-sky-800/60 border border-sky-500/40 text-[11px] font-medium text-sky-200 transition-colors cursor-pointer"
+                                  >
+                                    Als Wegweiser
+                                  </button>
+                                )}
+                              </>
                             )}
                           </div>
                         </div>
@@ -2271,8 +2325,10 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                                   ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
                                   : cr.status === 'present'
                                   ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                  : cr.status === 'waypoint'
+                                  ? 'bg-sky-500/15 text-sky-300 border border-sky-500/35'
                                   : cr.status === 'external'
-                                  ? 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
+                                  ? 'bg-slate-700/40 text-slate-300 border border-slate-600/40'
                                   : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                               }`}
                             >
@@ -2280,6 +2336,8 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                                 ? 'Einstieg (Main)'
                                 : cr.status === 'present'
                                 ? 'Geladen'
+                                : cr.status === 'waypoint'
+                                ? 'Wegweiser'
                                 : cr.status === 'external'
                                 ? 'Extern'
                                 : 'Ausstehend'}
@@ -2876,6 +2934,14 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                           }}
                         />
                       )}
+                      {checklistWaypointCount > 0 && (
+                        <div
+                          className="h-full bg-sky-500 transition-all duration-300"
+                          style={{
+                            width: `${(checklistWaypointCount / masterChecklist.length) * 100}%`,
+                          }}
+                        />
+                      )}
                       {checklistExternalCount > 0 && (
                         <div
                           className="h-full bg-slate-500 transition-all duration-300"
@@ -2897,6 +2963,9 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[10px] font-mono tabular-nums">
                       <span className="text-emerald-400">
                         {checklistPresentCount} lokal geladen
+                        {checklistWaypointCount > 0 && (
+                          <span className="text-sky-300"> · {checklistWaypointCount} Wegweiser</span>
+                        )}
                         {checklistExternalCount > 0 && (
                           <span className="text-slate-400"> · {checklistExternalCount} extern</span>
                         )}
@@ -2913,13 +2982,13 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                         </span>
                       ) : (
                         <span className="text-emerald-400/90">
-                          Alle Referenzen aus {mainScriptLabel} vorhanden
+                          Alle Referenzen aus {mainScriptLabel} abgedeckt
                         </span>
                       )}
                     </div>
                   </div>
 
-                  {/* Master <-> Import Abgleich-Block (Gefunden / Fehlend / Ungenutzt im Ordner) */}
+                  {/* Master <-> Import Abgleich-Block (Gefunden / Fehlend / Wegweiser / Ungenutzt im Ordner) */}
                   <div className="rounded-lg border border-slate-800 bg-slate-900/75 p-2.5 space-y-2">
                     <div className="flex items-center justify-between gap-2">
                       <div className="min-w-0">
@@ -2927,7 +2996,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                           Master ↔ Import Abgleich
                         </div>
                         <div className="text-[10px] text-slate-400">
-                          Regel: Name im Skript (Leerzeichen → <code className="font-mono text-slate-300">_</code>) = Dateiname
+                          Regel: Name im Skript (Leerzeichen → <code className="font-mono text-slate-300">_</code>) = Dateiname · Avaya/FlixCheck = Wegweiser
                         </div>
                       </div>
                       {reconcileTab !== 'none' && (
@@ -2937,14 +3006,14 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             setReconcileTab('none');
                             setReconcileSearch('');
                           }}
-                          className="text-[10px] text-slate-400 hover:text-slate-200 px-1.5 py-0.5 rounded hover:bg-slate-800 cursor-pointer"
+                          className="text-[10px] text-slate-400 hover:text-slate-200 px-1.5 py-0.5 rounded hover:bg-slate-800 cursor-pointer shrink-0"
                         >
                           Zuklappen
                         </button>
                       )}
                     </div>
 
-                    <div className="grid grid-cols-3 gap-1.5">
+                    <div className="grid grid-cols-4 gap-1">
                       <button
                         type="button"
                         onClick={() =>
@@ -2956,7 +3025,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             : 'bg-slate-950/70 border-slate-800 hover:border-emerald-500/40'
                         }`}
                       >
-                        <div className="text-[10px] text-slate-400">Gefunden</div>
+                        <div className="text-[9.5px] text-slate-400 truncate">Gefunden</div>
                         <div className="text-xs font-mono font-semibold tabular-nums text-emerald-400">
                           {reconcileFoundItems.length}
                         </div>
@@ -2975,13 +3044,32 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             : 'bg-slate-950/70 border-slate-800 hover:border-slate-700'
                         }`}
                       >
-                        <div className="text-[10px] text-slate-400">Fehlend</div>
+                        <div className="text-[9.5px] text-slate-400 truncate">Fehlend</div>
                         <div
                           className={`text-xs font-mono font-semibold tabular-nums ${
                             reconcileMissingItems.length > 0 ? 'text-rose-300' : 'text-emerald-400'
                           }`}
                         >
                           {reconcileMissingItems.length}
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setReconcileTab((prev) => (prev === 'waypoints' ? 'none' : 'waypoints'))
+                        }
+                        className={`p-1.5 rounded-md border text-left transition-colors cursor-pointer ${
+                          reconcileTab === 'waypoints'
+                            ? 'bg-sky-950/55 border-sky-400/70'
+                            : reconcileWaypointItems.length > 0
+                            ? 'bg-sky-950/20 border-sky-500/35 hover:border-sky-400/60'
+                            : 'bg-slate-950/70 border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="text-[9.5px] text-slate-400 truncate">Wegweiser</div>
+                        <div className="text-xs font-mono font-semibold tabular-nums text-sky-300">
+                          {reconcileWaypointItems.length}
                         </div>
                       </button>
 
@@ -2996,7 +3084,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             : 'bg-slate-950/70 border-slate-800 hover:border-slate-700'
                         }`}
                       >
-                        <div className="text-[10px] text-slate-400 truncate">Ungenutzt</div>
+                        <div className="text-[9.5px] text-slate-400 truncate">Ungenutzt</div>
                         <div className="text-xs font-mono font-semibold tabular-nums text-slate-300">
                           {assignedFolderPool || lastFolderResolveSummary
                             ? reconcileUnusedFolderEntries.length
@@ -3013,7 +3101,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             type="text"
                             value={reconcileSearch}
                             onChange={(e) => setReconcileSearch(e.target.value)}
-                            placeholder="Skript- oder Dateiname filtern..."
+                            placeholder="Skript-, Wegweiser- oder Dateiname filtern..."
                             className="w-full pl-6 pr-2 py-1 bg-slate-950 border border-slate-800 rounded text-[11px] text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
                           />
                         </div>
@@ -3060,73 +3148,153 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                           </div>
                         )}
 
-                        {reconcileTab === 'missing' && (
+                        {reconcileTab === 'missing' && (() => {
+                          const q = reconcileSearch.trim().toLowerCase();
+                          const filteredMissing = reconcileMissingItems.filter((it) => {
+                            if (!q) return true;
+                            return (
+                              it.refKey.toLowerCase().includes(q) ||
+                              it.expectedFilename.toLowerCase().includes(q) ||
+                              it.callerScriptNumber.toLowerCase().includes(q)
+                            );
+                          });
+                          return (
+                            <div className="space-y-1.5">
+                              {q.length > 0 && filteredMissing.length > 0 && onMarkAvayaWaypoints && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onMarkAvayaWaypoints(filteredMissing.map((m) => m.refKey));
+                                    setReconcileSearch('');
+                                  }}
+                                  className="w-full py-1 px-2 rounded bg-sky-900/50 hover:bg-sky-800/60 border border-sky-500/45 text-[10.5px] font-medium text-sky-200 transition-colors cursor-pointer"
+                                >
+                                  Alle {filteredMissing.length} Gefilterten als Wegweiser / Avaya-only markieren
+                                </button>
+                              )}
+                              <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
+                                {filteredMissing.map((it) => (
+                                  <div
+                                    key={`rec-miss-${it.refKey}`}
+                                    className="px-2 py-1.5 rounded bg-rose-950/20 border border-rose-500/35 flex items-center justify-between gap-2"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="text-[11px] font-mono font-semibold text-rose-200 truncate">
+                                        {it.refKey}
+                                      </div>
+                                      <div className="text-[10px] font-mono text-slate-400 truncate">
+                                        Erwartet: {it.expectedFilename} · aus [{it.callerScriptNumber}]
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setActiveChecklistRef(it.refKey);
+                                          setChecklistFeedback(null);
+                                          setIsEditingCompletedItem(false);
+                                        }}
+                                        className="px-1.5 py-0.5 rounded bg-indigo-600/80 hover:bg-indigo-500 text-[10px] font-medium text-white cursor-pointer"
+                                      >
+                                        Nachladen
+                                      </button>
+                                      {onMarkAvayaWaypoints && (
+                                        <button
+                                          type="button"
+                                          title="Als Avaya-only / FlixCheck-Wegweiser einstufen (zählt nicht als offen)"
+                                          onClick={() => {
+                                            onMarkAvayaWaypoints([it.refKey]);
+                                          }}
+                                          className="px-1.5 py-0.5 rounded bg-sky-900/60 hover:bg-sky-800/70 border border-sky-500/40 text-[10px] font-medium text-sky-200 cursor-pointer"
+                                        >
+                                          Wegweiser
+                                        </button>
+                                      )}
+                                      {onResolveIssue && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            const syntheticIssue: CallflowOpenIssue = {
+                                              id: `missing:${canonicalScriptMatchKey(it.refKey)}`,
+                                              type: 'missing-script',
+                                              status: 'open',
+                                              sourceScriptNumber: it.callerScriptNumber,
+                                              targetNumber: it.refKey,
+                                              title: `Fehlendes Skript [${it.refKey}]`,
+                                              question: '',
+                                              createdAt: Date.now(),
+                                            };
+                                            onResolveIssue(syntheticIssue, {
+                                              resolution: 'external-endpoint',
+                                              note: 'Über Master-Abgleich als Extern / Ende bestätigt',
+                                            });
+                                          }}
+                                          className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 cursor-pointer"
+                                        >
+                                          Extern
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                                {filteredMissing.length === 0 && (
+                                  <div className="text-[11px] text-emerald-300 py-1.5 text-center">
+                                    {reconcileMissingItems.length === 0
+                                      ? 'Keine fehlenden Skripte – alle Referenzen abgedeckt.'
+                                      : 'Kein fehlendes Skript passt auf diesen Suchfilter.'}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
+
+                        {reconcileTab === 'waypoints' && (
                           <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
-                            {reconcileMissingItems
+                            {reconcileWaypointItems
                               .filter((it) => {
                                 const q = reconcileSearch.trim().toLowerCase();
                                 if (!q) return true;
                                 return (
                                   it.refKey.toLowerCase().includes(q) ||
-                                  it.expectedFilename.toLowerCase().includes(q) ||
+                                  it.reason.toLowerCase().includes(q) ||
                                   it.callerScriptNumber.toLowerCase().includes(q)
                                 );
                               })
                               .map((it) => (
                                 <div
-                                  key={`rec-miss-${it.refKey}`}
-                                  className="px-2 py-1.5 rounded bg-rose-950/20 border border-rose-500/35 flex items-center justify-between gap-2"
+                                  key={`rec-wp-${it.refKey}`}
+                                  className="px-2 py-1.5 rounded bg-sky-950/25 border border-sky-500/35 flex items-center justify-between gap-2"
                                 >
                                   <div className="min-w-0">
-                                    <div className="text-[11px] font-mono font-semibold text-rose-200 truncate">
-                                      {it.refKey}
+                                    <div className="flex items-center gap-1.5 min-w-0">
+                                      <span className="text-[11px] font-mono font-semibold text-sky-200 truncate">
+                                        {it.refKey}
+                                      </span>
+                                      <span className="px-1.5 py-0.25 rounded bg-sky-500/15 border border-sky-500/30 text-[9.5px] text-sky-300 whitespace-nowrap shrink-0">
+                                        {it.reason}
+                                      </span>
                                     </div>
                                     <div className="text-[10px] font-mono text-slate-400 truncate">
-                                      Erwartet: {it.expectedFilename} · aus [{it.callerScriptNumber}]
+                                      aus [{it.callerScriptNumber}] · Avaya-only (keine .s-Datei erwartet)
                                     </div>
                                   </div>
-                                  <div className="flex items-center gap-1 shrink-0">
+                                  {it.isManual && onUnmarkAvayaWaypoint && (
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        setActiveChecklistRef(it.refKey);
-                                        setChecklistFeedback(null);
-                                        setIsEditingCompletedItem(false);
+                                        onUnmarkAvayaWaypoint(it.refKey);
                                       }}
-                                      className="px-1.5 py-0.5 rounded bg-indigo-600/80 hover:bg-indigo-500 text-[10px] font-medium text-white cursor-pointer"
+                                      className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
                                     >
-                                      Nachladen
+                                      Wieder öffnen
                                     </button>
-                                    {onResolveIssue && (
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          const syntheticIssue: CallflowOpenIssue = {
-                                            id: `missing:${canonicalScriptMatchKey(it.refKey)}`,
-                                            type: 'missing-script',
-                                            status: 'open',
-                                            sourceScriptNumber: it.callerScriptNumber,
-                                            targetNumber: it.refKey,
-                                            title: `Fehlendes Skript [${it.refKey}]`,
-                                            question: '',
-                                            createdAt: Date.now(),
-                                          };
-                                          onResolveIssue(syntheticIssue, {
-                                            resolution: 'external-endpoint',
-                                            note: 'Über Master-Abgleich als Extern / Ende bestätigt',
-                                          });
-                                        }}
-                                        className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-slate-300 cursor-pointer"
-                                      >
-                                        Extern
-                                      </button>
-                                    )}
-                                  </div>
+                                  )}
                                 </div>
                               ))}
-                            {reconcileMissingItems.length === 0 && (
-                              <div className="text-[11px] text-emerald-300 py-1.5 text-center">
-                                Keine fehlenden Skripte – alle Referenzen im Import vorhanden.
+                            {reconcileWaypointItems.length === 0 && (
+                              <div className="text-[11px] text-slate-500 py-1.5 text-center">
+                                Keine Avaya-Wegweiser / FlixCheck- oder Nummern-Ziele erkannt.
                               </div>
                             )}
                           </div>
@@ -3199,6 +3367,8 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                       className={`p-2.5 rounded-lg border space-y-2.5 ${
                         activeChecklistItem.status === 'missing'
                           ? 'bg-slate-900 border-rose-500/40'
+                          : activeChecklistItem.status === 'waypoint'
+                          ? 'bg-slate-900 border-sky-500/35'
                           : 'bg-slate-900 border-slate-800'
                       }`}
                     >
@@ -3213,6 +3383,11 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             {activeChecklistItem.status === 'missing' ? (
                               <AlertCircle
                                 className="w-3.5 h-3.5 text-rose-400 shrink-0 motion-safe:animate-pulse"
+                                aria-hidden="true"
+                              />
+                            ) : activeChecklistItem.status === 'waypoint' ? (
+                              <ArrowRight
+                                className="w-3.5 h-3.5 text-sky-400 shrink-0"
                                 aria-hidden="true"
                               />
                             ) : (
@@ -3241,6 +3416,12 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                                 Exakt zugeordnete Datei: {activeChecklistItem.matchedSourceFilename}
                               </div>
                             )}
+                          {activeChecklistItem.status === 'waypoint' && (
+                            <div className="text-[10px] font-mono text-sky-300 mt-0.5 truncate">
+                              ↗ Wegweiser / Avaya-only ·{' '}
+                              {activeChecklistItem.waypointReason || 'Kein lokales .s-Skript erwartet'}
+                            </div>
+                          )}
                           {activeChecklistItem.status === 'missing' && (
                             <div className="text-[10px] font-mono text-rose-300 mt-0.5 truncate">
                               Erwartete Datei: {activeChecklistItem.refKey}.s ·{' '}
@@ -3381,54 +3562,97 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             )}
                           </div>
 
-                          {activeChecklistItem.status === 'missing' && onResolveIssue && (
-                            <div className="flex items-center justify-between gap-2 pt-1">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const syntheticIssue: CallflowOpenIssue = {
-                                    id: `missing:${canonicalScriptMatchKey(activeChecklistItem.refKey)}`,
-                                    type: 'missing-script',
-                                    status: 'open',
-                                    sourceScriptNumber: activeChecklistItem.callerScriptNumber,
-                                    targetNumber: activeChecklistItem.refKey,
-                                    title: `Fehlendes Skript [${activeChecklistItem.refKey}]`,
-                                    question: '',
-                                    createdAt: Date.now(),
-                                  };
-                                  const updatedWs = onResolveIssue(syntheticIssue, {
-                                    resolution: 'external-endpoint',
-                                    note: 'Über Checkliste als Extern / Ende bestätigt',
-                                  });
-                                  advanceToNextMissingChecklistItem(
-                                    activeChecklistItem.refKey,
-                                    updatedWs ? updatedWs.masterChecklist : masterChecklist
-                                  );
-                                }}
-                                className="text-[11px] text-slate-400 hover:text-slate-200 underline underline-offset-2 cursor-pointer"
-                              >
-                                Als externes Ende abhaken
-                              </button>
-                              {isEditingCompletedItem && (
-                                <button
-                                  type="button"
-                                  onClick={() => setIsEditingCompletedItem(false)}
-                                  className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
-                                >
-                                  Fertig
-                                </button>
-                              )}
-                            </div>
-                          )}
+                          {activeChecklistItem.status === 'missing' &&
+                            (onMarkAvayaWaypoints || onResolveIssue) && (
+                              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  {onMarkAvayaWaypoints && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const updatedWs = onMarkAvayaWaypoints([
+                                          activeChecklistItem.refKey,
+                                        ]);
+                                        advanceToNextMissingChecklistItem(
+                                          activeChecklistItem.refKey,
+                                          updatedWs ? updatedWs.masterChecklist : masterChecklist
+                                        );
+                                      }}
+                                      className="px-2 py-0.5 rounded bg-sky-900/60 hover:bg-sky-800/70 border border-sky-500/45 text-[11px] font-medium text-sky-200 transition-colors cursor-pointer"
+                                    >
+                                      Als Wegweiser / Avaya-only
+                                    </button>
+                                  )}
+                                  {onResolveIssue && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const syntheticIssue: CallflowOpenIssue = {
+                                          id: `missing:${canonicalScriptMatchKey(activeChecklistItem.refKey)}`,
+                                          type: 'missing-script',
+                                          status: 'open',
+                                          sourceScriptNumber: activeChecklistItem.callerScriptNumber,
+                                          targetNumber: activeChecklistItem.refKey,
+                                          title: `Fehlendes Skript [${activeChecklistItem.refKey}]`,
+                                          question: '',
+                                          createdAt: Date.now(),
+                                        };
+                                        const updatedWs = onResolveIssue(syntheticIssue, {
+                                          resolution: 'external-endpoint',
+                                          note: 'Über Checkliste als Extern / Ende bestätigt',
+                                        });
+                                        advanceToNextMissingChecklistItem(
+                                          activeChecklistItem.refKey,
+                                          updatedWs ? updatedWs.masterChecklist : masterChecklist
+                                        );
+                                      }}
+                                      className="text-[11px] text-slate-400 hover:text-slate-200 underline underline-offset-2 cursor-pointer"
+                                    >
+                                      Als externes Ende abhaken
+                                    </button>
+                                  )}
+                                </div>
+                                {isEditingCompletedItem && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setIsEditingCompletedItem(false)}
+                                    className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+                                  >
+                                    Fertig
+                                  </button>
+                                )}
+                              </div>
+                            )}
                         </div>
                       ) : (
                         <div className="flex flex-wrap items-center justify-between gap-1.5 pt-2 border-t border-slate-800">
-                          <span className="text-[11px] text-emerald-400">
-                            {activeChecklistItem.status === 'external'
+                          <span
+                            className={`text-[11px] ${
+                              activeChecklistItem.status === 'waypoint'
+                                ? 'text-sky-300'
+                                : 'text-emerald-400'
+                            }`}
+                          >
+                            {activeChecklistItem.status === 'waypoint'
+                              ? `↗ ${activeChecklistItem.waypointReason || 'Wegweiser / Avaya-only'}`
+                              : activeChecklistItem.status === 'external'
                               ? '■ Als externes Ende markiert'
                               : '✓ Detail-Skript ist eingefügt'}
                           </span>
                           <div className="flex items-center gap-1.5">
+                            {activeChecklistItem.status === 'waypoint' &&
+                              activeChecklistItem.isManualWaypoint &&
+                              onUnmarkAvayaWaypoint && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onUnmarkAvayaWaypoint(activeChecklistItem.refKey);
+                                  }}
+                                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium rounded transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                                >
+                                  Wieder öffnen
+                                </button>
+                              )}
                             {activeChecklistItem.matchedModuleNumber && (
                               <button
                                 type="button"
@@ -3564,6 +3788,8 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                         const statusLabel =
                           item.status === 'missing'
                             ? 'Ausstehende Referenz'
+                            : item.status === 'waypoint'
+                            ? 'Wegweiser'
                             : item.status === 'external'
                             ? 'Extern'
                             : 'Vorhanden';
@@ -3573,6 +3799,8 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                             ? isMissingFromMain
                               ? 'text-rose-300'
                               : 'text-amber-300'
+                            : item.status === 'waypoint'
+                            ? 'text-sky-300'
                             : item.status === 'external'
                             ? 'text-slate-400'
                             : 'text-emerald-400';
@@ -3583,13 +3811,17 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                           ? 'bg-rose-950/20 border-rose-500/45 hover:bg-rose-950/35 hover:border-rose-400/70'
                           : isMissingNested
                           ? 'bg-amber-950/15 border-amber-500/40 hover:bg-amber-950/30 hover:border-amber-400/60'
+                          : item.status === 'waypoint'
+                          ? 'bg-sky-950/15 border-sky-500/30 hover:bg-sky-950/30 hover:border-sky-400/50'
                           : 'bg-slate-900/70 border-slate-800 hover:bg-slate-900';
 
                         const indentPadding =
                           depth >= 3 ? 'pl-7' : depth === 2 ? 'pl-5' : 'px-2.5';
 
                         const originLine =
-                          depth === 1
+                          item.status === 'waypoint' && item.waypointReason
+                            ? `${item.waypointReason} · aus ${item.parentScriptNumber || mainScriptLabel}`
+                            : depth === 1
                             ? `Direkt aus ${item.parentScriptNumber || mainScriptLabel} · ${item.contextLabel}`
                             : `Unter-Skript ${item.parentScriptNumber || ''} · ${item.contextLabel.replace(
                                 /^aus \[[^\]]+\]\s*·\s*/i,
@@ -3625,6 +3857,11 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                                   }`}
                                   aria-hidden="true"
                                 />
+                              ) : item.status === 'waypoint' ? (
+                                <ArrowRight
+                                  className="w-3.5 h-3.5 shrink-0 text-sky-400"
+                                  aria-hidden="true"
+                                />
                               ) : (
                                 <CheckCircle2
                                   className={`w-3.5 h-3.5 shrink-0 ${
@@ -3641,7 +3878,11 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                                 </div>
                                 <div
                                   className={`text-[10px] truncate ${
-                                    item.status === 'missing' ? 'text-slate-300' : 'text-slate-400'
+                                    item.status === 'missing'
+                                      ? 'text-slate-300'
+                                      : item.status === 'waypoint'
+                                      ? 'text-sky-300/80'
+                                      : 'text-slate-400'
                                   }`}
                                 >
                                   {originLine}
