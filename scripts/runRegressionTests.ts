@@ -492,7 +492,7 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.2.5', 'Expected release version 1.2.5');
+  assert.equal(AUDIT_APP_VERSION, '1.3.0', 'Expected release version 1.3.0');
 });
 
 async function finalizeSuite() {
@@ -1304,9 +1304,13 @@ async function finalizeSuite() {
         'IF CALL HAS PRIORITY THEN',
         '  SEND INFO "call has priority and call was routed"',
         '  EXECUTE Agent_Queuing_Oracle',
+        '  EXECUTE agent_queuing_oracle.s',
+        '  EXECUTE agent_queing',
+        '  EXECUTE agent_queing.s',
         'ELSE',
         '  EXECUTE Agent_Queuing',
         '  EXECUTE Skillset_Queuing',
+        '  EXECUTE Skillset_Queing',
         '  EXECUTE Oracle_CRM',
         '  EXECUTE Wait_Loop',
         '  EXECUTE Custom_Queuing',
@@ -1338,12 +1342,14 @@ async function finalizeSuite() {
         );
       }
 
-      // 2. Oracle, Agent_Queuing, Skillset_Queuing, Wait_Loop & Custom_Queuing -> automatic Wegweiser (0 offen)
+      // 2. Oracle, Agent_Queuing, agent_queing, Skillset_Queuing, Skillset_Queing, Wait_Loop & Custom_Queuing -> automatic Wegweiser (0 offen)
       const expectedWaypoints: Array<{ ref: string; reasonPart: string }> = [
         { ref: 'Agent_Queuing_Oracle', reasonPart: 'Oracle Agent-Queuing' },
+        { ref: 'agent_queing', reasonPart: 'Agent-/Skillset-Queuing' },
         { ref: 'Oracle_CRM', reasonPart: 'Oracle-Anbindung' },
         { ref: 'Agent_Queuing', reasonPart: 'Agent-/Skillset-Queuing' },
         { ref: 'Skillset_Queuing', reasonPart: 'Agent-/Skillset-Queuing' },
+        { ref: 'Skillset_Queing', reasonPart: 'Agent-/Skillset-Queuing' },
         { ref: 'Wait_Loop', reasonPart: 'Queuing-/Loop-Routine' },
         { ref: 'Custom_Queuing', reasonPart: 'Queuing-/Loop-Routine' },
       ];
@@ -1368,17 +1374,101 @@ async function finalizeSuite() {
         );
       }
 
-      // Only Echtes_Fehlendes_Skript remains missing
+      // Also verify direct classifier on .s variants & typo variants
+      assert.equal(classifyAvayaWaypointTarget('agent_queing.s'), 'Agent-/Skillset-Queuing (Avaya)');
+      assert.equal(
+        classifyAvayaWaypointTarget('agent_queuing_oracle.s'),
+        'Oracle Agent-Queuing (System)'
+      );
+      assert.equal(
+        classifyAvayaWaypointTarget('agent_queing_oracle'),
+        'Oracle Agent-Queuing (System)'
+      );
+
+      // Only Echtes_Fehlendes_Skript remains missing (and health audit must NOT flag agent_queing, agent_queuing_oracle, or has)
       assert.deepEqual(
         wsNoLocal.missingTargets,
         ['Echtes_Fehlendes_Skript'],
         `Only genuine missing script should remain in missingTargets, got: ${wsNoLocal.missingTargets.join(', ')}`
+      );
+      const healthNoLocal = analyzeWorkspaceLogicHealth(wsNoLocal);
+      const missingHealthIds = healthNoLocal
+        .filter((f) => f.category === 'missing-script')
+        .map((f) => f.id);
+      assert.deepEqual(
+        missingHealthIds,
+        ['health:missing-script:echtes_fehlendes_skript'],
+        `Only genuine missing script should appear in health findings, got: ${missingHealthIds.join(', ')}`
       );
 
       const masterMermaid = buildMasterOverviewMermaid(wsNoLocal, 'LR', { compact: false });
       assert.ok(
         masterMermaid.includes('Agent_Queuing_Oracle') && masterMermaid.includes(':::avayaWaypoint'),
         'Master diagram must render Agent_Queuing_Oracle as :::avayaWaypoint'
+      );
+      assert.ok(
+        masterMermaid.includes('agent_queing') && !masterMermaid.includes('● OFFEN · agent_queing'),
+        'Master diagram must render agent_queing as waypoint, never as OFFEN missing script'
+      );
+
+      // 2b. Ebene 2 (detail diagram) MUST also render Agent_Queuing_Oracle & agent_queing as :::avayaWaypoint, never :::missingScript
+      const detailMermaid = buildScriptDetailMermaid(wsNoLocal, 'Main', 'LR');
+      assert.ok(
+        detailMermaid.includes('JUMP_Agent_Queuing_Oracle(["↗ Agent_Queuing_Oracle') &&
+          detailMermaid.includes(':::avayaWaypoint'),
+        'Ebene 2 detail diagram must render Agent_Queuing_Oracle as :::avayaWaypoint'
+      );
+      assert.ok(
+        detailMermaid.includes('JUMP_agent_queing(["↗ agent_queing') &&
+          !detailMermaid.includes('● OFFEN · [agent_queing]'),
+        'Ebene 2 detail diagram must render agent_queing as :::avayaWaypoint, never OFFEN'
+      );
+      assert.ok(
+        detailMermaid.includes('● OFFEN · [Echtes_Fehlendes_Skript]'),
+        'Ebene 2 detail diagram must still flag genuine missing script'
+      );
+
+      // 2c. Legacy/stale cached workspace without rawText containing bogus "has", "has.", "agent_queing", "agent_queuing_oracle.s"
+      const staleLegacyWorkspace = buildScriptWorkspace([
+        {
+          scriptNumber: 'Legacy_Visio_Main',
+          scriptName: 'Legacy_Visio_Main',
+          isMaster: true,
+          origin: 'visio-new',
+          rawText: '',
+          rules: [
+            {
+              id: 'r1',
+              prio: 1,
+              stepName: 'Legacy OCL call has',
+              sourceNumber: 'Legacy_Visio_Main',
+              targetNumber: 'has',
+              choices: [
+                { choice: '1', targetNumber: 'has.' },
+                { choice: '2', targetNumber: 'agent_queing' },
+                { choice: '3', targetNumber: 'agent_queuing_oracle.s' },
+              ],
+              rawLine: 'CALL HAS ABANDONED',
+            },
+          ],
+          outgoingNumbers: ['has', 'has.', 'agent_queing', 'agent_queuing_oracle.s'],
+        },
+      ]);
+      const upgradedStale = rehydrateAndUpgradeWorkspace(staleLegacyWorkspace);
+      assert.deepEqual(
+        upgradedStale.missingTargets,
+        [],
+        `Stale legacy workspace must yield 0 missingTargets after sanitization, got: ${upgradedStale.missingTargets.join(', ')}`
+      );
+      assert.equal(
+        analyzeWorkspaceLogicHealth(upgradedStale).filter((f) => f.category === 'missing-script').length,
+        0,
+        'Stale legacy workspace must yield 0 missing-script health findings'
+      );
+      assert.equal(
+        (upgradedStale.masterChecklist || []).some((c) => c.refKey.toLowerCase().startsWith('has')),
+        false,
+        'Stale legacy "has" must be completely stripped from masterChecklist'
       );
 
       // 3. Strict 1:1 .s precedence: if Agent_Queuing.s IS in the folder, it MUST load as "present" (never waypoint)

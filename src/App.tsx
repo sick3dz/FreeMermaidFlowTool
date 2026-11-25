@@ -4069,7 +4069,9 @@ function OfflineStudioApp() {
       saved.scriptWorkspace.modules.length > 0;
     if (hasModules && saved.scriptWorkspace) {
       setScriptWorkspace(
-        buildScriptWorkspace(saved.scriptWorkspace.modules, saved.scriptWorkspace)
+        rehydrateAndUpgradeWorkspace(
+          buildScriptWorkspace(saved.scriptWorkspace.modules, saved.scriptWorkspace)
+        )
       );
       setCode('');
     } else {

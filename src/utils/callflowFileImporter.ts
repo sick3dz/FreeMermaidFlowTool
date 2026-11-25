@@ -500,6 +500,7 @@ export async function autoResolveConnectedScriptsFromFolder(
       const matchedEntry = findMatchingFileInFolderPool(pool, targetRef);
       if (!matchedEntry) {
         if (
+          isValidScriptRef(targetRef) &&
           !isAnnouncementOrEndpointTargetName(targetRef) &&
           !classifyAvayaWaypointTarget(targetRef)
         ) {

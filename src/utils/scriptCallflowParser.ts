@@ -149,10 +149,25 @@ const SCRIPT_NAME_STOPWORDS = new Set([
   'has',
   'have',
   'had',
+  'is',
+  'be',
+  'do',
+  'does',
+  'did',
+  'can',
+  'could',
+  'will',
+  'would',
+  'shall',
+  'should',
+  'may',
+  'might',
+  'must',
   'was',
   'were',
   'are',
   'been',
+  'being',
   'not',
   'from',
   'with',
@@ -162,6 +177,8 @@ const SCRIPT_NAME_STOPWORDS = new Set([
   'that',
   'then',
   'else',
+  'elif',
+  'endif',
   'and',
   'but',
   'into',
@@ -189,6 +206,94 @@ const SCRIPT_NAME_STOPWORDS = new Set([
   'transferred',
   'routed',
   'held',
+  'parked',
+  'connected',
+  'completed',
+  'waiting',
+  'ringing',
+  'aborted',
+  'cancelled',
+  'canceled',
+  'priority',
+  'duration',
+  'origin',
+  'type',
+  'info',
+  'message',
+  'count',
+  'time',
+  'date',
+  'day',
+  'week',
+  'hour',
+  'minute',
+  'second',
+  'agent',
+  'agents',
+  'available',
+  'logged',
+  'idle',
+  'busy',
+  'active',
+  'closed',
+  'yes',
+  'nil',
+  'zero',
+  'all',
+  'any',
+  'some',
+  'each',
+  'every',
+  'other',
+  'new',
+  'old',
+  'first',
+  'last',
+  'prev',
+  'previous',
+  'current',
+  'same',
+  'only',
+  'just',
+  'also',
+  'even',
+  'still',
+  'already',
+  'never',
+  'always',
+  'here',
+  'there',
+  'what',
+  'which',
+  'who',
+  'why',
+  'how',
+  'than',
+  'begin',
+  'stop',
+  'exit',
+  'quit',
+  'break',
+  'continue',
+  'jump',
+  'exec',
+  'run',
+  'set',
+  'get',
+  'put',
+  'add',
+  'del',
+  'delete',
+  'clear',
+  'reset',
+  'check',
+  'test',
+  'clid',
+  'dnis',
+  'ani',
+  'uui',
+  'var',
+  'const',
   'variable',
   'data',
   'status',
@@ -255,6 +360,7 @@ export function normalizeScriptRef(raw: string): string {
     .normalize('NFC')
     .trim()
     .replace(/^['"`\[\]()]+|['"`\[\]()]+$/g, '')
+    .replace(/[.,:;!?]+$/g, '')
     .replace(/\s+/g, '_');
   const numeric = cleaned.match(/^(\d{3,6})$/);
   if (numeric) return numeric[1];
@@ -311,11 +417,11 @@ export function isDynamicAvayaVariableTarget(token: string): boolean {
 }
 
 export function isPlausibleNamedScriptTarget(token: string): boolean {
-  const clean = normalizeScriptRef(token);
+  const clean = normalizeScriptRef(stripKnownScriptExtension(token));
   if (!clean || clean.length < 3) return false;
   if (/^\d+$/.test(clean)) return false;
   if (isDeactivatedSentinelTarget(clean) || isDynamicAvayaVariableTarget(clean)) return false;
-  if (/\.(?:wav|mp3|ogg|ulaw|alaw)$/i.test(clean)) return false;
+  if (/\.(?:wav|mp3|ogg|ulaw|alaw)$/i.test(String(token || '').trim())) return false;
   if (SCRIPT_NAME_STOPWORDS.has(clean.toLowerCase())) return false;
   return true;
 }
@@ -343,7 +449,7 @@ export function classifyAvayaWaypointTarget(
   token: string,
   options?: { isAvayaRouteCmd?: boolean }
 ): string | null {
-  const clean = normalizeScriptRef(token);
+  const clean = normalizeScriptRef(stripKnownScriptExtension(token));
   if (!clean) return null;
 
   // 1. FlixCheck / Call-Deflection / Digital Bot Wegweiser
@@ -356,24 +462,25 @@ export function classifyAvayaWaypointTarget(
     return 'FlixCheck-Wegweiser';
   }
 
-  // 2. Oracle-Anbindung & Oracle Agent-Queuing (z. B. Agent_Queuing_Oracle, Oracle_CRM, *_Oracle)
+  // 2. Oracle-Anbindung & Oracle Agent-Queuing (z. B. Agent_Queuing_Oracle, Agent_Queing_Oracle, Oracle_CRM, *_Oracle)
   if (/(?:^|[_.\-\s])oracle(?:$|[_.\-\s\d])/i.test(clean) || /oracle/i.test(clean)) {
-    if (/(?:agent[\s_.-]*queu(?:e|ing|eing)|queuing|queueing)/i.test(clean)) {
+    if (/(?:agent[\s_.-]*queu?(?:e|ing|eing)|queu?e?ing)/i.test(clean)) {
       return 'Oracle Agent-Queuing (System)';
     }
     return 'Oracle-Anbindung (System)';
   }
 
-  // 3. Avaya Agent-/Skillset-Queuing & allgemeine Queuing-/Loop-Routinen (z. B. Agent_Queuing, Skillset_Queuing, *_Queuing, *_Loop)
+  // 3. Avaya Agent-/Skillset-Queuing & allgemeine Queuing-/Loop-Routinen
+  //    (inkl. Schreibvarianten wie Agent_Queing, Agent_Queuing, Agent_Queueing, Skillset_Queing, *_Queuing, *_Loop)
   if (
-    /(?:^|[_.\-\s])(?:agent[\s_.-]*queu(?:e|ing|eing)|skillset[\s_.-]*queu(?:e|ing|eing)|preferred[\s_.-]*agent|direct[\s_.-]*agent)(?:$|[_.\-\s\d])/i.test(
+    /(?:^|[_.\-\s])(?:agent[\s_.-]*queu?(?:e|ing|eing)|skillset[\s_.-]*queu?(?:e|ing|eing)|preferred[\s_.-]*agent|direct[\s_.-]*agent)(?:$|[_.\-\s\d])/i.test(
       clean
     )
   ) {
     return 'Agent-/Skillset-Queuing (Avaya)';
   }
   if (
-    /(?:^|[_.\-\s])(?:queuing|queueing|queue[\s_.-]*loop|wait[\s_.-]*loop|hold[\s_.-]*loop|loop)(?:$|[_.\-\s\d])/i.test(
+    /(?:^|[_.\-\s])(?:queu?e?ing|queue[\s_.-]*loop|wait[\s_.-]*loop|hold[\s_.-]*loop|loop)(?:$|[_.\-\s\d])/i.test(
       clean
     )
   ) {
@@ -3448,9 +3555,10 @@ function parseAaccScriptBlocks(
           ? actionSegment.match(/\b(?:fax(?:routing)?\s*(?:cdn)?|cdn)\s*[:=]?\s*(\d{4})\b/i)
           : actionSegment.match(/\bfax(?:routing)?\s*(?:cdn)?\s*[:=]?\s*(\d{4})\b/i);
 
-      // Guard against false script matches inside messaging/host/logging statements or string literals (e.g. `SEND INFO "The call has ..."` or `IF CALL HAS ...`)
+      // Guard against false script matches inside messaging/host/logging/OCL-state statements or string literals
+      // (e.g. `SEND INFO "The call has ..."`, `IF CALL HAS ...`, or `CALL HAS ABANDONED`)
       const isNonExecMessageStmt =
-        /^\s*(?:send\s+(?:info|request)|get\s+response|(?:open|send|receive)\s+host|readvar|log|print|syslog|event|disconnect|drop\s+call|route\s+end)\b/i.test(
+        /^\s*(?:send\s+(?:info|request)|get\s+response|(?:open|send|receive)\s+host|readvar|log|print|syslog|event|disconnect|drop\s+call|route\s+end|call\s+(?:has|have|had|is|was|were|are|not|abandoned|answered|queued|dropped|ended|disconnected|terminated|offered|delivered|transferred|routed|held|waiting|priority|duration|origin|data|id|type|status|state))\b/i.test(
           actionSegment
         );
       // Strip string literals that are NOT the direct argument of an explicit script-execution keyword
@@ -5322,9 +5430,10 @@ export function detectMasterScriptChecklist(
       const cleanRef = normalizeScriptRef(rawRef);
       const key = canonicalScriptMatchKey(cleanRef);
       if (!cleanRef || seenTargetKeys.has(key) || ignoredKeys.has(key)) return;
+      const matchedMod = moduleByKey.get(key);
+      if (!matchedMod && !isValidScriptRef(cleanRef)) return;
       seenTargetKeys.add(key);
 
-      const matchedMod = moduleByKey.get(key);
       const resolvedStatus = resolveChecklistStatus(cleanRef, key, matchedMod, false);
 
       checklist.push({
@@ -5381,6 +5490,7 @@ export function detectMasterScriptChecklist(
       const clean = normalizeScriptRef(rawRef);
       const key = canonicalScriptMatchKey(clean);
       if (!clean || key === modKey) return;
+      if (!moduleByKey.has(key) && !isValidScriptRef(clean)) return;
 
       let entry = aggregatedMap.get(key);
       if (!entry) {
@@ -5564,6 +5674,7 @@ export function detectWorkspaceIssues(
   missingTargets.forEach((targetRef) => {
     const tKey = canonicalScriptMatchKey(targetRef);
     if (
+      !isValidScriptRef(targetRef) ||
       externalKeySet.has(tKey) ||
       waypointKeySet.has(tKey) ||
       ignoredKeySet.has(tKey) ||
@@ -5885,10 +5996,14 @@ export function buildScriptWorkspace(
       const selfKey = canonicalScriptMatchKey(mod.scriptNumber);
       const selfAliasKey = mod.cdnAlias ? canonicalScriptMatchKey(mod.cdnAlias) : '';
 
-      const resolveCanonicalTarget = (rawTarget: string): string => {
-        const clean = normalizeScriptRef(rawTarget);
+      const resolveCanonicalTarget = (rawTarget: string): string | undefined => {
+        const clean = normalizeScriptRef(stripKnownScriptExtension(rawTarget));
         const tKey = canonicalScriptMatchKey(clean);
-        return knownKeyToDisplay.get(tKey) || clean;
+        if (!clean || !tKey) return undefined;
+        const matched = knownKeyToDisplay.get(tKey);
+        if (matched) return matched;
+        if (!isValidScriptRef(clean)) return undefined;
+        return clean;
       };
 
       const sortedRules = [...mod.rules]
@@ -5896,10 +6011,12 @@ export function buildScriptWorkspace(
         .map((r) => ({
           ...r,
           targetNumber: r.targetNumber ? resolveCanonicalTarget(r.targetNumber) : undefined,
-          choices: r.choices.map((c) => ({
-            ...c,
-            targetNumber: resolveCanonicalTarget(c.targetNumber),
-          })),
+          choices: r.choices
+            .map((c) => {
+              const resolvedChoiceTarget = resolveCanonicalTarget(c.targetNumber);
+              return resolvedChoiceTarget ? { ...c, targetNumber: resolvedChoiceTarget } : null;
+            })
+            .filter((c): c is ScriptChoiceOption => Boolean(c)),
         }));
 
       const recordTarget = (rawTarget: string, isExternalRoute = false) => {
@@ -5909,6 +6026,7 @@ export function buildScriptWorkspace(
         const canonicalDisplay = knownKeyToDisplay.get(rawKey) || clean;
         const tKey = canonicalScriptMatchKey(canonicalDisplay);
         if (ignoredKeySet.has(tKey) || isDeactivatedSentinelTarget(canonicalDisplay)) return;
+        if (!knownKeyToDisplay.has(tKey) && !isValidScriptRef(canonicalDisplay)) return;
 
         if (tKey !== selfKey && (!selfAliasKey || tKey !== selfAliasKey)) {
           outMap.set(tKey, canonicalDisplay);
@@ -6616,6 +6734,7 @@ export function buildMasterOverviewMermaid(
       const tKey = canonicalScriptMatchKey(resolvedRef);
       if (ignoredKeySet.has(tKey)) return;
       if (!activeModuleKeySet.has(tKey)) {
+        if (!isValidScriptRef(resolvedRef)) return;
         const autoWaypointReason = classifyAvayaWaypointTarget(resolvedRef, {
           isAvayaRouteCmd: externalRouteTargetKeys.has(tKey),
         });
@@ -7139,12 +7258,21 @@ export function rehydrateAndUpgradeWorkspace(rawWorkspace: ScriptWorkspace): Scr
   };
 
   for (const mod of rawWorkspace.modules || []) {
-    const strippedLegacyRules = (mod.rules || []).filter((r) => !isFramedHeaderJunkRule(r));
+    const sanitizeLegacyRuleTargets = (rule: ScriptRule): ScriptRule => ({
+      ...rule,
+      targetNumber:
+        rule.targetNumber && isValidScriptRef(rule.targetNumber) ? rule.targetNumber : undefined,
+      choices: (rule.choices || []).filter((c) => Boolean(c.targetNumber && isValidScriptRef(c.targetNumber))),
+    });
+    const strippedLegacyRules = (mod.rules || [])
+      .filter((r) => !isFramedHeaderJunkRule(r))
+      .map(sanitizeLegacyRuleTargets);
     if (mod.origin === 'visio-new' || !mod.rawText || !mod.rawText.trim()) {
-      const cleanedBase =
-        strippedLegacyRules.length !== (mod.rules || []).length
-          ? { ...mod, rules: strippedLegacyRules }
-          : mod;
+      const cleanedBase: ScriptModule = {
+        ...mod,
+        rules: strippedLegacyRules,
+        outgoingNumbers: (mod.outgoingNumbers || []).filter((t) => isValidScriptRef(t)),
+      };
       const cleaned =
         canonicalScriptMatchKey(cleanedBase.scriptNumber) === 'main' ||
         cleanedBase.scriptName === 'Main (Masterscript)'
@@ -7230,6 +7358,12 @@ export function buildScriptDetailMermaid(
   const moduleByKey = new Map<string, ScriptModule>();
   workspace.modules.forEach((m) => {
     moduleByKey.set(canonicalScriptMatchKey(m.scriptNumber), m);
+    if (m.sourceFilename) {
+      const fileKey = canonicalScriptMatchKey(stripKnownScriptExtension(m.sourceFilename));
+      if (fileKey && !moduleByKey.has(fileKey)) {
+        moduleByKey.set(fileKey, m);
+      }
+    }
     if (m.cdnAlias) {
       const aliasKey = canonicalScriptMatchKey(m.cdnAlias);
       if (aliasKey && !moduleByKey.has(aliasKey)) {
@@ -7238,6 +7372,9 @@ export function buildScriptDetailMermaid(
     }
   });
   const externalKeySet = new Set((workspace.externalEndpoints || []).map(canonicalScriptMatchKey));
+  const manualWaypointKeySet = new Set(
+    (workspace.avayaWaypoints || []).map(canonicalScriptMatchKey)
+  );
   const openRuleIds = new Set(
     (workspace.issues || [])
       .filter(
@@ -7345,25 +7482,49 @@ export function buildScriptDetailMermaid(
   let prevStepId = entryId;
   const externalJumpRefs = new Map<
     string,
-    { num: string; suffix: string; name: string; known: boolean; externalConfirmed: boolean }
+    {
+      num: string;
+      suffix: string;
+      name: string;
+      known: boolean;
+      externalConfirmed: boolean;
+      waypointReason?: string;
+    }
   >();
   const queueNodes = new Map<string, { id: string; label: string }>();
   let hasOpenStep = selfOpenCount > 0;
 
-  const registerExternalJump = (rawTarget: string): string => {
-    const cleanTarget = normalizeScriptRef(rawTarget);
+  const registerExternalJump = (rawTarget: string, isAvayaRouteCmd = false): string => {
+    const cleanTarget = normalizeScriptRef(stripKnownScriptExtension(rawTarget));
     const tKey = canonicalScriptMatchKey(cleanTarget);
     const targetMod = moduleByKey.get(tKey);
     const effectiveNum = targetMod ? targetMod.scriptNumber : cleanTarget;
+    const effKey = canonicalScriptMatchKey(effectiveNum);
+    const existing = externalJumpRefs.get(effKey);
+    if (existing) {
+      return `JUMP_${existing.suffix}`;
+    }
     const suffix = toMermaidNodeSuffix(effectiveNum);
     const jumpId = `JUMP_${suffix}`;
+    const autoWaypointReason = !targetMod
+      ? classifyAvayaWaypointTarget(cleanTarget, { isAvayaRouteCmd })
+      : null;
+    const waypointReason = !targetMod
+      ? manualWaypointKeySet.has(tKey)
+        ? 'Avaya-Wegweiser'
+        : autoWaypointReason || undefined
+      : undefined;
     const isConfirmedExt =
-      externalKeySet.has(tKey) || isAnnouncementOrEndpointTargetName(cleanTarget);
-    externalJumpRefs.set(canonicalScriptMatchKey(effectiveNum), {
+      !targetMod &&
+      !waypointReason &&
+      (externalKeySet.has(tKey) || isAnnouncementOrEndpointTargetName(cleanTarget));
+    externalJumpRefs.set(effKey, {
       num: effectiveNum,
       suffix,
       name: targetMod
         ? targetMod.scriptName
+        : waypointReason
+        ? waypointReason
         : isAnnouncementOrEndpointTargetName(cleanTarget)
         ? 'Sonderansage / Endpunkt'
         : isConfirmedExt
@@ -7371,6 +7532,7 @@ export function buildScriptDetailMermaid(
         : 'Nicht geladen',
       known: Boolean(targetMod),
       externalConfirmed: isConfirmedExt,
+      waypointReason,
     });
     return jumpId;
   };
@@ -7558,7 +7720,7 @@ export function buildScriptDetailMermaid(
       if (canonicalScriptMatchKey(rule.targetNumber) === modKey) {
         lines.push(`        ${stepId} -.->${sanitizeMermaidEdgeLabel(`↻ Schleife ${safeModRef}`)} ${entryId}`);
       } else {
-        const jumpId = registerExternalJump(rule.targetNumber);
+        const jumpId = registerExternalJump(rule.targetNumber, Boolean(rule.isExternalRouteCall));
         const edgeText = rule.isExternalRouteCall
           ? `Route Call: ${rule.targetNumber}`
           : `Wohin: ${rule.targetNumber}`;
@@ -7621,6 +7783,8 @@ export function buildScriptDetailMermaid(
   lines.push('    end');
 
   if (externalJumpRefs.size > 0) {
+    let hasMissingJumpNode = false;
+    let hasWaypointJumpNode = false;
     lines.push(`    subgraph Ziele["Ausgehende Ziel-Skripte (Klick für Drilldown)"]`);
     for (const ref of externalJumpRefs.values()) {
       const jumpId = `JUMP_${ref.suffix}`;
@@ -7628,15 +7792,26 @@ export function buildScriptDetailMermaid(
       const safeNum = sanitizeMermaidText(ref.num);
       if (ref.known) {
         lines.push(`        ${jumpId}(["→ [${safeNum}] ${safeName}"])`);
+      } else if (ref.waypointReason) {
+        hasWaypointJumpNode = true;
+        lines.push(`        ${jumpId}(["↗ ${safeNum} · ${safeName}"]):::avayaWaypoint`);
       } else if (ref.externalConfirmed) {
         lines.push(`        ${jumpId}[("■ [${safeNum}] ${safeName}")]`);
       } else {
         hasOpenStep = true;
+        hasMissingJumpNode = true;
         lines.push(`        ${jumpId}["● OFFEN · [${safeNum}] ${safeName}"]:::missingScript`);
       }
     }
     lines.push('    end');
-    lines.push('    classDef missingScript stroke-dasharray: 5 5,stroke:#ef4444;');
+    if (hasMissingJumpNode) {
+      lines.push('    classDef missingScript stroke-dasharray: 5 5,stroke:#ef4444;');
+    }
+    if (hasWaypointJumpNode) {
+      lines.push(
+        '    classDef avayaWaypoint fill:#0c4a6e,stroke:#38bdf8,color:#e0f2fe,stroke-width:1.5px;'
+      );
+    }
   }
 
   if (hasOpenStep) {
@@ -8221,6 +8396,7 @@ export function analyzeWorkspaceLogicHealth(
     if (
       !cleanTarget ||
       !tKey ||
+      !isValidScriptRef(cleanTarget) ||
       reportedMissingKeys.has(tKey) ||
       moduleByKey.has(tKey) ||
       externalEndpointKeys.has(tKey) ||
@@ -8254,7 +8430,7 @@ export function analyzeWorkspaceLogicHealth(
         : explicitCaller
         ? `[${explicitCaller}]`
         : '[Main]';
-    const expectedFilename = `${cleanTarget}.s`;
+    const expectedFilename = `${stripKnownScriptExtension(cleanTarget)}.s`;
 
     findings.push({
       id: `health:missing-script:${tKey}`,

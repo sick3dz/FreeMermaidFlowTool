@@ -46,12 +46,16 @@ function extractFirstScriptTargetRef(text: string): string | undefined {
     .replace(/\bprio(?:rit[aä]t)?\s*[:=]?\s*\d+\b/gi, ' ')
     .trim();
 
+  const withoutQuoted = withoutDates.replace(/(["'])(?:\\.|[^"'\\])*\1/g, ' ');
   const explicitNamed =
-    withoutDates.match(
-      /\b(?:wohin|ziel|sprung|script|skript|subscript|execute|call|goto|schaltung|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|cdn)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/i
+    withoutQuoted.match(
+      /\b(?:wohin|ziel|sprung|script|skript|subscript|execute(?:\s+script)?|call\s+script|goto|schaltung|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|cdn)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
+    ) ||
+    withoutQuoted.match(
+      /^\s*call\s+["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
     ) ||
     withoutDates.match(
-      /(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/
+      /(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/
     );
   if (explicitNamed && isValidScriptRef(explicitNamed[1])) {
     return normalizeScriptRef(explicitNamed[1]);
@@ -306,9 +310,13 @@ function convertExtractedShapesToModule(params: {
 
     // Also inspect shape's own text for explicit jump/Sprung/CDN/Target 3-to-6-digit numbers or named scripts
     if (!targetNumber) {
+      const txtNoQuoted = txt.replace(/(["'])(?:\\.|[^"'\\])*\1/g, ' ');
       const explicitJump =
-        txt.match(
-          /\b(?:wohin|ziel|sprung|cdn|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|weiter(?:leitung)?|nach|execute|call|script|skript)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,})["']?\b/i
+        txtNoQuoted.match(
+          /\b(?:wohin|ziel|sprung|cdn|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|weiter(?:leitung)?|nach|execute(?:\s+script)?|call\s+script|script|skript)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
+        ) ||
+        txtNoQuoted.match(
+          /^\s*call\s+["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
         ) ||
         txt.match(
           /\b([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i

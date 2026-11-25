@@ -729,7 +729,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
       } else if (item.status === 'missing') {
         missing.push({
           refKey: item.refKey,
-          expectedFilename: `${item.refKey}.s`,
+          expectedFilename: `${stripKnownScriptExtension(item.refKey)}.s`,
           callerScriptNumber: item.callerScriptNumber,
           contextLabel: item.contextLabel,
           depth: item.depth || 1,
@@ -3579,7 +3579,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                           )}
                           {activeChecklistItem.status === 'missing' && (
                             <div className="text-[10px] font-mono text-rose-300 mt-0.5 truncate">
-                              Erwartete Datei: {activeChecklistItem.refKey}.s ·{' '}
+                              Erwartete Datei: {stripKnownScriptExtension(activeChecklistItem.refKey)}.s ·{' '}
                               {(activeChecklistItem.depth || 1) === 1 ? 'Direkt aus ' : 'Aufgerufen in '}
                               {activeChecklistItem.parentScriptNumber || mainScriptLabel}, im Import
                               fehlend
