@@ -169,6 +169,7 @@ export interface ScriptRule {
   hdxAction?: string;
   treatmentInfo?: string;
   loopSectionTarget?: string;
+  isGotoFallback?: boolean;
   externalIntegration?: ExternalApiIntegrationMeta;
 }
 

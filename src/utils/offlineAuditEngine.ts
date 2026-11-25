@@ -77,7 +77,7 @@ export interface SbomPackageItem {
   corporateNote: string;
 }
 
-export const AUDIT_APP_VERSION = '1.3.0';
+export const AUDIT_APP_VERSION = '1.3.1';
 
 export const ENTERPRISE_HIGHLIGHT_TILES: EnterpriseHighlightTile[] = [
   {
@@ -663,6 +663,33 @@ if (incomingHasData || !existingCache.hasProjectData) {
 }
 // Entfernt alle externen <link>/<script type="module">-Referenzen im Build-Output`,
   },
+  {
+    id: 'in-memory-callflow-graph-audit',
+    numberLabel: '07',
+    title: '100 % In-Memory Callflow-Graph-Audit ohne Disk-I/O & ohne Roh-Skript-Dump',
+    category: 'Datensparsamkeit · Zero-FS · Struktur-Audit',
+    relevanceForCompany:
+      'Für Audits produktiver Avaya-Bestände (~350 Skripte inkl. FlixCheck & Oracle) dürfen weder Dateisystem-Schreibzugriffe noch rohe Skript-Inhalte, Durchwahlen oder Kundenkommentare im exportierten JSON-Bericht landen.',
+    technicalExplanation:
+      'Das Modul src/utils/auditCallflows.ts arbeitet vollständig seiteneffektfrei im Arbeitsspeicher (ohne node:fs, ohne node:path, ohne Netzwerk-Calls). Es prüft Broken Links, verwaiste Skripte, Sackgassen (inkl. Skillset-Queue-Hinweis), DFS-Schleifen sowie das FlixCheck-/Oracle-Inventar und exportiert JSON-Bericht und Mermaid-Architekturübersicht ausschließlich als lokale RAM-Blobs mit reinen Struktur-Metadaten.',
+    excludedRisk:
+      'Kein unkontrolliertes Schreiben auf Netzlaufwerke, kein Abfluss von Kundendaten oder Skript-Kommentaren in Audit-Reports, volle Kompatibilität mit der 0-Byte-Offline-HTML-Datei.',
+    moduleHint: 'src/utils/auditCallflows.ts · runCallflowAudit() & generateArchitectureMermaid()',
+    codeTitle: 'CODE INSPECT: REIN METADATEN-BASIERTER IN-MEMORY-AUDIT-REPORT',
+    auditFacts: [
+      { label: 'Dateisystem (fs)', value: '0 Importe · 0 Schreibzugriffe' },
+      { label: 'Export-Inhalt', value: 'Nur Dateinamen, Befehle & Zeilen' },
+      { label: 'PII / Roh-Skripte', value: 'Technisch ausgeschlossen' },
+    ],
+    codeExcerpt: `export function runCallflowAudit(input: ScriptWorkspace | ScriptModule[]): AuditReport {
+  // Reine RAM-Auswertung ohne fs/fetch; speichert niemals rawText oder rawLine:
+  return {
+    schemaVersion: '1.3.1',
+    privacyMode: '100%-in-memory-metadata-only',
+    summary, nodes, brokenLinks, orphanScripts, deadEndScripts, circularLoops, externalIntegrations,
+  };
+}`,
+  },
 ];
 
 export const SBOM_PACKAGES: SbomPackageItem[] = [
@@ -699,12 +726,22 @@ export const SBOM_PACKAGES: SbomPackageItem[] = [
   {
     name: '@mermaid-js/layout-elk',
     versionSpec: '^1.0.2',
-    license: 'MIT / EPL-2.0 (elkjs)',
+    license: 'MIT',
     scope: 'runtime-offline',
     scopeLabel: 'Laufzeit (Offline-Bundle)',
-    purpose: 'Eclipse Layout Kernel (ELK) für kreuzungsarme komplexe Callflow-Graphen',
+    purpose: 'Mermaid-Adapter für den Eclipse Layout Kernel (ELK) bei komplexen Callflows',
     networkBehavior: '0 Requests (komplett geinlined)',
-    corporateNote: 'Unverändert eingebunden; interne Firmennutzung ohne Distribution unkritisch.',
+    corporateNote: 'Freizügige MIT-Lizenz, vollständig im Offline-Bundle enthalten.',
+  },
+  {
+    name: 'elkjs',
+    versionSpec: '^0.12.1',
+    license: 'EPL-2.0',
+    scope: 'runtime-offline',
+    scopeLabel: 'Laufzeit (Offline-Bundle)',
+    purpose: 'Deterministische orthogonale Graph-Layout-Engine für kreuzungsarme Groß-Callflows',
+    networkBehavior: '0 Requests (reine RAM-Berechnung im Browser)',
+    corporateNote: 'Unverändert unter Eclipse Public License 2.0 eingebunden; interne Firmennutzung unkritisch.',
   },
   {
     name: 'jszip',
@@ -785,6 +822,26 @@ export const SBOM_PACKAGES: SbomPackageItem[] = [
     purpose: 'Minimierung & IIFE-Bundling für das portierbare Offline-Paket',
     networkBehavior: 'Nur Build-Zeit',
     corporateNote: 'Reines Compile-Werkzeug unter MIT.',
+  },
+  {
+    name: 'vitest',
+    versionSpec: '^5.1.2',
+    license: 'MIT',
+    scope: 'build-only',
+    scopeLabel: 'Nur Build- / Test-Zeit',
+    purpose: 'Automatisierte Unit-Tests für Avaya-OCL-/Visio-Parser und In-Memory-Graph-Audit',
+    networkBehavior: '0 Bytes im Offline-HTML-Bundle (nur lokale QS)',
+    corporateNote: 'Reines Test-Werkzeug (devDependency) unter MIT-Lizenz; nicht im Endartefakt.',
+  },
+  {
+    name: 'tsx',
+    versionSpec: '^4.21.0',
+    license: 'MIT',
+    scope: 'build-only',
+    scopeLabel: 'Nur Build- / Test-Zeit',
+    purpose: 'Lokale Ausführung der synthetischen Regressions- und Rauchtest-Suite',
+    networkBehavior: '0 Bytes im Offline-HTML-Bundle (nur lokale QS)',
+    corporateNote: 'Reines Entwickler-Testwerkzeug (devDependency) unter MIT; nicht im Endartefakt.',
   },
   {
     name: 'express / dotenv / @google/genai',

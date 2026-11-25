@@ -208,7 +208,7 @@ export const OfflineAuditSection: React.FC<OfflineAuditSectionProps> = ({
             3. Fakten nach Fachbereichen
           </a>
           <a href="#audit-code-inspect" className="hover:text-slate-100 transition-colors">
-            4. Code-Inspect-Nachweise (6)
+            4. Code-Inspect-Nachweise ({CODE_INSPECT_AUDIT_PROOFS.length})
           </a>
           <a href="#audit-sbom" className="hover:text-slate-100 transition-colors">
             5. Open-Source-SBOM ({SBOM_PACKAGES.length})
@@ -490,10 +490,10 @@ export const OfflineAuditSection: React.FC<OfflineAuditSectionProps> = ({
       <section id="audit-code-inspect" className="scroll-mt-20 space-y-4">
         <div className="space-y-1">
           <h2 className="text-base sm:text-lg font-semibold text-slate-100">
-            4. Unternehmens-Nachweise mit Code-Inspect (6 Quellcode-Belege)
+            4. Unternehmens-Nachweise mit Code-Inspect ({CODE_INSPECT_AUDIT_PROOFS.length} Quellcode-Belege)
           </h2>
           <p className="text-xs text-slate-400">
-            Alle sechs Sicherheits- und Architekturmechanismen kompakt zusammengefasst.
+            Alle {CODE_INSPECT_AUDIT_PROOFS.length} Sicherheits- und Architekturmechanismen kompakt zusammengefasst.
             Klicken Sie auf „Weiter lesen &amp; Code Inspect“, um die ausführliche Erklärung
             und den zugehörigen TypeScript-/Build-Auszug aufzuklappen.
           </p>

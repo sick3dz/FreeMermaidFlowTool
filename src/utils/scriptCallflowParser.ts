@@ -353,6 +353,14 @@ const SCRIPT_NAME_STOPWORDS = new Set([
   'anruf',
   'gespraech',
   'gespräch',
+  'wartezeit',
+  'warteschleife',
+  'oeffnungszeit',
+  'oeffnungszeiten',
+  'öffnungszeit',
+  'öffnungszeiten',
+  'pause',
+  'dauer',
 ]);
 
 export function normalizeScriptRef(raw: string): string {
@@ -410,24 +418,326 @@ export function isDeactivatedSentinelTarget(token: string): boolean {
   return /^(?:0+|-1|none|null|empty|leer|inaktiv|deaktiviert|dummy|n\/?a|-+|_+)$/.test(clean);
 }
 
-export function isDynamicAvayaVariableTarget(token: string): boolean {
-  const clean = normalizeScriptRef(token);
+export function isDynamicAvayaVariableTarget(
+  token: string,
+  declaredVars?: ReadonlySet<string>
+): boolean {
+  const clean = normalizeScriptRef(stripKnownScriptExtension(token));
   if (!clean) return false;
+  if (declaredVars && declaredVars.size > 0) {
+    const lower = clean.toLowerCase();
+    if (declaredVars.has(lower) || declaredVars.has(clean)) {
+      return true;
+    }
+  }
   return /^(?:sys_|gv_|cv_|lv_|var_|call_var|default_)/i.test(clean);
 }
 
-export function isPlausibleNamedScriptTarget(token: string): boolean {
+export function isPlausibleNamedScriptTarget(
+  token: string,
+  declaredVars?: ReadonlySet<string>
+): boolean {
   const clean = normalizeScriptRef(stripKnownScriptExtension(token));
   if (!clean || clean.length < 3) return false;
   if (/^\d+$/.test(clean)) return false;
-  if (isDeactivatedSentinelTarget(clean) || isDynamicAvayaVariableTarget(clean)) return false;
+  if (isDeactivatedSentinelTarget(clean) || isDynamicAvayaVariableTarget(clean, declaredVars)) {
+    return false;
+  }
   if (/\.(?:wav|mp3|ogg|ulaw|alaw)$/i.test(String(token || '').trim())) return false;
   if (SCRIPT_NAME_STOPWORDS.has(clean.toLowerCase())) return false;
   return true;
 }
 
-export function isValidScriptRef(token: string): boolean {
-  return isNumericScriptRef(token) || isPlausibleNamedScriptTarget(token);
+export function isValidScriptRef(
+  token: string,
+  declaredVars?: ReadonlySet<string>
+): boolean {
+  return isNumericScriptRef(token) || isPlausibleNamedScriptTarget(token, declaredVars);
+}
+
+export interface ExtractedOclVariables {
+  declaredVars: Set<string>;
+  staticStringLiterals: Map<string, string>;
+}
+
+/**
+ * Extracts all OCL variable declarations (`VAR`, `GLOBAL`, `CONST`, `SET <var> = ...`, `ASSIGN ... TO <var>`)
+ * and captures unambiguous string-literal constant/variable values.
+ */
+export function extractOclDeclaredVariables(lines: string[]): ExtractedOclVariables {
+  const declaredVars = new Set<string>();
+  const staticStringLiterals = new Map<string, string>();
+  const literalVariantsByVar = new Map<string, Set<string>>();
+  const hasDynamicAssign = new Set<string>();
+
+  const registerVar = (name: string) => {
+    const key = name.trim().toLowerCase();
+    if (!key || /^\d+$/.test(key)) return;
+    if (
+      /^(?:if|then|else|end|section|var|const|global|string|integer|number|boolean|float|char|date|time|to|from|with|priority|set|assign)$/i.test(
+        key
+      )
+    ) {
+      return;
+    }
+    declaredVars.add(key);
+  };
+
+  const recordLiteralOrDynamic = (varName: string, rawExpr: string) => {
+    const key = varName.trim().toLowerCase();
+    if (!key) return;
+    registerVar(key);
+    const expr = rawExpr.replace(/;.*$/, '').trim();
+    const quotedMatch = expr.match(/^(?:"([^"]+)"|'([^']+)')$/);
+    if (quotedMatch) {
+      const val = (quotedMatch[1] || quotedMatch[2] || '').trim();
+      if (val) {
+        const set = literalVariantsByVar.get(key) || new Set<string>();
+        set.add(val);
+        literalVariantsByVar.set(key, set);
+        return;
+      }
+    }
+    hasDynamicAssign.add(key);
+  };
+
+  let inDeclBlock = false;
+  for (const rawLine of lines) {
+    const t = rawLine.trim();
+    if (!t) continue;
+
+    if (/^end\s+(?:const|var|global)\b/i.test(t)) {
+      inDeclBlock = false;
+      continue;
+    }
+
+    const blockStart = t.match(/^(const|var|global)(?:\s+(?:var|const))?(?:\s+(.*))?$/i);
+    if (blockStart && !/\b(?:execute|queue|route)\b/i.test(t)) {
+      const rest = (blockStart[2] || '').replace(/\bend\s+(?:const|var|global)\b/gi, '').trim();
+      if (!rest) {
+        inDeclBlock = true;
+        continue;
+      }
+      // Inline declaration: `VAR ziel_script STRING`, `CONST target = 'Sales_DE'`, `GLOBAL my_var`
+      const eqMatch = rest.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:=)\s*(.+)$/);
+      if (eqMatch) {
+        recordLiteralOrDynamic(eqMatch[1], eqMatch[2]);
+      } else {
+        const quotedConst = rest.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(?:"([^"]+)"|'([^']+)')/);
+        if (quotedConst) {
+          recordLiteralOrDynamic(quotedConst[1], `"${quotedConst[2] || quotedConst[3] || ''}"`);
+        } else {
+          // Could be comma-separated declarations: `VAR a, b, c STRING` or `GLOBAL gv_target`
+          const headParts = rest.split(/\s*,\s*/);
+          for (const part of headParts) {
+            const nameMatch = part.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)/);
+            if (nameMatch) registerVar(nameMatch[1]);
+          }
+        }
+      }
+      if (!/\bend\s+(?:const|var|global)\b/i.test(t) && /^[\s]*$/i.test(rest)) {
+        inDeclBlock = true;
+      }
+      continue;
+    }
+
+    if (inDeclBlock) {
+      const eqMatch = t.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:=)\s*(.+)$/);
+      if (eqMatch) {
+        recordLiteralOrDynamic(eqMatch[1], eqMatch[2]);
+      } else {
+        const quotedConst = t.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+(?:"([^"]+)"|'([^']+)')/);
+        if (quotedConst) {
+          recordLiteralOrDynamic(quotedConst[1], `"${quotedConst[2] || quotedConst[3] || ''}"`);
+        } else {
+          const nameMatch = t.match(/^([A-Za-z_][A-Za-z0-9_]*)\b/);
+          if (nameMatch) registerVar(nameMatch[1]);
+        }
+      }
+      continue;
+    }
+
+    // Inline `SET <var> = <expr>` (may appear after THEN/ELSE/semicolon)
+    const setRe = /\bset\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:=)\s*('[^']*'|"[^"]*"|[^\r\n;]+)/gi;
+    let mSet: RegExpExecArray | null;
+    while ((mSet = setRe.exec(t)) !== null) {
+      recordLiteralOrDynamic(mSet[1], mSet[2]);
+    }
+
+    // Inline `ASSIGN <expr> TO <var>`
+    const assignToRe =
+      /\bassign\s+('[^']*'|"[^"]*"|[^\r\n;]+?)\s+to\s+([A-Za-z_][A-Za-z0-9_]*)\b/gi;
+    let mAsg: RegExpExecArray | null;
+    while ((mAsg = assignToRe.exec(t)) !== null) {
+      recordLiteralOrDynamic(mAsg[2], mAsg[1]);
+    }
+
+    // Inline `ASSIGN <var> = <expr>`
+    const assignEqRe = /\bassign\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*('[^']*'|"[^"]*"|[^\r\n;]+)/gi;
+    let mAsgEq: RegExpExecArray | null;
+    while ((mAsgEq = assignEqRe.exec(t)) !== null) {
+      if (!/\bto\s+[A-Za-z_][A-Za-z0-9_]*$/i.test(mAsgEq[2])) {
+        recordLiteralOrDynamic(mAsgEq[1], mAsgEq[2]);
+      }
+    }
+  }
+
+  for (const [varKey, variants] of literalVariantsByVar.entries()) {
+    if (variants.size === 1 && !hasDynamicAssign.has(varKey)) {
+      const [onlyVal] = Array.from(variants);
+      staticStringLiterals.set(varKey, onlyVal);
+    }
+  }
+
+  return { declaredVars, staticStringLiterals };
+}
+
+export interface InlineOclClause {
+  kind: 'if-then' | 'else-if-then' | 'else' | 'plain';
+  condition?: string;
+  action: string;
+  closesIf: boolean;
+}
+
+/**
+ * Quote-safe lookup of a top-level keyword (e.g. `THEN`, `ELSE`) outside string literals.
+ */
+function findKeywordOutsideQuotes(text: string, keyword: 'then' | 'else', startFrom = 0): number {
+  const kwLen = keyword.length;
+  const lower = text.toLowerCase();
+  let quote: '"' | "'" | null = null;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === '\\') {
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (i < startFrom) continue;
+    if (lower.startsWith(keyword, i)) {
+      const prev = i > 0 ? text[i - 1] : ' ';
+      const next = i + kwLen < text.length ? text[i + kwLen] : ' ';
+      const prevBoundary = !/[A-Za-z0-9_]/.test(prev);
+      const nextBoundary = !/[A-Za-z0-9_]/.test(next);
+      if (prevBoundary && nextBoundary) {
+        return i;
+      }
+    }
+  }
+  return -1;
+}
+
+/**
+ * Splits a semicolon-separated statement list cleanly while respecting string quotes.
+ */
+export function splitOclStatementsOutsideQuotes(segment: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    if (quote) {
+      current += ch;
+      if (ch === '\\' && i + 1 < segment.length) {
+        current += segment[++i];
+        continue;
+      }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === ';') {
+      const trimmed = current.trim();
+      if (trimmed) parts.push(trimmed);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  const tail = current.trim();
+  if (tail) parts.push(tail);
+  return parts;
+}
+
+/**
+ * Cleanly splits inline `IF <cond> THEN <action> [ELSE <elseAction>] [END IF]` and
+ * `ELSE [IF <cond> THEN] <action>` lines so `^`-anchored OCL guards (`isNonExecMessageStmt`, `^\s*call`)
+ * always inspect the isolated action command.
+ */
+export function splitInlineIfThenElseClauses(rawLine: string): InlineOclClause[] {
+  const trimmed = rawLine.trim();
+  if (!trimmed) return [];
+
+  const stripEndIf = (s: string): { body: string; hasEndIf: boolean } => {
+    const hasEndIf = /\b(?:end\s*if|endif)\b/i.test(s);
+    const body = s.replace(/\b(?:end\s*if|endif)\b/gi, '').trim();
+    return { body, hasEndIf };
+  };
+
+  // Case 1: `ELSE IF <cond> THEN <body...> [ELSE <elseBody...>]`
+  if (/^else\s+if\b/i.test(trimmed)) {
+    const thenIdx = findKeywordOutsideQuotes(trimmed, 'then', 7);
+    if (thenIdx >= 0) {
+      const cond = trimmed.slice(trimmed.search(/\bif\b/i) + 2, thenIdx).trim();
+      const afterThen = trimmed.slice(thenIdx + 4).trim();
+      const elseIdx = findKeywordOutsideQuotes(afterThen, 'else', 0);
+      if (elseIdx >= 0) {
+        const thenPart = stripEndIf(afterThen.slice(0, elseIdx));
+        const elsePart = stripEndIf(afterThen.slice(elseIdx + 4));
+        return [
+          { kind: 'else-if-then', condition: cond, action: thenPart.body, closesIf: false },
+          { kind: 'else', action: elsePart.body, closesIf: elsePart.hasEndIf },
+        ];
+      }
+      const cleaned = stripEndIf(afterThen);
+      return [
+        { kind: 'else-if-then', condition: cond, action: cleaned.body, closesIf: cleaned.hasEndIf },
+      ];
+    }
+  }
+
+  // Case 2: `ELSE <action...>`
+  if (/^else\b/i.test(trimmed) && !/^else\s+if\b/i.test(trimmed)) {
+    const afterElse = trimmed.replace(/^else\b/i, '').trim();
+    const cleaned = stripEndIf(afterElse);
+    return [{ kind: 'else', action: cleaned.body, closesIf: cleaned.hasEndIf }];
+  }
+
+  // Case 3: `IF <cond> THEN <body...> [ELSE <elseBody...>]`
+  if (/^if\b/i.test(trimmed)) {
+    const thenIdx = findKeywordOutsideQuotes(trimmed, 'then', 2);
+    if (thenIdx >= 0) {
+      const cond = trimmed.slice(2, thenIdx).trim();
+      const afterThen = trimmed.slice(thenIdx + 4).trim();
+      const elseIdx = findKeywordOutsideQuotes(afterThen, 'else', 0);
+      if (elseIdx >= 0) {
+        const thenPart = stripEndIf(afterThen.slice(0, elseIdx));
+        const elsePart = stripEndIf(afterThen.slice(elseIdx + 4));
+        return [
+          { kind: 'if-then', condition: cond, action: thenPart.body, closesIf: false },
+          { kind: 'else', action: elsePart.body, closesIf: elsePart.hasEndIf },
+        ];
+      }
+      const cleaned = stripEndIf(afterThen);
+      return [
+        { kind: 'if-then', condition: cond, action: cleaned.body, closesIf: cleaned.hasEndIf },
+      ];
+    }
+  }
+
+  return [{ kind: 'plain', action: trimmed, closesIf: false }];
 }
 
 export function isAnnouncementOrEndpointTargetName(token: string): boolean {
@@ -435,6 +745,16 @@ export function isAnnouncementOrEndpointTargetName(token: string): boolean {
   if (!clean) return false;
   if (isDynamicAvayaVariableTarget(clean)) return true;
   if (/\.(?:wav|mp3|ogg|ulaw|alaw|vox|au)$/i.test(clean)) return true;
+  // Tokens explicitly naming a script (e.g. `External_Script`) are scripts, not generic endpoints,
+  // unless they explicitly also carry an announcement/media marker (e.g. `Ansage_Script`).
+  if (
+    /(?:^|[_.\-\s])(?:script|skript|subscript)(?:$|[_.\-\s\d])/i.test(clean) &&
+    !/(?:^|[_.\-\s])(?:sonderansage|ansage|ansagen|ran|prompt|voice|wav|audio|musik|music|wartemusik)(?:$|[_.\-\s\d])/i.test(
+      clean
+    )
+  ) {
+    return false;
+  }
   return /(?:^|[_.\-\s])(?:sonderansage|ansage|ansagen|ran|prompt|voice(?:[\s_-]*segment)?|wav|audio|musik|music|wartemusik|treatment|busy|ringback|disconnect|drop|abwurf|mailbox|voicemail|anrufbeantworter|ab|fax|ivr|skillset|queue|warteschlange|hunt|trunk|pilot|extern|external|hotline|vdn|acd|geschlossen|nacht(?:schaltung)?|feiertag(?:sansage)?|st[oö]rung(?:sansage)?|stoerung(?:sansage)?|wartung(?:sansage)?|info(?:ansage|text)?|text(?:ansage)?|ende|endpunkt)(?:$|[_.\-\s\d])/i.test(
     clean
   );
@@ -447,10 +767,27 @@ export function isAnnouncementOrEndpointTargetName(token: string): boolean {
  */
 export function classifyAvayaWaypointTarget(
   token: string,
-  options?: { isAvayaRouteCmd?: boolean }
+  options?: {
+    isAvayaRouteCmd?: boolean;
+    knownScriptKeys?: ReadonlySet<string> | ReadonlyMap<string, unknown>;
+    declaredVars?: ReadonlySet<string>;
+  }
 ): string | null {
   const clean = normalizeScriptRef(stripKnownScriptExtension(token));
   if (!clean) return null;
+
+  // Guard 1: Sentinels & declared/dynamic OCL variables are never waypoints
+  if (
+    isDeactivatedSentinelTarget(clean) ||
+    isDynamicAvayaVariableTarget(clean, options?.declaredVars)
+  ) {
+    return null;
+  }
+
+  // Guard 2: Real loaded scripts in the workspace pool ALWAYS take precedence over waypoint heuristics
+  if (options?.knownScriptKeys && options.knownScriptKeys.has(canonicalScriptMatchKey(clean))) {
+    return null;
+  }
 
   // 1. FlixCheck / Call-Deflection / Digital Bot Wegweiser
   if (
@@ -487,10 +824,14 @@ export function classifyAvayaWaypointTarget(
     return 'Queuing-/Loop-Routine (Avaya)';
   }
 
-  // 4. Avaya-Menü / Orchestration Flow / IVR-Applikation (e.g. Menu, Menü, flow_1, Flow2, VoicePortal, AEP, VRU, Vector)
+  // 4. Avaya-Menü / Orchestration Flow / IVR-Applikation (strict, non-greedy:
+  //    matches standalone/numbered Menu/Flow/Subflow or explicit AEP/IVR/Portal/Vector markers,
+  //    WITHOUT swallowing custom named scripts like `SUBFLOW_Kundenservice` or `Flow_Vertrieb`)
   if (
-    /^(?:flow|subflow|men[uü])(?:[_.\-\s]?\d+|[A-Za-zÄÖÜäöüß0-9_.-]*)$/i.test(clean) ||
-    /(?:^|[_.\-\s])(?:men[uü]|hauptmen[uü]|sprachmen[uü]|auswahlmen[uü]|submen[uü]|untermen[uü]|flow|subflow|voice[\s_-]*portal|aep|aaep|orchestration|auto[\s_-]*attendant|vru|vector|vektor|route[\s_-]*point|application)(?:$|[_.\-\s\d])/i.test(
+    /^(?:(?:haupt|sprach|auswahl|sub|unter)?men[uü]|flow|subflow)(?:[_.\-\s]?(?:\d+|haupt|main|start|ivr|aep|aaep|portal))?$/i.test(
+      clean
+    ) ||
+    /(?:^|[_.\-\s])(?:hauptmen[uü]|sprachmen[uü]|auswahlmen[uü]|submen[uü]|untermen[uü]|voice[\s_-]*portal|aep|aaep|orchestration|auto[\s_-]*attendant|vru|vector|vektor|route[\s_-]*point|application)(?:$|[_.\-\s\d])/i.test(
       clean
     )
   ) {
@@ -509,6 +850,135 @@ export function classifyAvayaWaypointTarget(
   }
 
   return null;
+}
+
+export type ExtractedTargetCategory =
+  | 'ignored'
+  | 'known-script'
+  | 'avaya-waypoint'
+  | 'external-endpoint'
+  | 'missing-script';
+
+export interface ExtractedTargetClassification {
+  category: ExtractedTargetCategory;
+  normalizedRef: string;
+  canonicalKey: string;
+  reason?: string;
+}
+
+/**
+ * Enforces the strict 5-step validation & classification priority for any extracted target token:
+ * 1. Exclude sentinels (`isDeactivatedSentinelTarget`) and OCL variables (`isDynamicAvayaVariableTarget`).
+ * 2. Check loaded script pool (`knownScriptKeys`) — real script matches ALWAYS win over waypoint/endpoint heuristics.
+ * 3. Classify pure numbers (`\d{3,6}` / phone/CDN) NOT in `knownScriptKeys` as `Avaya-Nummer / CDN`.
+ * 4. Apply waypoint heuristics (`classifyAvayaWaypointTarget`) and announcement/endpoint heuristics.
+ * 5. Mark remaining unknown valid script references explicitly as `Missing / External Script`.
+ */
+export function classifyExtractedTarget(
+  token: string,
+  options?: {
+    knownScriptKeys?: ReadonlySet<string> | ReadonlyMap<string, unknown>;
+    declaredVars?: ReadonlySet<string>;
+    isAvayaRouteCmd?: boolean;
+    manualWaypointKeys?: ReadonlySet<string>;
+    externalEndpointKeys?: ReadonlySet<string>;
+    treatUnresolvedAsEndpoint?: boolean;
+  }
+): ExtractedTargetClassification {
+  const clean = normalizeScriptRef(stripKnownScriptExtension(token));
+  const canonicalKey = canonicalScriptMatchKey(clean);
+
+  // Step 1: Sentinels & OCL variables
+  if (
+    !clean ||
+    !canonicalKey ||
+    isDeactivatedSentinelTarget(clean) ||
+    isDynamicAvayaVariableTarget(clean, options?.declaredVars)
+  ) {
+    return {
+      category: 'ignored',
+      normalizedRef: clean,
+      canonicalKey,
+      reason: 'Sentinel / Variable',
+    };
+  }
+
+  // Step 2: Loaded script pool ALWAYS takes priority over waypoint & endpoint heuristics
+  if (options?.knownScriptKeys && options.knownScriptKeys.has(canonicalKey)) {
+    return {
+      category: 'known-script',
+      normalizedRef: clean,
+      canonicalKey,
+      reason: 'Geladenes Skript',
+    };
+  }
+
+  // Step 3: Pure numbers not in knownScriptKeys -> Avaya-Nummer / CDN
+  if (isNumericScriptRef(clean) || /^\+?\d{2,16}$/.test(clean)) {
+    return {
+      category: 'avaya-waypoint',
+      normalizedRef: clean,
+      canonicalKey,
+      reason: 'Avaya-Nummer / CDN',
+    };
+  }
+
+  // Filter stopwords / non-plausible script names
+  if (!isValidScriptRef(clean, options?.declaredVars)) {
+    return {
+      category: 'ignored',
+      normalizedRef: clean,
+      canonicalKey,
+      reason: 'Stopword / Ungültige Referenz',
+    };
+  }
+
+  // Step 4: Manual waypoints, Avaya-only heuristics, or external/announcement endpoints
+  if (options?.manualWaypointKeys?.has(canonicalKey)) {
+    return {
+      category: 'avaya-waypoint',
+      normalizedRef: clean,
+      canonicalKey,
+      reason: 'Manuell als Wegweiser',
+    };
+  }
+
+  const autoWaypointReason = classifyAvayaWaypointTarget(clean, {
+    isAvayaRouteCmd: options?.isAvayaRouteCmd,
+    knownScriptKeys: options?.knownScriptKeys,
+    declaredVars: options?.declaredVars,
+  });
+  if (autoWaypointReason) {
+    return {
+      category: 'avaya-waypoint',
+      normalizedRef: clean,
+      canonicalKey,
+      reason: autoWaypointReason,
+    };
+  }
+
+  if (
+    options?.externalEndpointKeys?.has(canonicalKey) ||
+    isAnnouncementOrEndpointTargetName(clean) ||
+    options?.treatUnresolvedAsEndpoint
+  ) {
+    return {
+      category: 'external-endpoint',
+      normalizedRef: clean,
+      canonicalKey,
+      reason: isAnnouncementOrEndpointTargetName(clean)
+        ? 'Sonderansage / Endpunkt'
+        : 'Externer Endpunkt',
+    };
+  }
+
+  // Step 5: Remaining unknown script reference
+  return {
+    category: 'missing-script',
+    normalizedRef: clean,
+    canonicalKey,
+    reason: 'Missing / External Script',
+  };
 }
 
 export function formatScriptDisplayLabel(
@@ -1527,9 +1997,9 @@ function extractInlineKeyValuesFromText(
     }
   }
 
-  // Inline Queue mention in free-text (`... -> Queue Support_DE`)
+  // Inline Queue mention in free-text (`... -> Queue Support_DE` or `Queue: Support_DE`)
   const inlineQueue = lineWithoutChoices.match(
-    /\b(?:queue|warteschlange|acd)\s*[:=]?\s*([A-Za-z0-9_äöüÄÖÜß-]+)/i
+    /\b(?:queue|warteschlange|acd)(?:\s*[:=]\s*|\s+)([A-Za-z0-9_äöüÄÖÜß-]+)/i
   );
   if (inlineQueue) {
     queueTarget = inlineQueue[1].trim();
@@ -1574,10 +2044,10 @@ function isAaccScriptText(text: string): boolean {
     /\b(?:Sys_Team_Skillset|Sys_Ueberlauf_Skillset|Sys_Retour_Zentrale|Sys_SondStat|Sys_SondZeit|Sys_brand|src_route_number)\b/i.test(
       cleaned
     ) ||
-    /\b(?:queue\s+to|route\s+(?:call|target|end)|give\s+(?:announcement|ran|ivr|music|cdn|script|ringback|treatment|overflow|busy|controlled\s+broadcast|aura\s+recording|silence)|transfer\s+to|execute(?:\s+script)?)\b/i.test(
+    /\b(?:queue\s+to|route\s+(?:call|target|end)|give\s+(?:announcement|ran|ivr|music|cdn|script|ringback|treatment|overflow|busy|controlled\s+broadcast|aura\s+recording|silence)|transfer\s+to|execute(?:\s+script)?|call\s+script|subscript)\b/i.test(
       cleaned
     ) ||
-    /\b(?:readvar|send\s+info|logged\s+in\s+agents|idle\s+agents|expected\s+wait\s+time|calls\s+waiting|queue\s+length|oldest\s+call|not\s+queued|out\s+of\s+service)\b/i.test(
+    /\b(?:readvar|send\s+(?:info|request)|get\s+response|(?:open|send|receive)\s+host|logged\s+in\s+agents|idle\s+agents|expected\s+wait\s+time|calls\s+waiting|queue\s+length|oldest\s+call|not\s+queued|out\s+of\s+service)\b/i.test(
       cleaned
     ) ||
     /\b(?:open\s+voice\s+session|end\s+voice\s+session|play\s+prompt|voice\s+segment|collect\s+\d+\s+digits)\b/i.test(
@@ -1586,6 +2056,8 @@ function isAaccScriptText(text: string): boolean {
     /\b(?:event\s+(?:handler|call\s+abandon)|end\s+where|end\s+section|disconnect|drop\s+call)\b/i.test(
       cleaned
     ) ||
+    /^\s*(?:call|goto)\s+(?:"[^"]+"|'[^']+'|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]+)/im.test(cleaned) ||
+    /^\s*(?:set\s+[A-Za-z_][A-Za-z0-9_]*\s*=|global\s+[A-Za-z_])/im.test(cleaned) ||
     /\bVALUE\s+['"]?[0-9A-Za-z*#_.-]{1,15}['"]?\s*[:=]/i.test(cleaned) ||
     /\b(?:DNIS_Range[A-Za-z0-9_]*|WHERE\s+(?:DNIS|CDN|CLID|CALLING|CALLED|src_route_number|[A-Za-z0-9_]+)\b)/i.test(
       cleaned
@@ -2776,6 +3248,7 @@ function parseAaccScriptBlocks(
     sourceFilename?: string;
     origin?: ScriptOrigin;
     isMasterHint?: boolean;
+    knownScriptKeys?: ReadonlySet<string>;
   }
 ): ScriptModule[] {
   const withoutComments = stripScriptCommentsAndNoise(rawText);
@@ -2784,7 +3257,7 @@ function parseAaccScriptBlocks(
   const isOclBodyCodeLine = (line: string): boolean => {
     const t = line.trim();
     if (!t) return false;
-    return /^(?:section\b(?!\s+["']?init\b)|const\b|var\b|event\b|assign\b|readvar\b|send\b|get\s+response\b|receive\s+host\b|if\b|else\b|end\b|give\b|transfer\b|route\b|queue\b|collect\b|execute\b|call\b|goto\b|subscript\b|open\b|play\b|wait\b|disconnect\b|drop\b|where\b|select\b|case\b|value\b|default\b|otherwise\b)/i.test(
+    return /^(?:section\b(?!\s+["']?init\b)|const\b|var\b|global\b|set\b|event\b|assign\b|readvar\b|send\b|get\s+response\b|receive\s+host\b|if\b|else\b|end\b|give\b|transfer\b|route\b|queue\b|collect\b|execute\b|call\b|goto\b|subscript\b|open\b|play\b|wait\b|disconnect\b|drop\b|where\b|select\b|case\b|value\b|default\b|otherwise\b)/i.test(
       t
     );
   };
@@ -2879,7 +3352,7 @@ function parseAaccScriptBlocks(
       chunks.length === 1 && chunkIdx === 0 ? rawText.slice(0, 4000) : chunkText.slice(0, 2000);
     const headerCommentScriptName = headerCommentSlice
       .match(
-        /(?:script\s*name|scriptname|skript(?:\s*name)?|script|application(?:\s*name)?|modul(?:name)?|titel|title)\s*[:=]\s*["']?([^\r\n*/"']{2,80})["']?/i
+        /(?:\b(?:script\s*name|scriptname|skript(?:\s*name)?|application(?:\s*name)?|modul(?:name)?|titel|title)\s*[:=]|(?:^|[*\/;])\s*script\s*[:=])\s*["']?([^\r\n*/"']{2,80})["']?/im
       )?.[1]
       ?.trim()
       ?.replace(/\.s$/i, '')
@@ -3205,6 +3678,15 @@ function parseAaccScriptBlocks(
       }
     }
 
+    // Pre-scan all declared OCL variables (`VAR`, `GLOBAL`, `CONST`, `SET`, `ASSIGN`)
+    const { declaredVars, staticStringLiterals } = extractOclDeclaredVariables(sliceLines);
+    const activeStringLiterals = new Map<string, string>(staticStringLiterals);
+    const resolveDeclaredVarLiteral = (rawToken: string): string | undefined => {
+      const cleanKey = normalizeScriptRef(stripKnownScriptExtension(rawToken)).toLowerCase();
+      if (!cleanKey) return undefined;
+      return activeStringLiterals.get(cleanKey);
+    };
+
     interface ConditionFrame {
       kind: 'if' | 'where' | 'value' | 'event';
       condText: string;
@@ -3481,28 +3963,56 @@ function parseAaccScriptBlocks(
     const moduleFlixContextText = `${scriptNumber} ${scriptName} ${headerCommentSlice.slice(0, 600)}`;
 
     const recordAssignVars = (text: string) => {
+      const recordVarAssignment = (vName: string, rawExpr: string, isQuotedLiteral = false) => {
+        const lowerName = vName.trim().toLowerCase();
+        if (!lowerName) return;
+        declaredVars.add(lowerName);
+        const trimmedExpr = rawExpr.replace(/;.*$/, '').trim();
+        const quotedMatch = trimmedExpr.match(/^(?:"([^"]+)"|'([^']+)')$/);
+        const unquotedVal = quotedMatch
+          ? (quotedMatch[1] || quotedMatch[2] || '').trim()
+          : trimmedExpr;
+
+        if (isHardcodedApiSecretAssignment(vName, unquotedVal)) {
+          moduleHasHardcodedSecret = true;
+          activeAssignVars.set(lowerName, '***redacted***');
+          activeStringLiterals.delete(lowerName);
+          return;
+        }
+        activeAssignVars.set(lowerName, unquotedVal);
+        if (quotedMatch || isQuotedLiteral) {
+          if (unquotedVal) {
+            activeStringLiterals.set(lowerName, unquotedVal);
+          }
+        } else {
+          // Assigned a dynamic / non-literal expression -> clear any prior static string literal
+          activeStringLiterals.delete(lowerName);
+        }
+      };
+
       const assigns = extractAssignStatements(text);
       for (const a of assigns) {
-        if (isHardcodedApiSecretAssignment(a.variable, a.value)) {
-          moduleHasHardcodedSecret = true;
-          activeAssignVars.set(a.variable.toLowerCase(), '***redacted***');
-        } else {
-          activeAssignVars.set(a.variable.toLowerCase(), a.value);
-        }
+        const wasQuoted = new RegExp(
+          `\\bassign\\s+["']${a.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']\\s+to\\s+${a.variable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+          'i'
+        ).test(text);
+        recordVarAssignment(a.variable, a.value, wasQuoted);
       }
-      const eqRe = /\bassign\s+([A-Za-z0-9_]+)\s*=\s*([^\r\n;]+)/gi;
+
+      const eqRe = /\bassign\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*('[^']*'|"[^"]*"|[^\r\n;]+)/gi;
       let meq: RegExpExecArray | null;
       while ((meq = eqRe.exec(text)) !== null) {
         const vName = meq[1].trim();
         const vVal = meq[2].trim();
         if (!/\bto\s+[A-Za-z0-9_]+$/i.test(vVal)) {
-          if (isHardcodedApiSecretAssignment(vName, vVal)) {
-            moduleHasHardcodedSecret = true;
-            activeAssignVars.set(vName.toLowerCase(), '***redacted***');
-          } else {
-            activeAssignVars.set(vName.toLowerCase(), vVal);
-          }
+          recordVarAssignment(vName, vVal);
         }
+      }
+
+      const setRe = /\bset\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:=)\s*('[^']*'|"[^"]*"|[^\r\n;]+)/gi;
+      let mSet: RegExpExecArray | null;
+      while ((mSet = setRe.exec(text)) !== null) {
+        recordVarAssignment(mSet[1], mSet[2]);
       }
     };
 
@@ -3542,6 +4052,81 @@ function parseAaccScriptBlocks(
       explicitIsFax = false,
       explicitCaseLabel?: string
     ): boolean => {
+      const trimmedSegment = actionSegment.trim();
+      if (!trimmedSegment) return false;
+
+      // Ensure inline `IF ... THEN ... [ELSE ...]` or `ELSE ...` segments (e.g. after `VALUE ...:`)
+      // are cleanly split before matching `^`-anchored guards (`isNonExecMessageStmt`, `^\s*call`).
+      if (/^(?:if|else)\b/i.test(trimmedSegment)) {
+        const inlineClauses = splitInlineIfThenElseClauses(trimmedSegment);
+        if (inlineClauses.length > 0 && inlineClauses[0].kind !== 'plain') {
+          let handledAny = false;
+          for (const clause of inlineClauses) {
+            const clauseLabel =
+              clause.condition
+                ? formatReadableOclCondition(clause.condition)
+                : clause.kind === 'else'
+                ? 'Sonst (ELSE)'
+                : undefined;
+            const mergedLabel = [explicitCaseLabel, clauseLabel].filter(Boolean).join(' · ') || undefined;
+            if (clause.action) {
+              if (
+                processActionSegment(
+                  clause.action,
+                  rawLine,
+                  explicitValueNums,
+                  explicitIsFax || Boolean(clause.condition && /\bfax/i.test(clause.condition)),
+                  mergedLabel
+                )
+              ) {
+                handledAny = true;
+              }
+            }
+          }
+          return handledAny;
+        }
+      }
+
+      // Split multiple semicolon-separated inline statements (e.g. `SET target = 'X'; EXECUTE target`)
+      const subStatements = splitOclStatementsOutsideQuotes(trimmedSegment);
+      if (subStatements.length > 1) {
+        let handledAny = false;
+        for (const sub of subStatements) {
+          if (processActionSegment(sub, rawLine, explicitValueNums, explicitIsFax, explicitCaseLabel)) {
+            handledAny = true;
+          }
+        }
+        return handledAny;
+      }
+
+      // Handle inline `SET <var> = <expr>` / `ASSIGN ...` cleanly without emitting bogus rules
+      if (/^set\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:=|:=)/i.test(trimmedSegment)) {
+        recordAssignVars(trimmedSegment);
+        return false;
+      }
+      if (/^assign\b/i.test(trimmedSegment)) {
+        recordAssignVars(trimmedSegment);
+        const strippedAssign = trimmedSegment
+          .replace(
+            /\bassign\s+[^\r\n;]+?\s+to\s+[A-Za-z0-9_]+(?=\s*(?:assign\b|end\s*if\b|endif\b|else\b|execute\b|call\b|subscript\b|goto\b|give\b|queue\b|route\b|transfer\b|disconnect\b|drop\b|wait\b|;|$))/gi,
+            ' '
+          )
+          .replace(/\bassign\s+[A-Za-z0-9_]+\s*=\s*[^\r\n;]+/gi, ' ')
+          .trim();
+        if (!strippedAssign || strippedAssign === trimmedSegment) {
+          return false;
+        }
+        return processActionSegment(
+          strippedAssign,
+          rawLine,
+          explicitValueNums,
+          explicitIsFax,
+          explicitCaseLabel
+        );
+      }
+
+      actionSegment = trimmedSegment;
+
       const valueNumbers =
         explicitValueNums.length > 0
           ? explicitValueNums
@@ -3561,7 +4146,7 @@ function parseAaccScriptBlocks(
         /^\s*(?:send\s+(?:info|request)|get\s+response|(?:open|send|receive)\s+host|readvar|log|print|syslog|event|disconnect|drop\s+call|route\s+end|call\s+(?:has|have|had|is|was|were|are|not|abandoned|answered|queued|dropped|ended|disconnected|terminated|offered|delivered|transferred|routed|held|waiting|priority|duration|origin|data|id|type|status|state))\b/i.test(
           actionSegment
         );
-      // Strip string literals that are NOT the direct argument of an explicit script-execution keyword
+      // Strip string literals that are NOT the direct argument of an explicit script-execution or GOTO keyword
       const actionForExecScan = actionSegment.replace(
         /(["'])(?:\\.|[^"'\\])*\1/g,
         (quoted, _q, offset: number, full: string) => {
@@ -3576,16 +4161,28 @@ function parseAaccScriptBlocks(
           return ' ';
         }
       );
+
+      // External script execution (`GOTO` intentionally excluded — handled separately below)
       const execCmd = isNonExecMessageStmt
         ? null
         : actionForExecScan.match(
-            /\b(execute(?:\s+script)?|call\s+script|subscript|give\s+script|goto)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
+            /\b(execute(?:\s+script)?|call\s+script|subscript|give\s+script)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
           ) ||
           actionForExecScan.match(
             /^\s*(call)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
           );
+
+      // Internal section jump (`GOTO <SECTION>`), with fallback check against knownScriptKeys
+      const gotoCmd =
+        isNonExecMessageStmt || execCmd
+          ? null
+          : actionForExecScan.match(
+              /\bgoto\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
+            );
+
+      // Multi-skillset support: e.g. `QUEUE TO SKILLSET Sales_DE, Support_DE, VIP_DE WITH PRIORITY 10`
       const queueCmd = actionSegment.match(
-        /\bqueue\s+to\s+(?:(network\s+skillset|skillset|agent|cdn)\s+)?(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))(?:\s+with\s+priority\s+(\d{1,3}))?/i
+        /\bqueue\s+to\s+(?:(network\s+skillset|skillset|agent|cdn)\s+)?((?:(?:"[^"]+"|'[^']+'|[A-Za-z0-9ÄÖÜäöüß_.-]+)(?:\s*,\s*(?:"[^"]+"|'[^']+'|[A-Za-z0-9ÄÖÜäöüß_.-]+))*))(?:\s+with\s+priority\s+(\d{1,3}))?/i
       );
       const routeEndCmd = /\broute\s+end\b/i.test(actionSegment);
       const routeCmd = !routeEndCmd
@@ -3608,12 +4205,12 @@ function parseAaccScriptBlocks(
       const sendInfoCmd = !sendRequestCmd
         ? actionSegment.match(/\bsend\s+info\b(?:\s+(.+))?$/i)
         : null;
-      const ivrTreatmentCmd = !execCmd
+      const ivrTreatmentCmd = !execCmd && !gotoCmd
         ? actionSegment.match(
             /\bgive\s+ivr\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))(?:\s+with\s+treatment\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+)))?/i
           )
         : null;
-      const annCmd = !execCmd && !ivrTreatmentCmd
+      const annCmd = !execCmd && !gotoCmd && !ivrTreatmentCmd
         ? actionSegment.match(
             /\b(?:give\s+(controlled\s+broadcast(?:\s+announcement)?|aura\s+recording|announcement|ran|music|treatment|overflow)|open\s+voice\s+segment|(?:play\s+)?(?:prompt\s+)?voice\s+segment|play\s+(?:prompt|announcement|tone|ran)|(?:sonderansage|ansage)\b)(?:\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+)))?/i
           )
@@ -3639,34 +4236,82 @@ function parseAaccScriptBlocks(
         valueNumbers.push(faxCdnMatch[1]);
       }
 
+      // Resolve declared OCL variables unambiguously set to string literals BEFORE validation
       const rawExecToken = execCmd ? (execCmd[2] || execCmd[3] || execCmd[4] || '').trim() : '';
-      const execKeyword = execCmd ? execCmd[1] : '';
-      const isLocalSectionCall =
-        Boolean(rawExecToken) &&
-        !/\bscript\b/i.test(execKeyword) &&
-        localSectionNames.has(canonicalScriptMatchKey(rawExecToken));
-
+      const execWasQuoted = Boolean(execCmd && (execCmd[2] || execCmd[3]));
+      const resolvedExecFromVar =
+        rawExecToken && !execWasQuoted ? resolveDeclaredVarLiteral(rawExecToken) : undefined;
+      const effectiveExecToken = resolvedExecFromVar || rawExecToken;
       const execTarget =
-        rawExecToken && !isLocalSectionCall && isValidScriptRef(rawExecToken)
-          ? normalizeScriptRef(rawExecToken)
+        effectiveExecToken &&
+        (Boolean(resolvedExecFromVar)
+          ? isValidScriptRef(effectiveExecToken)
+          : isValidScriptRef(effectiveExecToken, declaredVars))
+          ? normalizeScriptRef(effectiveExecToken)
           : undefined;
+
+      // Handle `GOTO <Target>`: internal SECTION takes priority; fallback to known external script pool
+      const rawGotoToken = gotoCmd ? (gotoCmd[1] || gotoCmd[2] || gotoCmd[3] || '').trim() : '';
+      const gotoWasQuoted = Boolean(gotoCmd && (gotoCmd[1] || gotoCmd[2]));
+      const resolvedGotoFromVar =
+        rawGotoToken && !gotoWasQuoted ? resolveDeclaredVarLiteral(rawGotoToken) : undefined;
+      const effectiveGotoToken = resolvedGotoFromVar || rawGotoToken;
+      const gotoKey = effectiveGotoToken ? canonicalScriptMatchKey(effectiveGotoToken) : '';
+
+      let isLocalSectionCall = false;
+      let localSectionJumpTarget: string | undefined;
+      let gotoExternalTarget: string | undefined;
+      let isGotoFallback = false;
+
+      if (effectiveGotoToken) {
+        if (localSectionNames.has(gotoKey)) {
+          isLocalSectionCall = true;
+          localSectionJumpTarget = effectiveGotoToken;
+        } else if (options?.knownScriptKeys) {
+          if (options.knownScriptKeys.has(gotoKey)) {
+            gotoExternalTarget = normalizeScriptRef(effectiveGotoToken);
+            isGotoFallback = true;
+          } else {
+            // Not in local sections and not in known script pool -> internal/unresolved section jump
+            isLocalSectionCall = true;
+            localSectionJumpTarget = effectiveGotoToken;
+          }
+        } else if (
+          Boolean(resolvedGotoFromVar)
+            ? isValidScriptRef(effectiveGotoToken)
+            : isValidScriptRef(effectiveGotoToken, declaredVars)
+        ) {
+          // Deferred workspace pool check in buildScriptWorkspace
+          gotoExternalTarget = normalizeScriptRef(effectiveGotoToken);
+          isGotoFallback = true;
+        }
+      }
 
       const routeKeyword = routeCmd?.[1]?.toLowerCase() || '';
       const rawRouteToken = routeCmd
         ? (routeCmd[2] || routeCmd[3] || routeCmd[4] || '').trim()
         : '';
+      const routeWasQuoted = Boolean(routeCmd && (routeCmd[2] || routeCmd[3]));
+      const resolvedRouteFromVar =
+        rawRouteToken && !routeWasQuoted ? resolveDeclaredVarLiteral(rawRouteToken) : undefined;
+      const effectiveRouteToken = resolvedRouteFromVar || rawRouteToken;
       const isPhoneOrExtTarget =
-        Boolean(rawRouteToken) &&
+        Boolean(effectiveRouteToken) &&
         /^(?:route\s+(?:call|target)|transfer|give\s+cdn)/.test(routeKeyword) &&
-        /^\+?\d{2,16}$/.test(rawRouteToken);
+        /^\+?\d{2,16}$/.test(effectiveRouteToken);
       const routeTarget =
-        rawRouteToken && !isFaxRoute && (isValidScriptRef(rawRouteToken) || isPhoneOrExtTarget)
-          ? normalizeScriptRef(rawRouteToken)
+        effectiveRouteToken &&
+        !isFaxRoute &&
+        (isPhoneOrExtTarget ||
+          (Boolean(resolvedRouteFromVar)
+            ? isValidScriptRef(effectiveRouteToken)
+            : isValidScriptRef(effectiveRouteToken, declaredVars)))
+          ? normalizeScriptRef(effectiveRouteToken)
           : undefined;
       const isExternalRouteCall = Boolean(
         routeTarget && /^(?:route\s+(?:call|target)|transfer|give\s+cdn)/.test(routeKeyword)
       );
-      const resolvedTarget = execTarget || routeTarget;
+      const resolvedTarget = execTarget || gotoExternalTarget || routeTarget;
 
       const rawQueueKind = queueCmd?.[1]?.toLowerCase().replace(/\s+/g, ' ');
       const queueKind: ScriptRule['queueKind'] = queueCmd
@@ -3678,8 +4323,24 @@ function parseAaccScriptBlocks(
           ? 'cdn'
           : 'skillset'
         : undefined;
-      const queueToken = queueCmd ? (queueCmd[2] || queueCmd[3] || queueCmd[4] || '').trim() : '';
-      const queuePrio = queueCmd && queueCmd[5] ? parseInt(queueCmd[5], 10) : undefined;
+      const queueTokens: string[] = queueCmd
+        ? (queueCmd[2] || '')
+            .split(',')
+            .map((item) => {
+              const rawItem = item.trim();
+              const isQuoted = /^["'].*["']$/.test(rawItem);
+              const unquoted = rawItem.replace(/^["']|["']$/g, '').trim();
+              if (!unquoted) return '';
+              if (!isQuoted) {
+                const resolvedLit = resolveDeclaredVarLiteral(unquoted);
+                if (resolvedLit) return resolvedLit;
+              }
+              return unquoted;
+            })
+            .filter(Boolean)
+        : [];
+      const queueToken = queueTokens[0] || '';
+      const queuePrio = queueCmd && queueCmd[3] ? parseInt(queueCmd[3], 10) : undefined;
 
       const annKind = annCmd?.[1]?.toLowerCase().replace(/\s+/g, ' ');
       const annVal = annCmd ? (annCmd[2] || annCmd[3] || annCmd[4] || '').trim() : '';
@@ -3795,6 +4456,7 @@ function parseAaccScriptBlocks(
       if (
         waitSecondsVal !== undefined &&
         !execCmd &&
+        !gotoCmd &&
         !queueCmd &&
         !routeCmd &&
         !ivrTreatmentCmd &&
@@ -3818,9 +4480,10 @@ function parseAaccScriptBlocks(
       }
 
       if (
-        execCmd ||
+        execTarget ||
+        gotoExternalTarget ||
         isLocalSectionCall ||
-        queueCmd ||
+        queueTokens.length > 0 ||
         routeCmd ||
         ivrTreatmentCmd ||
         annCmd ||
@@ -3846,24 +4509,27 @@ function parseAaccScriptBlocks(
         const activeIntrinsics = getActiveIntrinsics();
         const valDisplay = valueNumbers.length > 0 ? valueNumbers.join(', ') : '';
 
+        const formatQueueStepLabel = (qTok: string): string =>
+          queueKind === 'network-skillset'
+            ? `Network-Skillset: ${qTok}`
+            : queueKind === 'agent'
+            ? `Agent-Queue: ${qTok}`
+            : `Queue: ${qTok}`;
+
         const stepLabel = routeEndCmd
           ? 'Anruf-Ende (Route End)'
           : disconnectCmd
           ? 'Anruf beenden (Disconnect)'
-          : isLocalSectionCall
-          ? `Zyklus / Abschnitt → ${rawExecToken}`
+          : isLocalSectionCall && localSectionJumpTarget
+          ? `Zyklus / Abschnitt → ${localSectionJumpTarget}`
           : isFaxRoute && !execTarget
           ? `Fax-Routing (4-stellig)${valDisplay ? `: ${valDisplay}` : ''}`
-          : execTarget
-          ? `${valDisplay ? `VALUE ${valDisplay} → ` : 'Subskript: '}${execTarget}`
-          : queueCmd
-          ? queueKind === 'network-skillset'
-            ? `Network-Skillset: ${queueToken}`
-            : queueKind === 'agent'
-            ? `Agent-Queue: ${queueToken}`
-            : `Queue: ${queueToken}`
+          : execTarget || gotoExternalTarget
+          ? `${valDisplay ? `VALUE ${valDisplay} → ` : 'Subskript: '}${execTarget || gotoExternalTarget}`
+          : queueTokens.length > 0
+          ? formatQueueStepLabel(queueToken)
           : routeCmd
-          ? `Route Call → ${routeTarget || rawRouteToken}`
+          ? `Route Call → ${routeTarget || effectiveRouteToken}`
           : externalIntegration?.isFlixcheck
           ? `FlixCheck: ${externalIntegration.actionLabel}`
           : hdxAction
@@ -3910,6 +4576,7 @@ function parseAaccScriptBlocks(
           queueTarget: queueToken || undefined,
           queueKind,
           isExternalRouteCall: isExternalRouteCall || undefined,
+          isGotoFallback: isGotoFallback || undefined,
           skillsetPriority: queuePrio,
           waitSeconds: waitSecondsVal,
           isDisconnect: disconnectCmd || undefined,
@@ -3919,7 +4586,7 @@ function parseAaccScriptBlocks(
           treatmentInfo,
           hdxAction,
           externalIntegration,
-          loopSectionTarget: isLocalSectionCall ? rawExecToken : undefined,
+          loopSectionTarget: isLocalSectionCall ? localSectionJumpTarget : undefined,
           intrinsicMetrics: activeIntrinsics.length > 0 ? activeIntrinsics : undefined,
           schedule: detectedTime.schedule,
           holiday: detectedTime.holiday,
@@ -3935,6 +4602,39 @@ function parseAaccScriptBlocks(
         };
         rules.push(createdRule);
         ruleTracking.lastCreated = createdRule;
+
+        // Multi-skillset QUEUE TO: create an individual Queue reference rule for each additional skillset
+        for (let qIdx = 1; qIdx < queueTokens.length; qIdx++) {
+          const extraQueueToken = queueTokens[qIdx];
+          const extraPrio = Math.max(
+            rules.reduce((mx, r) => Math.max(mx, r.prio || 0), 19) + 1,
+            ruleCounter + 20
+          );
+          const extraQueueRule: ScriptRule = {
+            id: `${scriptNumber}-${ruleCounter++}`,
+            prio: extraPrio,
+            stepName: formatQueueStepLabel(extraQueueToken),
+            sourceNumber: scriptNumber,
+            queueTarget: extraQueueToken,
+            queueKind,
+            skillsetPriority: queuePrio,
+            sectionName: currentSection,
+            eventName: currentEvent,
+            intrinsicMetrics: activeIntrinsics.length > 0 ? activeIntrinsics : undefined,
+            schedule: detectedTime.schedule,
+            holiday: detectedTime.holiday,
+            condition: combinedCondition,
+            choices: [],
+            rawLine,
+            organizationName: orga.organizationName,
+            orgaCode: orga.orgaCode,
+            brandName: orga.brandName,
+            srcRouteNumber: orga.srcRouteNumber,
+          };
+          rules.push(extraQueueRule);
+          ruleTracking.lastCreated = extraQueueRule;
+        }
+
         if (collectCmd) {
           ruleTracking.lastCollect = createdRule;
         } else if (!caseLabel && valueNumbers.length === 0) {
@@ -3947,6 +4647,16 @@ function parseAaccScriptBlocks(
         return true;
       }
 
+      // Suppress fallback to free-text heuristics if an explicit EXECUTE/CALL/GOTO/ROUTE
+      // statement intentionally targeted a dynamic OCL variable or stopword
+      if (
+        (execCmd && !execTarget) ||
+        (gotoCmd && !gotoExternalTarget && !isLocalSectionCall) ||
+        isNonExecMessageStmt
+      ) {
+        return true;
+      }
+
       return false;
     };
 
@@ -3954,16 +4664,50 @@ function parseAaccScriptBlocks(
       const t = line.trim();
       if (!t) continue;
 
-      // Skip CONST / VAR declaration blocks cleanly without creating bogus rules
-      if (/^(?:const|var)\b/i.test(t) && !/\bexecute\b|\bqueue\b|\broute\b/i.test(t)) {
-        inDeclBlock = !/\bend\s+(?:const|var)\b/i.test(t);
+      // Skip CONST / VAR / GLOBAL declaration blocks cleanly while tracking declared vars & literals
+      if (/^(?:const|var|global)\b/i.test(t) && !/\bexecute\b|\bqueue\b|\broute\b/i.test(t)) {
+        const restAfterDecl = t
+          .replace(/^(?:const|var|global)(?:\s+(?:var|const))?\b/i, '')
+          .replace(/\bend\s+(?:const|var|global)\b/gi, '')
+          .trim();
+        if (!restAfterDecl && !/\bend\s+(?:const|var|global)\b/i.test(t)) {
+          inDeclBlock = true;
+        } else if (restAfterDecl) {
+          const declEq = restAfterDecl.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:=)\s*(.+)$/);
+          if (declEq) {
+            recordAssignVars(`SET ${declEq[1]} = ${declEq[2]}`);
+          } else {
+            const declTok = restAfterDecl.match(/^([A-Za-z_][A-Za-z0-9_]*)\b/);
+            if (declTok) declaredVars.add(declTok[1].toLowerCase());
+          }
+        }
         continue;
       }
-      if (/^end\s+(?:const|var)\b/i.test(t)) {
+      if (/^end\s+(?:const|var|global)\b/i.test(t)) {
         inDeclBlock = false;
         continue;
       }
       if (inDeclBlock) {
+        const declEq = t.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|:=)\s*(.+)$/);
+        if (declEq) {
+          recordAssignVars(`SET ${declEq[1]} = ${declEq[2]}`);
+        } else {
+          const declTok = t.match(/^([A-Za-z_][A-Za-z0-9_]*)\b/);
+          if (declTok) declaredVars.add(declTok[1].toLowerCase());
+        }
+        continue;
+      }
+
+      // Handle standalone `SET <var> = <expr>` lines (with optional trailing `;` actions)
+      if (/^set\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:=|:=)/i.test(t)) {
+        const stmts = splitOclStatementsOutsideQuotes(t);
+        for (const stmt of stmts) {
+          if (/^set\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:=|:=)/i.test(stmt)) {
+            recordAssignVars(stmt);
+          } else {
+            processActionSegment(stmt, t);
+          }
+        }
         continue;
       }
 
@@ -4084,106 +4828,77 @@ function parseAaccScriptBlocks(
         continue;
       }
 
-      // Handle ELSE / ELSE IF (with optional inline action on same line)
-      if (/^else\b(?:\s+if\b(.*?)\bthen\b)?/i.test(t)) {
-        ruleTracking.lastCollect = null;
-        const elseIfMatch = t.match(/^else\s+if\s+(.+?)\s+then(?:\s+(.*))?$/i);
-        const topFrame = conditionStack[conditionStack.length - 1];
-        const prevFrame = topFrame && topFrame.kind === 'if' ? conditionStack.pop() : undefined;
+      // Handle IF ... THEN ... [ELSE ...] and ELSE [IF ... THEN ...] cleanly via quote-safe clause splitter
+      if (/^(?:else|if)\b/i.test(t)) {
+        const clauses = splitInlineIfThenElseClauses(t);
+        if (clauses.length > 0 && clauses[0].kind !== 'plain') {
+          ruleTracking.lastCollect = null;
+          let prevPoppedFrame: ConditionFrame | undefined;
 
-        if (elseIfMatch) {
-          const condExpr = formatReadableOclCondition(elseIfMatch[1]);
-          const inlineBody = elseIfMatch[2]?.trim() || '';
-          const hasEndIf = /\bend\s*if\b|\bendif\b/i.test(inlineBody);
-          const cleanInline = inlineBody.replace(/\b(?:end\s*if|endif)\b/gi, '').trim();
-          let orga: AaccOrgaContext = detectOrgaFromText(condExpr);
-          if (cleanInline) {
-            orga = applyAssignmentsToOrga(cleanInline, orga);
-          }
-          const frame: ConditionFrame = {
-            kind: 'if',
-            condText: condExpr,
-            orga,
-            isFaxCond: /\bfax/i.test(condExpr),
-            hadInlineRules: false,
-            intrinsics: extractCcmaIntrinsicsFromText(elseIfMatch[1]),
-          };
-          conditionStack.push(frame);
-          if (cleanInline) {
-            const actionPart = cleanInline
-              .replace(/\bassign\s+.+?\s+to\s+[A-Za-z0-9_]+/gi, '')
-              .trim();
-            if (actionPart) {
-              processActionSegment(actionPart, t);
+          for (const clause of clauses) {
+            if (clause.kind === 'else-if-then' || clause.kind === 'else') {
+              const topFrame = conditionStack[conditionStack.length - 1];
+              if (topFrame && topFrame.kind === 'if') {
+                prevPoppedFrame = conditionStack.pop();
+              }
+            }
+
+            if (clause.kind === 'if-then' || clause.kind === 'else-if-then') {
+              const rawCond = clause.condition || '';
+              const condExpr = formatReadableOclCondition(rawCond);
+              let orga: AaccOrgaContext = detectOrgaFromText(condExpr);
+              if (clause.action) {
+                orga = applyAssignmentsToOrga(clause.action, orga);
+              }
+              conditionStack.push({
+                kind: 'if',
+                condText: condExpr,
+                orga,
+                isFaxCond: /\bfax/i.test(condExpr),
+                hadInlineRules: false,
+                intrinsics: extractCcmaIntrinsicsFromText(rawCond),
+              });
+            } else if (clause.kind === 'else') {
+              let orga: AaccOrgaContext = {};
+              if (clause.action) {
+                orga = applyAssignmentsToOrga(clause.action, orga);
+              }
+              conditionStack.push({
+                kind: 'if',
+                condText: prevPoppedFrame
+                  ? `Sonst (nicht: ${prevPoppedFrame.condText})`
+                  : 'Sonst (ELSE)',
+                orga,
+                isFaxCond: false,
+                hadInlineRules: false,
+                intrinsics: [],
+              });
+            }
+
+            if (clause.action) {
+              const stmts = splitOclStatementsOutsideQuotes(clause.action);
+              for (const stmt of stmts) {
+                const actionPart = stmt
+                  .replace(
+                    /\bassign\s+[^\r\n;]+?\s+to\s+[A-Za-z0-9_]+(?=\s*(?:assign\b|end\s*if\b|endif\b|else\b|execute\b|call\b|subscript\b|goto\b|give\b|queue\b|route\b|transfer\b|disconnect\b|drop\b|wait\b|;|$))/gi,
+                    ' '
+                  )
+                  .trim();
+                if (actionPart) {
+                  processActionSegment(actionPart, t);
+                }
+              }
+            }
+
+            if (clause.closesIf) {
+              const topFrame = conditionStack[conditionStack.length - 1];
+              if (topFrame && topFrame.kind === 'if') {
+                conditionStack.pop();
+              }
             }
           }
-          if (hasEndIf) {
-            conditionStack.pop();
-          }
-          continue;
-        } else {
-          const inlineElseBody = t.replace(/^else\b/i, '').trim();
-          const hasEndIf = /\bend\s*if\b|\bendif\b/i.test(inlineElseBody);
-          const cleanInline = inlineElseBody.replace(/\b(?:end\s*if|endif)\b/gi, '').trim();
-          conditionStack.push({
-            kind: 'if',
-            condText: prevFrame ? `Sonst (nicht: ${prevFrame.condText})` : 'Sonst (ELSE)',
-            orga: {},
-            isFaxCond: false,
-            hadInlineRules: false,
-            intrinsics: [],
-          });
-          if (cleanInline) {
-            const actionPart = cleanInline
-              .replace(/\bassign\s+.+?\s+to\s+[A-Za-z0-9_]+/gi, '')
-              .trim();
-            if (actionPart) {
-              processActionSegment(actionPart, t);
-            }
-          }
-          if (hasEndIf) {
-            conditionStack.pop();
-          }
           continue;
         }
-      }
-
-      // Handle IF ... THEN (including IF NOT OUT OF SERVICE and inline assign/actions)
-      const ifThenMatch = t.match(/^if\s+(.+?)\s+then(?:\s+(.*))?$/i);
-      if (ifThenMatch) {
-        ruleTracking.lastCollect = null;
-        const condExpr = formatReadableOclCondition(ifThenMatch[1]);
-        const inlineBody = ifThenMatch[2]?.trim() || '';
-        const hasEndIf = /\bend\s*if\b|\bendif\b/i.test(inlineBody);
-        const cleanInline = inlineBody.replace(/\b(?:end\s*if|endif)\b/gi, '').trim();
-
-        let orga: AaccOrgaContext = detectOrgaFromText(condExpr);
-        if (cleanInline) {
-          orga = applyAssignmentsToOrga(cleanInline, orga);
-        }
-
-        const frame: ConditionFrame = {
-          kind: 'if',
-          condText: condExpr,
-          orga,
-          isFaxCond: /\bfax/i.test(condExpr),
-          hadInlineRules: false,
-          intrinsics: extractCcmaIntrinsicsFromText(ifThenMatch[1]),
-        };
-        conditionStack.push(frame);
-
-        if (cleanInline) {
-          const actionPart = cleanInline
-            .replace(/\bassign\s+.+?\s+to\s+[A-Za-z0-9_]+/gi, '')
-            .trim();
-          if (actionPart) {
-            processActionSegment(actionPart, t);
-          }
-        }
-        if (hasEndIf) {
-          conditionStack.pop();
-        }
-        continue;
       }
 
       // Handle standalone `assign ... to ...` (or `assign var = val`) lines inside/outside IF blocks
@@ -4592,6 +5307,7 @@ export function parseScriptTextBundle(
     sourceFilename?: string;
     origin?: ScriptOrigin;
     isMasterHint?: boolean;
+    knownScriptKeys?: ReadonlySet<string>;
   }
 ): ScriptModule[] {
   const cleanedRawText = stripScriptCommentsAndNoise(rawText);
@@ -5109,6 +5825,7 @@ export function parseCallflowTextWithFallback(
     sourceFilename?: string;
     origin?: ScriptOrigin;
     isMasterHint?: boolean;
+    knownScriptKeys?: ReadonlySet<string>;
   }
 ): ScriptModule[] {
   const trimmed = rawText.trim();
@@ -6008,16 +6725,40 @@ export function buildScriptWorkspace(
 
       const sortedRules = [...mod.rules]
         .sort((a, b) => a.prio - b.prio)
-        .map((r) => ({
-          ...r,
-          targetNumber: r.targetNumber ? resolveCanonicalTarget(r.targetNumber) : undefined,
-          choices: r.choices
-            .map((c) => {
-              const resolvedChoiceTarget = resolveCanonicalTarget(c.targetNumber);
-              return resolvedChoiceTarget ? { ...c, targetNumber: resolvedChoiceTarget } : null;
-            })
-            .filter((c): c is ScriptChoiceOption => Boolean(c)),
-        }));
+        .map((r) => {
+          // GOTO fallback verification: only keep as external script call if target exists in the loaded script pool;
+          // otherwise treat as an internal/unresolved section jump so it never creates a false missing script.
+          if (r.isGotoFallback && r.targetNumber) {
+            const gotoKey = canonicalScriptMatchKey(r.targetNumber);
+            const matchedKnown = knownKeyToDisplay.get(gotoKey);
+            if (!matchedKnown) {
+              return {
+                ...r,
+                targetNumber: undefined,
+                loopSectionTarget: r.loopSectionTarget || r.targetNumber,
+                stepName: r.stepName.startsWith('Subskript:')
+                  ? `Zyklus / Abschnitt → ${r.targetNumber}`
+                  : r.stepName,
+                choices: r.choices
+                  .map((c) => {
+                    const resolvedChoiceTarget = resolveCanonicalTarget(c.targetNumber);
+                    return resolvedChoiceTarget ? { ...c, targetNumber: resolvedChoiceTarget } : null;
+                  })
+                  .filter((c): c is ScriptChoiceOption => Boolean(c)),
+              };
+            }
+          }
+          return {
+            ...r,
+            targetNumber: r.targetNumber ? resolveCanonicalTarget(r.targetNumber) : undefined,
+            choices: r.choices
+              .map((c) => {
+                const resolvedChoiceTarget = resolveCanonicalTarget(c.targetNumber);
+                return resolvedChoiceTarget ? { ...c, targetNumber: resolvedChoiceTarget } : null;
+              })
+              .filter((c): c is ScriptChoiceOption => Boolean(c)),
+          };
+        });
 
       const recordTarget = (rawTarget: string, isExternalRoute = false) => {
         const clean = normalizeScriptRef(rawTarget);
@@ -6026,32 +6767,32 @@ export function buildScriptWorkspace(
         const canonicalDisplay = knownKeyToDisplay.get(rawKey) || clean;
         const tKey = canonicalScriptMatchKey(canonicalDisplay);
         if (ignoredKeySet.has(tKey) || isDeactivatedSentinelTarget(canonicalDisplay)) return;
-        if (!knownKeyToDisplay.has(tKey) && !isValidScriptRef(canonicalDisplay)) return;
+
+        // Enforce strict 5-step validation & classification priority
+        const classification = classifyExtractedTarget(canonicalDisplay, {
+          knownScriptKeys: knownKeyToDisplay,
+          isAvayaRouteCmd: isExternalRoute,
+          manualWaypointKeys: manualWaypointKeySet,
+          externalEndpointKeys: externalKeySet,
+          treatUnresolvedAsEndpoint,
+        });
+
+        if (classification.category === 'ignored') return;
 
         if (tKey !== selfKey && (!selfAliasKey || tKey !== selfAliasKey)) {
           outMap.set(tKey, canonicalDisplay);
         }
 
-        if (!knownKeyToDisplay.has(tKey) && !externalKeySet.has(tKey)) {
-          // Priority:
-          // 1. Manual or auto-detected Avaya-only / FlixCheck / Menu / Flow / Numeric / Transfer-CDN waypoint
-          //    -> never flagged as a missing .s script!
-          // 2. Sonderansagen / announcement endpoints, dynamic Avaya variables, audio/skillset targets -> external endpoint
-          // 3. Everything else (named script genuinely absent from import) -> missing target
-          if (
-            manualWaypointKeySet.has(tKey) ||
-            Boolean(classifyAvayaWaypointTarget(canonicalDisplay, { isAvayaRouteCmd: isExternalRoute }))
-          ) {
-            missingByKey.delete(tKey);
-          } else if (
-            isAnnouncementOrEndpointTargetName(canonicalDisplay) ||
-            treatUnresolvedAsEndpoint
-          ) {
-            autoExternalByKey.set(tKey, canonicalDisplay);
-            externalKeySet.add(tKey);
-          } else {
-            missingByKey.set(tKey, canonicalDisplay);
-          }
+        if (classification.category === 'known-script') {
+          return;
+        }
+        if (classification.category === 'avaya-waypoint') {
+          missingByKey.delete(tKey);
+        } else if (classification.category === 'external-endpoint') {
+          autoExternalByKey.set(tKey, canonicalDisplay);
+          externalKeySet.add(tKey);
+        } else if (classification.category === 'missing-script') {
+          missingByKey.set(tKey, canonicalDisplay);
         }
       };
 

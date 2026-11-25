@@ -25,6 +25,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  ShieldCheck,
   Sliders,
   Upload,
   X,
@@ -67,6 +68,7 @@ import {
   FolderScriptPool,
 } from '../utils/callflowFileImporter';
 import { SearchableScriptDropdown } from './SearchableScriptDropdown';
+import { CallflowGraphAuditPanel } from './CallflowGraphAuditPanel';
 
 interface CallflowInspectorProps {
   graph: CallflowGraph;
@@ -214,7 +216,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
 
   // Top-Down Masterscript Checklist Wizard & Sync Map state
   const [inspectorTab, setInspectorTab] = useState<
-    'overview' | 'schedules' | 'health' | 'registry' | 'matrix'
+    'overview' | 'schedules' | 'health' | 'audit' | 'registry' | 'matrix'
   >('overview');
   const [scheduleFilter, setScheduleFilter] = useState<
     'all' | 'with-hours' | 'holiday' | 'without-hours'
@@ -1139,7 +1141,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-5 gap-1 px-2.5 py-2 border-b border-slate-800 bg-slate-950/90 shrink-0">
+        <div className="grid grid-cols-6 gap-1 px-2 py-2 border-b border-slate-800 bg-slate-950/90 shrink-0">
           <button
             type="button"
             onClick={() => setInspectorTab('overview')}
@@ -1223,6 +1225,24 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                 : healthInfoCount > 0
                 ? `${healthInfoCount} Hinw.`
                 : '0 Fehler'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setInspectorTab('audit')}
+            className={`px-1 py-1.5 rounded-lg text-[11px] font-medium transition-colors flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+              inspectorTab === 'audit'
+                ? 'bg-emerald-600/25 text-emerald-200 border border-emerald-500/40'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent'
+            }`}
+          >
+            <div className="flex items-center gap-1">
+              <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Audit</span>
+            </div>
+            <span className="text-[10px] font-mono tabular-nums text-emerald-300/90">
+              JSON/MMD
             </span>
           </button>
 
@@ -1918,6 +1938,15 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
               </>
             )}
           </section>
+        )}
+
+        {/* TAB AUDIT (Free Mode) or STEP 3 (Guided Mode): 100% In-Memory Graph-Audit & Architektur-Export */}
+        {((workspaceMode === 'free' && inspectorTab === 'audit') ||
+          (workspaceMode === 'guided' && guidedStep === 3)) && (
+          <CallflowGraphAuditPanel
+            workspace={moduleOnlyWorkspace}
+            onFocusScript={(scriptNumber) => jumpToScriptInInspector(scriptNumber, false, true)}
+          />
         )}
 
         {/* TAB 3: Zentrales Ressourcen- & Variablen-Register (Free Mode or Guided Step 3) */}

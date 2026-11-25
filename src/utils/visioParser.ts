@@ -34,37 +34,57 @@ function cleanVisioText(raw: string): string {
     .trim();
 }
 
-function extractFirstScriptTargetRef(text: string): string | undefined {
+function stripUnrelatedQuotedStrings(text: string): string {
+  return text.replace(
+    /(["'])(?:\\.|[^"'\\])*\1/g,
+    (quoted, _q, offset: number, full: string) => {
+      const before = full.slice(0, offset);
+      if (
+        /(?:\b(?:wohin|ziel|sprung|script|skript|subscript|execute(?:\s+script)?|call(?:\s+script)?|goto|schaltung|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|weiter(?:leitung)?|nach|cdn)\s*[:=]?\s*|(?:->|=>)\s*)$/i.test(
+          before
+        )
+      ) {
+        return quoted;
+      }
+      return ' ';
+    }
+  );
+}
+
+export function extractFirstScriptTargetRef(text: string): string | undefined {
   // Ignore dates, clock times, durations/units, and priority numbers before extracting 3-to-6-digit script/CDN IDs
   const withoutDates = text
     .replace(/\b\d{1,2}\.\d{1,2}\.\d{2,4}\b/g, ' ')
     .replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, ' ')
     .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, ' ')
-    .replace(/\b\d+\s*(?:ms|sek(?:unden)?|sec|min(?:uten)?|std)\b/gi, ' ')
+    .replace(/\b\d+\s*(?:ms|sek(?:unden)?|sec(?:onds?)?|min(?:uten|utes?)?|std)\b/gi, ' ')
     .replace(/\b\d+(?:[.,]\d+)?\s*%/g, ' ')
     .replace(/\b\d+s\b/gi, ' ')
     .replace(/\bprio(?:rit[aä]t)?\s*[:=]?\s*\d+\b/gi, ' ')
     .trim();
 
-  const withoutQuoted = withoutDates.replace(/(["'])(?:\\.|[^"'\\])*\1/g, ' ');
+  const contextSafeText = stripUnrelatedQuotedStrings(withoutDates);
   const explicitNamed =
-    withoutQuoted.match(
-      /\b(?:wohin|ziel|sprung|script|skript|subscript|execute(?:\s+script)?|call\s+script|goto|schaltung|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|cdn)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
+    contextSafeText.match(
+      /\b(?:wohin|ziel|sprung|script|skript|subscript|execute(?:\s+script)?|call\s+script|goto|schaltung|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|cdn)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b)/i
     ) ||
-    withoutQuoted.match(
-      /^\s*call\s+["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
+    contextSafeText.match(
+      /^\s*call\s+(?:"([^"]+)"|'([^']+)'|(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b)/i
     ) ||
-    withoutDates.match(
-      /(?:->|=>)\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/
+    contextSafeText.match(
+      /(?:->|=>)\s*(?:"([^"]+)"|'([^']+)'|(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b)/i
     );
-  if (explicitNamed && isValidScriptRef(explicitNamed[1])) {
-    return normalizeScriptRef(explicitNamed[1]);
+  const explicitToken = explicitNamed
+    ? (explicitNamed[1] || explicitNamed[2] || explicitNamed[3] || '').trim()
+    : '';
+  if (explicitToken && isValidScriptRef(explicitToken)) {
+    return normalizeScriptRef(explicitToken);
   }
 
-  const numMatch = withoutDates.match(/\b(\d{3,6})\b/);
+  const numMatch = contextSafeText.match(/\b(\d{3,6})\b/);
   if (numMatch) return numMatch[1];
 
-  const namedScriptToken = withoutDates.match(
+  const namedScriptToken = contextSafeText.match(
     /\b([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
   );
   if (namedScriptToken && isPlausibleNamedScriptTarget(namedScriptToken[1])) {
@@ -72,11 +92,12 @@ function extractFirstScriptTargetRef(text: string): string | undefined {
   }
 
   // Standalone free script identifier on a Visio box (e.g. `Main`, `Schaltung1`, `Vertrieb_VIP`)
+  const trimmedOriginal = text.trim();
   if (
-    /^[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,}$/.test(withoutDates) &&
-    isPlausibleNamedScriptTarget(withoutDates)
+    /^[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]{2,}$/.test(trimmedOriginal) &&
+    isPlausibleNamedScriptTarget(trimmedOriginal)
   ) {
-    return normalizeScriptRef(withoutDates);
+    return normalizeScriptRef(trimmedOriginal);
   }
 
   return undefined;
@@ -310,23 +331,29 @@ function convertExtractedShapesToModule(params: {
 
     // Also inspect shape's own text for explicit jump/Sprung/CDN/Target 3-to-6-digit numbers or named scripts
     if (!targetNumber) {
-      const txtNoQuoted = txt.replace(/(["'])(?:\\.|[^"'\\])*\1/g, ' ');
+      const txtContextSafe = stripUnrelatedQuotedStrings(txt);
       const explicitJump =
-        txtNoQuoted.match(
-          /\b(?:wohin|ziel|sprung|cdn|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|weiter(?:leitung)?|nach|execute(?:\s+script)?|call\s+script|script|skript)\s*[:=]?\s*["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
+        txtContextSafe.match(
+          /\b(?:wohin|ziel|sprung|cdn|transfer(?:\s+to)?|route(?:\s+call)?(?:\s+to)?|weiter(?:leitung)?|nach|execute(?:\s+script)?|call\s+script|script|skript)\s*[:=]?\s*(?:"([^"]+)"|'([^']+)'|(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b)/i
         ) ||
-        txtNoQuoted.match(
-          /^\s*call\s+["']?(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})["']?\b/i
+        txtContextSafe.match(
+          /^\s*call\s+(?:"([^"]+)"|'([^']+)'|(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b)/i
         ) ||
-        txt.match(
+        txtContextSafe.match(
+          /(?:->|=>)\s*(?:"([^"]+)"|'([^']+)'|(\d{3,6}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]{2,})\b)/i
+        ) ||
+        txtContextSafe.match(
           /\b([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_-]*(?:script|schaltung)[A-Za-z0-9ÄÖÜäöüß_-]*)\b/i
         );
+      const jumpToken = explicitJump
+        ? (explicitJump[1] || explicitJump[2] || explicitJump[3] || '').trim()
+        : '';
       if (
-        explicitJump &&
-        canonicalScriptMatchKey(explicitJump[1]) !== selfKey &&
-        isValidScriptRef(explicitJump[1])
+        jumpToken &&
+        canonicalScriptMatchKey(jumpToken) !== selfKey &&
+        isValidScriptRef(jumpToken)
       ) {
-        targetNumber = normalizeScriptRef(explicitJump[1]);
+        targetNumber = normalizeScriptRef(jumpToken);
         outNumbers.add(targetNumber);
       }
     }
