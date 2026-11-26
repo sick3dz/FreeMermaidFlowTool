@@ -66,6 +66,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
   onSelectDetailScript,
 }) => {
   const [showYamlPreview, setShowYamlPreview] = useState(false);
+  const [previewMode, setPreviewMode] = useState<'genesys' | 'avaya'>('genesys');
   const [showWarnings, setShowWarnings] = useState(false);
   const [showValidationPanel, setShowValidationPanel] = useState(false);
   const [isEditingYaml, setIsEditingYaml] = useState(false);
@@ -107,6 +108,23 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
     return translation.scripts.flatMap((s) =>
       s.warnings.map((w) => ({
         ...w,
+        fileName: s.fileName,
+        scriptNumber: s.scriptNumber,
+      }))
+    );
+  }, [isMasterView, effectiveScript, translation.scripts]);
+
+  const displayedIrFindings = useMemo(() => {
+    if (!isMasterView && effectiveScript) {
+      return (effectiveScript.flowIR?.findings || []).map((f) => ({
+        ...f,
+        fileName: effectiveScript.fileName,
+        scriptNumber: effectiveScript.scriptNumber,
+      }));
+    }
+    return translation.scripts.flatMap((s) =>
+      (s.flowIR?.findings || []).map((f) => ({
+        ...f,
         fileName: s.fileName,
         scriptNumber: s.scriptNumber,
       }))
@@ -191,6 +209,19 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
   const activeYamlContent =
     isEditingYaml && effectiveScript ? customYamlText : effectiveScript?.archyYaml || '';
 
+  const activeModeReport = useMemo(() => {
+    if (!effectiveScript) return null;
+    return previewMode === 'avaya' ? effectiveScript.avayaView : effectiveScript.genesysView;
+  }, [effectiveScript, previewMode]);
+
+  const activePreviewCode = useMemo(() => {
+    if (!effectiveScript) return '';
+    if (previewMode === 'avaya') {
+      return effectiveScript.avayaView?.ergebnisText || '';
+    }
+    return activeYamlContent;
+  }, [effectiveScript, previewMode, activeYamlContent]);
+
   const handleDownloadSingleYaml = () => {
     if (!effectiveScript) return;
     const blob = new Blob([activeYamlContent], {
@@ -200,8 +231,8 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
   };
 
   const handleDownloadMigrationGraphJson = () => {
-    if (!effectiveScript?.migrationGraph) return;
-    const blob = new Blob([JSON.stringify(effectiveScript.migrationGraph, null, 2)], {
+    if (!effectiveScript?.flowIR) return;
+    const blob = new Blob([JSON.stringify({ flowIR: effectiveScript.flowIR }, null, 2)], {
       type: 'application/json;charset=utf-8',
     });
     downloadBlob(blob, `${effectiveScript.cleanName}.graph.json`);
@@ -221,7 +252,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
   const handleCopyYaml = async () => {
     if (!effectiveScript) return;
     try {
-      await navigator.clipboard.writeText(activeYamlContent);
+      await navigator.clipboard.writeText(activePreviewCode);
       setCopiedYaml(true);
       setTimeout(() => setCopiedYaml(false), 2000);
     } catch {
@@ -287,7 +318,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             onClick={() => setShowValidationPanel((v) => !v)}
             title={
               displayedValidation.isValid
-                ? 'Archy-YAML Vollprüfung bestanden (Schema-Keys, Einrückung, RefIds & Variablen) — klicken für Details'
+                ? 'Archy-YAML & flowIR v1.1 Vollprüfung — klicken für Details & offene Migrationsfragen'
                 : `${displayedValidation.errorCount} Archy-YAML Schema-Fehler gefunden — klicken für Fehlerdetails (Export bleibt möglich)`
             }
             className={`px-2 py-0.5 rounded border text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap tabular-nums ${
@@ -305,7 +336,10 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             ) : (
               <XCircle className="w-3 h-3 text-rose-400 shrink-0" />
             )}
-            <span>{validationBadgeLabel}</span>
+            <span>
+              {validationBadgeLabel}
+              {displayedIrFindings.length > 0 ? ` · ${displayedIrFindings.length} IR` : ''}
+            </span>
           </button>
 
           {isMasterView ? (
@@ -339,7 +373,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
           )}
         </div>
 
-        {/* Right: Archy YAML Preview & Downloads (Export remains always enabled) */}
+        {/* Right: Archy YAML / flowIR Preview & Downloads (Export remains always enabled) */}
         <div className="flex flex-wrap items-center gap-1.5 shrink-0">
           <button
             type="button"
@@ -351,7 +385,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             }`}
           >
             <Code2 className="w-3.5 h-3.5 text-orange-400 shrink-0" />
-            <span>{showYamlPreview ? 'Archy YAML schließen' : 'Archy YAML'}</span>
+            <span>{showYamlPreview ? 'YAML / IR schließen' : 'Archy YAML / IR'}</span>
           </button>
 
           {effectiveScript && (
@@ -376,11 +410,11 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
               <button
                 type="button"
                 onClick={handleDownloadMigrationGraphJson}
-                title={`Ebene-1 Neutraler Migrations-Graph (${effectiveScript.cleanName}.graph.json) als JSON herunterladen`}
+                title={`Kanonische flowIR v1.1 Zwischenrepräsentation (${effectiveScript.cleanName}.graph.json) als JSON herunterladen`}
                 className="px-2 py-1 rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
               >
                 <GitBranch className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                <span>Graph (.json)</span>
+                <span>flowIR (.json)</span>
               </button>
             </>
           )}
@@ -391,7 +425,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             disabled={isExportingZip}
             title={
               translation.summary.yamlErrorCount === 0
-                ? 'Alle generierten Archy-YAML-Dateien + Readiness-Übersicht als ZIP aus dem RAM herunterladen'
+                ? 'Alle generierten Archy-YAML-Dateien + flowIR v1.1 + Readiness-Übersicht als ZIP aus dem RAM herunterladen'
                 : `Hinweis: ${translation.summary.yamlErrorCount} Schema-Fehler im Workspace — ZIP-Export bleibt trotzdem möglich`
             }
             className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-[11px] font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60"
@@ -406,14 +440,14 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
         </div>
       </div>
 
-      {/* Expandable Archy YAML Validation Panel */}
+      {/* Expandable Archy YAML + flowIR v1.1 Validation Panel */}
       {showValidationPanel && (
-        <div className="px-3 py-2 border-t border-slate-800 bg-slate-900/95 max-h-52 overflow-y-auto space-y-1.5">
+        <div className="px-3 py-2 border-t border-slate-800 bg-slate-900/95 max-h-60 overflow-y-auto space-y-1.5">
           <div className="flex flex-wrap items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-wide pb-0.5">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className={displayedValidation.isValid ? 'text-emerald-300' : 'text-rose-300'}>
-                Archy-YAML Vollprüfung ({displayedValidation.errorCount} Fehler ·{' '}
-                {displayedValidation.warningCount} Hinweise)
+                Archy-YAML &amp; flowIR v1.1 Prüfung ({displayedValidation.errorCount} Fehler ·{' '}
+                {displayedValidation.warningCount} YAML-Hinweise · {displayedIrFindings.length} IR-Findings)
               </span>
               {displayedValidation.stats && (
                 <span className="font-mono text-slate-400 normal-case font-normal">
@@ -423,6 +457,9 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                   {!isMasterView && effectiveScript?.migrationGraph && (
                     <>
                       {' '}· {effectiveScript.migrationGraph.diagnostics.branchNodeCount} Branches
+                      {effectiveScript.migrationGraph.diagnostics.inlinedSectionCount > 0
+                        ? ` · ${effectiveScript.migrationGraph.diagnostics.inlinedSectionCount} Sections geinlined`
+                        : ''}
                       {effectiveScript.metrics.prunedDeadPathCount > 0
                         ? ` · ${effectiveScript.metrics.prunedDeadPathCount} Dead Paths bereinigt`
                         : ''}
@@ -441,14 +478,16 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             </button>
           </div>
 
-          {displayedValidation.errors.length === 0 && displayedValidation.warnings.length === 0 && (
-            <div className="flex items-center gap-2 text-[11px] bg-emerald-950/40 border border-emerald-500/35 rounded px-2.5 py-1.5 text-emerald-200">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              <span>
-                Alle Schema-Keys, 2-Space-Einrückungen, RefIds und Variablen-Scopes entsprechen dem verbindlichen Genesys Archy YAML-Schema.
-              </span>
-            </div>
-          )}
+          {displayedValidation.errors.length === 0 &&
+            displayedValidation.warnings.length === 0 &&
+            displayedIrFindings.length === 0 && (
+              <div className="flex items-center gap-2 text-[11px] bg-emerald-950/40 border border-emerald-500/35 rounded px-2.5 py-1.5 text-emerald-200">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>
+                  Alle Schema-Keys, 2-Space-Einrückungen, RefIds, Variablen-Scopes und flowIR-v1.1-Regeln wurden ohne Befund bestanden.
+                </span>
+              </div>
+            )}
 
           {displayedValidation.errors.map((err, idx) => (
             <div
@@ -509,6 +548,56 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
               )}
             </div>
           ))}
+
+          {displayedIrFindings.length > 0 && (
+            <div className="space-y-1 pt-1">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
+                flowIR v1.1 Migrations-Findings &amp; offene Fragen ({displayedIrFindings.length})
+              </div>
+              {displayedIrFindings.map((finding, idx) => {
+                const traceLabel = finding.sourceTrace
+                  ? `${finding.sourceTrace.script}${
+                      finding.sourceTrace.section ? ` · ${finding.sourceTrace.section}` : ''
+                    } · Z.${finding.sourceTrace.lineStart}`
+                  : finding.fileName;
+                const badgeClass =
+                  finding.severity === 'ERROR'
+                    ? 'text-rose-300 border-rose-500/35 bg-rose-950/30'
+                    : finding.severity === 'WARN'
+                    ? 'text-amber-300 border-amber-500/30 bg-amber-950/25'
+                    : 'text-cyan-300 border-cyan-500/30 bg-cyan-950/25';
+                return (
+                  <div
+                    key={`ir-${finding.fileName}-${finding.code}-${finding.nodeId || idx}-${idx}`}
+                    className={`flex items-start justify-between gap-2 text-[11px] border rounded px-2.5 py-1.5 ${badgeClass}`}
+                  >
+                    <div className="min-w-0 space-y-0.5">
+                      <div>
+                        <span className="font-mono font-semibold mr-1.5">
+                          [{finding.code}] {traceLabel}
+                        </span>
+                        <span className="text-slate-100">{finding.message}</span>
+                      </div>
+                      {finding.variableName && (
+                        <div className="text-[10.5px] text-slate-300/85">
+                          Variable: <span className="font-mono">{finding.variableName}</span>
+                        </div>
+                      )}
+                    </div>
+                    {isMasterView && onSelectDetailScript && (
+                      <button
+                        type="button"
+                        onClick={() => onSelectDetailScript(finding.scriptNumber)}
+                        className="text-[10.5px] font-semibold text-cyan-300 hover:text-cyan-200 whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        Flow öffnen →
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -549,46 +638,82 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
         </div>
       )}
 
-      {/* Expandable Archy YAML Drawer with Interactive Live-Validator */}
+      {/* Expandable Dual-Mode Archy YAML / Avaya Mapping (flowIR v1.1) Drawer */}
       {showYamlPreview && effectiveScript && (
         <div className="px-3 py-2.5 border-t border-slate-800 bg-slate-950 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-slate-300">
               <FileCode2 className="w-3.5 h-3.5 text-orange-400 shrink-0" />
-              <span>{effectiveScript.archyFilename}</span>
+              <span>
+                {previewMode === 'genesys'
+                  ? effectiveScript.archyFilename
+                  : `${effectiveScript.cleanName}.flowIR.yaml`}
+              </span>
               <span className="text-slate-500">·</span>
               <span className="text-slate-400">
                 Quelle: {effectiveScript.fileName} ({effectiveScript.metrics.actionCount} Actions)
               </span>
-              {isEditingYaml && (
+              {/* Dual-Mode Toggle: modus=genesys vs modus=avaya */}
+              <div className="inline-flex rounded border border-slate-700 bg-slate-900 p-0.5 font-sans">
+                <button
+                  type="button"
+                  onClick={() => setPreviewMode('genesys')}
+                  className={`px-2 py-0.5 rounded text-[10.5px] font-semibold cursor-pointer transition-colors ${
+                    previewMode === 'genesys'
+                      ? 'bg-orange-600/35 text-orange-100'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Genesys (Archy YAML)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPreviewMode('avaya');
+                    setIsEditingYaml(false);
+                  }}
+                  className={`px-2 py-0.5 rounded text-[10.5px] font-semibold cursor-pointer transition-colors ${
+                    previewMode === 'avaya'
+                      ? 'bg-cyan-600/35 text-cyan-100'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Avaya Mapping (flowIR v1.1)
+                </button>
+              </div>
+              {isEditingYaml && previewMode === 'genesys' && (
                 <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 text-[10px] font-sans font-semibold">
                   Live-Prüfmodus aktiv
                 </span>
               )}
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setIsEditingYaml((v) => !v)}
-                className={`px-2 py-1 rounded border text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors ${
-                  isEditingYaml
-                    ? 'bg-cyan-600/25 border-cyan-400/60 text-cyan-100'
-                    : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200'
-                }`}
-              >
-                <Pencil className="w-3 h-3" />
-                <span>{isEditingYaml ? 'Vorschau-Modus' : 'Live-Prüfen / Bearbeiten'}</span>
-              </button>
-              {isEditingYaml && customYamlText !== effectiveScript.archyYaml && (
+              {previewMode === 'genesys' && (
                 <button
                   type="button"
-                  onClick={handleResetCustomYaml}
-                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+                  onClick={() => setIsEditingYaml((v) => !v)}
+                  className={`px-2 py-1 rounded border text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors ${
+                    isEditingYaml
+                      ? 'bg-cyan-600/25 border-cyan-400/60 text-cyan-100'
+                      : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200'
+                  }`}
                 >
-                  <RotateCcw className="w-3 h-3" />
-                  <span>Zurücksetzen</span>
+                  <Pencil className="w-3 h-3" />
+                  <span>{isEditingYaml ? 'Vorschau-Modus' : 'Live-Prüfen / Bearbeiten'}</span>
                 </button>
               )}
+              {previewMode === 'genesys' &&
+                isEditingYaml &&
+                customYamlText !== effectiveScript.archyYaml && (
+                  <button
+                    type="button"
+                    onClick={handleResetCustomYaml}
+                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Zurücksetzen</span>
+                  </button>
+                )}
               <button
                 type="button"
                 onClick={handleCopyYaml}
@@ -599,7 +724,13 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                 ) : (
                   <Copy className="w-3 h-3" />
                 )}
-                <span>{copiedYaml ? 'Kopiert!' : 'YAML kopieren'}</span>
+                <span>
+                  {copiedYaml
+                    ? 'Kopiert!'
+                    : previewMode === 'avaya'
+                    ? 'flowIR kopieren'
+                    : 'YAML kopieren'}
+                </span>
               </button>
               <button
                 type="button"
@@ -612,7 +743,44 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             </div>
           </div>
 
-          {isEditingYaml ? (
+          {/* Structured 4-Part Migration Summary Strip (Kurzfazit, Offene Punkte, Migrationshinweise) */}
+          {activeModeReport && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-2 text-[11px]">
+              <div className="rounded border border-slate-800 bg-slate-900/75 px-2.5 py-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-0.5">
+                  1. Kurzfazit ({previewMode === 'genesys' ? 'modus=genesys' : 'modus=avaya'})
+                </div>
+                <p className="text-slate-200 leading-snug">{activeModeReport.kurzfazit}</p>
+              </div>
+              <div className="rounded border border-slate-800 bg-slate-900/75 px-2.5 py-1.5 max-h-24 overflow-y-auto">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-300/90 mb-0.5">
+                  2. Annahmen / offene Punkte ({activeModeReport.annahmenUndOffenePunkte.length})
+                </div>
+                <ul className="space-y-0.5 text-slate-300 leading-snug">
+                  {activeModeReport.annahmenUndOffenePunkte.slice(0, 4).map((q, idx) => (
+                    <li key={`oq-${idx}`}>• {q}</li>
+                  ))}
+                  {activeModeReport.annahmenUndOffenePunkte.length > 4 && (
+                    <li className="text-slate-400">
+                      + {activeModeReport.annahmenUndOffenePunkte.length - 4} weitere (siehe Prüfpanel)
+                    </li>
+                  )}
+                </ul>
+              </div>
+              <div className="rounded border border-slate-800 bg-slate-900/75 px-2.5 py-1.5 max-h-24 overflow-y-auto">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-cyan-300/90 mb-0.5">
+                  4. Wichtigste Migrationshinweise
+                </div>
+                <ul className="space-y-0.5 text-slate-300 leading-snug">
+                  {activeModeReport.migrationshinweise.slice(0, 4).map((note, idx) => (
+                    <li key={`mn-${idx}`}>• {note}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          {previewMode === 'genesys' && isEditingYaml ? (
             <div className="space-y-2">
               <textarea
                 value={customYamlText}
@@ -689,7 +857,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             </div>
           ) : (
             <pre className="text-[11px] font-mono text-slate-200 bg-slate-900/90 border border-slate-800 rounded-lg p-3 max-h-60 overflow-auto whitespace-pre leading-relaxed select-text">
-              {effectiveScript.archyYaml}
+              {activePreviewCode}
             </pre>
           )}
         </div>

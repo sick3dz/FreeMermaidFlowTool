@@ -32,6 +32,19 @@ import {
   flattenMigrationSteps,
   toCleanGraphSlug,
 } from './genesysMigrationGraph';
+import {
+  FlowIR,
+  FlowIRDocument,
+  FlowIRFinding,
+  FlowIRFindingCode,
+  FlowIRValidationResult,
+  RenderedModeReport,
+  buildFlowIRFromMigrationGraph,
+  renderArchyYamlFromFlowIR,
+  renderAvayaView,
+  renderGenesysView,
+  validateIR,
+} from './genesysFlowIR';
 
 export type {
   MigrationFlowGraph,
@@ -41,6 +54,28 @@ export type {
   MigrationVariableDecl,
   NormalizedTransferTarget,
 } from './genesysMigrationGraph';
+export type {
+  FlowIR,
+  FlowIRDocument,
+  FlowIRFinding,
+  FlowIRFindingCode,
+  FlowIRNode,
+  FlowIRNodeKind,
+  FlowIRSourceTrace,
+  FlowIRTransferTargetType,
+  FlowIRTransition,
+  FlowIRTransitionType,
+  FlowIRValidationResult,
+  FlowIRVariable,
+  RenderedModeReport,
+} from './genesysFlowIR';
+export {
+  buildFlowIRFromMigrationGraph,
+  renderArchyYamlFromFlowIR,
+  renderAvayaView,
+  renderGenesysView,
+  validateIR,
+};
 
 export type GenesysReadinessLevel = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -183,6 +218,14 @@ export interface GenesysScriptTranslation {
   localReusableTasks: Array<{ name: string; refId: string; originalTarget: string }>;
   /** Level 1 Neutral Control-Flow Migration Graph (IR) powering both Archy YAML and Mermaid. */
   migrationGraph: MigrationFlowGraph;
+  /** Kanonisches FlowIR v1.1 (Single Source of Truth: Avaya -> IR -> Avaya / Genesys). */
+  flowIR: FlowIR;
+  /** Harte IR-Validierung (validateIR) inkl. aller 10 verbindlichen Findings-Codes. */
+  irValidation: FlowIRValidationResult;
+  /** modus=avaya: Normalisiertes Avaya-Mapping & 4-Teile-Bericht. */
+  avayaView: RenderedModeReport;
+  /** modus=genesys: Genesys Zielstruktur & 4-Teile-Bericht. */
+  genesysView: RenderedModeReport;
   warnings: GenesysScriptWarning[];
   archyYaml: string;
   yamlValidation: ArchyYamlValidationResult;
@@ -210,6 +253,8 @@ export interface GenesysWorkspaceTranslation {
     yamlErrorCount: number;
     totalPrunedDeadPaths: number;
     totalNormalizedTargets: number;
+    totalInlinedSections: number;
+    totalIrFindings: number;
   };
   scripts: GenesysScriptTranslation[];
   scriptsByKey: Record<string, GenesysScriptTranslation>;
@@ -324,6 +369,16 @@ function emitArchyStepList(
     const p = spaces(propIndent);
     const li = spaces(listIndent);
 
+    if (step.yamlComment) {
+      const commentLines = step.yamlComment
+        .split(/\r?\n/)
+        .map((c) => c.trim())
+        .filter(Boolean);
+      for (const cl of commentLines) {
+        lines.push(`${li}# ${cl}`);
+      }
+    }
+
     switch (step.kind) {
       case 'playAudio': {
         const promptSlug = step.targetSlug || toArchySlug(step.target || 'Prompt', 'Prompt');
@@ -375,22 +430,7 @@ function emitArchyStepList(
         lines.push(`${p}noMatchAudio:`);
         lines.push(`${p}  tts: "${escapeYamlString(step.noMatchTts || 'Ungueltige Eingabe.')}"`);
 
-        const successSteps =
-          step.successSteps && step.successSteps.length > 0
-            ? step.successSteps
-            : [
-                {
-                  id: `${step.id}_ack`,
-                  kind: 'setParticipantData' as const,
-                  lineNumber: step.lineNumber,
-                  avayaCommand: 'COLLECT_STORE',
-                  label: `Store ${step.inputVarName || 'collectedDigits'}`,
-                  variableName: step.inputVarName || 'collectedDigits',
-                  variableRef: inputVarRef,
-                  expressionValue: inputVarRef,
-                  isTerminal: false,
-                },
-              ];
+        const successSteps = step.successSteps || [];
         const failureSteps =
           step.failureSteps && step.failureSteps.length > 0
             ? step.failureSteps
@@ -408,8 +448,13 @@ function emitArchyStepList(
 
         lines.push(`${p}outputs:`);
         lines.push(`${p}  success:`);
-        lines.push(`${p}    actions:`);
-        emitArchyStepList(lines, successSteps, propIndent + 6, uniqueName);
+        if (successSteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, successSteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    # HINWEIS: Eingabe steht in ${inputVarRef} fuer Folgeaktionen bereit.`);
+          lines.push(`${p}    actions: []`);
+        }
         lines.push(`${p}  failure:`);
         lines.push(`${p}    actions:`);
         emitArchyStepList(lines, failureSteps, propIndent + 6, uniqueName);
@@ -465,21 +510,7 @@ function emitArchyStepList(
           }
         }
 
-        const successSteps =
-          step.successSteps && step.successSteps.length > 0
-            ? step.successSteps
-            : [
-                {
-                  id: `${step.id}_ok`,
-                  kind: 'setParticipantData' as const,
-                  lineNumber: step.lineNumber,
-                  avayaCommand: 'API_SUCCESS_LOG',
-                  label: `Store ${prefixLabel} Result`,
-                  variableName: `${prefixLabel}_Status`,
-                  expressionValue: outMappings[0]?.targetVarRef || '"OK"',
-                  isTerminal: false,
-                },
-              ];
+        const successSteps = step.successSteps || [];
         const failureSteps =
           step.failureSteps && step.failureSteps.length > 0
             ? step.failureSteps
@@ -511,8 +542,13 @@ function emitArchyStepList(
 
         lines.push(`${p}outputs:`);
         lines.push(`${p}  success:`);
-        lines.push(`${p}    actions:`);
-        emitArchyStepList(lines, successSteps, propIndent + 6, uniqueName);
+        if (successSteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, successSteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    # HINWEIS: Rueckgabewerte stehen ueber successOutputs fuer nachfolgende Entscheidungen bereit.`);
+          lines.push(`${p}    actions: []`);
+        }
         lines.push(`${p}  failure:`);
         lines.push(`${p}    actions:`);
         emitArchyStepList(lines, failureSteps, propIndent + 6, uniqueName);
@@ -912,9 +948,12 @@ export function generateArchyYaml(script: GenesysScriptTranslation): string {
   // Flow-level variables ONLY (clean unscoped names; referenced via Flow.<name>)
   emitVariableBlock(lines, graph.flowVariables, 2);
 
-  // Tasks (Main_Task + translated SECTION tasks + hydrated Reusable Subscript tasks + Fallback_Error_Task)
+  // Tasks (Main_Task + mehrfach genutzte SECTION tasks + hydratisierte Reusable Subscript tasks + Fallback_Error_Task)
   lines.push('  tasks:');
   for (const task of graph.tasks) {
+    if (task.yamlComment) {
+      lines.push(`    # ${task.yamlComment.replace(/\r?\n/g, ' ')}`);
+    }
     lines.push('    - task:');
     lines.push(`        name: ${toArchySlug(task.name, 'Task')}`);
     lines.push(`        refId: ${toArchySlug(task.refId, 'Task')}`);
@@ -1558,6 +1597,22 @@ export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResul
       (a) => a.indent === actionItemIndent && a.isListItem
     );
 
+    if (
+      actionsKeyLine.indent > 8 &&
+      actionItems.length > 0 &&
+      actionItems.every((a) => a.key === 'setParticipantData')
+    ) {
+      warnings.push({
+        lineNumber: actionsKeyLine.lineNumber,
+        code: 'DIAGNOSIS_ONLY_BRANCH',
+        severity: 'warning',
+        field: 'actions',
+        message: `Zeile ${actionsKeyLine.lineNumber}: Branch enthält ausschließlich Diagnose-Aktionen (setParticipantData) ohne fachliche Weiterleitung oder Endpunkt.`,
+        suggestion:
+          'Ersetze reine Trace-/Diagnose-Branches durch echte Zielaktionen (Task, Common Module, Transfer, Disconnect) oder bereinige sie.',
+      });
+    }
+
     let hitTerminalInSequence = false;
     let terminalActionName = '';
 
@@ -1710,14 +1765,19 @@ export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResul
         if (condProp) {
           const condChildren = collectIndentedBlock(parsed, parsed.indexOf(condProp));
           const expLine = condChildren.find((c) => c.key === 'exp');
-          if (expLine && /Flow\.avayaCondition\s*==\s*["']true["']/i.test(expLine.unquotedValue)) {
+          if (
+            expLine &&
+            /(?:Flow\.avayaCondition\s*==\s*["']true["']|Task\.checkResult\s*==\s*true)/i.test(
+              expLine.unquotedValue
+            )
+          ) {
             warnings.push({
               lineNumber: expLine.lineNumber,
               code: 'PLACEHOLDER_CONDITION',
               severity: 'warning',
               field: 'decision.condition.exp',
-              message: `Zeile ${expLine.lineNumber}: Platzhalter-Bedingung "Flow.avayaCondition == true" statt echter Fachlogik.`,
-              suggestion: 'Ersetze den Platzhalter durch eine konkrete Architect-Expression.',
+              message: `Zeile ${expLine.lineNumber}: Platzhalter-Bedingung ("${expLine.unquotedValue}") statt echter Fachlogik.`,
+              suggestion: 'Ersetze den Platzhalter durch eine konkrete Architect-Expression mit belegter Datenquelle.',
             });
           }
         }
@@ -2862,53 +2922,69 @@ function buildDomainAwareFallbackSubtask(
     };
   }
 
-  // Response / Validation block (e.g. Check_Response)
-  if (/check|response|valid|blacklist|vip/i.test(lower)) {
-    const statusVar: MigrationVariableDecl = {
-      name: 'checkResult',
-      refName: 'Task.checkResult',
-      originalName: 'checkResult',
-      scope: 'task',
-      isParticipantData: false,
-      dataType: 'boolean',
-      initialValue: false,
-    };
+  // Blacklist / VIP unloaded block (e.g. blacklist_vip) — real Data Table Lookup instead of dummy checkResult!
+  if (/blacklist|vip/i.test(lower)) {
+    const tableName = `${toArchySlug(ref.originalTarget, 'Blacklist')}_Table`;
     return {
       refId: ref.refId,
       name: ref.name,
       kind: 'subscript',
       originalTarget: ref.originalTarget,
-      taskVariables: [statusVar],
+      yamlComment: `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" ohne .s-Quelldatei — als Data Table Lookup (${tableName}) mit klarem Sperr-/Ruecksprungpfad modelliert.`,
+      taskVariables: [],
       steps: [
         {
-          id: `sub_${ref.refId}_dec`,
-          kind: 'decision',
+          id: `sub_${ref.refId}_dt`,
+          kind: 'callDataTableLookup',
           lineNumber: 0,
-          avayaCommand: 'SUBTASK_CHECK',
-          label: `Evaluate ${ref.originalTarget}`,
-          conditionLabel: `${ref.refId}_Passed`,
-          expression: 'Task.checkResult == true',
-          yesSteps: [
+          avayaCommand: 'SUBTASK_BLACKLIST_LOOKUP',
+          label: `Blacklist Lookup (${tableName})`,
+          target: tableName,
+          targetSlug: tableName,
+          dataTableKey: 'Call.Ani',
+          dataActionOutputs: [
             {
-              id: `sub_${ref.refId}_ok`,
-              kind: 'setParticipantData',
-              lineNumber: 0,
-              avayaCommand: 'CHECK_OK',
-              label: `Set ${ref.refId} Result`,
-              variableName: `${ref.refId}_Status`,
-              expressionValue: '"OK"',
-              isTerminal: false,
+              field: 'isListed',
+              targetVarName: 'MCF_Blacklist_flag_cv',
+              targetVarRef: 'Flow.MCF_Blacklist_flag_cv',
+              dataType: 'string',
             },
           ],
-          noSteps: [
+          yamlComment: `OFFENE MIGRATIONSFRAGE: Tabellenname "${tableName}" und Rueckgabespalte fuer "${ref.originalTarget}" in Genesys pruefen.`,
+          foundSteps: [
             {
-              id: `sub_${ref.refId}_nok`,
-              kind: 'setParticipantData',
+              id: `sub_${ref.refId}_flag1`,
+              kind: 'updateData',
               lineNumber: 0,
-              avayaCommand: 'CHECK_NOK',
-              label: `Set ${ref.refId} Failed`,
-              variableName: `${ref.refId}_Status`,
-              expressionValue: '"FAILED"',
+              avayaCommand: 'BLACKLIST_HIT',
+              label: 'Set Flow.MCF_Blacklist_flag_cv = "1"',
+              variableName: 'MCF_Blacklist_flag_cv',
+              variableRef: 'Flow.MCF_Blacklist_flag_cv',
+              variableDataType: 'string',
+              literalValue: '1',
+              isTerminal: false,
+            },
+            {
+              id: `sub_${ref.refId}_disc`,
+              kind: 'disconnect',
+              lineNumber: 0,
+              avayaCommand: 'BLACKLIST_DISCONNECT',
+              label: 'Disconnect (Blacklist Treffer)',
+              target: 'Blacklist_Blocked',
+              isTerminal: true,
+            },
+          ],
+          notFoundSteps: [
+            {
+              id: `sub_${ref.refId}_flag0`,
+              kind: 'updateData',
+              lineNumber: 0,
+              avayaCommand: 'BLACKLIST_MISS',
+              label: 'Set Flow.MCF_Blacklist_flag_cv = "0"',
+              variableName: 'MCF_Blacklist_flag_cv',
+              variableRef: 'Flow.MCF_Blacklist_flag_cv',
+              variableDataType: 'string',
+              literalValue: '0',
               isTerminal: false,
             },
           ],
@@ -2918,22 +2994,122 @@ function buildDomainAwareFallbackSubtask(
     };
   }
 
-  // Generic unloaded internal Avaya building block
+  // Response / Validation unloaded block (e.g. Check_Response) — NEVER dummy checkResult: false!
+  if (/check|response|valid/i.test(lower)) {
+    const respVar: MigrationVariableDecl = {
+      name: 'HDX_Resp_cv',
+      refName: 'Task.HDX_Resp_cv',
+      originalName: 'HDX_Resp_cv',
+      scope: 'task',
+      isParticipantData: true,
+      dataType: 'string',
+      initialValue: '',
+    };
+    const errorFallbackStep: MigrationStep = hasFallbackTask
+      ? {
+          id: `sub_${ref.refId}_fb`,
+          kind: 'jumpToReusableTask',
+          lineNumber: 0,
+          avayaCommand: 'RESPONSE_FALLBACK',
+          label: 'Fallback bei Fehler-Response',
+          target: 'Fallback_Error_Task',
+          targetTaskRefId: 'Fallback_Error_Task',
+          isTerminal: true,
+        }
+      : {
+          id: `sub_${ref.refId}_disc`,
+          kind: 'disconnect',
+          lineNumber: 0,
+          avayaCommand: 'RESPONSE_DISCONNECT',
+          label: `Disconnect (${ref.name} Fehler)`,
+          target: `${ref.name}_Error`,
+          isTerminal: true,
+        };
+
+    return {
+      refId: ref.refId,
+      name: ref.name,
+      kind: 'subscript',
+      originalTarget: ref.originalTarget,
+      yamlComment: `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" ohne .s-Quelldatei — wertet uebergebene Response-Variable ueber Get Participant Data + Switch statt Dummy-Flag aus.`,
+      taskVariables: [respVar],
+      steps: [
+        {
+          id: `sub_${ref.refId}_gpd`,
+          kind: 'getParticipantData',
+          lineNumber: 0,
+          avayaCommand: 'READ_RESPONSE',
+          label: `Get Participant Data: ${respVar.name}`,
+          variableName: respVar.name,
+          variableRef: respVar.refName,
+          yamlComment: `OFFENE MIGRATIONSFRAGE: Rueckgabevariable fuer "${ref.originalTarget}" (z. B. HDX_Resp_cv) aus vorgeschaltetem Aufruf pruefen.`,
+          isTerminal: false,
+        },
+        {
+          id: `sub_${ref.refId}_sw`,
+          kind: 'switch',
+          lineNumber: 0,
+          avayaCommand: 'CHECK_RESPONSE_SWITCH',
+          label: `Evaluate ${ref.originalTarget} (${respVar.refName})`,
+          variableName: respVar.name,
+          variableRef: respVar.refName,
+          expression: respVar.refName,
+          cases: [
+            {
+              value: 'SUCCESS',
+              label: 'Response_SUCCESS',
+              steps: [
+                {
+                  id: `sub_${ref.refId}_ok`,
+                  kind: 'callCommonModule',
+                  lineNumber: 0,
+                  avayaCommand: 'RESPONSE_OK_ROUTE',
+                  label: 'Continue Master Call Flow',
+                  target: `${ref.refId}_Success_Module`,
+                  targetSlug: `${ref.refId}_Success_Module`,
+                  yamlComment: `OFFENE MIGRATIONSFRAGE: Ziel-Routing bei SUCCESS aus "${ref.originalTarget}" konkretisieren.`,
+                  isTerminal: false,
+                },
+              ],
+            },
+            {
+              value: 'FAILED',
+              label: 'Response_FAILED',
+              steps: [errorFallbackStep],
+            },
+          ],
+          defaultSteps: [
+            {
+              ...errorFallbackStep,
+              id: `sub_${ref.refId}_def_err`,
+              label: `Fallback (${ref.name} Default)`,
+            },
+          ],
+          isTerminal: false,
+        },
+      ],
+    };
+  }
+
+  // Generic unloaded internal Avaya building block — NEVER diagnosis-only setParticipantData!
+  const modSlug = toArchySlug(ref.originalTarget, ref.refId);
   return {
     refId: ref.refId,
     name: ref.name,
     kind: 'subscript',
     originalTarget: ref.originalTarget,
+    yamlComment: `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" hat keine geladene .s-Quelldatei — delegiert sauber an Common Module "${modSlug}".`,
     taskVariables: [],
     steps: [
       {
-        id: `sub_${ref.refId}_spd`,
-        kind: 'setParticipantData',
+        id: `sub_${ref.refId}_cm`,
+        kind: 'callCommonModule',
         lineNumber: 0,
-        avayaCommand: 'SUBTASK_TRACE',
-        label: `Trace Subtask ${ref.originalTarget}`,
-        variableName: `AvayaSubtask_${ref.refId}`,
-        expressionValue: `"${ref.originalTarget}"`,
+        avayaCommand: 'UNLOADED_SUBFLOW_MODULE',
+        label: `Common Module: ${modSlug}`,
+        target: ref.originalTarget,
+        targetSlug: modSlug,
+        yamlComment: `OFFENE MIGRATIONSFRAGE: Inhalt von "${ref.originalTarget}.s" im Workspace ergaenzen oder als Genesys Common Module "${modSlug}" implementieren.`,
         isTerminal: false,
       },
     ],
@@ -2943,13 +3119,15 @@ function buildDomainAwareFallbackSubtask(
 /**
  * Hydrates local Reusable Tasks referenced by `callTask`:
  * - If the target `.s` script is loaded in the workspace, embeds its REAL translated graph logic!
- * - Otherwise, builds a structured domain-aware Reusable Task (never an empty stub).
+ * - Otherwise, builds a structured, commented Reusable Task (never dummy checkResult or diagnosis-only trace).
+ * Returns the list of unloaded subflow names so FlowIR records MISSING_SUBFLOW_SOURCE findings transparently.
  */
 function hydrateLocalSubscriptTasks(
   callerGraph: MigrationFlowGraph,
   localSubscriptRefs: Array<{ name: string; refId: string; originalTarget: string; targetKey: string }>,
   allGraphsByKey: Map<string, MigrationFlowGraph>
-): void {
+): string[] {
+  const missingSubflows: string[] = [];
   const existingTaskIds = new Set(callerGraph.tasks.map((t) => t.refId));
   const existingFlowVarKeys = new Set(callerGraph.flowVariables.map((v) => v.name.toLowerCase()));
   let ensureFallback = existingTaskIds.has('Fallback_Error_Task');
@@ -3054,8 +3232,25 @@ function hydrateLocalSubscriptTasks(
       }
     }
 
-    // Subscript not loaded in workspace -> domain-aware Reusable Task
+    // Subscript not loaded in workspace -> domain-aware Reusable Task + transparent MISSING_SUBFLOW_SOURCE finding
+    missingSubflows.push(ref.originalTarget);
     const fallbackSubtask = buildDomainAwareFallbackSubtask(ref, ensureFallback);
+    // Ensure Flow.MCF_Blacklist_flag_cv is declared on flow if a Blacklist subtask writes it
+    if (
+      /blacklist|vip/i.test(ref.originalTarget) &&
+      !existingFlowVarKeys.has('mcf_blacklist_flag_cv')
+    ) {
+      existingFlowVarKeys.add('mcf_blacklist_flag_cv');
+      callerGraph.flowVariables.push({
+        name: 'MCF_Blacklist_flag_cv',
+        refName: 'Flow.MCF_Blacklist_flag_cv',
+        originalName: 'MCF_Blacklist_flag_cv',
+        scope: 'flow',
+        isParticipantData: true,
+        dataType: 'string',
+        initialValue: '',
+      });
+    }
     callerGraph.tasks.push(fallbackSubtask);
     existingTaskIds.add(ref.refId);
   }
@@ -3093,13 +3288,15 @@ function hydrateLocalSubscriptTasks(
   }
 
   callerGraph.flowVariables.sort((a, b) => a.name.localeCompare(b.name));
+  return missingSubflows;
 }
 
 function finalizeScriptTranslation(
   node: ParsedScriptNode,
   built: BuildMigrationGraphResult,
   incomingCallCount: number,
-  brokenLinkCount: number
+  brokenLinkCount: number,
+  missingSubflows: string[]
 ): GenesysScriptTranslation {
   const { graph, localSubscriptRefs, metrics } = built;
   const warnings: GenesysScriptWarning[] = built.warnings.map((w) => ({ ...w }));
@@ -3235,6 +3432,10 @@ function finalizeScriptTranslation(
     }
   }
 
+  // Build canonical FlowIR v1.1 (Single Source of Truth) + validateIR(ir)
+  const flowIR = buildFlowIRFromMigrationGraph(graph, { missingSubflows });
+  const irValidation = validateIR(flowIR);
+
   const partial: GenesysScriptTranslation = {
     scriptKey: node.scriptKey,
     scriptNumber: node.scriptNumber,
@@ -3271,6 +3472,17 @@ function finalizeScriptTranslation(
       originalTarget,
     })),
     migrationGraph: graph,
+    flowIR,
+    irValidation,
+    avayaView: renderAvayaView(flowIR),
+    genesysView: {
+      mode: 'genesys',
+      kurzfazit: '',
+      annahmenUndOffenePunkte: [],
+      ergebnisText: '',
+      migrationshinweise: [],
+      markdownReport: '',
+    },
     warnings,
     archyYaml: '',
     yamlValidation: {
@@ -3284,6 +3496,7 @@ function finalizeScriptTranslation(
 
   partial.archyYaml = generateArchyYaml(partial);
   partial.yamlValidation = validateArchyYaml(partial.archyYaml);
+  partial.genesysView = renderGenesysView(flowIR, partial.archyYaml);
   partial.genesysMermaid = generateSingleScriptGenesysMermaid(partial);
   return partial;
 }
@@ -3356,7 +3569,7 @@ export function translateAvayaWorkspaceToGenesys(
         incomingCallCountByKey,
         brokenTargetKeysForScript: brokenByScriptKey.get(node.scriptKey) || new Set<string>(),
       },
-      '1.4.7'
+      '1.5.0'
     );
     builtByKey.set(node.scriptKey, { node, built });
     allGraphsByKey.set(node.scriptKey, built.graph);
@@ -3367,12 +3580,17 @@ export function translateAvayaWorkspaceToGenesys(
   const scriptsByKey: Record<string, GenesysScriptTranslation> = {};
 
   for (const { node, built } of builtByKey.values()) {
-    hydrateLocalSubscriptTasks(built.graph, built.localSubscriptRefs, allGraphsByKey);
+    const missingSubflows = hydrateLocalSubscriptTasks(
+      built.graph,
+      built.localSubscriptRefs,
+      allGraphsByKey
+    );
     const translated = finalizeScriptTranslation(
       node,
       built,
       incomingCallCountByKey.get(node.scriptKey) || 0,
-      (brokenByScriptKey.get(node.scriptKey) || new Set<string>()).size
+      (brokenByScriptKey.get(node.scriptKey) || new Set<string>()).size,
+      missingSubflows
     );
     scripts.push(translated);
     scriptsByKey[translated.scriptKey] = translated;
@@ -3385,7 +3603,7 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.4.7',
+    schemaVersion: '1.5.0',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     overallReadiness,
@@ -3405,6 +3623,11 @@ export function translateAvayaWorkspaceToGenesys(
       yamlErrorCount: scripts.reduce((acc, s) => acc + s.yamlValidation.errors.length, 0),
       totalPrunedDeadPaths: scripts.reduce((acc, s) => acc + s.metrics.prunedDeadPathCount, 0),
       totalNormalizedTargets: scripts.reduce((acc, s) => acc + s.metrics.normalizedTargetCount, 0),
+      totalInlinedSections: scripts.reduce(
+        (acc, s) => acc + (s.migrationGraph.diagnostics.inlinedSectionCount || 0),
+        0
+      ),
+      totalIrFindings: scripts.reduce((acc, s) => acc + s.flowIR.findings.length, 0),
     },
     scripts,
     scriptsByKey,
@@ -3417,7 +3640,7 @@ export function translateAvayaWorkspaceToGenesys(
 }
 
 /**
- * Packages all generated Genesys Archy YAML files, Level-1 Neutral Migration Graphs (JSON),
+ * Packages all generated Genesys Archy YAML files, canonical FlowIR v1.1 JSON files,
  * overview Mermaid diagram, and Readiness README.md into a 100% in-memory ZIP Blob.
  */
 export async function exportAllArchyYamlsZipBlob(
@@ -3437,7 +3660,8 @@ export async function exportAllArchyYamlsZipBlob(
     }
     usedNames.add(baseName.toLowerCase());
     flowsFolder.file(`${baseName}.yaml`, script.archyYaml);
-    graphsFolder.file(`${baseName}.graph.json`, JSON.stringify(script.migrationGraph, null, 2));
+    const irDoc: FlowIRDocument = { flowIR: script.flowIR };
+    graphsFolder.file(`${baseName}.graph.json`, JSON.stringify(irDoc, null, 2));
   }
 
   const readmeLines: string[] = [

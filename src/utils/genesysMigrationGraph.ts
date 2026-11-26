@@ -179,6 +179,23 @@ export interface MigrationStep {
   dataTableKey?: string;
   choices?: Array<{ digit: string; target: string }>;
   warning?: string;
+  /** Optionaler Archy-YAML-Kommentar (z. B. # OFFENE MIGRATIONSFRAGE: ...). */
+  yamlComment?: string;
+  /** Ursprüngliche Avaya-Section als reiner Herkunftshinweis (für sourceTrace). */
+  sectionHint?: string;
+  /** v1.1-Zieltypisierung für Transfers. */
+  resolvedTargetType?: 'queue' | 'user' | 'externalNumber' | 'extension' | 'flow' | 'unresolved';
+  /** Strukturiertes Provenance-Finding, das ins FlowIR v1.1 übernommen wird. */
+  provenanceFinding?: {
+    severity: 'INFO' | 'WARN' | 'ERROR';
+    code:
+      | 'VAR_USED_BEFORE_SET'
+      | 'SWITCH_WITHOUT_SOURCE'
+      | 'DUMMY_CONDITION'
+      | 'MISSING_CONDITION_SOURCE';
+    message: string;
+    variableName?: string;
+  };
 }
 
 export interface MigrationTaskGraph {
@@ -186,6 +203,8 @@ export interface MigrationTaskGraph {
   name: string;
   kind: 'entry' | 'section' | 'subscript' | 'fallback';
   originalTarget?: string;
+  isProtectedHandler?: boolean;
+  yamlComment?: string;
   taskVariables: MigrationVariableDecl[];
   steps: MigrationStep[];
 }
@@ -213,6 +232,8 @@ export interface MigrationGraphDiagnostics {
   fallbackExpressionCount: number;
   terminalNodeCount: number;
   branchNodeCount: number;
+  inlinedSectionCount: number;
+  synthesizedSourceCount: number;
   normalizedTargets: NormalizedTransferTarget[];
 }
 
@@ -258,6 +279,33 @@ const SCHEDULE_COND_RE =
 const HOLIDAY_ONLY_COND_RE = /\b(?:HOLIDAY|FEIERTAG|SONDZEIT)\b/i;
 const EMERGENCY_COND_RE =
   /\b(?:EMERGENCY|NIGHT\s+SERVICE|OUT\s+OF\s+SERVICE|NOTFALL|STOERUNG)\b/i;
+
+function isCallVarIdentifier(name: string): boolean {
+  return /^CV_/i.test(name) || /_cv$/i.test(name);
+}
+
+function isLocalVarIdentifier(name: string): boolean {
+  return /^LV_/i.test(name) || /_lv$/i.test(name);
+}
+
+function isGlobalVarIdentifier(name: string): boolean {
+  return /^GV_/i.test(name) || /_gv$/i.test(name);
+}
+
+function isProtectedHandlerSectionName(rawName: string): boolean {
+  const clean = (rawName || '').trim();
+  return (
+    /^(?:BESETZT|BUSY|FEHLER|ERROR|ABORT|ABBRUCH|DROP|TIMEOUT|ENDE|EXIT|NOTFALL|CLOSED|HANGUP|DISCONNECT|REJECT|BLOCKED|BLACKLIST_END|FAIL)/i.test(
+      clean
+    ) || /(?:^|_)(?:BESETZT|BUSY|FEHLER|ERROR|NOTFALL|ABBRUCH)(?:$|_)/i.test(clean)
+  );
+}
+
+function isGuardOrBlacklistCondition(cond: string): boolean {
+  return /(?:blacklist|sperr|block|busy|besetzt|notfall|emergency|reject|ungueltig|invalid)/i.test(
+    cond || ''
+  );
+}
 
 export function toCleanGraphSlug(raw: string, fallback = 'Unnamed'): string {
   const base = stripKnownScriptExtension(normalizeScriptRef(raw || ''))
@@ -640,10 +688,10 @@ export function compileOclConditionToArchitectExpr(
       /^[A-Za-zÄÖÜäöüß_][A-Za-z0-9ÄÖÜäöüß_.-]*$/.test(innerRaw) &&
       !/^(?:TRUE|FALSE)$/i.test(innerRaw)
     ) {
-      const isTask = /^LV_/i.test(innerRaw);
+      const isTask = isLocalVarIdentifier(innerRaw);
       const flagVar = isTask
         ? registry.ensureTaskVar(taskVars, innerRaw, 'boolean', false)
-        : registry.ensureFlowVar(innerRaw, 'boolean', false, /^CV_/i.test(innerRaw));
+        : registry.ensureFlowVar(innerRaw, 'boolean', false, isCallVarIdentifier(innerRaw));
       return { expression: `!${flagVar.refName}`, isFallbackFlag: false };
     }
     const inner = compileOclConditionToArchitectExpr(
@@ -745,8 +793,8 @@ export function compileOclConditionToArchitectExpr(
       };
     }
 
-    // LV_* -> Task-scoped variable
-    if (/^LV_[A-Za-z0-9_]+$/i.test(op)) {
+    // LV_* / *_lv -> Task-scoped variable
+    if (isLocalVarIdentifier(op) && /^[A-Za-z0-9_]+$/i.test(op)) {
       const v = registry.ensureTaskVar(taskVars, op, preferType);
       return {
         expr: v.refName,
@@ -756,9 +804,9 @@ export function compileOclConditionToArchitectExpr(
       };
     }
 
-    // CV_* / GV_* -> Flow-scoped variable
-    if (/^(?:CV|GV)_[A-Za-z0-9_]+$/i.test(op)) {
-      const v = registry.ensureFlowVar(op, preferType, undefined, /^CV_/i.test(op));
+    // CV_* / *_cv / GV_* / *_gv -> Flow-scoped variable
+    if ((isCallVarIdentifier(op) || isGlobalVarIdentifier(op)) && /^[A-Za-z0-9_]+$/i.test(op)) {
+      const v = registry.ensureFlowVar(op, preferType, undefined, isCallVarIdentifier(op));
       return {
         expr: v.refName,
         isNumeric: v.dataType === 'integer',
@@ -877,10 +925,10 @@ export function compileOclConditionToArchitectExpr(
   }
 
   if (/^[A-Za-zÄÖÜäöüß_][A-Za-z0-9ÄÖÜäöüß_.-]*$/.test(atom)) {
-    const isTask = /^LV_/i.test(atom);
+    const isTask = isLocalVarIdentifier(atom);
     const flagVar = isTask
       ? registry.ensureTaskVar(taskVars, atom, 'boolean', false)
-      : registry.ensureFlowVar(atom, 'boolean', false, /^CV_/i.test(atom));
+      : registry.ensureFlowVar(atom, 'boolean', false, isCallVarIdentifier(atom));
     return { expression: `${flagVar.refName} == true`, isFallbackFlag: false };
   }
 
@@ -1034,7 +1082,7 @@ export function buildMigrationFlowGraph(
   node: ParsedScriptNode,
   mod: ScriptModule | undefined,
   ctx: BuildMigrationGraphContext,
-  schemaVersion = '1.4.7'
+  schemaVersion = '1.5.0'
 ): BuildMigrationGraphResult {
   const rawText = mod?.rawText || '';
   const strippedLines = rawText ? stripOclCommentsPreservingLines(rawText) : [];
@@ -1044,9 +1092,11 @@ export function buildMigrationFlowGraph(
   // Always declare flow origin metadata cleanly (unscoped name, Flow. reference)
   registry.ensureFlowVar('avayaOriginScript', 'string', node.fileName || node.scriptNumber);
 
-  // Pre-register explicit CV_* / GV_* variables found in the script
+  // Pre-register explicit CV_* / GV_* AND *_cv / *_gv variables found in the script
   for (const line of strippedLines) {
-    const varMatches = line.matchAll(/\b((?:CV|GV)_[A-Za-z0-9_]+)\b/gi);
+    const varMatches = line.matchAll(
+      /\b((?:CV|GV)_[A-Za-z0-9_]+|[A-Za-z][A-Za-z0-9_]*_(?:cv|gv))\b/gi
+    );
     for (const m of varMatches) {
       if (!m[1]) continue;
       const lower = m[1].toLowerCase();
@@ -1056,7 +1106,7 @@ export function buildMigrationFlowGraph(
         m[1],
         isInt ? 'integer' : 'string',
         isInt ? Number(staticVal) : staticVal,
-        /^CV_/i.test(m[1])
+        isCallVarIdentifier(m[1])
       );
     }
   }
@@ -1223,17 +1273,23 @@ export function buildMigrationFlowGraph(
       return emitted;
     }
 
-    // Detect SET / ASSIGN on CV_ / GV_ / LV_ variables
+    // Detect SET / ASSIGN on CV_ / GV_ / LV_ (prefix or _cv / _gv / _lv suffix) variables
     const assignMatch =
-      trimmed.match(/^\s*SET\s+((?:CV|GV|LV)_[A-Za-z0-9_]+)\s*(?:=|:=)\s*(.+)$/i) ||
-      trimmed.match(/^\s*ASSIGN\s+(.+?)\s+TO\s+((?:CV|GV|LV)_[A-Za-z0-9_]+)\b/i) ||
-      trimmed.match(/^\s*ASSIGN\s+((?:CV|GV|LV)_[A-Za-z0-9_]+)\s*=\s*(.+)$/i);
+      trimmed.match(
+        /^\s*SET\s+((?:CV|GV|LV)_[A-Za-z0-9_]+|[A-Za-z][A-Za-z0-9_]*_(?:cv|gv|lv))\s*(?:=|:=)\s*(.+)$/i
+      ) ||
+      trimmed.match(
+        /^\s*ASSIGN\s+(.+?)\s+TO\s+((?:CV|GV|LV)_[A-Za-z0-9_]+|[A-Za-z][A-Za-z0-9_]*_(?:cv|gv|lv))\b/i
+      ) ||
+      trimmed.match(
+        /^\s*ASSIGN\s+((?:CV|GV|LV)_[A-Za-z0-9_]+|[A-Za-z][A-Za-z0-9_]*_(?:cv|gv|lv))\s*=\s*(.+)$/i
+      );
     if (assignMatch) {
       const isAssignValToVar = /^\s*ASSIGN\s+.+?\s+TO\s+/i.test(trimmed);
       const vName = (isAssignValToVar ? assignMatch[2] : assignMatch[1]).trim();
       const rawRhs = (isAssignValToVar ? assignMatch[1] : assignMatch[2]).trim();
-      const isCv = /^CV_/i.test(vName);
-      const isLv = /^LV_/i.test(vName);
+      const isCv = isCallVarIdentifier(vName);
+      const isLv = isLocalVarIdentifier(vName);
 
       const rhsClean = rawRhs.replace(/^["']|["']$/g, '');
       const isSystemAni = /\b(?:CLID|CALLING[\s_]*NUMBER|CALL\.ANI)\b/i.test(rawRhs);
@@ -1742,6 +1798,7 @@ export function buildMigrationFlowGraph(
           warning: isMulti
             ? 'Multi-Skillset in eine Ziel-Queue + ACD Skills & Bullseye-Ringe umbauen'
             : undefined,
+          resolvedTargetType: 'queue',
           isTerminal: true,
         });
       }
@@ -1848,6 +1905,7 @@ export function buildMigrationFlowGraph(
             originalTransferTarget: norm.originalTarget,
             normalizedE164: norm.normalizedTarget,
             normalizationNote: norm.note,
+            resolvedTargetType: 'externalNumber',
             isTerminal: true,
           });
         } else {
@@ -1869,6 +1927,7 @@ export function buildMigrationFlowGraph(
             targetSlug: norm.normalizedTarget,
             originalTransferTarget: norm.originalTarget,
             normalizationNote: norm.note,
+            resolvedTargetType: 'queue',
             isTerminal: true,
           });
         }
@@ -1893,10 +1952,10 @@ export function buildMigrationFlowGraph(
       return emitted;
     }
 
-    // EXECUTE / CALL SCRIPT / SUBSCRIPT
+    // EXECUTE / GOSUB / CALL SCRIPT / SUBSCRIPT
     const execMatch =
       trimmed.match(
-        /\b(EXECUTE(?:\s+SCRIPT)?|CALL\s+SCRIPT|SUBSCRIPT)\s+(?:"([^"]+)"|'([^']+)'|(\+?\d{2,18}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]*))/i
+        /\b(EXECUTE(?:\s+SCRIPT)?|GOSUB|CALL\s+SCRIPT|SUBSCRIPT)\s+(?:"([^"]+)"|'([^']+)'|(\+?\d{2,18}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]*))/i
       ) ||
       trimmed.match(
         /^(CALL)\s+(?:"([^"]+)"|'([^']+)'|(\+?\d{2,18}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]*))/i
@@ -2095,7 +2154,9 @@ export function buildMigrationFlowGraph(
 
   /**
    * Emits prerequisite system/API prep steps (e.g. Get Queue Observations for LOGGED AGENTS,
-   * Get Participant Data for CV_* reads, EWT capture) before evaluating a condition.
+   * EWT capture) before evaluating a condition.
+   * Note: General CV_* / *_cv data provenance is handled path-sensitively in the dedicated
+   * Variable-Provenance pass after section inlining so already-set variables are never re-read.
    */
   const emitConditionPrerequisites = (
     cond: string,
@@ -2103,21 +2164,6 @@ export function buildMigrationFlowGraph(
     taskVars: Map<string, MigrationVariableDecl>
   ): MigrationStep[] => {
     const prep: MigrationStep[] = [];
-
-    const cvRead = cond.match(/\b(CV_[A-Za-z0-9_]+)\b/i);
-    if (cvRead && cvRead[1]) {
-      const decl = registry.ensureFlowVar(cvRead[1], 'string', '', true);
-      prep.push({
-        id: nextStepId('gpd'),
-        kind: 'getParticipantData',
-        lineNumber,
-        avayaCommand: 'READ CV_*',
-        label: `Get Participant Data: ${cvRead[1]}`,
-        variableName: cvRead[1],
-        variableRef: decl.refName,
-        isTerminal: false,
-      });
-    }
 
     if (/\b(?:EXPECTED\s+WAIT\s+TIME|EWT)\b/i.test(cond)) {
       warnings.push({
@@ -2383,19 +2429,35 @@ export function buildMigrationFlowGraph(
 
         let explicitNoSteps = parseBlockLines(elseLines, taskVars, activeDigitsVarRef);
 
-        // If the IF has no explicit ELSE and remaining lines follow in this block,
-        // check whether the YES branch terminates (e.g. IF EMERGENCY THEN DISCONNECT END IF)
-        // — if YES terminates, pull the continuation cleanly into the NO branch so no code sits
-        // ambiguously outside the decision!
+        // Exclusive Guard / Blacklist / Terminal-YES Branching:
+        // If YES terminates OR is a blacklist/busy/error guard without ELSE, terminate YES cleanly
+        // and move ALL remaining continuation lines exclusively into the NO branch so YES never falls through!
         const provisionalDecision = buildNestedDecision(0, explicitNoSteps);
+        const isGuardCond = isGuardOrBlacklistCondition(firstBranch.condition);
+        if (
+          isGuardCond &&
+          (provisionalDecision.yesSteps || []).length > 0 &&
+          !isStepListTerminal(provisionalDecision.yesSteps || [])
+        ) {
+          provisionalDecision.yesSteps!.push({
+            id: nextStepId('disc'),
+            kind: 'disconnect',
+            lineNumber: firstBranch.lineNumber,
+            avayaCommand: 'GUARD_TERMINAL_EXIT',
+            label: 'Disconnect (Sperr-/Fehlerpfad)',
+            target: 'Guard_Exit',
+            yamlComment:
+              'HINWEIS: Positiver Sperr-/Blacklist-Pfad eindeutig terminal abgeschlossen, damit der normale Hauptpfad nicht weiterlaeuft.',
+            isTerminal: true,
+          });
+        }
         if (
           explicitNoSteps.length === 0 &&
           idx < blockLines.length &&
-          isStepListTerminal(provisionalDecision.yesSteps || [])
+          (isStepListTerminal(provisionalDecision.yesSteps || []) || isGuardCond)
         ) {
           explicitNoSteps = parseBlockLines(blockLines.slice(idx), taskVars, activeDigitsVarRef);
           idx = blockLines.length;
-          // Attach continuation to innermost NO branch
           let cursor = provisionalDecision;
           while (
             cursor.noSteps &&
@@ -2464,12 +2526,12 @@ export function buildMigrationFlowGraph(
 
         idx = j;
 
-        const isLvWhere = /^LV_/i.test(whereExprRaw);
+        const isLvWhere = isLocalVarIdentifier(whereExprRaw);
         const whereVarDecl =
           isLvWhere || taskVars.has(toCleanGraphSlug(whereExprRaw).toLowerCase())
             ? registry.ensureTaskVar(taskVars, whereExprRaw, 'string', '')
-            : /^(?:CV|GV)_/i.test(whereExprRaw)
-            ? registry.ensureFlowVar(whereExprRaw, 'string', '', /^CV_/i.test(whereExprRaw))
+            : isCallVarIdentifier(whereExprRaw) || isGlobalVarIdentifier(whereExprRaw)
+            ? registry.ensureFlowVar(whereExprRaw, 'string', '', isCallVarIdentifier(whereExprRaw))
             : registry.ensureTaskVar(taskVars, whereExprRaw, 'string', '');
 
         const cases = caseBlocks.map((cb) => ({
@@ -2616,14 +2678,29 @@ export function buildMigrationFlowGraph(
             ];
           }
 
-          // If there is no ELSE and remaining lines follow in this block, wire continuation into NO when YES ends or is a loop
+          // If there is no ELSE and remaining lines follow in this block, wire continuation into NO
+          // when YES ends, is a guard/blacklist check, or follows collectInput
+          const isGuardInline = isGuardOrBlacklistCondition(cond);
+          if (isGuardInline && thenSteps.length > 0 && !isStepListTerminal(thenSteps)) {
+            thenSteps.push({
+              id: nextStepId('disc'),
+              kind: 'disconnect',
+              lineNumber,
+              avayaCommand: 'GUARD_TERMINAL_EXIT',
+              label: 'Disconnect (Sperr-/Fehlerpfad)',
+              target: 'Guard_Exit',
+              yamlComment:
+                'HINWEIS: Positiver Sperr-/Blacklist-Pfad eindeutig terminal abgeschlossen.',
+              isTerminal: true,
+            });
+          }
           if (noSteps.length === 0 && idx < blockLines.length) {
             const yesEnds = isStepListTerminal(thenSteps);
             const isDigitsBranch =
               steps.length > 0 &&
               steps[steps.length - 1].kind === 'collectInput' &&
               (steps[steps.length - 1].successSteps || []).length === 0;
-            if (yesEnds || isDigitsBranch) {
+            if (yesEnds || isDigitsBranch || isGuardInline) {
               noSteps = parseBlockLines(blockLines.slice(idx), taskVars, activeDigitsVarRef);
               idx = blockLines.length;
             }
@@ -2943,23 +3020,48 @@ export function buildMigrationFlowGraph(
       }
     }
 
+    // Tag all steps in this section with sectionHint for v1.1 sourceTrace
+    const tagSectionHint = (list: MigrationStep[], secHint: string) => {
+      for (const st of list) {
+        if (!st.sectionHint) st.sectionHint = secHint;
+        if (st.yesSteps) tagSectionHint(st.yesSteps, secHint);
+        if (st.noSteps) tagSectionHint(st.noSteps, secHint);
+        if (st.openSteps) tagSectionHint(st.openSteps, secHint);
+        if (st.closedSteps) tagSectionHint(st.closedSteps, secHint);
+        if (st.holidaySteps) tagSectionHint(st.holidaySteps, secHint);
+        if (st.successSteps) tagSectionHint(st.successSteps, secHint);
+        if (st.failureSteps) tagSectionHint(st.failureSteps, secHint);
+        if (st.timeoutSteps) tagSectionHint(st.timeoutSteps, secHint);
+        if (st.foundSteps) tagSectionHint(st.foundSteps, secHint);
+        if (st.notFoundSteps) tagSectionHint(st.notFoundSteps, secHint);
+        if (st.bodySteps) tagSectionHint(st.bodySteps, secHint);
+        if (st.defaultSteps) tagSectionHint(st.defaultSteps, secHint);
+        if (st.cases) st.cases.forEach((c) => tagSectionHint(c.steps, secHint));
+      }
+    };
+    tagSectionHint(steps, sec.rawName);
+
     // Prune dead paths after any terminal action in this section
     steps = pruneDeadPaths(steps, deadPathCounter);
 
-    // If section doesn't end with a terminal and there is a next SECTION in fall-through order, connect via jumpToReusableTask
+    // Protected-Section Fall-Through Guard:
+    // NEVER unconditionally fall through into a protected Busy/Error/Abort section (e.g. Section_BESETZT)!
     if (sIdx + 1 < rawSections.length && !isStepListTerminal(steps)) {
       const nextSec = rawSections[sIdx + 1];
-      steps.push({
-        id: nextStepId('jmp'),
-        kind: 'jumpToReusableTask',
-        lineNumber: nextSec.startLine,
-        avayaCommand: 'SECTION_FALLTHROUGH',
-        label: `Continue to ${nextSec.rawName}`,
-        target: nextSec.rawName,
-        targetSlug: nextSec.refId,
-        targetTaskRefId: nextSec.refId,
-        isTerminal: true,
-      });
+      if (!isProtectedHandlerSectionName(nextSec.rawName)) {
+        steps.push({
+          id: nextStepId('jmp'),
+          kind: 'jumpToReusableTask',
+          lineNumber: nextSec.startLine,
+          avayaCommand: 'SECTION_FALLTHROUGH',
+          label: `Continue to ${nextSec.rawName}`,
+          target: nextSec.rawName,
+          targetSlug: nextSec.refId,
+          targetTaskRefId: nextSec.refId,
+          sectionHint: sec.rawName,
+          isTerminal: true,
+        });
+      }
     }
 
     // Ensure every task has at least one valid step
@@ -2970,6 +3072,7 @@ export function buildMigrationFlowGraph(
         lineNumber: sec.startLine,
         avayaCommand: 'END_OF_TASK',
         label: `Disconnect (${sec.rawName})`,
+        sectionHint: sec.rawName,
         isTerminal: true,
       });
     }
@@ -2979,6 +3082,7 @@ export function buildMigrationFlowGraph(
       name: sec.refId,
       kind: sec.isEntry ? 'entry' : 'section',
       originalTarget: sec.rawName,
+      isProtectedHandler: isProtectedHandlerSectionName(sec.rawName),
       taskVariables: Array.from(taskVars.values()).sort((a, b) => a.name.localeCompare(b.name)),
       steps,
     });
@@ -2991,6 +3095,516 @@ export function buildMigrationFlowGraph(
       name: 'Fallback_Error_Task',
       kind: 'fallback',
       originalTarget: 'System Fallback',
+      isProtectedHandler: true,
+      taskVariables: [],
+      steps: [
+        {
+          id: nextStepId('aud'),
+          kind: 'playAudio',
+          lineNumber: 0,
+          avayaCommand: 'FALLBACK_AUDIO',
+          label: 'Fallback Hinweis-Ansage',
+          target: 'Technischer_Hinweis',
+          targetSlug: 'Technischer_Hinweis',
+          ttsText: 'Entschuldigung, aktuell liegt eine technische Stoerung vor. Bitte versuchen Sie es spaeter erneut.',
+          isTerminal: false,
+        },
+        {
+          id: nextStepId('disc'),
+          kind: 'disconnect',
+          lineNumber: 0,
+          avayaCommand: 'FALLBACK_DISCONNECT',
+          label: 'Disconnect (Fallback Error)',
+          target: 'Fallback_Error',
+          isTerminal: true,
+        },
+      ],
+    });
+  }
+
+  // ============================================================================
+  // GRAPH-REDUKTIONS-PASS: Selektives Section-Inlining (1x genutzt -> inline Branch;
+  // >= 2x genutzt -> Reusable Task; unreferenzierte tote Sections entfernen)
+  // ============================================================================
+  let inlinedSectionCount = 0;
+
+  const countJumpRefs = (taskList: MigrationTaskGraph[]): Map<string, number> => {
+    const counts = new Map<string, number>();
+    const visit = (list: MigrationStep[]) => {
+      for (const st of list) {
+        if (st.kind === 'jumpToReusableTask' && st.targetTaskRefId) {
+          counts.set(st.targetTaskRefId, (counts.get(st.targetTaskRefId) || 0) + 1);
+        }
+        if (st.yesSteps) visit(st.yesSteps);
+        if (st.noSteps) visit(st.noSteps);
+        if (st.openSteps) visit(st.openSteps);
+        if (st.closedSteps) visit(st.closedSteps);
+        if (st.holidaySteps) visit(st.holidaySteps);
+        if (st.successSteps) visit(st.successSteps);
+        if (st.failureSteps) visit(st.failureSteps);
+        if (st.timeoutSteps) visit(st.timeoutSteps);
+        if (st.foundSteps) visit(st.foundSteps);
+        if (st.notFoundSteps) visit(st.notFoundSteps);
+        if (st.bodySteps) visit(st.bodySteps);
+        if (st.defaultSteps) visit(st.defaultSteps);
+        if (st.cases) st.cases.forEach((c) => visit(c.steps));
+      }
+    };
+    taskList.forEach((t) => visit(t.steps));
+    return counts;
+  };
+
+  const hasCycleToSelf = (startRefId: string, byRef: Map<string, MigrationTaskGraph>): boolean => {
+    const visited = new Set<string>();
+    const dfs = (cur: string): boolean => {
+      const t = byRef.get(cur);
+      if (!t) return false;
+      const targets: string[] = [];
+      const collect = (list: MigrationStep[]) => {
+        for (const st of list) {
+          if (st.kind === 'jumpToReusableTask' && st.targetTaskRefId) targets.push(st.targetTaskRefId);
+          if (st.yesSteps) collect(st.yesSteps);
+          if (st.noSteps) collect(st.noSteps);
+          if (st.openSteps) collect(st.openSteps);
+          if (st.closedSteps) collect(st.closedSteps);
+          if (st.holidaySteps) collect(st.holidaySteps);
+          if (st.successSteps) collect(st.successSteps);
+          if (st.failureSteps) collect(st.failureSteps);
+          if (st.timeoutSteps) collect(st.timeoutSteps);
+          if (st.foundSteps) collect(st.foundSteps);
+          if (st.notFoundSteps) collect(st.notFoundSteps);
+          if (st.bodySteps) collect(st.bodySteps);
+          if (st.defaultSteps) collect(st.defaultSteps);
+          if (st.cases) st.cases.forEach((c) => collect(c.steps));
+        }
+      };
+      collect(t.steps);
+      for (const nxt of targets) {
+        if (nxt === startRefId) return true;
+        if (!visited.has(nxt)) {
+          visited.add(nxt);
+          if (dfs(nxt)) return true;
+        }
+      }
+      return false;
+    };
+    return dfs(startRefId);
+  };
+
+  const cloneInlinedSteps = (list: MigrationStep[], prefix: string): MigrationStep[] =>
+    list.map((st) => ({
+      ...st,
+      id: `${prefix}_${st.id}`,
+      yesSteps: st.yesSteps ? cloneInlinedSteps(st.yesSteps, prefix) : undefined,
+      noSteps: st.noSteps ? cloneInlinedSteps(st.noSteps, prefix) : undefined,
+      openSteps: st.openSteps ? cloneInlinedSteps(st.openSteps, prefix) : undefined,
+      closedSteps: st.closedSteps ? cloneInlinedSteps(st.closedSteps, prefix) : undefined,
+      holidaySteps: st.holidaySteps ? cloneInlinedSteps(st.holidaySteps, prefix) : undefined,
+      successSteps: st.successSteps ? cloneInlinedSteps(st.successSteps, prefix) : undefined,
+      failureSteps: st.failureSteps ? cloneInlinedSteps(st.failureSteps, prefix) : undefined,
+      timeoutSteps: st.timeoutSteps ? cloneInlinedSteps(st.timeoutSteps, prefix) : undefined,
+      foundSteps: st.foundSteps ? cloneInlinedSteps(st.foundSteps, prefix) : undefined,
+      notFoundSteps: st.notFoundSteps ? cloneInlinedSteps(st.notFoundSteps, prefix) : undefined,
+      bodySteps: st.bodySteps ? cloneInlinedSteps(st.bodySteps, prefix) : undefined,
+      defaultSteps: st.defaultSteps ? cloneInlinedSteps(st.defaultSteps, prefix) : undefined,
+      cases: st.cases
+        ? st.cases.map((c) => ({ ...c, steps: cloneInlinedSteps(c.steps, prefix) }))
+        : undefined,
+    }));
+
+  // Iteratively inline single-use non-cyclic Avaya SECTION tasks directly into caller branches
+  for (let pass = 0; pass < 4; pass += 1) {
+    const byRef = new Map<string, MigrationTaskGraph>(tasks.map((t) => [t.refId, t]));
+    const refCounts = countJumpRefs(tasks);
+    const inlineableRefs = new Set<string>();
+
+    for (const t of tasks) {
+      if (t.kind !== 'section') continue;
+      const count = refCounts.get(t.refId) || 0;
+      if (count === 1 && !hasCycleToSelf(t.refId, byRef)) {
+        inlineableRefs.add(t.refId);
+      }
+    }
+
+    if (inlineableRefs.size === 0) break;
+
+    let didInline = false;
+    const replaceJumps = (
+      list: MigrationStep[],
+      hostTask: MigrationTaskGraph
+    ): MigrationStep[] => {
+      const out: MigrationStep[] = [];
+      for (const st of list) {
+        if (
+          st.kind === 'jumpToReusableTask' &&
+          st.targetTaskRefId &&
+          inlineableRefs.has(st.targetTaskRefId)
+        ) {
+          const targetTask = byRef.get(st.targetTaskRefId);
+          if (targetTask) {
+            // Merge task-local variables cleanly into host task
+            const hostVarKeys = new Set(hostTask.taskVariables.map((v) => v.name.toLowerCase()));
+            for (const tv of targetTask.taskVariables) {
+              if (!hostVarKeys.has(tv.name.toLowerCase())) {
+                hostVarKeys.add(tv.name.toLowerCase());
+                hostTask.taskVariables.push({ ...tv });
+              }
+            }
+            const cloned = cloneInlinedSteps(targetTask.steps, nextStepId('inl'));
+            out.push(...cloned);
+            inlinedSectionCount += 1;
+            didInline = true;
+            continue;
+          }
+        }
+        const copy: MigrationStep = { ...st };
+        if (copy.yesSteps) copy.yesSteps = replaceJumps(copy.yesSteps, hostTask);
+        if (copy.noSteps) copy.noSteps = replaceJumps(copy.noSteps, hostTask);
+        if (copy.openSteps) copy.openSteps = replaceJumps(copy.openSteps, hostTask);
+        if (copy.closedSteps) copy.closedSteps = replaceJumps(copy.closedSteps, hostTask);
+        if (copy.holidaySteps) copy.holidaySteps = replaceJumps(copy.holidaySteps, hostTask);
+        if (copy.successSteps) copy.successSteps = replaceJumps(copy.successSteps, hostTask);
+        if (copy.failureSteps) copy.failureSteps = replaceJumps(copy.failureSteps, hostTask);
+        if (copy.timeoutSteps) copy.timeoutSteps = replaceJumps(copy.timeoutSteps, hostTask);
+        if (copy.foundSteps) copy.foundSteps = replaceJumps(copy.foundSteps, hostTask);
+        if (copy.notFoundSteps) copy.notFoundSteps = replaceJumps(copy.notFoundSteps, hostTask);
+        if (copy.bodySteps) copy.bodySteps = replaceJumps(copy.bodySteps, hostTask);
+        if (copy.defaultSteps) copy.defaultSteps = replaceJumps(copy.defaultSteps, hostTask);
+        if (copy.cases) {
+          copy.cases = copy.cases.map((c) => ({
+            ...c,
+            steps: replaceJumps(c.steps, hostTask),
+          }));
+        }
+        out.push(copy);
+      }
+      return out;
+    };
+
+    for (const t of tasks) {
+      if (inlineableRefs.has(t.refId)) continue;
+      t.steps = pruneDeadPaths(replaceJumps(t.steps, t), deadPathCounter);
+      t.taskVariables.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    if (!didInline) break;
+    // Remove all inlined section tasks
+    for (let i = tasks.length - 1; i >= 0; i -= 1) {
+      if (inlineableRefs.has(tasks[i].refId)) {
+        tasks.splice(i, 1);
+      }
+    }
+  }
+
+  // Drop completely unreferenced orphan section tasks (e.g. unreachable Section_BESETZT)
+  const finalJumpRefs = countJumpRefs(tasks);
+  for (let i = tasks.length - 1; i >= 0; i -= 1) {
+    const t = tasks[i];
+    if (t.kind === 'section' && (finalJumpRefs.get(t.refId) || 0) === 0) {
+      tasks.splice(i, 1);
+    }
+  }
+
+  // ============================================================================
+  // VARIABLE-PROVENANCE-PASS: Stellt sicher, dass jede geprüfte Variable vor
+  // decision / switch eine nachvollziehbare Quelle hat (+ # OFFENE MIGRATIONSFRAGE)
+  // ============================================================================
+  let synthesizedSourceCount = 0;
+
+  const extractScopedVarsFromExpr = (
+    expr: string
+  ): Array<{ scope: 'flow' | 'task'; name: string; refName: string }> => {
+    const found: Array<{ scope: 'flow' | 'task'; name: string; refName: string }> = [];
+    const seen = new Set<string>();
+    const matches = (expr || '').matchAll(/\b(Flow|Task)\.([A-Za-z_][A-Za-z0-9_]*)\b/g);
+    for (const m of matches) {
+      const scope = m[1].toLowerCase() === 'task' ? 'task' : 'flow';
+      const name = m[2];
+      const key = `${scope}:${name.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({ scope, name, refName: `${scope === 'task' ? 'Task' : 'Flow'}.${name}` });
+    }
+    return found;
+  };
+
+  const ensureProvenanceOnList = (
+    steps: MigrationStep[],
+    inheritedWritten: Set<string>,
+    hostTask: MigrationTaskGraph
+  ): MigrationStep[] => {
+    const written = new Set<string>(inheritedWritten);
+    const out: MigrationStep[] = [];
+
+    const markWritten = (name?: string) => {
+      if (!name) return;
+      written.add(name.replace(/^(?:Flow|Task)\./i, '').toLowerCase());
+    };
+
+    for (const st of steps) {
+      const copy: MigrationStep = { ...st };
+
+      // Check unread variables in decision / switch BEFORE pushing the step
+      if (copy.kind === 'decision' && copy.expression && !copy.isEmergencyCheck) {
+        const refs = extractScopedVarsFromExpr(copy.expression);
+        for (const r of refs) {
+          const lower = r.name.toLowerCase();
+          if (written.has(lower)) continue;
+          if (
+            lower === 'estimatedwaittime' ||
+            lower === 'queueagentsonline' ||
+            lower === 'emergencyoverride' ||
+            lower === 'avayaoriginscript'
+          ) {
+            continue;
+          }
+
+          if (/blacklist|vip/i.test(r.name)) {
+            synthesizedSourceCount += 1;
+            const tableName = `${toCleanGraphSlug(r.name.replace(/_flag|_cv/gi, ''), 'Blacklist')}_Table`;
+            const isBool = registry.flowVars.get(lower)?.dataType === 'boolean';
+            out.push({
+              id: nextStepId('dt'),
+              kind: 'callDataTableLookup',
+              lineNumber: copy.lineNumber,
+              avayaCommand: 'DATA_PROVENANCE_LOOKUP',
+              label: `Data Table Lookup: ${tableName}`,
+              target: tableName,
+              targetSlug: tableName,
+              dataTableKey: 'Call.Ani',
+              sectionHint: copy.sectionHint,
+              dataActionOutputs: [
+                {
+                  field: 'isListed',
+                  targetVarName: r.name,
+                  targetVarRef: r.refName,
+                  dataType: isBool ? 'boolean' : 'string',
+                },
+              ],
+              yamlComment: `OFFENE MIGRATIONSFRAGE: Quelle fuer "${r.name}" im Avaya-Skript nicht eindeutig enthalten — Data Table Lookup (${tableName} ueber Call.Ani) ergaenzt, bitte Tabellenname/Schluessel in Genesys pruefen.`,
+              provenanceFinding: {
+                severity: 'WARN',
+                code: 'VAR_USED_BEFORE_SET',
+                variableName: r.name,
+                message: `Variable "${r.name}" wird in Zeile ${copy.lineNumber} geprüft, Quelle im Avaya-Skript nicht eindeutig gefunden (Data Table Lookup "${tableName}" als Zielquelle ergänzt).`,
+              },
+              foundSteps: [
+                {
+                  id: nextStepId('upd'),
+                  kind: 'updateData',
+                  lineNumber: copy.lineNumber,
+                  avayaCommand: 'SET_LOOKUP_MATCH',
+                  label: `Set ${r.refName} (Match)`,
+                  variableName: r.name,
+                  variableRef: r.refName,
+                  variableDataType: isBool ? 'boolean' : 'string',
+                  literalValue: isBool ? true : '1',
+                  sectionHint: copy.sectionHint,
+                  isTerminal: false,
+                },
+              ],
+              notFoundSteps: [
+                {
+                  id: nextStepId('upd'),
+                  kind: 'updateData',
+                  lineNumber: copy.lineNumber,
+                  avayaCommand: 'SET_LOOKUP_NOMATCH',
+                  label: `Set ${r.refName} (Not Found)`,
+                  variableName: r.name,
+                  variableRef: r.refName,
+                  variableDataType: isBool ? 'boolean' : 'string',
+                  literalValue: isBool ? false : '0',
+                  sectionHint: copy.sectionHint,
+                  isTerminal: false,
+                },
+              ],
+              isTerminal: false,
+            });
+            markWritten(r.name);
+          } else {
+            synthesizedSourceCount += 1;
+            out.push({
+              id: nextStepId('gpd'),
+              kind: 'getParticipantData',
+              lineNumber: copy.lineNumber,
+              avayaCommand: 'DATA_PROVENANCE_READ',
+              label: `Get Participant Data: ${r.name}`,
+              variableName: r.name,
+              variableRef: r.refName,
+              sectionHint: copy.sectionHint,
+              yamlComment: `OFFENE MIGRATIONSFRAGE: "${r.name}" wird vor expliziter Zuweisung geprueft — Uebernahme aus Participant Data / vorgeschaltetem Modul ergaenzt.`,
+              provenanceFinding: {
+                severity: 'WARN',
+                code: 'VAR_USED_BEFORE_SET',
+                variableName: r.name,
+                message: `Variable "${r.name}" wird in Zeile ${copy.lineNumber} geprüft, aber vorher im Skript nicht explizit gesetzt (Get Participant Data als Herkunft ergänzt).`,
+              },
+              isTerminal: false,
+            });
+            markWritten(r.name);
+          }
+        }
+      } else if (copy.kind === 'switch' && copy.variableRef) {
+        let wrappedSwitchInDataAction = false;
+        const refs = extractScopedVarsFromExpr(copy.variableRef);
+        for (const r of refs) {
+          const lower = r.name.toLowerCase();
+          if (written.has(lower)) continue;
+
+          // If immediately preceded by a callDataAction, wire this response var straight into its outputs!
+          const prevOut = out[out.length - 1];
+          if (prevOut && prevOut.kind === 'callDataAction') {
+            prevOut.dataActionOutputs = prevOut.dataActionOutputs || [];
+            if (!prevOut.dataActionOutputs.some((o) => o.targetVarName.toLowerCase() === lower)) {
+              prevOut.dataActionOutputs.push({
+                field: 'responseCode',
+                targetVarName: r.name,
+                targetVarRef: r.refName,
+                dataType: 'string',
+              });
+            }
+            markWritten(r.name);
+            continue;
+          }
+
+          synthesizedSourceCount += 1;
+          const prevWasSubflow =
+            prevOut && (prevOut.kind === 'callTask' || prevOut.kind === 'callCommonModule');
+
+          if (/hdx|resp|response|host|oracle|status/i.test(r.name) && !prevWasSubflow) {
+            // Synthesize structured Data Action with Input/Output mapping and nest Switch inside successSteps!
+            needsFallbackErrorTask = true;
+            markWritten(r.name);
+            if (copy.cases) {
+              copy.cases = copy.cases.map((c) => ({
+                ...c,
+                steps: ensureProvenanceOnList(c.steps, written, hostTask),
+              }));
+            }
+            if (copy.defaultSteps) {
+              copy.defaultSteps = ensureProvenanceOnList(copy.defaultSteps, written, hostTask);
+            }
+            out.push({
+              id: nextStepId('da'),
+              kind: 'callDataAction',
+              lineNumber: copy.lineNumber,
+              avayaCommand: 'DATA_PROVENANCE_API',
+              label: `Data Action: Query_${toCleanGraphSlug(r.name, 'HDX')}`,
+              target: `Query_${toCleanGraphSlug(r.name, 'HDX')}`,
+              targetSlug: `Query_${toCleanGraphSlug(r.name, 'HDX')}`,
+              dataActionCategory: 'Oracle_Integration',
+              sectionHint: copy.sectionHint,
+              dataActionInputs: [
+                { name: 'callerAni', expr: 'Call.Ani' },
+                { name: 'dialedDnis', expr: 'Call.Dnis' },
+              ],
+              dataActionOutputs: [
+                {
+                  field: 'responseCode',
+                  targetVarName: r.name,
+                  targetVarRef: r.refName,
+                  dataType: 'string',
+                },
+              ],
+              yamlComment: `OFFENE MIGRATIONSFRAGE: Switch prueft "${r.name}" ohne sichtbare Zuweisung im Skript — Data Action Output-Mapping ergaenzt, bitte Ziel-Integration abstimmen.`,
+              provenanceFinding: {
+                severity: 'WARN',
+                code: 'SWITCH_WITHOUT_SOURCE',
+                variableName: r.name,
+                message: `Switch auf "${r.name}" in Zeile ${copy.lineNumber} ohne vorherige Zuweisung im Skript (Data Action Output-Mapping ergänzt).`,
+              },
+              successSteps: [copy],
+              failureSteps: [makeFallbackJumpStep(copy.lineNumber, `${r.name} Failure`)],
+              timeoutSteps: [makeFallbackJumpStep(copy.lineNumber, `${r.name} Timeout`)],
+              isTerminal: false,
+            });
+            wrappedSwitchInDataAction = true;
+            break;
+          } else {
+            out.push({
+              id: nextStepId('gpd'),
+              kind: 'getParticipantData',
+              lineNumber: copy.lineNumber,
+              avayaCommand: 'DATA_PROVENANCE_READ',
+              label: `Get Participant Data: ${r.name}`,
+              variableName: r.name,
+              variableRef: r.refName,
+              sectionHint: copy.sectionHint,
+              yamlComment: prevWasSubflow
+                ? `OFFENE MIGRATIONSFRAGE: "${r.name}" wird nach "${prevOut.target || 'Subflow'}" im Switch ausgewertet — bitte Rueckgabewert aus Subflow/Participant Data pruefen.`
+                : `OFFENE MIGRATIONSFRAGE: Switch prueft "${r.name}" ohne vorherige Zuweisung — Herkunft aus Participant Data ergaenzt.`,
+              provenanceFinding: {
+                severity: 'WARN',
+                code: 'SWITCH_WITHOUT_SOURCE',
+                variableName: r.name,
+                message: `Switch auf "${r.name}" in Zeile ${copy.lineNumber}: Quelle im Skript nicht explizit sichtbar (Übernahme nach ${prevWasSubflow ? prevOut.target : 'Participant Data'} markiert).`,
+              },
+              isTerminal: false,
+            });
+            markWritten(r.name);
+          }
+        }
+        if (wrappedSwitchInDataAction) continue;
+      }
+
+      // Record writes performed by this step
+      if (copy.kind === 'updateData' || copy.kind === 'getParticipantData') {
+        markWritten(copy.variableName);
+      } else if (copy.kind === 'collectInput') {
+        markWritten(copy.inputVarName);
+      } else if (copy.kind === 'callDataAction' || copy.kind === 'callDataTableLookup') {
+        for (const om of copy.dataActionOutputs || []) {
+          markWritten(om.targetVarName);
+        }
+      }
+
+      // Recurse into child branches with isolated copy of current written set
+      if (copy.yesSteps) copy.yesSteps = ensureProvenanceOnList(copy.yesSteps, written, hostTask);
+      if (copy.noSteps) copy.noSteps = ensureProvenanceOnList(copy.noSteps, written, hostTask);
+      if (copy.openSteps) copy.openSteps = ensureProvenanceOnList(copy.openSteps, written, hostTask);
+      if (copy.closedSteps) copy.closedSteps = ensureProvenanceOnList(copy.closedSteps, written, hostTask);
+      if (copy.holidaySteps) copy.holidaySteps = ensureProvenanceOnList(copy.holidaySteps, written, hostTask);
+      if (copy.successSteps) copy.successSteps = ensureProvenanceOnList(copy.successSteps, written, hostTask);
+      if (copy.failureSteps) copy.failureSteps = ensureProvenanceOnList(copy.failureSteps, written, hostTask);
+      if (copy.timeoutSteps) copy.timeoutSteps = ensureProvenanceOnList(copy.timeoutSteps, written, hostTask);
+      if (copy.foundSteps) copy.foundSteps = ensureProvenanceOnList(copy.foundSteps, written, hostTask);
+      if (copy.notFoundSteps) copy.notFoundSteps = ensureProvenanceOnList(copy.notFoundSteps, written, hostTask);
+      if (copy.bodySteps) copy.bodySteps = ensureProvenanceOnList(copy.bodySteps, written, hostTask);
+      if (copy.defaultSteps) copy.defaultSteps = ensureProvenanceOnList(copy.defaultSteps, written, hostTask);
+      if (copy.cases) {
+        copy.cases = copy.cases.map((c) => ({
+          ...c,
+          steps: ensureProvenanceOnList(c.steps, written, hostTask),
+        }));
+      }
+
+      out.push(copy);
+    }
+
+    return out;
+  };
+
+  // Variables initialized with explicit non-empty Avaya static literals are already written
+  const preWrittenFlowVars = new Set<string>();
+  for (const fv of registry.flowVars.values()) {
+    if (fv.dataType === 'string' && typeof fv.initialValue === 'string' && fv.initialValue.trim().length > 0) {
+      preWrittenFlowVars.add(fv.name.toLowerCase());
+    }
+  }
+
+  for (const t of tasks) {
+    if (t.kind === 'fallback') continue;
+    t.steps = ensureProvenanceOnList(t.steps, preWrittenFlowVars, t);
+  }
+
+  // Ensure Fallback_Error_Task exists if provenance pass synthesized a Data Action referencing it
+  if (needsFallbackErrorTask && !tasks.some((t) => t.refId === 'Fallback_Error_Task')) {
+    tasks.push({
+      refId: 'Fallback_Error_Task',
+      name: 'Fallback_Error_Task',
+      kind: 'fallback',
+      originalTarget: 'System Fallback',
+      isProtectedHandler: true,
       taskVariables: [],
       steps: [
         {
@@ -3070,6 +3684,8 @@ export function buildMigrationFlowGraph(
       fallbackExpressionCount,
       terminalNodeCount,
       branchNodeCount,
+      inlinedSectionCount,
+      synthesizedSourceCount,
       normalizedTargets,
     },
   };

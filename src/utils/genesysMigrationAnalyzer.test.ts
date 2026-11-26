@@ -8,10 +8,15 @@ import {
 } from './scriptCallflowParser';
 import { ScriptModule } from '../types/mermaidStudio';
 import {
+  FlowIR,
   exportAllArchyYamlsZipBlob,
+  renderArchyYamlFromFlowIR,
+  renderAvayaView,
+  renderGenesysView,
   toArchySlug,
   translateAvayaWorkspaceToGenesys,
   validateArchyYaml,
+  validateIR,
 } from './genesysMigrationAnalyzer';
 import {
   generateInteractiveCallflowHtml,
@@ -824,7 +829,515 @@ SECTION Mobile_Entry
     expect(res.warnings.some((w) => w.code === 'DUPLICATE_ACTION_NAME')).toBe(true);
     expect(res.warnings.some((w) => w.code === 'PLACEHOLDER_CONDITION')).toBe(true);
   });
+
+  it('KPV_ADAC pattern: populates MCF_Blacklist_flag_cv & HDX_Resp_cv, blocks blind Section_BESETZT fall-through, inlines single-use sections, and produces scope-free flowIR v1.1', () => {
+    const kpvMod = makeModule(
+      'KPV_ADAC',
+      `
+SECTION Start
+  IF MCF_Blacklist_flag_cv = "1" THEN
+    GOTO BESETZT
+  ELSE
+    GOSUB GET_SCHALTER
+    GOTO CHECK_RESPONSE
+  END IF
+
+SECTION BESETZT
+  GIVE RAN 9001
+  DISCONNECT
+
+SECTION CHECK_RESPONSE
+  WHERE HDX_Resp_cv EQUALS
+    VALUE "OK":
+      QUEUE TO SKILLSET ADAC_Service_DE
+    VALUE "VIP":
+      QUEUE TO SKILLSET ADAC_VIP_DE
+    DEFAULT:
+      TRANSFER TO 00498976760
+  END WHERE
+`
+    );
+
+    const ws = buildScriptWorkspace([kpvMod]);
+    const res = translateAvayaWorkspaceToGenesys(ws);
+    const script = res.scripts[0];
+
+    expect(script).toBeDefined();
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.yamlValidation.errors).toHaveLength(0);
+
+    // 1. No dummy checkResult or placeholder conditions anywhere
+    expect(script.archyYaml).not.toContain('checkResult');
+    expect(script.archyYaml).not.toContain('Flow.avayaCondition');
+
+    // 2. MCF_Blacklist_flag_cv & HDX_Resp_cv recognized as Flow variables (suffix *_cv)
+    expect(script.archyYaml).toContain('name: MCF_Blacklist_flag_cv');
+    expect(script.archyYaml).toContain('name: HDX_Resp_cv');
+    expect(script.archyYaml).not.toMatch(/^\s+name:\s+(?:Flow|Task)\./m);
+
+    // 3. Variable provenance: blacklist lookup + OFFENE MIGRATIONSFRAGE comment before decision
+    expect(script.archyYaml).toContain('callDataTableLookup:');
+    expect(script.archyYaml).toContain('OFFENE MIGRATIONSFRAGE:');
+    expect(script.archyYaml).toContain('Flow.MCF_Blacklist_flag_cv == \\"1\\"');
+
+    // 4. Single-use sections BESETZT and CHECK_RESPONSE are inlined directly (no goto-style Section_BESETZT task)
+    expect(script.migrationGraph.diagnostics.inlinedSectionCount).toBeGreaterThanOrEqual(2);
+    expect(script.archyYaml).not.toContain('refId: Section_BESETZT');
+    expect(script.archyYaml).not.toContain('refId: Section_CHECK_RESPONSE');
+    // Positive blacklist path disconnects cleanly (no accidental fallthrough from normal path into BESETZT)
+    expect(script.archyYaml).toContain('Prompt.S_9001');
+    expect(script.archyYaml).toContain('ADAC_Service_DE');
+    expect(script.archyYaml).toContain('lit: "+498976760"');
+
+    // 5. Canonical flowIR v1.1 checks: scope-free expressions, sourceTrace & explicit terminal on every node
+    expect(script.flowIR.meta.version).toBe('1.1');
+    expect(script.flowIR.meta.sourceSystem).toBe('Avaya');
+    expect(script.flowIR.meta.targetSystem).toBe('Genesys');
+    for (const v of script.flowIR.variables) {
+      expect(v.name).not.toMatch(/^(?:Flow|Task)\./);
+      expect(v.sourceTrace).toBeDefined();
+      expect(v.sourceTrace.script).toBe('KPV_ADAC.s');
+    }
+    for (const n of script.flowIR.nodes) {
+      expect(typeof n.terminal).toBe('boolean');
+      expect(n.sourceTrace).toBeDefined();
+      expect(n.sourceTrace.script).toBe('KPV_ADAC.s');
+      if (n.condition?.expr) {
+        expect(n.condition.expr).not.toMatch(/\b(?:Flow|Task)\./);
+      }
+      if (n.kind === 'transfer') {
+        expect(n.resolvedTargetType).toBeDefined();
+      }
+    }
+    // Missing subflow GET_SCHALTER reported cleanly in flowIR findings
+    expect(
+      script.flowIR.findings.some((f) => f.code === 'MISSING_SUBFLOW_SOURCE')
+    ).toBe(true);
+  });
+
+  it('unloaded domain subtasks (blacklist_vip, Check_Response, Custom_Helper) emit zero checkResult stubs and zero diagnosis-only branches', () => {
+    const callerMod = makeModule(
+      'Main_Subflow_Caller',
+      `
+SECTION Entry
+  EXECUTE blacklist_vip
+  EXECUTE Check_Response
+  EXECUTE Custom_Helper
+  QUEUE TO SKILLSET Support_DE
+`
+    );
+
+    const ws = buildScriptWorkspace([callerMod]);
+    const res = translateAvayaWorkspaceToGenesys(ws);
+    const script = res.scripts[0];
+
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.yamlValidation.errors).toHaveLength(0);
+    expect(script.archyYaml).not.toContain('checkResult');
+    expect(script.archyYaml).toContain('callDataTableLookup:');
+    expect(script.archyYaml).toContain('callCommonModule:');
+    expect(script.archyYaml).toContain('OFFENE MIGRATIONSFRAGE:');
+    expect(
+      script.yamlValidation.warnings.some((w) => w.code === 'DIAGNOSIS_ONLY_BRANCH')
+    ).toBe(false);
+    expect(
+      script.yamlValidation.warnings.some((w) => w.code === 'PLACEHOLDER_CONDITION')
+    ).toBe(false);
+    expect(
+      script.flowIR.findings.filter((f) => f.code === 'MISSING_SUBFLOW_SOURCE').length
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  it('keeps reused sections (>= 2 callers) as Reusable Tasks while inlining single-use sections', () => {
+    const mod = makeModule(
+      'Section_Reuse_Test',
+      `
+SECTION Entry
+  IF DNIS = "1000" THEN
+    GOTO Shared_Busy
+  ELSE
+    IF DNIS = "2000" THEN
+      GOTO Shared_Busy
+    ELSE
+      GOTO Single_Only
+    END IF
+  END IF
+
+SECTION Shared_Busy
+  GIVE RAN 5001
+  DISCONNECT
+
+SECTION Single_Only
+  GIVE RAN 5002
+  QUEUE TO SKILLSET Sales_DE
+`
+    );
+
+    const ws = buildScriptWorkspace([mod]);
+    const res = translateAvayaWorkspaceToGenesys(ws);
+    const script = res.scripts[0];
+
+    expect(script.yamlValidation.isValid).toBe(true);
+    // Shared_Busy has 2 callers -> remains a Reusable Task
+    expect(script.archyYaml).toContain('refId: Section_Shared_Busy');
+    // Single_Only has 1 caller -> inlined directly into caller branch
+    expect(script.archyYaml).not.toContain('refId: Section_Single_Only');
+    expect(script.archyYaml).toContain('Prompt.S_5002');
+    expect(script.archyYaml).toContain('Sales_DE');
+    expect(script.migrationGraph.diagnostics.inlinedSectionCount).toBe(1);
+  });
+
+  it('validateIR catches all 10 binding v1.1 Findings-Codes plus structural graph errors', () => {
+    const brokenIR: FlowIR = {
+      meta: {
+        flowId: 'Broken_IR_Test',
+        sourceSystem: 'Avaya',
+        targetSystem: 'Genesys',
+        sourceScript: 'Broken_IR_Test.s',
+        entryNodeId: 'n_start',
+        language: 'de-de',
+        version: '1.1',
+      },
+      variables: [
+        {
+          id: 'v_flag',
+          name: 'uninitializedFlag',
+          scope: 'flow',
+          category: 'flow',
+          type: 'string',
+          initialValue: '',
+          source: { origin: 'avaya', originalName: 'uninitializedFlag' },
+          sourceTrace: { script: 'Broken_IR_Test.s', lineStart: 1, lineEnd: 1 },
+          usedByNodes: ['n_dec_uninit'],
+        },
+        {
+          id: 'v_switch',
+          name: 'respCode',
+          scope: 'flow',
+          category: 'flow',
+          type: 'string',
+          initialValue: '',
+          source: { origin: 'avaya', originalName: 'respCode' },
+          sourceTrace: { script: 'Broken_IR_Test.s', lineStart: 2, lineEnd: 2 },
+          usedByNodes: ['n_switch_nosrc'],
+        },
+      ],
+      nodes: [
+        {
+          id: 'n_start',
+          kind: 'entry',
+          name: 'Start',
+          terminal: false,
+          parameters: {},
+          sourceTrace: { script: 'Broken_IR_Test.s', lineStart: 1, lineEnd: 1 },
+        },
+        {
+          id: 'n_dec_dummy',
+          kind: 'decision',
+          name: 'Dummy Decision',
+          terminal: false,
+          parameters: {},
+          condition: { expr: 'avayaCondition == "true"' },
+          sourceTrace: { script: 'Broken_IR_Test.s', lineStart: 5, lineEnd: 5 },
+        },
+        {
+          id: 'n_dec_uninit',
+          kind: 'decision',
+          name: 'Uninit Check',
+          terminal: false,
+          parameters: {},
+          condition: { expr: 'uninitializedFlag == "1"' },
+          sourceTrace: { script: 'Broken_IR_Test.s', lineStart: 8, lineEnd: 8 },
+        },
+        {
+          id: 'n_switch_nosrc',
+          kind: 'switch',
+          name: 'Switch Without Source',
+          terminal: false,
+          parameters: {},
+          expression: { expr: 'respCode' },
+          sourceTrace: { script: 'Broken_IR_Test.s', lineStart: 12, lineEnd: 12 },
+        },
+        {
+          id: 'n_data_incomplete',
+          kind: 'dataAction',
+          name: 'Incomplete Data Action',
+          terminal: false,
+          parameters: {},
+          integration: {
+            type: 'webservice',
+            sourceSystem: 'avaya',
+            targetAction: 'CheckCustomer',
+          },
+          inputs: [{ name: 'ani', expr: 'Call.Ani' }],
+          outputs: [],
+          sourceTrace: { script: 'Broken_IR_Test.s', lineStart: 15, lineEnd: 15 },
+        },
+        {
+          id: 'n_transfer_unresolved',
+          kind: 'transfer',
+          name: 'Unresolved Transfer',
+          terminal: true,
+          parameters: { target: '99999' },
+          resolvedTargetType: 'unresolved',
+          sourceTrace: { script: 'Broken_IR_Test.s', lineStart: 20, lineEnd: 20 },
+        },
+        {
+          id: 'n_blind_section',
+          kind: 'invokeSubflow',
+          name: 'Jump Section_BESETZT',
+          terminal: false,
+          parameters: { target: 'Section_BESETZT' },
+          sourceTrace: { script: 'Broken_IR_Test.s', lineStart: 25, lineEnd: 25 },
+        },
+        {
+          id: 'n_end',
+          kind: 'terminal',
+          name: 'End',
+          terminal: true,
+          parameters: {},
+          sourceTrace: { script: 'Broken_IR_Test.s', lineStart: 30, lineEnd: 30 },
+        },
+      ],
+      transitions: [
+        { from: 'n_start', to: 'n_dec_dummy', type: 'unconditional' },
+        { from: 'n_dec_dummy', to: 'n_dec_uninit', type: 'whenTrue' },
+        // Missing 'whenFalse' transition on n_dec_dummy -> EMPTY_BRANCH
+        { from: 'n_dec_uninit', to: 'n_switch_nosrc', type: 'whenTrue' },
+        { from: 'n_dec_uninit', to: 'n_data_incomplete', type: 'whenFalse' },
+        { from: 'n_switch_nosrc', to: 'n_transfer_unresolved', type: 'default' },
+        { from: 'n_data_incomplete', to: 'n_blind_section', type: 'success' },
+        // Terminal transfer continues into non-terminal node -> TERMINAL_PATH_CONTINUES
+        { from: 'n_transfer_unresolved', to: 'n_blind_section', type: 'unconditional' },
+        { from: 'n_blind_section', to: 'n_end', type: 'unconditional' },
+        // Terminal node has outgoing transition -> TERMINAL_HAS_OUTGOING
+        { from: 'n_end', to: 'n_blind_section', type: 'unconditional' },
+        // Broken target ref -> BROKEN_TRANSITION_REF
+        { from: 'n_blind_section', to: 'n_does_not_exist', type: 'failure' },
+      ],
+      dependencies: {
+        subflows: ['Section_BESETZT'],
+        commonModules: [],
+        dataActions: ['CheckCustomer'],
+      },
+      findings: [],
+      renderingHints: {
+        genesys: {
+          preferReusableTasks: true,
+          preferDecisionNodes: true,
+          avoidGotoStyleSections: true,
+        },
+      },
+    };
+
+    const result = validateIR(brokenIR);
+    const codes = new Set(result.findings.map((f) => f.code));
+
+    expect(result.isValid).toBe(false);
+    expect(codes.has('DUMMY_CONDITION')).toBe(true);
+    expect(codes.has('MISSING_CONDITION_SOURCE')).toBe(true);
+    expect(codes.has('EMPTY_BRANCH')).toBe(true);
+    expect(codes.has('VAR_USED_BEFORE_SET')).toBe(true);
+    expect(codes.has('SWITCH_WITHOUT_SOURCE')).toBe(true);
+    expect(codes.has('UNRESOLVED_INTEGRATION_OUTPUT')).toBe(true);
+    expect(codes.has('MISSING_ERROR_PATH')).toBe(true);
+    expect(codes.has('MISSING_TIMEOUT_PATH')).toBe(true);
+    expect(codes.has('UNRESOLVED_TRANSFER_TARGET')).toBe(true);
+    expect(codes.has('TERMINAL_PATH_CONTINUES')).toBe(true);
+    expect(codes.has('TERMINAL_HAS_OUTGOING')).toBe(true);
+    expect(codes.has('SECTION_RENDERED_BLINDLY')).toBe(true);
+    expect(codes.has('BROKEN_TRANSITION_REF')).toBe(true);
+  });
+
+  it('dual-mode renderAvayaView & renderGenesysView render a scope-free flowIR v1.1 with 4 structured report sections and scoped Genesys Archy YAML', () => {
+    const cleanIR: FlowIR = {
+      meta: {
+        flowId: 'Customer_Lookup_Flow',
+        sourceSystem: 'Avaya',
+        targetSystem: 'Genesys',
+        sourceScript: 'Customer_Lookup_Flow.s',
+        entryNodeId: 'n_start',
+        language: 'de-de',
+        version: '1.1',
+      },
+      variables: [
+        {
+          id: 'v_caller',
+          name: 'callerId',
+          scope: 'flow',
+          category: 'flow',
+          type: 'string',
+          initialValue: '',
+          source: { origin: 'avaya', originalName: 'callerId' },
+          sourceTrace: { script: 'Customer_Lookup_Flow.s', lineStart: 1, lineEnd: 1 },
+          usedByNodes: ['n_lookup'],
+        },
+        {
+          id: 'v_status',
+          name: 'customerStatus',
+          scope: 'task',
+          category: 'task',
+          owner: 'Main_Task',
+          type: 'string',
+          initialValue: '',
+          source: { origin: 'avaya', originalName: 'customerStatus' },
+          sourceTrace: { script: 'Customer_Lookup_Flow.s', lineStart: 2, lineEnd: 2 },
+          usedByNodes: ['n_lookup', 'n_check'],
+        },
+      ],
+      nodes: [
+        {
+          id: 'n_start',
+          kind: 'entry',
+          name: 'Start',
+          terminal: false,
+          parameters: {},
+          sourceTrace: { script: 'Customer_Lookup_Flow.s', lineStart: 1, lineEnd: 1 },
+        },
+        {
+          id: 'n_lookup',
+          kind: 'dataAction',
+          name: 'Customer Lookup',
+          terminal: false,
+          parameters: {},
+          integration: {
+            type: 'dbLookup',
+            sourceSystem: 'avaya',
+            targetAction: 'CustomerLookup',
+            category: 'CRM_Integration',
+          },
+          inputs: [{ name: 'callerId', expr: 'callerId' }],
+          outputs: [{ name: 'customerStatus', targetVariable: 'customerStatus' }],
+          errorHandling: {
+            onError: 'n_error_disc',
+            onTimeout: 'n_timeout_disc',
+          },
+          sourceTrace: { script: 'Customer_Lookup_Flow.s', lineStart: 5, lineEnd: 8 },
+        },
+        {
+          id: 'n_check',
+          kind: 'decision',
+          name: 'Check VIP Status',
+          terminal: false,
+          parameters: {},
+          condition: { expr: 'customerStatus == "VIP"' },
+          sourceTrace: { script: 'Customer_Lookup_Flow.s', lineStart: 10, lineEnd: 10 },
+        },
+        {
+          id: 'n_vip_queue',
+          kind: 'transfer',
+          name: 'Transfer VIP Queue',
+          terminal: true,
+          parameters: { target: 'VIP_Queue_DE' },
+          resolvedTargetType: 'queue',
+          sourceTrace: { script: 'Customer_Lookup_Flow.s', lineStart: 11, lineEnd: 11 },
+        },
+        {
+          id: 'n_std_ext',
+          kind: 'transfer',
+          name: 'Transfer Standard PSTN',
+          terminal: true,
+          parameters: { target: '+4989123456' },
+          resolvedTargetType: 'externalNumber',
+          sourceTrace: { script: 'Customer_Lookup_Flow.s', lineStart: 13, lineEnd: 13 },
+        },
+        {
+          id: 'n_error_disc',
+          kind: 'disconnect',
+          name: 'Lookup Error Disconnect',
+          terminal: true,
+          parameters: {},
+          sourceTrace: { script: 'Customer_Lookup_Flow.s', lineStart: 15, lineEnd: 15 },
+        },
+        {
+          id: 'n_timeout_disc',
+          kind: 'disconnect',
+          name: 'Lookup Timeout Disconnect',
+          terminal: true,
+          parameters: {},
+          sourceTrace: { script: 'Customer_Lookup_Flow.s', lineStart: 16, lineEnd: 16 },
+        },
+      ],
+      transitions: [
+        { from: 'n_start', to: 'n_lookup', type: 'unconditional' },
+        { from: 'n_lookup', to: 'n_check', type: 'success' },
+        { from: 'n_lookup', to: 'n_error_disc', type: 'failure' },
+        { from: 'n_lookup', to: 'n_timeout_disc', type: 'timeout' },
+        { from: 'n_check', to: 'n_vip_queue', type: 'whenTrue' },
+        { from: 'n_check', to: 'n_std_ext', type: 'whenFalse' },
+      ],
+      dependencies: {
+        subflows: [],
+        commonModules: [],
+        dataActions: ['CustomerLookup'],
+      },
+      findings: [],
+      renderingHints: {
+        genesys: {
+          preferReusableTasks: true,
+          preferDecisionNodes: true,
+          avoidGotoStyleSections: true,
+        },
+      },
+    };
+
+    // 1. modus=avaya view
+    const avayaView = renderAvayaView(cleanIR);
+    expect(avayaView.mode).toBe('avaya');
+    expect(avayaView.kurzfazit.length).toBeGreaterThan(10);
+    expect(avayaView.annahmenUndOffenePunkte.length).toBeGreaterThan(0);
+    expect(avayaView.migrationshinweise.length).toBeGreaterThan(0);
+    expect(avayaView.markdownReport).toContain('## 1. Kurzfazit');
+    expect(avayaView.ergebnisText).toContain('flowIR:');
+    expect(avayaView.ergebnisText).toContain('version: "1.1"');
+    expect(avayaView.ergebnisText).toContain('sourceTrace:');
+    // Scope-free in Avaya IR view
+    expect(avayaView.ergebnisText).toContain('expr: "customerStatus == \\"VIP\\""');
+
+    // 2. modus=genesys direct IR rendering -> scopes applied ONLY during Genesys render
+    const archyYaml = renderArchyYamlFromFlowIR(cleanIR);
+    const genesysView = renderGenesysView(cleanIR, archyYaml);
+    expect(genesysView.mode).toBe('genesys');
+    expect(genesysView.markdownReport).toContain('## 1. Kurzfazit');
+    expect(genesysView.ergebnisText).toContain('inboundCall:');
+    expect(genesysView.ergebnisText).toContain('exp: "Flow.callerId"');
+    expect(genesysView.ergebnisText).toContain('variable: Task.customerStatus');
+    expect(genesysView.ergebnisText).toContain('exp: "Task.customerStatus == \\"VIP\\""');
+    expect(genesysView.ergebnisText).toContain('transferToAcd:');
+    expect(genesysView.ergebnisText).toContain('name: "VIP_Queue_DE"');
+    expect(genesysView.ergebnisText).toContain('transferToNumber:');
+    expect(genesysView.ergebnisText).toContain('lit: "+4989123456"');
+
+    const yamlVal = validateArchyYaml(archyYaml);
+    expect(yamlVal.isValid).toBe(true);
+    expect(yamlVal.errors).toHaveLength(0);
+  });
+
+  it('ZIP export writes canonical flowIR v1.1 JSON into migration-graphs/*.graph.json', async () => {
+    const mod = makeModule(
+      'Zip_IR_Test',
+      `
+SECTION Start
+  GIVE RAN 4001
+  QUEUE TO SKILLSET Sales_DE
+`
+    );
+    const ws = buildScriptWorkspace([mod]);
+    const res = translateAvayaWorkspaceToGenesys(ws);
+    const blob = await exportAllArchyYamlsZipBlob(res);
+    const zip = await JSZip.loadAsync(await blob.arrayBuffer());
+
+    const graphFile = zip.file('migration-graphs/Zip_IR_Test.graph.json');
+    expect(graphFile).toBeTruthy();
+    const parsed = JSON.parse(await graphFile!.async('string'));
+    expect(parsed.flowIR).toBeDefined();
+    expect(parsed.flowIR.meta.version).toBe('1.1');
+    expect(Array.isArray(parsed.flowIR.nodes)).toBe(true);
+    expect(Array.isArray(parsed.flowIR.transitions)).toBe(true);
+    expect(Array.isArray(parsed.flowIR.findings)).toBe(true);
+  });
 });
+
 
 
 
