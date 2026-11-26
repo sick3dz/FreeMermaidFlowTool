@@ -378,6 +378,29 @@ export function findMatchingFileInFolderPool(
 }
 
 /**
+ * Locates an explicit Main / Master entry script in an assigned folder pool
+ * (e.g. `Main.s`, `Master.s`, `Masterscript.s`) so empty-studio folder imports
+ * can start recursive connected resolution without dumping unused legacy files.
+ */
+export function findEntryMainFileInFolderPool(
+  pool: FolderScriptPool
+): FolderScriptFileEntry | null {
+  if (!pool || pool.entries.length === 0) return null;
+
+  // Priority 1: exact canonical match for main / master / masterscript
+  for (const exactKey of ['main', 'master', 'masterscript', 'master_routing']) {
+    const hit = pool.byCanonicalKey.get(exactKey);
+    if (hit) return hit;
+  }
+
+  // Priority 2: .s file whose basename contains explicit main/master token
+  const explicitMatch = pool.entries.find((e) =>
+    /(?:^|[_.\-\s])(?:main|master(?:script)?)(?:$|[_.\-\s])/i.test(e.baseName)
+  );
+  return explicitMatch || null;
+}
+
+/**
  * Recursively resolves and loads only those `<Scriptname>.s` files from the assigned
  * folder that are actually referenced along the callflow chain starting from `initialModules`.
  * Unreferenced legacy ("Altlast") files in the 600+ file folder are skipped automatically.
@@ -387,8 +410,10 @@ export async function autoResolveConnectedScriptsFromFolder(
   pool: FolderScriptPool,
   options?: {
     externalEndpoints?: string[];
+    avayaWaypoints?: string[];
     ignoredChecklistTargets?: string[];
     masterScriptNumber?: string;
+    onProgress?: (loaded: number, total: number) => void;
   }
 ): Promise<FolderAutoResolveSummary> {
   let currentModules = [...initialModules];
@@ -420,6 +445,8 @@ export async function autoResolveConnectedScriptsFromFolder(
     }
   }
 
+  options?.onProgress?.(0, Math.max(1, pool.entries.length));
+
   let safetyRounds = 0;
   const MAX_ROUNDS = 450;
 
@@ -439,10 +466,11 @@ export async function autoResolveConnectedScriptsFromFolder(
 
     const checklistState = detectMasterScriptChecklist(
       currentModules,
-      [],
+      options?.externalEndpoints || [],
       [],
       options?.masterScriptNumber,
-      options?.ignoredChecklistTargets || []
+      options?.ignoredChecklistTargets || [],
+      options?.avayaWaypoints || []
     );
 
     const pendingTargets: string[] = [];
@@ -462,10 +490,10 @@ export async function autoResolveConnectedScriptsFromFolder(
       pendingTargets.push(clean);
     };
 
-    // 1. All missing or waypoint-classified items from the recursive Masterscript checklist
-    // (waypoint names like flow_2 or FlixCheck.V2 must still load if a real .s file exists in the folder!)
+    // 1. All missing, waypoint, or external items from the recursive Masterscript checklist
+    // (real .s files in the folder ALWAYS take precedence over waypoint/endpoint heuristics!)
     for (const item of checklistState.masterChecklist) {
-      if (item.status === 'missing' || item.status === 'waypoint') {
+      if (item.status === 'missing' || item.status === 'waypoint' || item.status === 'external') {
         enqueueCandidate(item.refKey);
       }
     }
@@ -542,6 +570,7 @@ export async function autoResolveConnectedScriptsFromFolder(
               relativePath: matchedEntry.relativePath,
             });
           }
+          options?.onProgress?.(loadedFilenames.length, Math.max(loadedFilenames.length, pendingTargets.length));
         } else {
           unmatchedTargetRefsMap.set(targetKey, targetRef);
         }
@@ -558,6 +587,7 @@ export async function autoResolveConnectedScriptsFromFolder(
   // Run a single O(N) normalization pass once all rounds complete
   const normalizedWorkspace = buildScriptWorkspace(currentModules, {
     externalEndpoints: options?.externalEndpoints,
+    avayaWaypoints: options?.avayaWaypoints,
     ignoredChecklistTargets: options?.ignoredChecklistTargets,
     masterScriptNumber: options?.masterScriptNumber,
     treatUnresolvedAsEndpoint: false,

@@ -167,11 +167,12 @@ import {
   FolderAutoResolveSummary,
   FolderScriptFileEntry,
   FolderScriptPool,
+  autoResolveConnectedScriptsFromFolder,
   extractFilesFromDataTransfer,
+  findEntryMainFileInFolderPool,
   importCallflowFile,
   indexScriptFolderFiles,
   isSupportedCallflowImportFilename,
-  loadAllScriptsFromFolder,
 } from './utils/callflowFileImporter';
 import { ThemeConfigurator } from './components/ThemeConfigurator';
 import { CallflowInspector } from './components/CallflowInspector';
@@ -3463,10 +3464,10 @@ function OfflineStudioApp() {
       setScriptWorkspace(nextWs);
       refreshDiagramFromWorkspace(nextWs);
 
-      // If a script folder pool is already assigned, ensure all remaining .s scripts from the folder are loaded
+      // If a script folder pool is already assigned, resolve only scripts connected to the active Main chain
       if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
         setIsAutoResolvingFolder(true);
-        void loadAllScriptsFromFolder(merged, assignedFolderPool, {
+        void autoResolveConnectedScriptsFromFolder(merged, assignedFolderPool, {
           externalEndpoints: nextWs.externalEndpoints,
           avayaWaypoints: nextWs.avayaWaypoints,
           ignoredChecklistTargets: nextWs.ignoredChecklistTargets,
@@ -3525,7 +3526,7 @@ function OfflineStudioApp() {
         if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
           setIsAutoResolvingFolder(true);
           try {
-            const summary = await loadAllScriptsFromFolder(
+            const summary = await autoResolveConnectedScriptsFromFolder(
               merged,
               assignedFolderPool,
               {
@@ -3596,14 +3597,44 @@ function OfflineStudioApp() {
       setIsAutoResolvingFolder(true);
       setFolderLoadProgress({ loaded: 0, total: pool.totalFilesScanned });
       try {
-        const summary = await loadAllScriptsFromFolder(
-          scriptWorkspace.modules,
+        let seedModules = scriptWorkspace.modules;
+        let effectiveMasterNumber = scriptWorkspace.masterScriptNumber;
+
+        // When loading a folder into an empty studio, start from the Main/Master entry script
+        // so hundreds of unreferenced legacy ("Altlast") scripts are never dumped blindly into the workspace.
+        if (wasEmpty) {
+          const entryFile = findEntryMainFileInFolderPool(pool);
+          if (!entryFile) {
+            setRightSidebarTab('callflow');
+            setIsRightPanelOpen(true);
+            showCanvasDropBanner(
+              'success',
+              `Ordner „${pool.folderName}“ zugewiesen (${pool.entries.length} Dateien) — bitte Startskript (z. B. Main) im Inspektor wählen, um nur die verknüpfte Kette ohne Altlasten zu laden.`
+            );
+            return;
+          }
+          const startRes = await importCallflowFile(entryFile.file, {
+            isMasterHint: true,
+          });
+          if (startRes.modules.length === 0) {
+            showCanvasDropBanner(
+              'error',
+              `In „${entryFile.filename}“ konnten keine Callflow-Regeln erkannt werden.`
+            );
+            return;
+          }
+          seedModules = promoteEntryModuleToMain(startRes.modules, startRes.modules[0].scriptNumber);
+          effectiveMasterNumber = 'Main';
+        }
+
+        const summary = await autoResolveConnectedScriptsFromFolder(
+          seedModules,
           pool,
           {
             externalEndpoints: scriptWorkspace.externalEndpoints,
             avayaWaypoints: scriptWorkspace.avayaWaypoints,
             ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
-            masterScriptNumber: scriptWorkspace.masterScriptNumber,
+            masterScriptNumber: effectiveMasterNumber,
             onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
           }
         );
@@ -3616,9 +3647,7 @@ function OfflineStudioApp() {
           resolvedIssues: scriptWorkspace.resolvedIssues,
           manualQuestions: scriptWorkspace.manualQuestions,
           manualLinks: scriptWorkspace.manualLinks,
-          masterScriptNumber: wasEmpty
-            ? summary.modules.find((m) => m.isMaster)?.scriptNumber
-            : scriptWorkspace.masterScriptNumber,
+          masterScriptNumber: effectiveMasterNumber,
           nodeOffsets: scriptWorkspace.nodeOffsets,
           treatUnresolvedAsEndpoint: false,
         });
@@ -3634,17 +3663,16 @@ function OfflineStudioApp() {
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
 
-        const connectedCount = summary.connectedScriptCount ?? 0;
-        const standaloneCount = summary.standaloneScriptNumbers?.length ?? 0;
+        const skippedCount = summary.skippedLegacyFilesCount || 0;
+        const skippedSuffix =
+          skippedCount > 0 ? ` · ${skippedCount} Altlasten übersprungen` : '';
         const missingSuffix =
           nextWs.missingTargets.length > 0
             ? ` · ${nextWs.missingTargets.length} echt fehlend`
             : ' · 0 fehlend';
-        const standaloneSuffix =
-          standaloneCount > 0 ? `, ${standaloneCount} eigenständig` : '';
         showCanvasDropBanner(
           'success',
-          `Ordner „${pool.folderName}“ vollständig geladen: ${nextWs.modules.length} Skripte im Diagramm (${connectedCount} verknüpft${standaloneSuffix})${missingSuffix}.`
+          `Ordner „${pool.folderName}“ ab Main aufgelöst: ${nextWs.modules.length} verknüpfte Skripte geladen${skippedSuffix}${missingSuffix}.`
         );
       } finally {
         setIsAutoResolvingFolder(false);
@@ -3681,7 +3709,7 @@ function OfflineStudioApp() {
           startRes.modules[0].scriptNumber
         );
         const primaryNumber = 'Main';
-        const summary = await loadAllScriptsFromFolder(
+        const summary = await autoResolveConnectedScriptsFromFolder(
           normalizedModules,
           assignedFolderPool,
           {
@@ -3704,17 +3732,16 @@ function OfflineStudioApp() {
         setPlatformViewMode('avaya');
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
-        const connectedCount = summary.connectedScriptCount ?? 0;
-        const standaloneCount = summary.standaloneScriptNumbers?.length ?? 0;
+        const skippedCount = summary.skippedLegacyFilesCount || 0;
+        const skippedSuffix =
+          skippedCount > 0 ? ` · ${skippedCount} Altlasten übersprungen` : '';
         const missingSuffix =
           nextWs.missingTargets.length > 0
             ? ` · ${nextWs.missingTargets.length} echt fehlend`
             : ' · 0 fehlend';
-        const standaloneSuffix =
-          standaloneCount > 0 ? `, ${standaloneCount} eigenständig` : '';
         showCanvasDropBanner(
           'success',
-          `Main (aus „${entry.filename}“) + alle ${nextWs.modules.length - 1} Ordner-Skripte eingebunden (${connectedCount} verknüpft${standaloneSuffix})${missingSuffix}.`
+          `Main (aus „${entry.filename}“) + ${Math.max(0, nextWs.modules.length - 1)} verknüpfte Ordner-Skripte geladen${skippedSuffix}${missingSuffix}.`
         );
       } finally {
         setIsAutoResolvingFolder(false);
@@ -3794,7 +3821,7 @@ function OfflineStudioApp() {
       let autoLoadedFromFolderCount = 0;
       const nextExternalEndpoints = [...(scriptWorkspace.externalEndpoints || [])];
       if (assignedFolderPool && assignedFolderPool.entries.length > 0) {
-        const summary = await loadAllScriptsFromFolder(
+        const summary = await autoResolveConnectedScriptsFromFolder(
           currentModules,
           assignedFolderPool,
           {

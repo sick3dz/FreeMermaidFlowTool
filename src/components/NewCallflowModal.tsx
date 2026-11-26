@@ -36,10 +36,10 @@ import {
   FolderAutoResolveSummary,
   FolderScriptFileEntry,
   FolderScriptPool,
+  autoResolveConnectedScriptsFromFolder,
   extractFilesFromDataTransfer,
   importCallflowFile,
   indexScriptFolderFiles,
-  loadAllScriptsFromFolder,
 } from '../utils/callflowFileImporter';
 
 export type MasterTargetDecision = 'request' | 'external' | 'ignore' | 'present';
@@ -147,7 +147,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     let resolveSummary: FolderAutoResolveSummary | null = null;
 
     if (effectivePool && effectivePool.entries.length > 0) {
-      resolveSummary = await loadAllScriptsFromFolder(
+      resolveSummary = await autoResolveConnectedScriptsFromFolder(
         normalizedModules,
         effectivePool,
         {
@@ -170,16 +170,20 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
 
     const targets: DraftConfirmedTarget[] = previewChecklist.masterChecklist.map((item) => {
       const isPresent = item.status === 'present';
-      const autoEndpoint =
+      const isWaypointOrExternal =
         !isPresent &&
-        (isAnnouncementOrEndpointTargetName(item.refKey) ||
+        (item.status === 'waypoint' ||
+          item.status === 'external' ||
+          isAnnouncementOrEndpointTargetName(item.refKey) ||
           isAnnouncementOrEndpointTargetName(item.displayName));
       return {
         refKey: item.refKey,
         displayName: item.displayName,
-        contextLabel: item.contextLabel,
+        contextLabel: item.waypointReason
+          ? `${item.contextLabel} · ${item.waypointReason}`
+          : item.contextLabel,
         triggeredNumbers: item.triggeredNumbers,
-        decision: isPresent ? 'present' : autoEndpoint ? 'external' : 'request',
+        decision: isPresent ? 'present' : isWaypointOrExternal ? 'external' : 'request',
         isAlreadyPresent: isPresent,
       };
     });
