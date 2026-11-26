@@ -3209,7 +3209,7 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.4.5',
+    schemaVersion: '1.4.6',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     overallReadiness,

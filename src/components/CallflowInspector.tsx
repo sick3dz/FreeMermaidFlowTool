@@ -109,6 +109,7 @@ interface CallflowInspectorProps {
   onUnignoreChecklistTarget?: (targetRef: string) => void;
   onMarkAvayaWaypoints?: (targetRefs: string[]) => ScriptWorkspace | void;
   onUnmarkAvayaWaypoint?: (targetRef: string) => ScriptWorkspace | void;
+  onToggleTreatUnresolvedAsEndpoint?: (enabled: boolean) => void;
   focusChecklistTrigger?: { refKey: string; nonce: number } | null;
   onSwitchViewLevel: (next: CallflowViewLevel) => void;
   onExportInteractiveHtml: () => void;
@@ -163,6 +164,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
   onUnignoreChecklistTarget,
   onMarkAvayaWaypoints,
   onUnmarkAvayaWaypoint,
+  onToggleTreatUnresolvedAsEndpoint,
   focusChecklistTrigger,
   onSwitchViewLevel,
   onExportInteractiveHtml,
@@ -3146,6 +3148,35 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                       )}
                     </div>
 
+                    {onToggleTreatUnresolvedAsEndpoint &&
+                      (assignedFolderPool ||
+                        lastFolderResolveSummary ||
+                        scriptWorkspace.treatUnresolvedAsEndpoint ||
+                        reconcileMissingItems.length > 0) && (
+                        <div className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-md bg-slate-950/75 border border-slate-800/90">
+                          <span className="text-[10px] text-slate-300 leading-snug">
+                            Ziele ohne <code className="font-mono text-slate-200">.s</code> im Ordner als interne Bausteine werten
+                          </span>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={Boolean(scriptWorkspace.treatUnresolvedAsEndpoint)}
+                            onClick={() =>
+                              onToggleTreatUnresolvedAsEndpoint(
+                                !scriptWorkspace.treatUnresolvedAsEndpoint
+                              )
+                            }
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors shrink-0 cursor-pointer ${
+                              scriptWorkspace.treatUnresolvedAsEndpoint
+                                ? 'bg-emerald-950/70 border-emerald-500/50 text-emerald-300 hover:bg-emerald-900/60'
+                                : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-600'
+                            }`}
+                          >
+                            {scriptWorkspace.treatUnresolvedAsEndpoint ? 'Aktiv (0 offen)' : 'Strikt'}
+                          </button>
+                        </div>
+                      )}
+
                     <div className="grid grid-cols-4 gap-1">
                       <button
                         type="button"
@@ -3297,7 +3328,7 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                           });
                           return (
                             <div className="space-y-1.5">
-                              {q.length > 0 && filteredMissing.length > 0 && onMarkAvayaWaypoints && (
+                              {filteredMissing.length > 0 && onMarkAvayaWaypoints && (
                                 <button
                                   type="button"
                                   onClick={() => {
@@ -3306,7 +3337,9 @@ const CallflowInspectorInner: React.FC<CallflowInspectorProps> = ({
                                   }}
                                   className="w-full py-1 px-2 rounded bg-sky-900/50 hover:bg-sky-800/60 border border-sky-500/45 text-[10.5px] font-medium text-sky-200 transition-colors cursor-pointer"
                                 >
-                                  Alle {filteredMissing.length} Gefilterten als Wegweiser / Avaya-only markieren
+                                  {q.length > 0
+                                    ? `Alle ${filteredMissing.length} Gefilterten als Wegweiser / Avaya-only markieren`
+                                    : `Alle ${filteredMissing.length} offenen Einträge als Wegweiser / Avaya-only markieren`}
                                 </button>
                               )}
                               <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">

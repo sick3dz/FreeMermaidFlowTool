@@ -413,6 +413,7 @@ export async function autoResolveConnectedScriptsFromFolder(
     avayaWaypoints?: string[];
     ignoredChecklistTargets?: string[];
     masterScriptNumber?: string;
+    treatUnresolvedAsEndpoint?: boolean;
     onProgress?: (loaded: number, total: number) => void;
   }
 ): Promise<FolderAutoResolveSummary> {
@@ -590,7 +591,7 @@ export async function autoResolveConnectedScriptsFromFolder(
     avayaWaypoints: options?.avayaWaypoints,
     ignoredChecklistTargets: options?.ignoredChecklistTargets,
     masterScriptNumber: options?.masterScriptNumber,
-    treatUnresolvedAsEndpoint: false,
+    treatUnresolvedAsEndpoint: options?.treatUnresolvedAsEndpoint ?? false,
   });
   currentModules = normalizedWorkspace.modules;
 

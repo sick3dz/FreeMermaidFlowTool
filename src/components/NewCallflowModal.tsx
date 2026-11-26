@@ -146,12 +146,14 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
     const effectivePool = activePool !== undefined ? activePool : folderPool;
     let resolveSummary: FolderAutoResolveSummary | null = null;
 
+    const hasFolderPool = Boolean(effectivePool && effectivePool.entries.length > 0);
     if (effectivePool && effectivePool.entries.length > 0) {
       resolveSummary = await autoResolveConnectedScriptsFromFolder(
         normalizedModules,
         effectivePool,
         {
           masterScriptNumber: primaryScriptNumber,
+          treatUnresolvedAsEndpoint: true,
         }
       );
       normalizedModules = resolveSummary.modules;
@@ -174,6 +176,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
         !isPresent &&
         (item.status === 'waypoint' ||
           item.status === 'external' ||
+          hasFolderPool ||
           isAnnouncementOrEndpointTargetName(item.refKey) ||
           isAnnouncementOrEndpointTargetName(item.displayName));
       return {
@@ -181,6 +184,8 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
         displayName: item.displayName,
         contextLabel: item.waypointReason
           ? `${item.contextLabel} · ${item.waypointReason}`
+          : !isPresent && hasFolderPool && item.status === 'missing'
+          ? `${item.contextLabel} · Interner Baustein (keine .s im Ordner)`
           : item.contextLabel,
         triggeredNumbers: item.triggeredNumbers,
         decision: isPresent ? 'present' : isWaypointOrExternal ? 'external' : 'request',
@@ -391,7 +396,7 @@ export const NewCallflowModal: React.FC<NewCallflowModalProps> = ({
       ignoredChecklistTargets,
       manualLinks,
       masterScriptNumber: activeMasterNumber,
-      treatUnresolvedAsEndpoint: false,
+      treatUnresolvedAsEndpoint: Boolean(folderPool && folderPool.entries.length > 0),
     });
 
     onStartNewCallflow({

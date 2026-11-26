@@ -3378,6 +3378,33 @@ function OfflineStudioApp() {
     [scriptWorkspace, refreshDiagramFromWorkspace]
   );
 
+  const handleToggleTreatUnresolvedAsEndpoint = useCallback(
+    (enabled: boolean) => {
+      let nextExternalEndpoints = scriptWorkspace.externalEndpoints || [];
+      if (!enabled) {
+        // Keep only explicitly confirmed external-endpoint resolutions when switching back to strict mode
+        const explicitKeys = new Set<string>();
+        Object.entries(scriptWorkspace.resolvedIssues || {}).forEach(([issueId, rec]) => {
+          if (rec?.resolution === 'external-endpoint' && issueId.startsWith('missing:')) {
+            const key = canonicalScriptMatchKey(issueId.slice('missing:'.length));
+            if (key) explicitKeys.add(key);
+          }
+        });
+        nextExternalEndpoints = nextExternalEndpoints.filter((ref) =>
+          explicitKeys.has(canonicalScriptMatchKey(ref))
+        );
+      }
+      const nextWs = buildScriptWorkspace(scriptWorkspace.modules, {
+        ...scriptWorkspace,
+        externalEndpoints: nextExternalEndpoints,
+        treatUnresolvedAsEndpoint: enabled,
+      });
+      setScriptWorkspace(nextWs);
+      refreshDiagramFromWorkspace(nextWs);
+    },
+    [scriptWorkspace, refreshDiagramFromWorkspace]
+  );
+
   const handleAddManualCallflowQuestion = useCallback(
     (scriptNumber: string, question: string) => {
       const cleanQ = question.trim();
@@ -3472,6 +3499,7 @@ function OfflineStudioApp() {
           avayaWaypoints: nextWs.avayaWaypoints,
           ignoredChecklistTargets: nextWs.ignoredChecklistTargets,
           masterScriptNumber: nextWs.masterScriptNumber,
+          treatUnresolvedAsEndpoint: true,
           onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
         })
           .then((summary) => {
@@ -3480,7 +3508,7 @@ function OfflineStudioApp() {
               ...nextWs,
               externalEndpoints: nextWs.externalEndpoints,
               masterScriptNumber: nextWs.masterScriptNumber,
-              treatUnresolvedAsEndpoint: false,
+              treatUnresolvedAsEndpoint: true,
             });
             setScriptWorkspace(autoWs);
             refreshDiagramFromWorkspace(autoWs);
@@ -3534,6 +3562,7 @@ function OfflineStudioApp() {
                 avayaWaypoints: scriptWorkspace.avayaWaypoints,
                 ignoredChecklistTargets: nextIgnored,
                 masterScriptNumber: effectiveMaster,
+                treatUnresolvedAsEndpoint: true,
                 onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
               }
             );
@@ -3545,12 +3574,14 @@ function OfflineStudioApp() {
           }
         }
 
+        const hasAssignedFolder = Boolean(assignedFolderPool && assignedFolderPool.entries.length > 0);
         const nextWs = buildScriptWorkspace(merged, {
           ...scriptWorkspace,
           externalEndpoints: nextExternalEndpoints,
           masterScriptNumber: effectiveMaster,
           ignoredChecklistTargets: nextIgnored,
-          treatUnresolvedAsEndpoint: false,
+          treatUnresolvedAsEndpoint:
+            hasAssignedFolder || Boolean(scriptWorkspace.treatUnresolvedAsEndpoint),
         });
         if (wasEmpty) {
           pendingAutoFitRef.current = true;
@@ -3635,6 +3666,7 @@ function OfflineStudioApp() {
             avayaWaypoints: scriptWorkspace.avayaWaypoints,
             ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
             masterScriptNumber: effectiveMasterNumber,
+            treatUnresolvedAsEndpoint: true,
             onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
           }
         );
@@ -3649,7 +3681,7 @@ function OfflineStudioApp() {
           manualLinks: scriptWorkspace.manualLinks,
           masterScriptNumber: effectiveMasterNumber,
           nodeOffsets: scriptWorkspace.nodeOffsets,
-          treatUnresolvedAsEndpoint: false,
+          treatUnresolvedAsEndpoint: true,
         });
 
         pendingAutoFitRef.current = true;
@@ -3714,6 +3746,7 @@ function OfflineStudioApp() {
           assignedFolderPool,
           {
             masterScriptNumber: primaryNumber,
+            treatUnresolvedAsEndpoint: true,
             onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
           }
         );
@@ -3722,7 +3755,7 @@ function OfflineStudioApp() {
         const nextWs = buildScriptWorkspace(summary.modules, {
           externalEndpoints: [],
           masterScriptNumber: primaryNumber,
-          treatUnresolvedAsEndpoint: false,
+          treatUnresolvedAsEndpoint: true,
         });
         pendingAutoFitRef.current = true;
         setIsVisualEditMode(true);
@@ -3829,6 +3862,7 @@ function OfflineStudioApp() {
             avayaWaypoints: scriptWorkspace.avayaWaypoints,
             ignoredChecklistTargets: scriptWorkspace.ignoredChecklistTargets,
             masterScriptNumber: wasEmpty ? 'Main' : scriptWorkspace.masterScriptNumber,
+            treatUnresolvedAsEndpoint: true,
             onProgress: (loaded, total) => setFolderLoadProgress({ loaded, total }),
           }
         );
@@ -3838,6 +3872,7 @@ function OfflineStudioApp() {
         setLastFolderResolveSummary(summary);
       }
 
+      const hasAssignedFolder = Boolean(assignedFolderPool && assignedFolderPool.entries.length > 0);
       const nextWs = buildScriptWorkspace(currentModules, {
         externalEndpoints: nextExternalEndpoints,
         avayaWaypoints: scriptWorkspace.avayaWaypoints,
@@ -3847,7 +3882,8 @@ function OfflineStudioApp() {
         manualLinks: scriptWorkspace.manualLinks,
         masterScriptNumber: wasEmpty ? 'Main' : scriptWorkspace.masterScriptNumber,
         nodeOffsets: scriptWorkspace.nodeOffsets,
-        treatUnresolvedAsEndpoint: false,
+        treatUnresolvedAsEndpoint:
+          hasAssignedFolder || Boolean(scriptWorkspace.treatUnresolvedAsEndpoint),
       });
 
       if (wasEmpty) {
@@ -8046,6 +8082,7 @@ function OfflineStudioApp() {
               onUnignoreChecklistTarget={handleUnignoreChecklistTarget}
               onMarkAvayaWaypoints={handleMarkAvayaWaypoints}
               onUnmarkAvayaWaypoint={handleUnmarkAvayaWaypoint}
+              onToggleTreatUnresolvedAsEndpoint={handleToggleTreatUnresolvedAsEndpoint}
               focusChecklistTrigger={checklistFocusTrigger}
               onExportInteractiveHtml={handleExportHtmlFromInspectorCb}
               isExportingHtml={isDownloadingHtml || Boolean(htmlExportProgress?.active)}
@@ -8159,6 +8196,7 @@ function OfflineStudioApp() {
                   onUnignoreChecklistTarget={handleUnignoreChecklistTarget}
                   onMarkAvayaWaypoints={handleMarkAvayaWaypoints}
                   onUnmarkAvayaWaypoint={handleUnmarkAvayaWaypoint}
+                  onToggleTreatUnresolvedAsEndpoint={handleToggleTreatUnresolvedAsEndpoint}
                   focusChecklistTrigger={checklistFocusTrigger}
                   onExportInteractiveHtml={handleExportHtmlFromInspectorCb}
                   isExportingHtml={isDownloadingHtml || Boolean(htmlExportProgress?.active)}
