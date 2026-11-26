@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import JSZip from 'jszip';
 import {
+  buildMasterOverviewMermaid,
+  buildScriptDetailMermaid,
   buildScriptWorkspace,
   parseCallflowTextWithFallback,
 } from './scriptCallflowParser';
@@ -527,5 +529,123 @@ describe('validateArchyYaml — Strict Archy YAML Schema Validator', () => {
     expect(res.errors.some((e) => e.code === 'INVALID_VARIABLE_SCOPE')).toBe(true);
     expect(res.errors.some((e) => e.code === 'DUPLICATE_VARIABLE')).toBe(true);
   });
+
+  it('keeps Avaya AACC core parsing (Skillsets/CDN, Zeitplaene, EXECUTE/SECTION/GOTO, Ansagen/Menues/Variablen/Oracle/FlixCheck) 100% intact and unmutated by Genesys translation', () => {
+    const mainRaw = `
+/* Einstiegsskript 514200 — Hauptrouting */
+ASSIGN "Kunde" TO CV_Segment
+ASSIGN "Aktiv" TO GV_HotlineStatus
+ASSIGN "0" TO LV_RetryCount
+
+IF DAY OF WEEK = MONDAY..FRIDAY AND TIME OF DAY = 08:00..18:00 THEN
+  EXECUTE Sys_SondZeit
+  GIVE RAN 1001
+  OPEN VOICE SESSION
+    PLAY PROMPT VOICE SEGMENT 2001
+    COLLECT 1 DIGITS INTO LV_MenuChoice
+  END VOICE SESSION
+  WHERE LV_MenuChoice EQUALS
+    VALUE "1":
+      EXECUTE Sub_OracleCheck
+    VALUE "2":
+      QUEUE TO SKILLSET Sales_DE
+    DEFAULT:
+      ROUTE CALL 520100
+  END WHERE
+ELSE
+  GIVE RAN 1099
+  DISCONNECT
+END IF
+
+SECTION Fallback_Sec
+  GIVE MUSIC 501
+  WAIT 10
+  GOTO Fallback_Sec
+`;
+    const subRaw = `
+/* Sub_OracleCheck — Oracle + FlixCheck + Skillset */
+ASSIGN "https://oracle.local/v1/customer" TO CV_OracleUrl
+EXECUTE FlixCheck_Webhook
+QUEUE TO SKILLSET Support_VIP
+`;
+
+    const mainMods = parseCallflowTextWithFallback(mainRaw, {
+      defaultScriptNumber: '514200',
+      defaultScriptName: 'Main_Hotline',
+      origin: 'legacy-text',
+      isMasterHint: true,
+    });
+    const subMods = parseCallflowTextWithFallback(subRaw, {
+      defaultScriptNumber: 'Sub_OracleCheck',
+      defaultScriptName: 'Sub_OracleCheck',
+      origin: 'legacy-text',
+    });
+
+    expect(mainMods.length).toBeGreaterThan(0);
+    expect(subMods.length).toBeGreaterThan(0);
+
+    const ws = buildScriptWorkspace([...mainMods, ...subMods]);
+    const wsSnapshotBefore = JSON.stringify(ws);
+
+    // Avaya Master + Detail diagrams must cleanly recognize all core Avaya elements
+    const masterMermaid = buildMasterOverviewMermaid(ws, 'LR');
+    const detailMermaid = buildScriptDetailMermaid(ws, '514200', 'LR');
+    expect(masterMermaid).toContain('flowchart LR');
+    expect(masterMermaid).toContain('514200');
+    expect(detailMermaid).toContain('flowchart LR');
+    expect(detailMermaid).toMatch(/Sales_DE|1001|520100|Sub_OracleCheck/);
+
+    // Genesys translation must be 100% read-only and never mutate the Avaya ScriptWorkspace
+    const genesys = translateAvayaWorkspaceToGenesys(ws);
+    expect(JSON.stringify(ws)).toBe(wsSnapshotBefore);
+    expect(genesys.scripts.length).toBe(ws.modules.length);
+    expect(genesys.summary.yamlErrorCount).toBe(0);
+  });
+
+  it('ignores keywords inside comments (/* */, //, --, leading #) without breaking inline DTMF #', () => {
+    const commentedMod = makeModule(
+      'Comment_Isolation',
+      `
+/* HOLIDAY EMERGENCY WAIT 30 ORACLE CLID DNIS CALLBACK VOICEMAIL QUEUE TO SKILLSET Fake1 */
+// QUEUE TO SKILLSET Fake2
+-- TRANSFER TO VOICEMAIL Fake3
+# SCHEDULE GROUP Fake4
+SECTION Start
+  GIVE RAN 1005
+  IF LV_Digit = # THEN
+    QUEUE TO SKILLSET Real_Queue_DE
+  END IF
+  DISCONNECT
+`
+    );
+
+    const ws = buildScriptWorkspace([commentedMod]);
+    const res = translateAvayaWorkspaceToGenesys(ws);
+    const script = res.scripts[0];
+
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.archyYaml).toContain('Real_Queue_DE');
+    expect(script.archyYaml).not.toContain('Fake1');
+    expect(script.archyYaml).not.toContain('Fake2');
+    expect(script.archyYaml).not.toContain('Fake3');
+    expect(script.archyYaml).not.toContain('Fake4');
+    expect(script.metrics.oracleApiCount).toBe(0);
+    expect(script.metrics.externalApiCount).toBe(0);
+    expect(script.warnings).toHaveLength(0);
+    expect(
+      script.actions.some((a) =>
+        [
+          'evaluateScheduleGroup',
+          'dataTableLookup',
+          'createCallback',
+          'transferToVoicemail',
+          'callDataAction',
+          'holdMusic',
+          'wait',
+        ].includes(a.kind)
+      )
+    ).toBe(false);
+  });
 });
+
 

@@ -291,7 +291,11 @@ function stripCommentsPreservingLines(rawText: string): string[] {
         continue;
       }
 
-      if ((ch === '/' && next === '/') || (ch === '-' && next === '-') || ch === '#') {
+      if (
+        (ch === '/' && next === '/') ||
+        (ch === '-' && next === '-') ||
+        (ch === '#' && out.trim().length === 0)
+      ) {
         break;
       }
 

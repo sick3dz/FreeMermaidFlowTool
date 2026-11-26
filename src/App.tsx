@@ -514,8 +514,14 @@ function OfflineStudioApp() {
   // Right Inspector Panel Mode ('callflow' | 'theme')
   const [rightSidebarTab, setRightSidebarTab] = useState<'callflow' | 'theme'>('callflow');
 
-  // Rendering & Validation states
-  const [baseRenderedSvg, setBaseRenderedSvg] = useState<string | null>(null);
+  // Rendering & Validation states (tagged with viewKey + platformMode + mermaidCode to prevent Avaya/Genesys cache cross-poisoning)
+  const [renderedSvgSnapshot, setRenderedSvgSnapshot] = useState<{
+    svg: string;
+    mermaidCode: string;
+    viewKey: string;
+    platformMode: 'avaya' | 'genesys';
+    styleSignature: string;
+  } | null>(null);
   const [masterRenderError, setMasterRenderError] = useState<string | null>(null);
   const [elkWorkerBusyLabel, setElkWorkerBusyLabel] = useState<string | null>(null);
   const [validation, setValidation] = useState<ValidationState>({
@@ -849,6 +855,12 @@ function OfflineStudioApp() {
     callflowHopDepth,
   ]);
 
+  const activeCanvasGraph = useMemo(
+    () =>
+      platformViewMode === 'genesys' ? parseCallflowGraph(effectiveMermaidCode) : callflowGraph,
+    [platformViewMode, effectiveMermaidCode, callflowGraph]
+  );
+
   const hasBaseRenderedSvgRef = useRef<boolean>(false);
   const scriptWorkspaceFallbackRef = useRef<ScriptWorkspace>(scriptWorkspace);
   scriptWorkspaceFallbackRef.current = scriptWorkspace;
@@ -856,14 +868,16 @@ function OfflineStudioApp() {
   const currentBaseStyleSignature = useMemo(
     () =>
       JSON.stringify({
+        platformViewMode,
         themeConfig,
         smartColorMode,
         pathColorMode,
         hiddenSmartNodeTypes,
         canvasSurface,
-        direction: currentDirection || 'LR',
+        direction: platformViewMode === 'genesys' ? 'TB' : currentDirection || 'LR',
       }),
     [
+      platformViewMode,
       themeConfig,
       smartColorMode,
       pathColorMode,
@@ -922,6 +936,17 @@ function OfflineStudioApp() {
 
   activeViewKeyRef.current = activeWorkspaceViewKey;
 
+  const baseRenderedSvg = useMemo(() => {
+    if (!renderedSvgSnapshot) return null;
+    if (
+      renderedSvgSnapshot.platformMode !== platformViewMode ||
+      renderedSvgSnapshot.viewKey !== activeWorkspaceViewKey
+    ) {
+      return null;
+    }
+    return renderedSvgSnapshot.svg;
+  }, [renderedSvgSnapshot, platformViewMode, activeWorkspaceViewKey]);
+
   // Clear on-demand view cache on unmount
   useEffect(() => {
     const viewsMap = preloadedViewsRef.current;
@@ -933,11 +958,15 @@ function OfflineStudioApp() {
   // Debounced Local Mermaid v11 Parsing & Base SVG Rendering (0ms when hitting Preload Cache!)
   useEffect(() => {
     let isCancelled = false;
-    const trimmed = effectiveMermaidCode.trim();
+    const targetMermaidCode = effectiveMermaidCode;
+    const targetViewKey = activeWorkspaceViewKey;
+    const targetPlatformMode = platformViewMode;
+    const targetStyleSignature = currentStyleSignature;
+    const trimmed = targetMermaidCode.trim();
     if (!trimmed) {
       hasBaseRenderedSvgRef.current = false;
       setMasterRenderError(null);
-      setBaseRenderedSvg(null);
+      setRenderedSvgSnapshot(null);
       setValidation({
         isValid: true,
         diagramType: 'Leer',
@@ -954,11 +983,11 @@ function OfflineStudioApp() {
       return;
     }
 
-    const cachedHit = preloadedViewsRef.current.get(activeWorkspaceViewKey);
+    const cachedHit = preloadedViewsRef.current.get(targetViewKey);
     if (
       cachedHit &&
       cachedHit.mermaidCode.trim() === trimmed &&
-      cachedHit.styleSignature === currentStyleSignature
+      cachedHit.styleSignature === targetStyleSignature
     ) {
       cachedHit.lastUsedAt = Date.now();
       hasBaseRenderedSvgRef.current = true;
@@ -969,18 +998,25 @@ function OfflineStudioApp() {
         errorMessage: null,
         errorLine: null,
       }));
-      setBaseRenderedSvg(cachedHit.rawSvg);
+      setRenderedSvgSnapshot({
+        svg: cachedHit.rawSvg,
+        mermaidCode: targetMermaidCode,
+        viewKey: targetViewKey,
+        platformMode: targetPlatformMode,
+        styleSignature: targetStyleSignature,
+      });
       return;
     }
 
     const elkAbortController = new AbortController();
     const delayMs = !hasBaseRenderedSvgRef.current ? 0 : 120;
+    const elkDirection = targetPlatformMode === 'genesys' ? 'TB' : currentDirection || 'LR';
     const timer = window.setTimeout(async () => {
-      const complexity = shouldUseFastDeterministicVectorLayout(effectiveMermaidCode);
+      const complexity = shouldUseFastDeterministicVectorLayout(targetMermaidCode);
       if (complexity.useFastVector && callflowViewLevel.level !== 'master') {
         let fastGraph: CallflowGraph;
         try {
-          fastGraph = parseCallflowGraph(effectiveMermaidCode);
+          fastGraph = parseCallflowGraph(targetMermaidCode);
         } catch {
           fastGraph = {
             nodes: new Map(),
@@ -992,17 +1028,21 @@ function OfflineStudioApp() {
         }
         if (fastGraph.nodes.size > 0) {
           const activeTitle =
-            activeWorkspaceViewKey.startsWith('script:')
-              ? `[${activeWorkspaceViewKey.slice(7)}] Detail-Callflow`
+            targetViewKey.startsWith('script:')
+              ? `[${targetViewKey.slice(7)}] Detail-Callflow`
+              : targetViewKey.startsWith('genesys:script:')
+              ? `[${targetViewKey.slice(15)}] Genesys Cloud Architect`
+              : targetPlatformMode === 'genesys'
+              ? 'Genesys Cloud Architect'
               : 'Callflow';
           setElkWorkerBusyLabel(
             `ELK-Layout wird im Hintergrund berechnet (${fastGraph.nodes.size} Knoten, ${complexity.edgeCount} Verbindungen)…`
           );
           const elkRes = await renderElkWorkerFlowchartSvg({
-            mermaidCode: effectiveMermaidCode,
+            mermaidCode: targetMermaidCode,
             graph: fastGraph,
             surface: canvasSurface,
-            direction: currentDirection || 'LR',
+            direction: elkDirection,
             title: activeTitle,
             timeoutMs: 18000,
             signal: elkAbortController.signal,
@@ -1021,14 +1061,20 @@ function OfflineStudioApp() {
             lastRenderMs: elkRes.durationMs,
           });
           setMasterRenderError(null);
-          setBaseRenderedSvg(elkRes.svg);
+          setRenderedSvgSnapshot({
+            svg: elkRes.svg,
+            mermaidCode: targetMermaidCode,
+            viewKey: targetViewKey,
+            platformMode: targetPlatformMode,
+            styleSignature: targetStyleSignature,
+          });
           return;
         }
       }
 
-      const useNativeSvgLabels = shouldUseNativeSvgLabels(effectiveMermaidCode);
+      const useNativeSvgLabels = shouldUseNativeSvgLabels(targetMermaidCode);
       const result = await renderLocalMermaidDiagram(
-        effectiveMermaidCode,
+        targetMermaidCode,
         themeConfig,
         useNativeSvgLabels
       );
@@ -1037,8 +1083,15 @@ function OfflineStudioApp() {
         hasBaseRenderedSvgRef.current = true;
         setValidation(result.validation);
         setMasterRenderError(null);
-        setBaseRenderedSvg(result.svg);
+        setRenderedSvgSnapshot({
+          svg: result.svg,
+          mermaidCode: targetMermaidCode,
+          viewKey: targetViewKey,
+          platformMode: targetPlatformMode,
+          styleSignature: targetStyleSignature,
+        });
       } else if (
+        targetPlatformMode === 'avaya' &&
         scriptWorkspaceFallbackRef.current.modules.length > 0 &&
         callflowViewLevel.level === 'master' &&
         !isolateSubgraphMode
@@ -1058,7 +1111,13 @@ function OfflineStudioApp() {
           hasBaseRenderedSvgRef.current = true;
           setValidation(fallbackResult.validation);
           setMasterRenderError(null);
-          setBaseRenderedSvg(fallbackResult.svg);
+          setRenderedSvgSnapshot({
+            svg: fallbackResult.svg,
+            mermaidCode: targetMermaidCode,
+            viewKey: targetViewKey,
+            platformMode: targetPlatformMode,
+            styleSignature: targetStyleSignature,
+          });
         } else {
           setValidation(result.validation);
           setMasterRenderError(
@@ -1070,7 +1129,7 @@ function OfflineStudioApp() {
         let rescueGraph: CallflowGraph | null = null;
         if (/^(?:flowchart|graph)\b/i.test(trimmed)) {
           try {
-            const parsed = parseCallflowGraph(effectiveMermaidCode);
+            const parsed = parseCallflowGraph(targetMermaidCode);
             if (parsed.nodes.size > 0) rescueGraph = parsed;
           } catch {
             rescueGraph = null;
@@ -1078,17 +1137,21 @@ function OfflineStudioApp() {
         }
         if (rescueGraph) {
           const activeTitle =
-            activeWorkspaceViewKey.startsWith('script:')
-              ? `[${activeWorkspaceViewKey.slice(7)}] Detail-Callflow`
+            targetViewKey.startsWith('script:')
+              ? `[${targetViewKey.slice(7)}] Detail-Callflow`
+              : targetViewKey.startsWith('genesys:script:')
+              ? `[${targetViewKey.slice(15)}] Genesys Cloud Architect`
+              : targetPlatformMode === 'genesys'
+              ? 'Genesys Cloud Architect'
               : 'Callflow';
           setElkWorkerBusyLabel(
             `ELK-Layout wird im Hintergrund berechnet (${rescueGraph.nodes.size} Knoten)…`
           );
           const rescueRes = await renderElkWorkerFlowchartSvg({
-            mermaidCode: effectiveMermaidCode,
+            mermaidCode: targetMermaidCode,
             graph: rescueGraph,
             surface: canvasSurface,
-            direction: currentDirection || 'LR',
+            direction: elkDirection,
             title: activeTitle,
             timeoutMs: 18000,
             signal: elkAbortController.signal,
@@ -1107,7 +1170,13 @@ function OfflineStudioApp() {
             lastRenderMs: rescueRes.durationMs,
           });
           setMasterRenderError(null);
-          setBaseRenderedSvg(rescueRes.svg);
+          setRenderedSvgSnapshot({
+            svg: rescueRes.svg,
+            mermaidCode: targetMermaidCode,
+            viewKey: targetViewKey,
+            platformMode: targetPlatformMode,
+            styleSignature: targetStyleSignature,
+          });
         } else {
           setValidation(result.validation);
           setMasterRenderError(
@@ -1125,6 +1194,7 @@ function OfflineStudioApp() {
     };
   }, [
     effectiveMermaidCode,
+    platformViewMode,
     themeConfig,
     canvasSurface,
     scriptWorkspace.modules.length,
@@ -1262,16 +1332,25 @@ function OfflineStudioApp() {
   ]);
 
   useEffect(() => {
-    if (!baseRenderedSvg || !baseColoredSvg || isolateSubgraphMode) return;
+    if (!renderedSvgSnapshot || !baseColoredSvg || isolateSubgraphMode) return;
     const trimmed = effectiveMermaidCode.trim();
     if (!trimmed) return;
+    // Strict provenance guard: never write a stale SVG from another platform/view/code into preloadedViewsRef
+    if (
+      renderedSvgSnapshot.viewKey !== activeWorkspaceViewKey ||
+      renderedSvgSnapshot.platformMode !== platformViewMode ||
+      renderedSvgSnapshot.styleSignature !== currentStyleSignature ||
+      renderedSvgSnapshot.mermaidCode.trim() !== trimmed
+    ) {
+      return;
+    }
     const cache = preloadedViewsRef.current;
     cache.set(activeWorkspaceViewKey, {
       viewKey: activeWorkspaceViewKey,
       mermaidCode: effectiveMermaidCode,
       codeHash: computeFastCacheHash(trimmed),
       styleSignature: currentStyleSignature,
-      rawSvg: baseRenderedSvg,
+      rawSvg: renderedSvgSnapshot.svg,
       coloredSvg: baseColoredSvg,
       logicSummary,
       lastUsedAt: Date.now(),
@@ -1290,11 +1369,12 @@ function OfflineStudioApp() {
       }
     }
   }, [
-    baseRenderedSvg,
+    renderedSvgSnapshot,
     baseColoredSvg,
     logicSummary,
     effectiveMermaidCode,
     activeWorkspaceViewKey,
+    platformViewMode,
     currentStyleSignature,
     isolateSubgraphMode,
     scriptWorkspace.modules.length,
@@ -1305,10 +1385,10 @@ function OfflineStudioApp() {
 
   const isLargeCanvasDiagram = useMemo(() => {
     if (!coloredSvg) return false;
-    if (callflowGraph.nodes.size >= 30 || callflowGraph.edges.length >= 50) return true;
+    if (activeCanvasGraph.nodes.size >= 30 || activeCanvasGraph.edges.length >= 50) return true;
     const dims = getSvgDimensions(coloredSvg);
     return Math.max(dims.width, dims.height) > 2200 || dims.width * dims.height > 2_200_000;
-  }, [coloredSvg, callflowGraph.nodes.size, callflowGraph.edges.length]);
+  }, [coloredSvg, activeCanvasGraph.nodes.size, activeCanvasGraph.edges.length]);
 
   const isLargeCanvasDiagramRef = useRef<boolean>(false);
   isLargeCanvasDiagramRef.current = isLargeCanvasDiagram;
@@ -1330,9 +1410,10 @@ function OfflineStudioApp() {
     const controller = new AbortController();
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      const svgForProxy = hasCustomNodeOffsets
-        ? applyNodeOffsetsToSvg(coloredSvg, activeNodeOffsets, callflowGraph, false)
-        : coloredSvg;
+      const svgForProxy =
+        platformViewMode === 'avaya' && hasCustomNodeOffsets
+          ? applyNodeOffsetsToSvg(coloredSvg, activeNodeOffsets, activeCanvasGraph, false)
+          : coloredSvg;
       void rasterizeSvgToGpuProxy(
         svgForProxy,
         {
@@ -1368,9 +1449,10 @@ function OfflineStudioApp() {
     isLargeCanvasDiagram,
     showMinimap,
     preloadProgress?.active,
+    platformViewMode,
     hasCustomNodeOffsets,
     activeNodeOffsets,
-    callflowGraph,
+    activeCanvasGraph,
     effectiveMermaidCode,
     themeConfig,
     smartColorMode,
@@ -1391,6 +1473,9 @@ function OfflineStudioApp() {
   const buildExportSvgSnapshot = useCallback(
     (includeSpotlight: boolean): string | null => {
       if (!baseColoredSvg) return null;
+      if (platformViewMode === 'genesys') {
+        return baseColoredSvg;
+      }
       const withSpotlight =
         includeSpotlight && callflowTrace && !isolateSubgraphMode
           ? applyCallflowSpotlightToSvg(
@@ -1406,6 +1491,7 @@ function OfflineStudioApp() {
     },
     [
       baseColoredSvg,
+      platformViewMode,
       callflowTrace,
       isolateSubgraphMode,
       canvasSurface,
@@ -1428,30 +1514,32 @@ function OfflineStudioApp() {
       liveSvgIndexRef.current = null;
       return;
     }
-    const index = buildLiveSvgDomIndex(svgEl, callflowGraph);
+    const index = buildLiveSvgDomIndex(svgEl, activeCanvasGraph);
     liveSvgIndexRef.current = index;
     stageEl.style.transform = `translate3d(${cameraRef.current.panX}px, ${cameraRef.current.panY}px, 0) scale(${cameraRef.current.zoom})`;
 
-    // Apply active spotlight, selected padlock visibility & offsets immediately before paint
-    applyLiveSpotlightToDom(
-      index,
-      callflowTrace && !isolateSubgraphMode ? callflowTrace : null,
-      canvasSurface,
-      callflowDirectionFilter,
-      callflowHopDepth,
-      selectedCallflowEdge
-    );
-    setHoveredLockTargetsInDom(index, null, null, selectedCallflowEdge);
-    applyLiveNodeOffsetsToDom(index, activeNodeOffsets, isVisualEditMode);
-    if (selectedCallflowNodeId && isVisualEditMode) {
-      materializeActiveNodePortsInDom(index, selectedCallflowNodeId, true);
+    if (platformViewMode === 'avaya') {
+      // Apply active spotlight, selected padlock visibility & offsets immediately before paint
+      applyLiveSpotlightToDom(
+        index,
+        callflowTrace && !isolateSubgraphMode ? callflowTrace : null,
+        canvasSurface,
+        callflowDirectionFilter,
+        callflowHopDepth,
+        selectedCallflowEdge
+      );
+      setHoveredLockTargetsInDom(index, null, null, selectedCallflowEdge);
+      applyLiveNodeOffsetsToDom(index, activeNodeOffsets, isVisualEditMode);
+      if (selectedCallflowNodeId && isVisualEditMode) {
+        materializeActiveNodePortsInDom(index, selectedCallflowNodeId, true);
+      }
     }
-  }, [baseColoredSvg, callflowGraph, preloadProgress?.active]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [baseColoredSvg, activeCanvasGraph, platformViewMode, preloadProgress?.active]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fast-path: update Spotlight & selected edge padlock visibility in-place (zero SVG rebuild)
   useLayoutEffect(() => {
     const index = liveSvgIndexRef.current;
-    if (!index) return;
+    if (!index || platformViewMode !== 'avaya') return;
     applyLiveSpotlightToDom(
       index,
       callflowTrace && !isolateSubgraphMode ? callflowTrace : null,
@@ -1462,6 +1550,7 @@ function OfflineStudioApp() {
     );
     setHoveredLockTargetsInDom(index, null, null, selectedCallflowEdge);
   }, [
+    platformViewMode,
     callflowTrace,
     isolateSubgraphMode,
     canvasSurface,
@@ -1473,12 +1562,12 @@ function OfflineStudioApp() {
   // Fast-path: update Node Offsets & lazily materialize active selected node ports (zero SVG rebuild)
   useLayoutEffect(() => {
     const index = liveSvgIndexRef.current;
-    if (!index) return;
+    if (!index || platformViewMode !== 'avaya') return;
     applyLiveNodeOffsetsToDom(index, activeNodeOffsets, isVisualEditMode);
     if (selectedCallflowNodeId && isVisualEditMode) {
       materializeActiveNodePortsInDom(index, selectedCallflowNodeId, true);
     }
-  }, [activeNodeOffsets, isVisualEditMode, selectedCallflowNodeId]);
+  }, [platformViewMode, activeNodeOffsets, isVisualEditMode, selectedCallflowNodeId]);
 
   // Global Escape & Delete/Backspace shortcut handler
   useEffect(() => {
@@ -2349,22 +2438,26 @@ function OfflineStudioApp() {
     if (e.button !== 0) return;
     if (isCanvasOverlayTarget(e.target)) return;
 
+    const allowAvayaNodeEdit = platformViewMode === 'avaya';
     const targetEl = e.target as Element;
-    const clickedLockHit = resolveClickedLockFromSvgElement(targetEl);
-    const portEl = !clickedLockHit ? targetEl?.closest?.('[data-port-node-id]') : null;
+    const clickedLockHit = allowAvayaNodeEdit ? resolveClickedLockFromSvgElement(targetEl) : null;
+    const portEl =
+      allowAvayaNodeEdit && !clickedLockHit ? targetEl?.closest?.('[data-port-node-id]') : null;
     const clickedNodeId =
-      !clickedLockHit && !portEl
+      allowAvayaNodeEdit && !clickedLockHit && !portEl
         ? resolveNodeIdAtClientPoint(targetEl, e.clientX, e.clientY)
         : null;
     const clickedEdgeHit =
-      !clickedLockHit && !portEl && !clickedNodeId
+      allowAvayaNodeEdit && !clickedLockHit && !portEl && !clickedNodeId
         ? resolveClickedEdgeFromSvgElement(targetEl)
         : null;
 
     // 1. Check if starting a Drag-to-Connect wire (either from a 4-side port dot or in 'connect' tool mode)
     const wireSourceNodeId =
-      portEl?.getAttribute('data-port-node-id') ||
-      (isVisualEditMode && visualEditTool === 'connect' ? clickedNodeId : null);
+      allowAvayaNodeEdit
+        ? portEl?.getAttribute('data-port-node-id') ||
+          (isVisualEditMode && visualEditTool === 'connect' ? clickedNodeId : null)
+        : null;
 
     let startedInteraction: 'none' | 'connect-wire' | 'move-node' | 'lock-click' | 'pan' = 'none';
 
@@ -2871,6 +2964,7 @@ function OfflineStudioApp() {
     skipAutoConvertRef.current = false;
     setRawScriptDraft(null);
     setScriptWorkspace(buildScriptWorkspace([]));
+    setPlatformViewMode('avaya');
     setCallflowViewLevel({ level: 'master' });
     setDiagramTitle(template.name);
     setCode(template.code);
@@ -2935,7 +3029,7 @@ function OfflineStudioApp() {
     setSelectedCallflowNodeId(null);
     setSelectedCallflowEdge(null);
     setIsolateSubgraphMode(false);
-    setBaseRenderedSvg(null);
+    setRenderedSvgSnapshot(null);
     hasBaseRenderedSvgRef.current = false;
     setMasterRenderError(null);
     setZoom(1);
@@ -3365,6 +3459,7 @@ function OfflineStudioApp() {
         pendingAutoFitRef.current = true;
         setIsVisualEditMode(true);
       }
+      setPlatformViewMode('avaya');
       setScriptWorkspace(nextWs);
       refreshDiagramFromWorkspace(nextWs);
 
@@ -3460,6 +3555,7 @@ function OfflineStudioApp() {
           pendingAutoFitRef.current = true;
           setIsVisualEditMode(true);
         }
+        setPlatformViewMode('avaya');
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
         return nextWs;
@@ -3534,6 +3630,7 @@ function OfflineStudioApp() {
             setGuidedStep(2);
           }
         }
+        setPlatformViewMode('avaya');
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
 
@@ -3604,6 +3701,7 @@ function OfflineStudioApp() {
         if (workspaceMode === 'guided' && guidedStep === 1) {
           setGuidedStep(2);
         }
+        setPlatformViewMode('avaya');
         setScriptWorkspace(nextWs);
         refreshDiagramFromWorkspace(nextWs);
         const connectedCount = summary.connectedScriptCount ?? 0;
@@ -3733,6 +3831,7 @@ function OfflineStudioApp() {
         }
       }
 
+      setPlatformViewMode('avaya');
       setScriptWorkspace(nextWs);
       refreshDiagramFromWorkspace(nextWs);
 
@@ -4010,6 +4109,7 @@ function OfflineStudioApp() {
       if (payload.folderSummary !== undefined) {
         setLastFolderResolveSummary(payload.folderSummary);
       }
+      setPlatformViewMode('avaya');
       setScriptWorkspace(payload.workspace);
       setGuidedStep(2);
       setIsVisualEditMode(true);
@@ -4046,6 +4146,7 @@ function OfflineStudioApp() {
             }
       );
       skipAutoConvertRef.current = false;
+      setPlatformViewMode('avaya');
       setRawScriptDraft({
         rawText,
         moduleCount: nextWs.modules.length,
@@ -4111,6 +4212,7 @@ function OfflineStudioApp() {
 
   const handleLoadSavedDiagram = (saved: SavedDiagram) => {
     skipAutoConvertRef.current = false;
+    setPlatformViewMode('avaya');
     setRawScriptDraft(null);
     const hasModules =
       saved.scriptWorkspace &&
@@ -4130,7 +4232,7 @@ function OfflineStudioApp() {
     setCallflowViewLevel(
       hasModules || saved.code.trim().length > 0 ? { level: 'welcome' } : { level: 'master' }
     );
-    setBaseRenderedSvg(null);
+    setRenderedSvgSnapshot(null);
     hasBaseRenderedSvgRef.current = false;
     setDiagramTitle(saved.title);
     if (saved.themeConfig) {
@@ -4156,6 +4258,7 @@ function OfflineStudioApp() {
       }
     }
     skipAutoConvertRef.current = false;
+    setPlatformViewMode('avaya');
     setRawScriptDraft(null);
     setScriptWorkspace(buildScriptWorkspace([]));
     setCallflowViewLevel({ level: 'master' });
@@ -4296,10 +4399,17 @@ function OfflineStudioApp() {
             pathColorMode
           ).svg;
         }
-        const rawUnfilteredSvg = baseRenderedSvg
+        const reusableStandaloneAvayaSvg =
+          platformViewMode === 'avaya' &&
+          renderedSvgSnapshot &&
+          renderedSvgSnapshot.platformMode === 'avaya' &&
+          renderedSvgSnapshot.mermaidCode.trim() === code.trim()
+            ? renderedSvgSnapshot.svg
+            : null;
+        const rawUnfilteredSvg = reusableStandaloneAvayaSvg
           ? applyNodeOffsetsToSvg(
               applySmartLogicColoring(
-                baseRenderedSvg,
+                reusableStandaloneAvayaSvg,
                 code,
                 smartColorMode,
                 targetSurface,
@@ -4499,7 +4609,9 @@ function OfflineStudioApp() {
         }
 
         const canReuseActiveCanvasSvg =
-          Boolean(baseRenderedSvg) &&
+          platformViewMode === 'avaya' &&
+          Boolean(renderedSvgSnapshot) &&
+          renderedSvgSnapshot?.platformMode === 'avaya' &&
           !isolateSubgraphMode &&
           exportThemeConfig.theme === themeConfig.theme &&
           exportThemeConfig.background === themeConfig.background &&
@@ -4651,10 +4763,11 @@ function OfflineStudioApp() {
 
           if (
             canReuseActiveCanvasSvg &&
-            baseRenderedSvg &&
-            trimmedSpecCode === effectiveMermaidCode.trim()
+            renderedSvgSnapshot &&
+            renderedSvgSnapshot.platformMode === 'avaya' &&
+            renderedSvgSnapshot.mermaidCode.trim() === trimmedSpecCode
           ) {
-            rawSvg = baseRenderedSvg;
+            rawSvg = renderedSvgSnapshot.svg;
             wasCacheHit = true;
           } else if (
             preloadedHit &&
@@ -5198,7 +5311,8 @@ function OfflineStudioApp() {
       callflowGraph,
       currentDirection,
       callflowViewLevel,
-      baseRenderedSvg,
+      platformViewMode,
+      renderedSvgSnapshot,
       effectiveMermaidCode,
       isolateSubgraphMode,
       activeNodeOffsets,
@@ -5301,11 +5415,29 @@ function OfflineStudioApp() {
     setCallflowViewLevel({ level: 'master' });
     setPlatformViewMode('avaya');
     setSelectedCallflowNodeId(null);
+    setSelectedCallflowEdge(null);
     setIsolateSubgraphMode(false);
-    setBaseRenderedSvg(null);
+    setRenderedSvgSnapshot(null);
     setZoom(1);
     setPan({ x: 0, y: 0 });
   };
+
+  const handleSwitchPlatformViewMode = useCallback(
+    (nextMode: 'avaya' | 'genesys') => {
+      setPlatformViewMode(nextMode);
+      setSelectedCallflowNodeId(null);
+      setSelectedCallflowEdge(null);
+      setIsolateSubgraphMode(false);
+      if (
+        nextMode === 'genesys' &&
+        callflowViewLevel.level === 'welcome' &&
+        scriptWorkspace.modules.length > 0
+      ) {
+        handleSwitchCallflowViewLevel({ level: 'master' });
+      }
+    },
+    [callflowViewLevel.level, scriptWorkspace.modules.length, handleSwitchCallflowViewLevel]
+  );
 
   const handleCopyCode = async () => {
     try {
@@ -5414,7 +5546,7 @@ function OfflineStudioApp() {
           >
             <button
               type="button"
-              onClick={() => setPlatformViewMode('avaya')}
+              onClick={() => handleSwitchPlatformViewMode('avaya')}
               title="Original Avaya AACC (OCL) Callflow anzeigen"
               className={`px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 platformViewMode === 'avaya'
@@ -5426,12 +5558,7 @@ function OfflineStudioApp() {
             </button>
             <button
               type="button"
-              onClick={() => {
-                setPlatformViewMode('genesys');
-                if (callflowViewLevel.level === 'welcome' && scriptWorkspace.modules.length > 0) {
-                  handleSwitchCallflowViewLevel({ level: 'master' });
-                }
-              }}
+              onClick={() => handleSwitchPlatformViewMode('genesys')}
               title="Deterministische Genesys Cloud Architect Ziel-Ansicht (Diagramm, Readiness & Archy YAML)"
               className={`px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 platformViewMode === 'genesys'
@@ -8358,7 +8485,13 @@ function OfflineStudioApp() {
                     hasBaseRenderedSvgRef.current = true;
                     pendingAutoFitRef.current = true;
                     setMasterRenderError(null);
-                    setBaseRenderedSvg(activeHit.rawSvg);
+                    setRenderedSvgSnapshot({
+                      svg: activeHit.rawSvg,
+                      mermaidCode: activeHit.mermaidCode,
+                      viewKey: activeHit.viewKey,
+                      platformMode: activeHit.viewKey.startsWith('genesys:') ? 'genesys' : 'avaya',
+                      styleSignature: activeHit.styleSignature,
+                    });
                   }
                   setPreloadProgress(null);
                 }}
