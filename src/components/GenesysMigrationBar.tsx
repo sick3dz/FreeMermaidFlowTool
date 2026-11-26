@@ -8,6 +8,7 @@ import {
   Copy,
   Download,
   FileCode2,
+  GitBranch,
   Layers,
   Pencil,
   RotateCcw,
@@ -198,6 +199,14 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
     downloadBlob(blob, effectiveScript.archyFilename);
   };
 
+  const handleDownloadMigrationGraphJson = () => {
+    if (!effectiveScript?.migrationGraph) return;
+    const blob = new Blob([JSON.stringify(effectiveScript.migrationGraph, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
+    downloadBlob(blob, `${effectiveScript.cleanName}.graph.json`);
+  };
+
   const handleDownloadZipAll = async () => {
     if (translation.scripts.length === 0 || isExportingZip) return;
     setIsExportingZip(true);
@@ -346,22 +355,34 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
           </button>
 
           {effectiveScript && (
-            <button
-              type="button"
-              onClick={handleDownloadSingleYaml}
-              title={
-                displayedValidation.isValid
-                  ? `Einzelnes Genesys Archy YAML (${effectiveScript.archyFilename}) aus dem RAM herunterladen`
-                  : `Hinweis: Enthält ${displayedValidation.errorCount} Schema-Fehler — Export bleibt trotzdem möglich`
-              }
-              className="px-2.5 py-1 rounded-md bg-orange-600 hover:bg-orange-500 text-white text-[11px] font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-            >
-              <Download className="w-3.5 h-3.5 shrink-0" />
-              <span>{effectiveScript.archyFilename}</span>
-              {!displayedValidation.isValid && (
-                <AlertTriangle className="w-3 h-3 text-amber-200 shrink-0" />
-              )}
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleDownloadSingleYaml}
+                title={
+                  displayedValidation.isValid
+                    ? `Einzelnes Genesys Archy YAML (${effectiveScript.archyFilename}) aus dem RAM herunterladen`
+                    : `Hinweis: Enthält ${displayedValidation.errorCount} Schema-Fehler — Export bleibt trotzdem möglich`
+                }
+                className="px-2.5 py-1 rounded-md bg-orange-600 hover:bg-orange-500 text-white text-[11px] font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Download className="w-3.5 h-3.5 shrink-0" />
+                <span>{effectiveScript.archyFilename}</span>
+                {!displayedValidation.isValid && (
+                  <AlertTriangle className="w-3 h-3 text-amber-200 shrink-0" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleDownloadMigrationGraphJson}
+                title={`Ebene-1 Neutraler Migrations-Graph (${effectiveScript.cleanName}.graph.json) als JSON herunterladen`}
+                className="px-2 py-1 rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <GitBranch className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span>Graph (.json)</span>
+              </button>
+            </>
           )}
 
           <button
@@ -399,6 +420,14 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                   {displayedValidation.stats.lineCount} Zeilen · {displayedValidation.stats.taskCount}{' '}
                   Tasks · {displayedValidation.stats.actionCount} Actions ·{' '}
                   {displayedValidation.stats.variableCount} Variablen
+                  {!isMasterView && effectiveScript?.migrationGraph && (
+                    <>
+                      {' '}· {effectiveScript.migrationGraph.diagnostics.branchNodeCount} Branches
+                      {effectiveScript.metrics.prunedDeadPathCount > 0
+                        ? ` · ${effectiveScript.metrics.prunedDeadPathCount} Dead Paths bereinigt`
+                        : ''}
+                    </>
+                  )}
                 </span>
               )}
             </div>

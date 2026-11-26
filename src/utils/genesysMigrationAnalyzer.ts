@@ -1,24 +1,19 @@
 /**
  * 100 % Offline & In-Memory Avaya AACC (OCL) -> Genesys Cloud Architect (Archy YAML)
- * Deterministischer Übersetzer für Mermaid (`flowchart TD`), Archy YAML & Readiness-Analyse.
+ * Zweistufiger deterministischer Konverter:
+ *   - EBENE 1 (genesysMigrationGraph.ts): Plattformneutraler Migrations-Graph (IR)
+ *   - EBENE 2 (diese Datei): Genesys Archy YAML Renderer, Graph-Mermaid Renderer & Rekursiver Validator
  *
- * Strikte Datenschutz- & Runtime-Vorgabe:
+ * Strikte Datenschutz- & Isolations-Vorgabe:
  * - KEIN Dateisystem-I/O (`fs`, `path`) und KEINE Netzwerk-Aufrufe (`fetch`, `XMLHttpRequest`).
- * - Reine, seiteneffektfreie In-Memory-Verarbeitung auf Basis der bestehenden Parser- & Audit-Typen.
- * - Verbindliche 15-Regeln Mapping-Matrix & exakt valides Genesys Archy YAML-Schema.
+ * - Reine, seiteneffektfreie In-Memory-Verarbeitung (Read-Only auf Avaya ScriptWorkspace / AuditReport).
+ * - Keinerlei Änderungen an Avaya-Parsern oder Avaya-Erkennungsregeln.
  */
 import JSZip from 'jszip';
 import { ScriptModule, ScriptWorkspace } from '../types/mermaidStudio';
 import {
   buildScriptWorkspace,
   canonicalScriptMatchKey,
-  classifyAvayaWaypointTarget,
-  extractOclDeclaredVariables,
-  isDeactivatedSentinelTarget,
-  isDynamicAvayaVariableTarget,
-  normalizeScriptRef,
-  splitInlineIfThenElseClauses,
-  splitOclStatementsOutsideQuotes,
   stripKnownScriptExtension,
 } from './scriptCallflowParser';
 import {
@@ -26,7 +21,26 @@ import {
   ParsedScriptNode,
   runCallflowAudit,
 } from './auditCallflows';
-import { detectExternalApiIntegration } from './flixcheckSpec';
+import {
+  BuildMigrationGraphResult,
+  MigrationFlowGraph,
+  MigrationStep,
+  MigrationTaskGraph,
+  MigrationVariableDataType,
+  MigrationVariableDecl,
+  buildMigrationFlowGraph,
+  flattenMigrationSteps,
+  toCleanGraphSlug,
+} from './genesysMigrationGraph';
+
+export type {
+  MigrationFlowGraph,
+  MigrationStep,
+  MigrationTaskGraph,
+  MigrationVariableDataType,
+  MigrationVariableDecl,
+  NormalizedTransferTarget,
+} from './genesysMigrationGraph';
 
 export type GenesysReadinessLevel = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -37,6 +51,7 @@ export type GenesysActionKind =
   | 'callDataAction'
   | 'callCommonModule'
   | 'callTask'
+  | 'jumpToReusableTask'
   | 'decision'
   | 'switch'
   | 'loop'
@@ -78,9 +93,13 @@ export interface ArchyYamlValidationResult {
 }
 
 export interface GenesysVariableDecl {
+  /** Clean unscoped variable declaration name (e.g. "avayaOriginScript", "GV_Region", "collectedDigits"). */
+  name: string;
   originalName: string;
-  archyName: string; // Flow.<name> or Task.<name>
+  /** Architect reference syntax (e.g. "Flow.avayaOriginScript", "Task.collectedDigits"). */
+  archyName: string;
   scope: 'participantData' | 'flow' | 'task';
+  dataType: MigrationVariableDataType;
   initialValue: string;
 }
 
@@ -123,6 +142,8 @@ export interface GenesysScriptWarning {
     | 'IN_QUEUE_FLOW_REQUIRED'
     | 'QUEUE_OBSERVATIONS_API'
     | 'EMERGENCY_GROUP_REQUIRED'
+    | 'INTERNAL_CDN_NORMALIZED'
+    | 'UNREACHABLE_CODE_PRUNED'
     | 'ARCHY_YAML_VALIDATION_ERROR';
   severity: 'warning' | 'blocker';
   message: string;
@@ -153,10 +174,15 @@ export interface GenesysScriptTranslation {
     flixcheckApiCount: number;
     callVariableCount: number;
     brokenLinkCount: number;
+    prunedDeadPathCount: number;
+    realExpressionCount: number;
+    normalizedTargetCount: number;
   };
   variables: GenesysVariableDecl[];
   actions: GenesysMappedAction[];
   localReusableTasks: Array<{ name: string; refId: string; originalTarget: string }>;
+  /** Level 1 Neutral Control-Flow Migration Graph (IR) powering both Archy YAML and Mermaid. */
+  migrationGraph: MigrationFlowGraph;
   warnings: GenesysScriptWarning[];
   archyYaml: string;
   yamlValidation: ArchyYamlValidationResult;
@@ -182,16 +208,14 @@ export interface GenesysWorkspaceTranslation {
     brokenLinks: number;
     yamlValidScriptCount: number;
     yamlErrorCount: number;
+    totalPrunedDeadPaths: number;
+    totalNormalizedTargets: number;
   };
   scripts: GenesysScriptTranslation[];
   scriptsByKey: Record<string, GenesysScriptTranslation>;
   masterGenesysMermaid: string;
   auditReport: AuditReport;
 }
-
-const FLIXCHECK_RE =
-  /flix[\s_.-]*check|(?:^|[_.\-\s/"'])(?:flix|call[\s_-]*deflection|deflection)(?:$|[_.\-\s\d/"'])/i;
-const ORACLE_RE = /(?:^|[_.\-\s/"'])oracle(?:$|[_.\-\s\d/"'])|oracle/i;
 
 function isScriptWorkspace(input: ScriptWorkspace | ScriptModule[]): input is ScriptWorkspace {
   return !Array.isArray(input) && Array.isArray(input.modules);
@@ -201,19 +225,7 @@ function isScriptWorkspace(input: ScriptWorkspace | ScriptModule[]): input is Sc
  * Formats any script/variable/prompt identifier into a strict YAML-safe Archy slug.
  */
 export function toArchySlug(raw: string, fallback = 'Unnamed'): string {
-  const base = stripKnownScriptExtension(normalizeScriptRef(raw || ''))
-    .replace(/ä/g, 'ae')
-    .replace(/ö/g, 'oe')
-    .replace(/ü/g, 'ue')
-    .replace(/Ä/g, 'Ae')
-    .replace(/Ö/g, 'Oe')
-    .replace(/Ü/g, 'Ue')
-    .replace(/ß/g, 'ss')
-    .replace(/[^A-Za-z0-9_]+/g, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  if (!base) return fallback;
-  return /^[0-9]/.test(base) ? `S_${base}` : base;
+  return toCleanGraphSlug(raw, fallback);
 }
 
 function escapeYamlString(raw: string): string {
@@ -240,129 +252,654 @@ function toSafeMermaidId(prefix: string, raw: string, index?: number): string {
   return index !== undefined ? `${prefix}_${slug}_${index}` : `${prefix}_${slug}`;
 }
 
-function stripCommentsPreservingLines(rawText: string): string[] {
-  const lines = rawText.split(/\r?\n/);
-  const result: string[] = [];
-  let inBlockComment = false;
+function spaces(count: number): string {
+  return ' '.repeat(count);
+}
 
-  for (const rawLine of lines) {
-    let out = '';
-    let i = 0;
-    let inQuote: '"' | "'" | null = null;
+// ============================================================================
+// EBENE 2A: GENESYS CLOUD ARCHITECT (ARCHY YAML) RENDERER
+// ============================================================================
 
-    while (i < rawLine.length) {
-      const ch = rawLine[i];
-      const next = i + 1 < rawLine.length ? rawLine[i + 1] : '';
+function variableTypeKey(dataType: MigrationVariableDataType): string {
+  if (dataType === 'integer') return 'integerVariable';
+  if (dataType === 'boolean') return 'booleanVariable';
+  return 'stringVariable';
+}
 
-      if (inBlockComment) {
-        if (ch === '*' && next === '/') {
-          inBlockComment = false;
-          i += 2;
-          out += ' ';
-        } else {
-          i += 1;
-        }
-        continue;
-      }
+function formatVariableLiteral(decl: MigrationVariableDecl): string {
+  if (decl.dataType === 'integer') {
+    const num = Number(decl.initialValue);
+    return Number.isFinite(num) ? String(Math.round(num)) : '0';
+  }
+  if (decl.dataType === 'boolean') {
+    return decl.initialValue === true || decl.initialValue === 'true' ? 'true' : 'false';
+  }
+  return `"${escapeYamlString(String(decl.initialValue ?? ''))}"`;
+}
 
-      if (inQuote) {
-        out += ch;
-        if (ch === '\\' && next) {
-          out += next;
-          i += 2;
-          continue;
-        }
-        if (ch === inQuote) inQuote = null;
-        i += 1;
-        continue;
-      }
+function emitVariableBlock(
+  lines: string[],
+  vars: MigrationVariableDecl[],
+  baseIndent: number
+): void {
+  if (vars.length === 0) return;
+  const seen = new Set<string>();
+  lines.push(`${spaces(baseIndent)}variables:`);
+  for (const v of vars) {
+    const cleanName = toArchySlug(v.name.replace(/^(?:Flow|Task)\./i, ''), 'varItem');
+    const key = cleanName.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
 
-      if (ch === '"' || ch === "'") {
-        inQuote = ch;
-        out += ch;
-        i += 1;
-        continue;
-      }
+    lines.push(`${spaces(baseIndent + 2)}- ${variableTypeKey(v.dataType)}:`);
+    lines.push(`${spaces(baseIndent + 6)}name: ${cleanName}`);
+    lines.push(`${spaces(baseIndent + 6)}initialValue:`);
+    lines.push(`${spaces(baseIndent + 8)}lit: ${formatVariableLiteral(v)}`);
+  }
+}
 
-      if (ch === '/' && next === '*') {
-        inBlockComment = true;
-        i += 2;
-        out += ' ';
-        continue;
-      }
+function createUniqueNameFactory() {
+  const counts = new Map<string, number>();
+  return (rawBase: string): string => {
+    const base = escapeYamlString(rawBase || 'Action').slice(0, 80) || 'Action';
+    const key = base.toLowerCase();
+    const prev = counts.get(key) || 0;
+    counts.set(key, prev + 1);
+    return prev === 0 ? base : `${base} (${prev + 1})`;
+  };
+}
 
-      if (
-        (ch === '/' && next === '/') ||
-        (ch === '-' && next === '-') ||
-        (ch === '#' && out.trim().length === 0)
-      ) {
+function emitArchyStepList(
+  lines: string[],
+  steps: MigrationStep[],
+  listIndent: number,
+  uniqueName: (base: string) => string
+): void {
+  if (steps.length === 0) {
+    return;
+  }
+
+  for (const step of steps) {
+    const propIndent = listIndent + 4;
+    const p = spaces(propIndent);
+    const li = spaces(listIndent);
+
+    switch (step.kind) {
+      case 'playAudio': {
+        const promptSlug = step.targetSlug || toArchySlug(step.target || 'Prompt', 'Prompt');
+        const actName = uniqueName(`Play Prompt.${promptSlug}`);
+        const tts = escapeYamlString(step.ttsText || `Ansage Prompt.${promptSlug}`);
+        lines.push(`${li}- playAudio:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}audio:`);
+        lines.push(`${p}  tts: "${tts}"`);
         break;
       }
 
-      out += ch;
-      i += 1;
+      case 'collectInput': {
+        const promptSlug = step.targetSlug || toArchySlug(step.target || 'DTMF_Input', 'DTMF_Input');
+        const actName = uniqueName(`Collect Input ${promptSlug}`);
+        const inputVarRef = step.inputVarRef || 'Task.collectedDigits';
+        const spec = step.digitSpec || { mode: 'exact', exact: 1 };
+        const noEntrySec = step.noEntryTimeoutSec ?? 5;
+        const interDigitSec = step.interDigitTimeoutSec ?? 3;
+
+        lines.push(`${li}- collectInput:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}inputAudio:`);
+        lines.push(`${p}  tts: "${escapeYamlString(step.ttsText || `Bitte Eingabe fuer ${promptSlug} vornehmen.`)}"`);
+        lines.push(`${p}inputData:`);
+        lines.push(`${p}  var: ${inputVarRef}`);
+        lines.push(`${p}numberOfDigits:`);
+        if (spec.mode === 'exact' && spec.exact) {
+          lines.push(`${p}  exact:`);
+          lines.push(`${p}    lit: ${spec.exact}`);
+        } else {
+          lines.push(`${p}  min:`);
+          lines.push(`${p}    lit: ${spec.min ?? 1}`);
+          lines.push(`${p}  max:`);
+          lines.push(`${p}    lit: ${spec.max ?? 16}`);
+        }
+        lines.push(`${p}noEntryTimeout:`);
+        lines.push(`${p}  lit:`);
+        lines.push(`${p}    seconds: ${noEntrySec}`);
+        lines.push(`${p}interDigitTimeout:`);
+        lines.push(`${p}  lit:`);
+        lines.push(`${p}    seconds: ${interDigitSec}`);
+        if (step.terminatingCharacter) {
+          lines.push(`${p}terminatingCharacter:`);
+          lines.push(`${p}  lit: "${escapeYamlString(step.terminatingCharacter)}"`);
+        }
+        lines.push(`${p}noEntryAudio:`);
+        lines.push(`${p}  tts: "${escapeYamlString(step.noEntryTts || 'Es wurde keine Eingabe erkannt.')}"`);
+        lines.push(`${p}noMatchAudio:`);
+        lines.push(`${p}  tts: "${escapeYamlString(step.noMatchTts || 'Ungueltige Eingabe.')}"`);
+
+        const successSteps =
+          step.successSteps && step.successSteps.length > 0
+            ? step.successSteps
+            : [
+                {
+                  id: `${step.id}_ack`,
+                  kind: 'setParticipantData' as const,
+                  lineNumber: step.lineNumber,
+                  avayaCommand: 'COLLECT_STORE',
+                  label: `Store ${step.inputVarName || 'collectedDigits'}`,
+                  variableName: step.inputVarName || 'collectedDigits',
+                  variableRef: inputVarRef,
+                  expressionValue: inputVarRef,
+                  isTerminal: false,
+                },
+              ];
+        const failureSteps =
+          step.failureSteps && step.failureSteps.length > 0
+            ? step.failureSteps
+            : [
+                {
+                  id: `${step.id}_fail`,
+                  kind: 'disconnect' as const,
+                  lineNumber: step.lineNumber,
+                  avayaCommand: 'COLLECT_FAILURE',
+                  label: 'Disconnect (Input Timeout)',
+                  target: 'Input_Timeout',
+                  isTerminal: true,
+                },
+              ];
+
+        lines.push(`${p}outputs:`);
+        lines.push(`${p}  success:`);
+        lines.push(`${p}    actions:`);
+        emitArchyStepList(lines, successSteps, propIndent + 6, uniqueName);
+        lines.push(`${p}  failure:`);
+        lines.push(`${p}    actions:`);
+        emitArchyStepList(lines, failureSteps, propIndent + 6, uniqueName);
+        break;
+      }
+
+      case 'menu': {
+        const menuSlug = step.targetSlug || toArchySlug(step.target || 'IVR_Menu', 'IVR_Menu');
+        const actName = uniqueName(`Menu ${menuSlug}`);
+        lines.push(`${li}- menu:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}audio:`);
+        lines.push(`${p}  tts: "${escapeYamlString(step.ttsText || `Auswahlmenue ${menuSlug}`)}"`);
+        break;
+      }
+
+      case 'callDataAction': {
+        const category = step.dataActionCategory || 'Oracle_Integration';
+        const targetSlug = step.targetSlug || toArchySlug(step.target || category, 'ExternalAction');
+        const prefixLabel =
+          category === 'FlixCheck_API'
+            ? 'FlixCheck'
+            : category === 'Genesys_Cloud_Data_Actions'
+            ? 'QueueObs'
+            : 'Oracle';
+        const actName = uniqueName(`${prefixLabel} ${targetSlug}`);
+
+        lines.push(`${li}- callDataAction:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}dataAction:`);
+        lines.push(`${p}  category: "${category}"`);
+        lines.push(`${p}  dataAction: "${escapeYamlString(targetSlug)}"`);
+
+        const inputs =
+          step.dataActionInputs && step.dataActionInputs.length > 0
+            ? step.dataActionInputs
+            : [{ name: 'callerAni', expr: 'Call.Ani' }];
+        lines.push(`${p}inputs:`);
+        for (const inp of inputs) {
+          lines.push(`${p}  - input:`);
+          lines.push(`${p}      name: "${escapeYamlString(inp.name)}"`);
+          lines.push(`${p}      value:`);
+          lines.push(`${p}        exp: "${escapeYamlString(inp.expr)}"`);
+        }
+
+        const outMappings = step.dataActionOutputs || [];
+        if (outMappings.length > 0) {
+          lines.push(`${p}successOutputs:`);
+          for (const om of outMappings) {
+            lines.push(`${p}  - output:`);
+            lines.push(`${p}      name: "${escapeYamlString(om.field)}"`);
+            lines.push(`${p}      variable: ${om.targetVarRef}`);
+          }
+        }
+
+        const successSteps =
+          step.successSteps && step.successSteps.length > 0
+            ? step.successSteps
+            : [
+                {
+                  id: `${step.id}_ok`,
+                  kind: 'setParticipantData' as const,
+                  lineNumber: step.lineNumber,
+                  avayaCommand: 'API_SUCCESS_LOG',
+                  label: `Store ${prefixLabel} Result`,
+                  variableName: `${prefixLabel}_Status`,
+                  expressionValue: outMappings[0]?.targetVarRef || '"OK"',
+                  isTerminal: false,
+                },
+              ];
+        const failureSteps =
+          step.failureSteps && step.failureSteps.length > 0
+            ? step.failureSteps
+            : [
+                {
+                  id: `${step.id}_err`,
+                  kind: 'disconnect' as const,
+                  lineNumber: step.lineNumber,
+                  avayaCommand: 'API_FAILURE',
+                  label: `Disconnect (${prefixLabel} Failure)`,
+                  target: `${prefixLabel}_Failure`,
+                  isTerminal: true,
+                },
+              ];
+        const timeoutSteps =
+          step.timeoutSteps && step.timeoutSteps.length > 0
+            ? step.timeoutSteps
+            : [
+                {
+                  id: `${step.id}_to`,
+                  kind: 'disconnect' as const,
+                  lineNumber: step.lineNumber,
+                  avayaCommand: 'API_TIMEOUT',
+                  label: `Disconnect (${prefixLabel} Timeout)`,
+                  target: `${prefixLabel}_Timeout`,
+                  isTerminal: true,
+                },
+              ];
+
+        lines.push(`${p}outputs:`);
+        lines.push(`${p}  success:`);
+        lines.push(`${p}    actions:`);
+        emitArchyStepList(lines, successSteps, propIndent + 6, uniqueName);
+        lines.push(`${p}  failure:`);
+        lines.push(`${p}    actions:`);
+        emitArchyStepList(lines, failureSteps, propIndent + 6, uniqueName);
+        lines.push(`${p}  timeout:`);
+        lines.push(`${p}    actions:`);
+        emitArchyStepList(lines, timeoutSteps, propIndent + 6, uniqueName);
+        break;
+      }
+
+      case 'callCommonModule': {
+        const modSlug = step.targetSlug || toArchySlug(step.target || 'CommonModule', 'CommonModule');
+        const actName = uniqueName(`Call CommonModule ${modSlug}`);
+        lines.push(`${li}- callCommonModule:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}commonModule:`);
+        lines.push(`${p}  name: "${escapeYamlString(modSlug)}"`);
+        break;
+      }
+
+      case 'callTask': {
+        const taskRef = step.targetTaskRefId || step.targetSlug || toArchySlug(step.target || 'SubTask', 'SubTask');
+        const actName = uniqueName(`Call Task ${taskRef}`);
+        lines.push(`${li}- callTask:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}targetTaskRef: "/inboundCall/tasks/task[${escapeYamlString(taskRef)}]"`);
+        break;
+      }
+
+      case 'jumpToReusableTask': {
+        const taskRef = step.targetTaskRefId || step.targetSlug || toArchySlug(step.target || 'TargetTask', 'TargetTask');
+        const actName = uniqueName(`Jump to ${taskRef}`);
+        lines.push(`${li}- jumpToReusableTask:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}targetTaskRef: "/inboundCall/tasks/task[${escapeYamlString(taskRef)}]"`);
+        break;
+      }
+
+      case 'decision': {
+        const condName = escapeYamlString(step.conditionLabel || step.target || 'Branch');
+        const actName = uniqueName(`Check ${condName}`);
+        const condExp = escapeYamlString(
+          step.expression || (step.isEmergencyCheck ? 'Flow.emergencyOverride == true' : 'Flow.cond_check == true')
+        );
+        const yesSteps = step.yesSteps || [];
+        const noSteps = step.noSteps || [];
+
+        lines.push(`${li}- decision:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}condition:`);
+        lines.push(`${p}  exp: "${condExp}"`);
+        lines.push(`${p}outputs:`);
+        lines.push(`${p}  yes:`);
+        if (yesSteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, yesSteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    actions: []`);
+        }
+        lines.push(`${p}  no:`);
+        if (noSteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, noSteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    actions: []`);
+        }
+        break;
+      }
+
+      case 'switch': {
+        const switchVarRef = step.variableRef || step.expression || 'Task.collectedDigits';
+        const actName = uniqueName(`Switch ${step.variableName || 'Selection'}`);
+        const cases = step.cases || [];
+        const defaultSteps = step.defaultSteps || [];
+
+        lines.push(`${li}- switch:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}evaluate:`);
+        lines.push(`${p}  firstTrue: true`);
+        if (cases.length > 0) {
+          lines.push(`${p}cases:`);
+          for (const c of cases) {
+            const valEsc = escapeYamlString(c.value);
+            lines.push(`${p}  - case:`);
+            lines.push(`${p}      value:`);
+            lines.push(`${p}        exp: "${escapeYamlString(switchVarRef)} == \\"${valEsc}\\""`);
+            if (c.steps.length > 0) {
+              lines.push(`${p}      actions:`);
+              emitArchyStepList(lines, c.steps, propIndent + 8, uniqueName);
+            } else {
+              lines.push(`${p}      actions: []`);
+            }
+          }
+        }
+        lines.push(`${p}default:`);
+        if (defaultSteps.length > 0) {
+          lines.push(`${p}  actions:`);
+          emitArchyStepList(lines, defaultSteps, propIndent + 4, uniqueName);
+        } else {
+          lines.push(`${p}  actions: []`);
+        }
+        break;
+      }
+
+      case 'loop': {
+        const loopSlug = step.targetSlug || toArchySlug(step.target || 'SectionLoop', 'SectionLoop');
+        const actName = uniqueName(`Loop ${loopSlug}`);
+        const bodySteps = step.bodySteps || [];
+        lines.push(`${li}- loop:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}maxLoopCount: ${step.maxLoopCount ?? 5}`);
+        if (step.currentIndexVarName) {
+          lines.push(`${p}currentIndexDataName: "Task.${escapeYamlString(step.currentIndexVarName)}"`);
+        }
+        if (bodySteps.length > 0) {
+          lines.push(`${p}actions:`);
+          emitArchyStepList(lines, bodySteps, propIndent + 2, uniqueName);
+        } else {
+          lines.push(`${p}actions: []`);
+        }
+        break;
+      }
+
+      case 'setParticipantData': {
+        const cvName = toArchySlug(step.variableName || 'CV_Data', 'CV_Data');
+        const valExpr = step.expressionValue || step.variableRef || `Flow.${cvName}`;
+        const actName = uniqueName(`Set Participant Data ${cvName}`);
+        lines.push(`${li}- setParticipantData:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}attributes:`);
+        lines.push(`${p}  - attribute:`);
+        lines.push(`${p}      name: "${escapeYamlString(cvName)}"`);
+        lines.push(`${p}      value:`);
+        lines.push(`${p}        exp: "${escapeYamlString(valExpr)}"`);
+        break;
+      }
+
+      case 'getParticipantData': {
+        const cvName = toArchySlug(step.variableName || 'CV_Data', 'CV_Data');
+        const targetVar = step.variableRef || `Flow.${cvName}`;
+        const actName = uniqueName(`Get Participant Data ${cvName}`);
+        lines.push(`${li}- getParticipantData:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}attributes:`);
+        lines.push(`${p}  - attribute:`);
+        lines.push(`${p}      name: "${escapeYamlString(cvName)}"`);
+        lines.push(`${p}      variable: ${escapeYamlString(targetVar)}`);
+        break;
+      }
+
+      case 'updateData': {
+        const varRef = step.variableRef || 'Flow.avayaOriginScript';
+        const stmtType =
+          step.variableDataType === 'integer'
+            ? 'integer'
+            : step.variableDataType === 'boolean'
+            ? 'boolean'
+            : 'string';
+        const actName = uniqueName(`Update ${step.variableName || varRef}`);
+        lines.push(`${li}- updateData:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}statements:`);
+        lines.push(`${p}  - ${stmtType}:`);
+        lines.push(`${p}      variable: ${escapeYamlString(varRef)}`);
+        lines.push(`${p}      value:`);
+        if (step.expressionValue) {
+          lines.push(`${p}        exp: "${escapeYamlString(step.expressionValue)}"`);
+        } else if (stmtType === 'integer') {
+          lines.push(`${p}        lit: ${Number(step.literalValue) || 0}`);
+        } else if (stmtType === 'boolean') {
+          lines.push(`${p}        lit: ${step.literalValue === true ? 'true' : 'false'}`);
+        } else {
+          lines.push(`${p}        lit: "${escapeYamlString(String(step.literalValue ?? ''))}"`);
+        }
+        break;
+      }
+
+      case 'transferToAcd': {
+        const queueName = step.targetSlug || toArchySlug(step.target || 'Default_Queue', 'Default_Queue');
+        const actName = uniqueName(
+          step.isMultiSkillset ? `Queue + Bullseye ${queueName}` : `Transfer to ACD ${queueName}`
+        );
+        lines.push(`${li}- transferToAcd:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}targetQueue:`);
+        lines.push(`${p}  lit:`);
+        lines.push(`${p}    name: "${escapeYamlString(queueName)}"`);
+        if (step.isMultiSkillset && step.skills && step.skills.length > 0) {
+          lines.push(`${p}skills:`);
+          for (const skill of step.skills) {
+            const skillSlug = toArchySlug(skill, 'Skill');
+            lines.push(`${p}  - lit:`);
+            lines.push(`${p}      name: "${escapeYamlString(skillSlug)}"`);
+          }
+        }
+        lines.push(`${p}failureTransferAudio:`);
+        lines.push(`${p}  tts: "Die Weiterleitung an die Warteschlange ${escapeYamlString(queueName)} ist fehlgeschlagen."`);
+        break;
+      }
+
+      case 'transferToNumber': {
+        const e164 = escapeYamlString(step.normalizedE164 || step.target || '+490000000');
+        const actName = uniqueName(`Transfer to External ${e164}`);
+        lines.push(`${li}- transferToNumber:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}targetNumber:`);
+        lines.push(`${p}  lit: "${e164}"`);
+        lines.push(`${p}failureTransferAudio:`);
+        lines.push(`${p}  tts: "Die externe Weiterleitung konnte nicht aufgebaut werden."`);
+        break;
+      }
+
+      case 'disconnect': {
+        const label = step.target ? `Disconnect (${step.target})` : 'Disconnect Call';
+        const actName = uniqueName(label);
+        lines.push(`${li}- disconnect:`);
+        lines.push(`${p}name: "${actName}"`);
+        break;
+      }
+
+      case 'evaluateScheduleGroup': {
+        const sgSlug = step.targetSlug || toArchySlug(step.target || 'Default_ScheduleGroup', 'Default_ScheduleGroup');
+        const actName = uniqueName(`Evaluate ${sgSlug}`);
+        const openSteps = step.openSteps || [];
+        const closedSteps = step.closedSteps || [];
+        const holidaySteps = step.holidaySteps || [];
+
+        lines.push(`${li}- evaluateScheduleGroup:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}scheduleGroup:`);
+        lines.push(`${p}  lit:`);
+        lines.push(`${p}    name: "${escapeYamlString(sgSlug)}"`);
+        lines.push(`${p}outputs:`);
+        lines.push(`${p}  open:`);
+        if (openSteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, openSteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    actions: []`);
+        }
+        lines.push(`${p}  closed:`);
+        if (closedSteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, closedSteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    actions: []`);
+        }
+        lines.push(`${p}  holiday:`);
+        if (holidaySteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, holidaySteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    actions: []`);
+        }
+        break;
+      }
+
+      case 'playHoldMusic': {
+        const musicSlug = step.targetSlug || toArchySlug(step.target || 'Hold_Music', 'Hold_Music');
+        const actName = uniqueName(`Play Hold Music ${musicSlug}`);
+        lines.push(`${li}- playHoldMusic:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}audio:`);
+        lines.push(`${p}  tts: "Wartemusik ${escapeYamlString(musicSlug)} (In-Queue Flow)"`);
+        break;
+      }
+
+      case 'delay': {
+        const secs = Math.max(1, Math.round(step.delaySeconds || 10));
+        const actName = uniqueName(`Wait ${secs}s`);
+        lines.push(`${li}- delay:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}seconds:`);
+        lines.push(`${p}  lit: ${secs}`);
+        break;
+      }
+
+      case 'setPriority': {
+        const prio = Number.isFinite(step.priorityValue) ? Math.round(step.priorityValue!) : 50;
+        const actName = uniqueName(`Set Priority ${prio}`);
+        lines.push(`${li}- setPriority:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}priority:`);
+        lines.push(`${p}  lit: ${prio}`);
+        break;
+      }
+
+      case 'createCallback': {
+        const cbQueue = step.targetSlug || toArchySlug(step.target || 'Callback_Queue', 'Callback_Queue');
+        const actName = uniqueName(`Offer Callback ${cbQueue}`);
+        lines.push(`${li}- createCallback:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}queue:`);
+        lines.push(`${p}  lit:`);
+        lines.push(`${p}    name: "${escapeYamlString(cbQueue)}"`);
+        lines.push(`${p}callbackNumber:`);
+        lines.push(`${p}  exp: "Call.Ani"`);
+        lines.push(`${p}outputs:`);
+        lines.push(`${p}  success:`);
+        if (step.successSteps && step.successSteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, step.successSteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    actions: []`);
+        }
+        lines.push(`${p}  failure:`);
+        if (step.failureSteps && step.failureSteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, step.failureSteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    actions: []`);
+        }
+        break;
+      }
+
+      case 'transferToVoicemail': {
+        const vmQueue = step.targetSlug || toArchySlug(step.target || 'Voicemail_Queue', 'Voicemail_Queue');
+        const actName = uniqueName(`Transfer to Voicemail ${vmQueue}`);
+        lines.push(`${li}- transferToVoicemail:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}targetQueue:`);
+        lines.push(`${p}  lit:`);
+        lines.push(`${p}    name: "${escapeYamlString(vmQueue)}"`);
+        break;
+      }
+
+      case 'setLanguage': {
+        const langCode = escapeYamlString(step.languageCode || 'de-de');
+        const actName = uniqueName(`Set Language ${langCode}`);
+        lines.push(`${li}- setLanguage:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}language:`);
+        lines.push(`${p}  lit: "${langCode}"`);
+        break;
+      }
+
+      case 'callDataTableLookup': {
+        const dtSlug = step.targetSlug || toArchySlug(step.target || 'Routing_DataTable', 'Routing_DataTable');
+        const keyExp = escapeYamlString(step.dataTableKey || 'Call.Dnis');
+        const actName = uniqueName(`Lookup ${dtSlug}`);
+        const foundSteps = step.foundSteps || [];
+        const notFoundSteps = step.notFoundSteps || [];
+        lines.push(`${li}- callDataTableLookup:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}dataTable:`);
+        lines.push(`${p}  lit:`);
+        lines.push(`${p}    name: "${escapeYamlString(dtSlug)}"`);
+        lines.push(`${p}lookupKey:`);
+        lines.push(`${p}  exp: "${keyExp}"`);
+        lines.push(`${p}outputs:`);
+        lines.push(`${p}  found:`);
+        if (foundSteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, foundSteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    actions: []`);
+        }
+        lines.push(`${p}  notFound:`);
+        if (notFoundSteps.length > 0) {
+          lines.push(`${p}    actions:`);
+          emitArchyStepList(lines, notFoundSteps, propIndent + 6, uniqueName);
+        } else {
+          lines.push(`${p}    actions: []`);
+        }
+        break;
+      }
+
+      case 'setUuiData': {
+        const uuiExp = escapeYamlString(step.expressionValue || 'Call.UserToUserInformation');
+        const actName = uniqueName(`Set UUI ${step.target || 'SIP_UUI'}`);
+        lines.push(`${li}- setUuiData:`);
+        lines.push(`${p}name: "${actName}"`);
+        lines.push(`${p}uuiData:`);
+        lines.push(`${p}  exp: "${uuiExp}"`);
+        break;
+      }
     }
-
-    result.push(out);
   }
-
-  return result;
-}
-
-function resolveVariablePrefixInfo(varName: string): {
-  scope: 'participantData' | 'flow' | 'task';
-  archyName: string;
-} | null {
-  const clean = varName.trim();
-  if (/^CV_/i.test(clean)) {
-    return { scope: 'participantData', archyName: `Flow.${toArchySlug(clean)}` };
-  }
-  if (/^GV_/i.test(clean)) {
-    return { scope: 'flow', archyName: `Flow.${toArchySlug(clean)}` };
-  }
-  if (/^LV_/i.test(clean)) {
-    return { scope: 'task', archyName: `Task.${toArchySlug(clean)}` };
-  }
-  return null;
-}
-
-function extractScopedVariables(lines: string[]): GenesysVariableDecl[] {
-  const byLower = new Map<string, GenesysVariableDecl>();
-  const oclVars = extractOclDeclaredVariables(lines);
-
-  const register = (rawName: string) => {
-    const info = resolveVariablePrefixInfo(rawName);
-    if (!info) return;
-    const lower = rawName.toLowerCase();
-    if (byLower.has(lower)) return;
-    const staticVal = oclVars.staticStringLiterals.get(lower) || '';
-    byLower.set(lower, {
-      originalName: rawName,
-      archyName: info.archyName,
-      scope: info.scope,
-      initialValue: staticVal,
-    });
-  };
-
-  for (const line of lines) {
-    const varMatches = line.matchAll(/\b((?:CV|GV|LV)_[A-Za-z0-9_]+)\b/gi);
-    for (const m of varMatches) {
-      if (m[1]) register(m[1]);
-    }
-  }
-
-  return Array.from(byLower.values()).sort((a, b) =>
-    a.originalName.localeCompare(b.originalName)
-  );
 }
 
 /**
- * Generates strict, schema-compliant Genesys Cloud Archy YAML for a translated Avaya script.
- * Uses ONLY valid official Archy YAML keys (zero invented keys).
+ * Generates strict, graph-structured Genesys Cloud Archy YAML directly from the Level-1 MigrationFlowGraph.
  */
 export function generateArchyYaml(script: GenesysScriptTranslation): string {
+  const graph = script.migrationGraph;
   const lines: string[] = [];
-  const cleanFlowName = toArchySlug(script.cleanName, 'Avaya_Migrated_Flow');
+  const cleanFlowName = toArchySlug(graph.cleanName || script.cleanName, 'Avaya_Migrated_Flow');
+  const uniqueName = createUniqueNameFactory();
 
   lines.push('inboundCall:');
   lines.push(`  name: ${cleanFlowName}`);
@@ -370,409 +907,35 @@ export function generateArchyYaml(script: GenesysScriptTranslation): string {
     `  description: "Auto-generiert aus Avaya AACC Skript ${escapeYamlString(script.fileName)}"`
   );
   lines.push('  defaultLanguage: de-de');
-  lines.push('  startUpRef: "/inboundCall/tasks/task[Main_Task]"');
+  lines.push(`  startUpRef: "/inboundCall/tasks/task[${escapeYamlString(graph.entryTaskRefId)}]"`);
 
-  // variables
-  lines.push('  variables:');
-  lines.push('    - stringVariable:');
-  lines.push('        name: Flow.avayaOriginScript');
-  lines.push('        initialValue:');
-  lines.push(`          lit: "${escapeYamlString(script.fileName)}"`);
+  // Flow-level variables ONLY (clean unscoped names; referenced via Flow.<name>)
+  emitVariableBlock(lines, graph.flowVariables, 2);
 
-  const hasCollectInput = script.actions.some(
-    (a) => a.kind === 'collectInput' || a.kind === 'menu'
-  );
-  const hasDecision = script.actions.some(
-    (a) => (a.kind === 'decision' && !a.isEmergencyCheck) || a.kind === 'switch'
-  );
-  const hasEmergency = script.actions.some((a) => a.isEmergencyCheck);
-  const hasCallerAni = script.actions.some((a) => a.archyVariableName === 'Flow.callerAni');
-  const hasDialedDnis = script.actions.some((a) => a.archyVariableName === 'Flow.dialedDnis');
-  const hasEstimatedWaitTime = script.actions.some(
-    (a) => a.archyVariableName === 'Flow.estimatedWaitTime'
-  );
-
-  if (hasCollectInput) {
-    lines.push('    - stringVariable:');
-    lines.push('        name: Task.collectedDigits');
-    lines.push('        initialValue:');
-    lines.push('          lit: ""');
-  }
-
-  if (hasDecision) {
-    lines.push('    - stringVariable:');
-    lines.push('        name: Flow.avayaCondition');
-    lines.push('        initialValue:');
-    lines.push('          lit: "true"');
-  }
-
-  if (hasEmergency) {
-    lines.push('    - stringVariable:');
-    lines.push('        name: Flow.emergencyOverride');
-    lines.push('        initialValue:');
-    lines.push('          lit: "false"');
-  }
-
-  if (hasCallerAni) {
-    lines.push('    - stringVariable:');
-    lines.push('        name: Flow.callerAni');
-    lines.push('        initialValue:');
-    lines.push('          lit: ""');
-  }
-
-  if (hasDialedDnis) {
-    lines.push('    - stringVariable:');
-    lines.push('        name: Flow.dialedDnis');
-    lines.push('        initialValue:');
-    lines.push('          lit: ""');
-  }
-
-  if (hasEstimatedWaitTime) {
-    lines.push('    - stringVariable:');
-    lines.push('        name: Flow.estimatedWaitTime');
-    lines.push('        initialValue:');
-    lines.push('          lit: ""');
-  }
-
-  const emittedVarNames = new Set<string>([
-    'Flow.avayaOriginScript',
-    'Task.collectedDigits',
-    'Flow.avayaCondition',
-    'Flow.emergencyOverride',
-    'Flow.callerAni',
-    'Flow.dialedDnis',
-    'Flow.estimatedWaitTime',
-  ]);
-
-  for (const v of script.variables) {
-    if (emittedVarNames.has(v.archyName)) continue;
-    emittedVarNames.add(v.archyName);
-    lines.push('    - stringVariable:');
-    lines.push(`        name: ${v.archyName}`);
-    lines.push('        initialValue:');
-    lines.push(`          lit: "${escapeYamlString(v.initialValue)}"`);
-  }
-
-  // tasks
+  // Tasks (Main_Task + translated SECTION tasks + hydrated Reusable Subscript tasks + Fallback_Error_Task)
   lines.push('  tasks:');
-  lines.push('    - task:');
-  lines.push('        name: Main_Task');
-  lines.push('        refId: Main_Task');
-  lines.push('        actions:');
-
-  if (script.actions.length === 0) {
-    lines.push('          - disconnect:');
-    lines.push('              name: "Disconnect Call"');
-  } else {
-    for (const action of script.actions) {
-      switch (action.kind) {
-        case 'playAudio': {
-          const promptSlug = toArchySlug(action.target || 'Prompt', 'Prompt');
-          lines.push('          - playAudio:');
-          lines.push(`              name: "Play Prompt.${escapeYamlString(promptSlug)}"`);
-          lines.push('              audio:');
-          lines.push(
-            `                tts: "Platzhalter Prompt ${escapeYamlString(promptSlug)}"`
-          );
-          break;
-        }
-        case 'collectInput': {
-          const promptSlug = toArchySlug(action.target || 'DTMF_Input', 'DTMF_Input');
-          lines.push('          - collectInput:');
-          lines.push(`              name: "Collect Input ${escapeYamlString(promptSlug)}"`);
-          lines.push('              inputAudio:');
-          lines.push(
-            `                tts: "Platzhalter Eingabe-Prompt ${escapeYamlString(promptSlug)}"`
-          );
-          lines.push('              inputData:');
-          lines.push('                var: Task.collectedDigits');
-          lines.push('              outputs:');
-          lines.push('                success:');
-          lines.push('                  actions: []');
-          lines.push('                failure:');
-          lines.push('                  actions: []');
-          break;
-        }
-        case 'menu': {
-          const menuSlug = toArchySlug(action.target || 'IVR_Menu', 'IVR_Menu');
-          lines.push('          - menu:');
-          lines.push(`              name: "Menu ${escapeYamlString(menuSlug)}"`);
-          lines.push('              audio:');
-          lines.push(
-            `                tts: "Platzhalter Menue ${escapeYamlString(menuSlug)}"`
-          );
-          break;
-        }
-        case 'callDataAction': {
-          const category = action.dataActionCategory || 'Oracle_Integration';
-          const targetSlug = toArchySlug(action.target || category, 'ExternalAction');
-          const prefixLabel =
-            category === 'FlixCheck_API'
-              ? 'FlixCheck'
-              : category === 'Genesys_Cloud_Data_Actions'
-              ? 'QueueObs'
-              : 'Oracle';
-          lines.push('          - callDataAction:');
-          lines.push(
-            `              name: "${prefixLabel} ${escapeYamlString(targetSlug)}"`
-          );
-          lines.push('              dataAction:');
-          lines.push(`                category: "${category}"`);
-          lines.push(`                dataAction: "${escapeYamlString(targetSlug)}"`);
-          break;
-        }
-        case 'callCommonModule': {
-          const modSlug = toArchySlug(action.target || 'CommonModule', 'CommonModule');
-          lines.push('          - callCommonModule:');
-          lines.push(`              name: "Call ${escapeYamlString(modSlug)}"`);
-          lines.push('              commonModule:');
-          lines.push(`                name: "${escapeYamlString(modSlug)}"`);
-          break;
-        }
-        case 'callTask': {
-          const taskRef = action.targetSlug || toArchySlug(action.target || 'SubTask', 'SubTask');
-          lines.push('          - callTask:');
-          lines.push(`              name: "Call Task ${escapeYamlString(taskRef)}"`);
-          lines.push(
-            `              targetTaskRef: "/inboundCall/tasks/task[${escapeYamlString(taskRef)}]"`
-          );
-          break;
-        }
-        case 'decision': {
-          const condName = escapeYamlString(
-            action.conditionLabel || action.target || 'Branch'
-          );
-          const condExp = action.isEmergencyCheck
-            ? 'Flow.emergencyOverride == \\"true\\"'
-            : 'Flow.avayaCondition == \\"true\\"';
-          lines.push('          - decision:');
-          lines.push(`              name: "Check ${condName}"`);
-          lines.push('              condition:');
-          lines.push(`                exp: "${condExp}"`);
-          lines.push('              outputs:');
-          lines.push('                yes:');
-          lines.push('                  actions: []');
-          lines.push('                no:');
-          lines.push('                  actions: []');
-          break;
-        }
-        case 'switch': {
-          const switchName = escapeYamlString(action.target || 'Switch_Branch');
-          lines.push('          - switch:');
-          lines.push(`              name: "Switch ${switchName}"`);
-          lines.push('              default:');
-          lines.push('                actions: []');
-          break;
-        }
-        case 'loop': {
-          const loopSlug = toArchySlug(action.target || 'SectionLoop', 'SectionLoop');
-          lines.push('          - loop:');
-          lines.push(
-            `              name: "Loop ${escapeYamlString(loopSlug)}"`
-          );
-          lines.push(`              maxLoopCount: ${action.maxLoopCount ?? 5}`);
-          lines.push('              actions: []');
-          break;
-        }
-        case 'setParticipantData': {
-          const cvName = toArchySlug(action.variableName || 'CV_Data', 'CV_Data');
-          const flowVar = action.archyVariableName || `Flow.${cvName}`;
-          lines.push('          - setParticipantData:');
-          lines.push(`              name: "Set Participant Data ${escapeYamlString(cvName)}"`);
-          lines.push('              attributes:');
-          lines.push('                - attribute:');
-          lines.push(`                    name: "${escapeYamlString(cvName)}"`);
-          lines.push('                    value:');
-          lines.push(`                      exp: "${escapeYamlString(flowVar)}"`);
-          break;
-        }
-        case 'getParticipantData': {
-          const cvName = toArchySlug(action.variableName || 'CV_Data', 'CV_Data');
-          const flowVar = action.archyVariableName || `Flow.${cvName}`;
-          lines.push('          - getParticipantData:');
-          lines.push(`              name: "Get Participant Data ${escapeYamlString(cvName)}"`);
-          lines.push('              attributes:');
-          lines.push('                - attribute:');
-          lines.push(`                    name: "${escapeYamlString(cvName)}"`);
-          lines.push(`                    variable: "${escapeYamlString(flowVar)}"`);
-          break;
-        }
-        case 'updateData': {
-          const varName = action.archyVariableName || 'Flow.avayaCondition';
-          lines.push('          - updateData:');
-          lines.push(
-            `              name: "Update ${escapeYamlString(action.variableName || varName)}"`
-          );
-          lines.push('              statements:');
-          lines.push('                - string:');
-          lines.push(`                    variable: ${escapeYamlString(varName)}`);
-          lines.push('                    value:');
-          if (action.expressionValue) {
-            lines.push(`                      exp: "${escapeYamlString(action.expressionValue)}"`);
-          } else {
-            lines.push('                      lit: ""');
-          }
-          break;
-        }
-        case 'transferToAcd': {
-          const queueName = toArchySlug(action.target || 'Default_Queue', 'Default_Queue');
-          lines.push('          - transferToAcd:');
-          lines.push(
-            `              name: "${action.isMultiSkillset ? 'Queue + Bullseye' : 'Queue'} ${escapeYamlString(queueName)}"`
-          );
-          lines.push('              targetQueue:');
-          lines.push('                lit:');
-          lines.push(`                  name: "${escapeYamlString(queueName)}"`);
-          if (action.isMultiSkillset && action.skills && action.skills.length > 0) {
-            lines.push('              skills:');
-            for (const skill of action.skills) {
-              const skillSlug = toArchySlug(skill, 'Skill');
-              lines.push('                - lit:');
-              lines.push(`                    name: "${escapeYamlString(skillSlug)}"`);
-            }
-          }
-          break;
-        }
-        case 'transferToNumber': {
-          const numTarget = escapeYamlString(action.target || '0000');
-          lines.push('          - transferToNumber:');
-          lines.push(`              name: "Transfer to ${numTarget}"`);
-          lines.push('              targetNumber:');
-          lines.push(`                lit: "${numTarget}"`);
-          break;
-        }
-        case 'disconnect': {
-          lines.push('          - disconnect:');
-          lines.push(
-            `              name: "${escapeYamlString(action.target ? `Disconnect (${action.target})` : 'Disconnect Call')}"`
-          );
-          break;
-        }
-        case 'evaluateScheduleGroup': {
-          const sgSlug = toArchySlug(action.target || 'Default_ScheduleGroup', 'Default_ScheduleGroup');
-          lines.push('          - evaluateScheduleGroup:');
-          lines.push(`              name: "Evaluate ${escapeYamlString(sgSlug)}"`);
-          lines.push('              scheduleGroup:');
-          lines.push('                lit:');
-          lines.push(`                  name: "${escapeYamlString(sgSlug)}"`);
-          lines.push('              outputs:');
-          lines.push('                open:');
-          lines.push('                  actions: []');
-          lines.push('                closed:');
-          lines.push('                  actions: []');
-          lines.push('                holiday:');
-          lines.push('                  actions: []');
-          break;
-        }
-        case 'playHoldMusic': {
-          const musicSlug = toArchySlug(action.target || 'Hold_Music', 'Hold_Music');
-          lines.push('          - playHoldMusic:');
-          lines.push(`              name: "Play Hold Music ${escapeYamlString(musicSlug)}"`);
-          lines.push('              audio:');
-          lines.push(
-            `                tts: "Platzhalter Wartemusik ${escapeYamlString(musicSlug)}"`
-          );
-          break;
-        }
-        case 'delay': {
-          const secs = Math.max(1, Math.round(action.delaySeconds || 10));
-          lines.push('          - delay:');
-          lines.push(`              name: "Wait ${secs}s"`);
-          lines.push('              seconds:');
-          lines.push(`                lit: ${secs}`);
-          break;
-        }
-        case 'setPriority': {
-          const prio = Number.isFinite(action.priorityValue) ? Math.round(action.priorityValue!) : 50;
-          lines.push('          - setPriority:');
-          lines.push(`              name: "Set Priority ${prio}"`);
-          lines.push('              priority:');
-          lines.push(`                lit: ${prio}`);
-          break;
-        }
-        case 'createCallback': {
-          const cbQueue = toArchySlug(action.target || 'Callback_Queue', 'Callback_Queue');
-          lines.push('          - createCallback:');
-          lines.push(`              name: "Offer Callback ${escapeYamlString(cbQueue)}"`);
-          lines.push('              queue:');
-          lines.push('                lit:');
-          lines.push(`                  name: "${escapeYamlString(cbQueue)}"`);
-          lines.push('              callbackNumber:');
-          lines.push('                exp: "Call.Ani"');
-          lines.push('              outputs:');
-          lines.push('                success:');
-          lines.push('                  actions: []');
-          lines.push('                failure:');
-          lines.push('                  actions: []');
-          break;
-        }
-        case 'transferToVoicemail': {
-          const vmQueue = toArchySlug(action.target || 'Voicemail_Queue', 'Voicemail_Queue');
-          lines.push('          - transferToVoicemail:');
-          lines.push(`              name: "Transfer to Voicemail ${escapeYamlString(vmQueue)}"`);
-          lines.push('              targetQueue:');
-          lines.push('                lit:');
-          lines.push(`                  name: "${escapeYamlString(vmQueue)}"`);
-          break;
-        }
-        case 'setLanguage': {
-          const langCode = escapeYamlString(action.languageCode || 'de-de');
-          lines.push('          - setLanguage:');
-          lines.push(`              name: "Set Language ${langCode}"`);
-          lines.push('              language:');
-          lines.push(`                lit: "${langCode}"`);
-          break;
-        }
-        case 'callDataTableLookup': {
-          const dtSlug = toArchySlug(action.target || 'Routing_DataTable', 'Routing_DataTable');
-          const keyExp = escapeYamlString(action.dataTableKey || 'Call.Dnis');
-          lines.push('          - callDataTableLookup:');
-          lines.push(`              name: "Lookup ${escapeYamlString(dtSlug)}"`);
-          lines.push('              dataTable:');
-          lines.push('                lit:');
-          lines.push(`                  name: "${escapeYamlString(dtSlug)}"`);
-          lines.push('              lookupKey:');
-          lines.push(`                exp: "${keyExp}"`);
-          lines.push('              outputs:');
-          lines.push('                found:');
-          lines.push('                  actions: []');
-          lines.push('                notFound:');
-          lines.push('                  actions: []');
-          break;
-        }
-        case 'setUuiData': {
-          const uuiExp = escapeYamlString(action.expressionValue || 'Call.UserToUserInformation');
-          lines.push('          - setUuiData:');
-          lines.push(`              name: "Set UUI ${escapeYamlString(action.target || 'SIP_UUI')}"`);
-          lines.push('              uuiData:');
-          lines.push(`                exp: "${uuiExp}"`);
-          break;
-        }
-      }
-    }
-  }
-
-  // Emit local reusable tasks referenced by callTask so targetTaskRef is always valid
-  for (const localTask of script.localReusableTasks) {
+  for (const task of graph.tasks) {
     lines.push('    - task:');
-    lines.push(`        name: ${localTask.name}`);
-    lines.push(`        refId: ${localTask.refId}`);
+    lines.push(`        name: ${toArchySlug(task.name, 'Task')}`);
+    lines.push(`        refId: ${toArchySlug(task.refId, 'Task')}`);
+    if (task.taskVariables.length > 0) {
+      // Task-local variables ONLY (clean unscoped names; referenced via Task.<name>)
+      emitVariableBlock(lines, task.taskVariables, 8);
+    }
     lines.push('        actions:');
-    lines.push('          - playAudio:');
-    lines.push(
-      `              name: "Subtask Placeholder ${escapeYamlString(localTask.name)}"`
-    );
-    lines.push('              audio:');
-    lines.push(
-      `                tts: "Platzhalter Task aus Avaya Subscript ${escapeYamlString(localTask.originalTarget)}"`
-    );
+    if (task.steps.length === 0) {
+      lines.push('          - disconnect:');
+      lines.push(`              name: "${uniqueName(`Disconnect (${task.refId})`)}"`);
+    } else {
+      emitArchyStepList(lines, task.steps, 10, uniqueName);
+    }
   }
 
   return lines.join('\n');
 }
 
 // ============================================================================
-// STRICT ARCHY YAML SCHEMA VALIDATOR (100 % Offline & In-Memory)
+// STRICT RECURSIVE ARCHY YAML SCHEMA & FLOW-GRAPH VALIDATOR (100 % Offline)
 // ============================================================================
 
 const ARCHY_INBOUND_ALLOWED_KEYS = new Set<string>([
@@ -792,7 +955,15 @@ const ARCHY_VARIABLE_TYPES = new Set<string>([
   'booleanVariable',
 ]);
 
-const ARCHY_TASK_ALLOWED_KEYS = new Set<string>(['name', 'refId', 'actions']);
+const ARCHY_TASK_ALLOWED_KEYS = new Set<string>(['name', 'refId', 'variables', 'actions']);
+
+const TERMINAL_ACTION_TYPES = new Set<string>([
+  'transferToAcd',
+  'transferToNumber',
+  'transferToVoicemail',
+  'disconnect',
+  'jumpToReusableTask',
+]);
 
 interface ArchyActionRule {
   required: string[];
@@ -806,7 +977,18 @@ const ARCHY_ACTION_SCHEMA: Record<string, ArchyActionRule> = {
   },
   collectInput: {
     required: ['name', 'inputAudio', 'inputData'],
-    allowed: new Set(['name', 'inputAudio', 'inputData', 'outputs']),
+    allowed: new Set([
+      'name',
+      'inputAudio',
+      'inputData',
+      'numberOfDigits',
+      'noEntryTimeout',
+      'interDigitTimeout',
+      'terminatingCharacter',
+      'noEntryAudio',
+      'noMatchAudio',
+      'outputs',
+    ]),
   },
   menu: {
     required: ['name', 'audio'],
@@ -814,7 +996,7 @@ const ARCHY_ACTION_SCHEMA: Record<string, ArchyActionRule> = {
   },
   callDataAction: {
     required: ['name', 'dataAction'],
-    allowed: new Set(['name', 'dataAction', 'inputs', 'outputs']),
+    allowed: new Set(['name', 'dataAction', 'inputs', 'successOutputs', 'failureOutputs', 'outputs']),
   },
   callCommonModule: {
     required: ['name', 'commonModule'],
@@ -824,13 +1006,17 @@ const ARCHY_ACTION_SCHEMA: Record<string, ArchyActionRule> = {
     required: ['name', 'targetTaskRef'],
     allowed: new Set(['name', 'targetTaskRef']),
   },
+  jumpToReusableTask: {
+    required: ['name', 'targetTaskRef'],
+    allowed: new Set(['name', 'targetTaskRef']),
+  },
   decision: {
     required: ['name', 'condition', 'outputs'],
     allowed: new Set(['name', 'condition', 'outputs']),
   },
   switch: {
     required: ['name', 'default'],
-    allowed: new Set(['name', 'cases', 'default']),
+    allowed: new Set(['name', 'evaluate', 'cases', 'default']),
   },
   loop: {
     required: ['name', 'maxLoopCount', 'actions'],
@@ -850,11 +1036,26 @@ const ARCHY_ACTION_SCHEMA: Record<string, ArchyActionRule> = {
   },
   transferToAcd: {
     required: ['name', 'targetQueue'],
-    allowed: new Set(['name', 'targetQueue', 'priority', 'skills', 'languageSkill', 'outputs']),
+    allowed: new Set([
+      'name',
+      'targetQueue',
+      'priority',
+      'skills',
+      'languageSkill',
+      'preTransferAudio',
+      'failureTransferAudio',
+      'outputs',
+    ]),
   },
   transferToNumber: {
     required: ['name', 'targetNumber'],
-    allowed: new Set(['name', 'targetNumber', 'outputs']),
+    allowed: new Set([
+      'name',
+      'targetNumber',
+      'preTransferAudio',
+      'failureTransferAudio',
+      'outputs',
+    ]),
   },
   disconnect: {
     required: ['name'],
@@ -968,8 +1169,8 @@ function collectIndentedBlock(lines: ParsedYamlLine[], parentIndex: number): Par
 }
 
 /**
- * Full offline schema, indentation, RefId and variable-scope validator for Genesys Cloud Archy YAML.
- * Returns structured UI-ready errors and warnings with exact 1-based line numbers.
+ * Full offline recursive schema, indentation, RefId, variable-scope, duplicate-name, and
+ * unreachable-after-terminal validator for Genesys Cloud Archy YAML.
  */
 export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResult {
   const errors: ArchyYamlValidationIssue[] = [];
@@ -1219,112 +1420,459 @@ export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResul
     }
   }
 
-  // Pass 4: Variables Validation (indent 4 list items -> indent 8 properties)
+  // Helper to validate a `variables:` block (either at Flow level or Task level)
   let variableCount = 0;
-  const declaredVariables = new Set<string>();
-  const variablesEntry = topLevelEntries.find((e) => e.key === 'variables');
-  if (variablesEntry) {
-    const varSectionIdx = parsed.indexOf(variablesEntry);
+  const validateVariablesBlock = (
+    varEntry: ParsedYamlLine,
+    scopeContext: 'flow' | 'task'
+  ) => {
+    const varSectionIdx = parsed.indexOf(varEntry);
     const varBlock = collectIndentedBlock(parsed, varSectionIdx);
-    for (let i = 0; i < varBlock.length; i += 1) {
-      const item = varBlock[i];
-      if (item.indent === 4 && item.isListItem) {
-        variableCount += 1;
-        if (!item.key || !ARCHY_VARIABLE_TYPES.has(item.key)) {
-          errors.push({
-            lineNumber: item.lineNumber,
-            code: 'UNKNOWN_VARIABLE_TYPE',
-            severity: 'error',
-            field: item.key || 'variable',
-            message: `Zeile ${item.lineNumber}: Ungültiger Variablentyp "${item.key || item.rawValue}".`,
-            suggestion: 'Erlaubt sind: stringVariable, integerVariable, booleanVariable.',
-          });
-          continue;
-        }
-        const itemGlobalIdx = parsed.indexOf(item);
-        const itemChildren = collectIndentedBlock(parsed, itemGlobalIdx);
-        const directProps = itemChildren.filter((c) => c.indent === 8 && !c.isListItem);
-        const vNameProp = directProps.find((p) => p.key === 'name');
-        const vInitProp = directProps.find((p) => p.key === 'initialValue');
+    const itemIndent = varEntry.indent + 2;
+    const propIndent = varEntry.indent + 6;
+    const declaredInScope = new Set<string>();
 
-        if (!vNameProp || !vNameProp.unquotedValue) {
+    for (const item of varBlock) {
+      if (item.indent !== itemIndent || !item.isListItem) continue;
+      variableCount += 1;
+
+      if (!item.key || !ARCHY_VARIABLE_TYPES.has(item.key)) {
+        errors.push({
+          lineNumber: item.lineNumber,
+          code: 'UNKNOWN_VARIABLE_TYPE',
+          severity: 'error',
+          field: item.key || 'variable',
+          message: `Zeile ${item.lineNumber}: Ungültiger Variablentyp "${item.key || item.rawValue}".`,
+          suggestion: 'Erlaubt sind: stringVariable, integerVariable, booleanVariable.',
+        });
+        continue;
+      }
+
+      const itemChildren = collectIndentedBlock(parsed, parsed.indexOf(item));
+      const directProps = itemChildren.filter((c) => c.indent === propIndent && !c.isListItem);
+      const vNameProp = directProps.find((p) => p.key === 'name');
+      const vInitProp = directProps.find((p) => p.key === 'initialValue');
+
+      if (!vNameProp || !vNameProp.unquotedValue) {
+        errors.push({
+          lineNumber: item.lineNumber,
+          code: 'MISSING_VARIABLE_NAME',
+          severity: 'error',
+          field: 'variables[].name',
+          message: `Zeile ${item.lineNumber}: Variablen-Definition ohne "name:"-Feld.`,
+          suggestion: 'Vergib einen sauberen Variablennamen ohne Scope-Präfix, z. B. "avayaOriginScript".',
+        });
+      } else {
+        const rawDeclName = vNameProp.unquotedValue;
+        const dupKey = rawDeclName.toLowerCase();
+
+        // Check duplicate BEFORE returning on scope error so both issues are surfaced
+        if (declaredInScope.has(dupKey)) {
           errors.push({
-            lineNumber: item.lineNumber,
-            code: 'MISSING_VARIABLE_NAME',
+            lineNumber: vNameProp.lineNumber,
+            code: 'DUPLICATE_VARIABLE',
             severity: 'error',
-            field: 'variables[].name',
-            message: `Zeile ${item.lineNumber}: Variablen-Definition ohne "name:"-Feld.`,
-            suggestion: 'Vergib einen Namen mit gültigem Scope, z. B. "Flow.avayaOriginScript".',
+            field: rawDeclName,
+            message: `Zeile ${vNameProp.lineNumber}: Variable "${rawDeclName}" wurde im ${scopeContext === 'flow' ? 'Flow' : 'Task'}-Block doppelt deklariert.`,
+            suggestion: 'Entferne die doppelte Variablendeklaration.',
           });
         } else {
-          const fullVarName = vNameProp.unquotedValue;
-          if (!/^(?:Flow|Task)\./.test(fullVarName)) {
-            errors.push({
-              lineNumber: vNameProp.lineNumber,
-              code: 'INVALID_VARIABLE_SCOPE',
-              severity: 'error',
-              field: fullVarName,
-              message: `Zeile ${vNameProp.lineNumber}: Ungültiger Variablen-Scope "${fullVarName}".`,
-              suggestion: 'Archy-Variablen müssen mit "Flow." oder "Task." beginnen.',
-            });
-          } else if (!/^(?:Flow|Task)\.[A-Za-z_][A-Za-z0-9_]*$/.test(fullVarName)) {
-            errors.push({
-              lineNumber: vNameProp.lineNumber,
-              code: 'INVALID_VARIABLE_NAME',
-              severity: 'error',
-              field: fullVarName,
-              message: `Zeile ${vNameProp.lineNumber}: Ungültiger Variablenname "${fullVarName}" (Sonderzeichen/Leerzeichen nicht erlaubt).`,
-              suggestion: 'Nutze nur Buchstaben, Ziffern und Unterstriche nach "Flow." oder "Task.".',
-            });
-          } else if (declaredVariables.has(fullVarName)) {
-            errors.push({
-              lineNumber: vNameProp.lineNumber,
-              code: 'DUPLICATE_VARIABLE',
-              severity: 'error',
-              field: fullVarName,
-              message: `Zeile ${vNameProp.lineNumber}: Variable "${fullVarName}" wurde doppelt deklariert.`,
-              suggestion: 'Entferne die doppelte Variablendeklaration.',
-            });
-          } else {
-            declaredVariables.add(fullVarName);
-          }
+          declaredInScope.add(dupKey);
         }
 
-        if (!vInitProp) {
+        // Strict Scope vs Name separation: declaration name must NOT embed scope prefix (Flow./Task./Global.)
+        if (rawDeclName.includes('.')) {
+          const scopePrefix = rawDeclName.split('.')[0];
+          const isTaskInFlow = scopeContext === 'flow' && /^Task$/i.test(scopePrefix);
           errors.push({
-            lineNumber: item.lineNumber,
-            code: 'MISSING_INITIAL_VALUE',
+            lineNumber: vNameProp.lineNumber,
+            code: 'INVALID_VARIABLE_SCOPE',
             severity: 'error',
-            field: 'variables[].initialValue',
-            message: `Zeile ${item.lineNumber}: Variable "${vNameProp?.unquotedValue || '?'}" fehlt "initialValue:".`,
-            suggestion: 'Ergänze "initialValue:" mit "lit:" oder "noValue: true".',
+            field: rawDeclName,
+            message: isTaskInFlow
+              ? `Zeile ${vNameProp.lineNumber}: Task-Variable "${rawDeclName}" darf nicht im globalen Flow-Variablenblock deklariert werden.`
+              : `Zeile ${vNameProp.lineNumber}: Ungültiger Scope-Präfix in Variablen-Deklaration "${rawDeclName}". Scope gehört nur in Referenzen (Flow.* / Task.*), nicht in den Deklarationsnamen.`,
+            suggestion: isTaskInFlow
+              ? `Deklariere "${rawDeclName.split('.').slice(1).join('_')}" lokal unter "task.variables:".`
+              : `Deklariere die Variable ohne Präfix als "${rawDeclName.split('.').slice(1).join('_')}".`,
           });
-        } else {
-          const initChildren = collectIndentedBlock(parsed, parsed.indexOf(vInitProp));
-          const hasWrapper = initChildren.some(
-            (c) => c.key === 'lit' || c.key === 'exp' || c.key === 'noValue'
-          );
-          if (!hasWrapper && !/^(?:lit|exp|noValue)\s*:/.test(vInitProp.rawValue)) {
-            errors.push({
-              lineNumber: vInitProp.lineNumber,
-              code: 'INVALID_VALUE_WRAPPER',
-              severity: 'error',
-              field: 'initialValue',
-              message: `Zeile ${vInitProp.lineNumber}: "initialValue" benötigt einen Archy-Wrapper ("lit:", "exp:" oder "noValue:").`,
-              suggestion: 'Schreibe z. B. "lit: \\"\\"" unterhalb von "initialValue:".',
-            });
-          }
+        } else if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(rawDeclName)) {
+          errors.push({
+            lineNumber: vNameProp.lineNumber,
+            code: 'INVALID_VARIABLE_NAME',
+            severity: 'error',
+            field: rawDeclName,
+            message: `Zeile ${vNameProp.lineNumber}: Ungültiger Variablenname "${rawDeclName}" (nur Buchstaben, Ziffern und Unterstriche erlaubt).`,
+            suggestion: 'Nutze einen gültigen Bezeichner wie "customerNumber".',
+          });
+        }
+      }
+
+      if (!vInitProp) {
+        errors.push({
+          lineNumber: item.lineNumber,
+          code: 'MISSING_INITIAL_VALUE',
+          severity: 'error',
+          field: 'variables[].initialValue',
+          message: `Zeile ${item.lineNumber}: Variable "${vNameProp?.unquotedValue || '?'}" fehlt "initialValue:".`,
+          suggestion: 'Ergänze "initialValue:" mit "lit:" oder "noValue: true".',
+        });
+      } else {
+        const initChildren = collectIndentedBlock(parsed, parsed.indexOf(vInitProp));
+        const hasWrapper = initChildren.some(
+          (c) => c.key === 'lit' || c.key === 'exp' || c.key === 'noValue'
+        );
+        if (!hasWrapper && !/^(?:lit|exp|noValue)\s*:/.test(vInitProp.rawValue)) {
+          errors.push({
+            lineNumber: vInitProp.lineNumber,
+            code: 'INVALID_VALUE_WRAPPER',
+            severity: 'error',
+            field: 'initialValue',
+            message: `Zeile ${vInitProp.lineNumber}: "initialValue" benötigt einen Archy-Wrapper ("lit:", "exp:" oder "noValue:").`,
+            suggestion: 'Schreibe z. B. "lit: \\"\\"" unterhalb von "initialValue:".',
+          });
         }
       }
     }
+  };
+
+  // Pass 4: Flow-level Variables Validation
+  const variablesEntry = topLevelEntries.find((e) => e.key === 'variables');
+  if (variablesEntry) {
+    validateVariablesBlock(variablesEntry, 'flow');
   }
 
-  // Pass 5: Tasks, RefIds & Strict Action Schema Validation
+  // Pass 5: Recursive Action List Validator
   let taskCount = 0;
   let actionCount = 0;
   const declaredTaskRefIds = new Map<string, number>();
-  const referencedCallTaskRefs: Array<{ refId: string; lineNumber: number }> = [];
+  const referencedTaskRefs: Array<{ refId: string; lineNumber: number; field: string }> = [];
+  const seenActionNames = new Map<string, number>();
 
+  const validateActionListBlock = (actionsKeyLine: ParsedYamlLine) => {
+    if (actionsKeyLine.rawValue === '[]') return;
+    const actionsIdx = parsed.indexOf(actionsKeyLine);
+    const actionsBlock = collectIndentedBlock(parsed, actionsIdx);
+    const actionItemIndent = actionsKeyLine.indent + 2;
+    const actionItems = actionsBlock.filter(
+      (a) => a.indent === actionItemIndent && a.isListItem
+    );
+
+    let hitTerminalInSequence = false;
+    let terminalActionName = '';
+
+    for (const actItem of actionItems) {
+      actionCount += 1;
+      const actType = actItem.key || '';
+
+      if (hitTerminalInSequence) {
+        errors.push({
+          lineNumber: actItem.lineNumber,
+          code: 'UNREACHABLE_AFTER_TERMINAL',
+          severity: 'error',
+          field: actType || 'action',
+          message: `Zeile ${actItem.lineNumber}: Unerreichbare Action "${actType}" nach terminaler Action "${terminalActionName}" im selben Pfad.`,
+          suggestion:
+            'Beende sequenzielle Pfade nach transferToNumber, transferToAcd, transferToVoicemail, disconnect oder jumpToReusableTask.',
+        });
+      }
+
+      const schemaRule = ARCHY_ACTION_SCHEMA[actType];
+      if (!schemaRule) {
+        errors.push({
+          lineNumber: actItem.lineNumber,
+          code: 'UNKNOWN_ACTION_TYPE',
+          severity: 'error',
+          field: actType || actItem.rawValue,
+          message: `Zeile ${actItem.lineNumber}: Unbekannter oder nicht erlaubter Archy-Action-Key "${actType || actItem.rawValue}".`,
+          suggestion:
+            'Verwende ausschließlich offizielle Archy-Actions (z. B. playAudio, transferToAcd, callDataAction, evaluateScheduleGroup, jumpToReusableTask, disconnect).',
+        });
+        continue;
+      }
+
+      const actGlobalIdx = parsed.indexOf(actItem);
+      const actChildren = collectIndentedBlock(parsed, actGlobalIdx);
+      const actPropIndent = actItem.indent + 4;
+      const actProps = actChildren.filter((c) => c.indent === actPropIndent && !c.isListItem);
+      const seenActProps = new Map<string, ParsedYamlLine>();
+
+      for (const prop of actProps) {
+        if (!prop.key) continue;
+        if (seenActProps.has(prop.key)) {
+          errors.push({
+            lineNumber: prop.lineNumber,
+            code: 'DUPLICATE_KEY',
+            severity: 'error',
+            field: `${actType}.${prop.key}`,
+            message: `Zeile ${prop.lineNumber}: Doppeltes Feld "${prop.key}" in Action "${actType}".`,
+          });
+        } else {
+          seenActProps.set(prop.key, prop);
+        }
+
+        if (!schemaRule.allowed.has(prop.key)) {
+          errors.push({
+            lineNumber: prop.lineNumber,
+            code: 'UNKNOWN_ACTION_PROPERTY',
+            severity: 'error',
+            field: `${actType}.${prop.key}`,
+            message: `Zeile ${prop.lineNumber}: Nicht erlaubtes Feld "${prop.key}" in Action "${actType}".`,
+            suggestion: `Erlaubte Felder für ${actType}: ${Array.from(schemaRule.allowed).join(', ')}.`,
+          });
+        }
+      }
+
+      for (const reqProp of schemaRule.required) {
+        if (!seenActProps.has(reqProp)) {
+          errors.push({
+            lineNumber: actItem.lineNumber,
+            code: 'MISSING_ACTION_PROPERTY',
+            severity: 'error',
+            field: `${actType}.${reqProp}`,
+            message: `Zeile ${actItem.lineNumber}: Action "${actType}" fehlt das Pflichtfeld "${reqProp}:".`,
+            suggestion: `Ergänze "${reqProp}:" innerhalb von "${actType}".`,
+          });
+        }
+      }
+
+      // Duplicate action name check
+      const actNameProp = seenActProps.get('name');
+      if (actNameProp && actNameProp.unquotedValue) {
+        const lowerName = actNameProp.unquotedValue.toLowerCase();
+        if (seenActionNames.has(lowerName)) {
+          warnings.push({
+            lineNumber: actNameProp.lineNumber,
+            code: 'DUPLICATE_ACTION_NAME',
+            severity: 'warning',
+            field: `${actType}.name`,
+            message: `Zeile ${actNameProp.lineNumber}: Doppelter Action-Name "${actNameProp.unquotedValue}" (bereits in Zeile ${seenActionNames.get(lowerName)}).`,
+            suggestion: 'Vergib eindeutige Action-Namen zur besseren Wartbarkeit in Architect.',
+          });
+        } else {
+          seenActionNames.set(lowerName, actNameProp.lineNumber);
+        }
+      }
+
+      // Action-specific semantic & recursive sub-branch checks
+      if (actType === 'callTask' || actType === 'jumpToReusableTask') {
+        const refProp = seenActProps.get('targetTaskRef');
+        if (refProp) {
+          const m = refProp.unquotedValue.match(
+            /^\/inboundCall\/tasks\/task\[([A-Za-z_][A-Za-z0-9_.-]*)\]$/
+          );
+          if (!m) {
+            errors.push({
+              lineNumber: refProp.lineNumber,
+              code: 'INVALID_REF_SYNTAX',
+              severity: 'error',
+              field: `${actType}.targetTaskRef`,
+              message: `Zeile ${refProp.lineNumber}: Ungültige targetTaskRef-Syntax "${refProp.unquotedValue}".`,
+              suggestion: 'Erwartetes Format: "/inboundCall/tasks/task[<RefId>]".',
+            });
+          } else {
+            referencedTaskRefs.push({
+              refId: m[1],
+              lineNumber: refProp.lineNumber,
+              field: `${actType}.targetTaskRef`,
+            });
+          }
+        }
+      } else if (actType === 'callDataAction') {
+        const daProp = seenActProps.get('dataAction');
+        if (daProp) {
+          const daChildren = collectIndentedBlock(parsed, parsed.indexOf(daProp));
+          const hasCat = daChildren.some((c) => c.key === 'category' && Boolean(c.unquotedValue));
+          const hasName = daChildren.some(
+            (c) => c.key === 'dataAction' && Boolean(c.unquotedValue)
+          );
+          if (!hasCat) {
+            errors.push({
+              lineNumber: daProp.lineNumber,
+              code: 'MISSING_ACTION_PROPERTY',
+              severity: 'error',
+              field: 'callDataAction.dataAction.category',
+              message: `Zeile ${daProp.lineNumber}: callDataAction fehlt "category:" (z. B. Oracle_Integration oder FlixCheck_API).`,
+            });
+          }
+          if (!hasName) {
+            errors.push({
+              lineNumber: daProp.lineNumber,
+              code: 'MISSING_ACTION_PROPERTY',
+              severity: 'error',
+              field: 'callDataAction.dataAction.dataAction',
+              message: `Zeile ${daProp.lineNumber}: callDataAction fehlt der Name unter "dataAction:".`,
+            });
+          }
+        }
+      } else if (actType === 'decision') {
+        const condProp = seenActProps.get('condition');
+        if (condProp) {
+          const condChildren = collectIndentedBlock(parsed, parsed.indexOf(condProp));
+          const expLine = condChildren.find((c) => c.key === 'exp');
+          if (expLine && /Flow\.avayaCondition\s*==\s*["']true["']/i.test(expLine.unquotedValue)) {
+            warnings.push({
+              lineNumber: expLine.lineNumber,
+              code: 'PLACEHOLDER_CONDITION',
+              severity: 'warning',
+              field: 'decision.condition.exp',
+              message: `Zeile ${expLine.lineNumber}: Platzhalter-Bedingung "Flow.avayaCondition == true" statt echter Fachlogik.`,
+              suggestion: 'Ersetze den Platzhalter durch eine konkrete Architect-Expression.',
+            });
+          }
+        }
+      } else if (actType === 'loop') {
+        const maxProp = seenActProps.get('maxLoopCount');
+        if (maxProp) {
+          let numVal = Number(maxProp.unquotedValue);
+          if (!maxProp.unquotedValue) {
+            const maxChildren = collectIndentedBlock(parsed, parsed.indexOf(maxProp));
+            const litChild = maxChildren.find((c) => c.key === 'lit');
+            numVal = litChild ? Number(litChild.unquotedValue) : NaN;
+          }
+          if (!Number.isInteger(numVal) || numVal <= 0) {
+            errors.push({
+              lineNumber: maxProp.lineNumber,
+              code: 'INVALID_ACTION_VALUE',
+              severity: 'error',
+              field: 'loop.maxLoopCount',
+              message: `Zeile ${maxProp.lineNumber}: "maxLoopCount" muss eine positive Ganzzahl > 0 sein.`,
+              suggestion: 'Setze z. B. "maxLoopCount: 5".',
+            });
+          }
+        }
+        const loopActsProp = seenActProps.get('actions');
+        if (loopActsProp) {
+          validateActionListBlock(loopActsProp);
+        }
+      } else if (actType === 'transferToVoicemail') {
+        if (!seenActProps.has('targetQueue') && !seenActProps.has('targetUser')) {
+          errors.push({
+            lineNumber: actItem.lineNumber,
+            code: 'MISSING_ACTION_PROPERTY',
+            severity: 'error',
+            field: 'transferToVoicemail.targetQueue',
+            message: `Zeile ${actItem.lineNumber}: transferToVoicemail benötigt entweder "targetQueue:" oder "targetUser:".`,
+          });
+        }
+      } else if (actType === 'delay') {
+        const secProp = seenActProps.get('seconds');
+        if (secProp) {
+          const secChildren = collectIndentedBlock(parsed, parsed.indexOf(secProp));
+          const litNode = secChildren.find((c) => c.key === 'lit');
+          const expNode = secChildren.find((c) => c.key === 'exp');
+          if (!litNode && !expNode) {
+            errors.push({
+              lineNumber: secProp.lineNumber,
+              code: 'INVALID_VALUE_WRAPPER',
+              severity: 'error',
+              field: 'delay.seconds',
+              message: `Zeile ${secProp.lineNumber}: "delay.seconds" benötigt "lit:" oder "exp:".`,
+            });
+          } else if (
+            litNode &&
+            (!Number.isFinite(Number(litNode.unquotedValue)) || Number(litNode.unquotedValue) <= 0)
+          ) {
+            errors.push({
+              lineNumber: litNode.lineNumber,
+              code: 'INVALID_ACTION_VALUE',
+              severity: 'error',
+              field: 'delay.seconds.lit',
+              message: `Zeile ${litNode.lineNumber}: "delay.seconds.lit" muss eine positive Zahl > 0 sein.`,
+            });
+          }
+        }
+      } else if (actType === 'playHoldMusic') {
+        warnings.push({
+          lineNumber: actItem.lineNumber,
+          code: 'IN_QUEUE_ACTION_HINT',
+          severity: 'warning',
+          field: 'playHoldMusic',
+          message: `Zeile ${actItem.lineNumber}: playHoldMusic wird in Genesys Cloud üblicherweise in einem In-Queue Call Flow konfiguriert.`,
+        });
+      }
+
+      // Recursively validate nested `outputs.*.actions`
+      const outProp = seenActProps.get('outputs');
+      if (outProp) {
+        const outChildren = collectIndentedBlock(parsed, parsed.indexOf(outProp));
+        const branchIndent = outProp.indent + 2;
+        const branches = outChildren.filter((c) => c.indent === branchIndent && !c.isListItem);
+
+        if (actType === 'evaluateScheduleGroup') {
+          const hasBranch = branches.some(
+            (c) => c.key === 'open' || c.key === 'closed' || c.key === 'holiday'
+          );
+          if (!hasBranch) {
+            warnings.push({
+              lineNumber: outProp.lineNumber,
+              code: 'INCOMPLETE_SCHEDULE_OUTPUTS',
+              severity: 'warning',
+              field: 'evaluateScheduleGroup.outputs',
+              message: `Zeile ${outProp.lineNumber}: evaluateScheduleGroup enthält keine Ausgänge (open/closed/holiday).`,
+              suggestion: 'Definiere mindestens die Pfade "open:", "closed:" und "holiday:".',
+            });
+          }
+        }
+
+        let nonEmptyDecisionBranches = 0;
+        for (const br of branches) {
+          const brChildren = collectIndentedBlock(parsed, parsed.indexOf(br));
+          const brActionsLine = brChildren.find(
+            (c) => c.indent === br.indent + 2 && !c.isListItem && c.key === 'actions'
+          );
+          if (brActionsLine) {
+            if (brActionsLine.rawValue !== '[]') nonEmptyDecisionBranches += 1;
+            validateActionListBlock(brActionsLine);
+          }
+        }
+
+        if (actType === 'decision' && branches.length > 0 && nonEmptyDecisionBranches === 0) {
+          warnings.push({
+            lineNumber: actItem.lineNumber,
+            code: 'EMPTY_DECISION_BRANCHES',
+            severity: 'warning',
+            field: 'decision.outputs',
+            message: `Zeile ${actItem.lineNumber}: Decision hat ausschließlich leere yes/no-Ausgänge.`,
+            suggestion: 'Fülle mindestens einen Zweig mit konkreten Architect-Aktionen.',
+          });
+        }
+      }
+
+      // Recursively validate switch `cases[].case.actions` and `default.actions`
+      if (actType === 'switch') {
+        const casesProp = seenActProps.get('cases');
+        if (casesProp) {
+          const casesChildren = collectIndentedBlock(parsed, parsed.indexOf(casesProp));
+          const caseItems = casesChildren.filter(
+            (c) => c.indent === casesProp.indent + 2 && c.isListItem && c.key === 'case'
+          );
+          for (const ci of caseItems) {
+            const ciChildren = collectIndentedBlock(parsed, parsed.indexOf(ci));
+            const ciActions = ciChildren.find(
+              (c) => c.indent === ci.indent + 4 && !c.isListItem && c.key === 'actions'
+            );
+            if (ciActions) validateActionListBlock(ciActions);
+          }
+        }
+        const defProp = seenActProps.get('default');
+        if (defProp) {
+          const defChildren = collectIndentedBlock(parsed, parsed.indexOf(defProp));
+          const defActions = defChildren.find(
+            (c) => c.indent === defProp.indent + 2 && !c.isListItem && c.key === 'actions'
+          );
+          if (defActions) validateActionListBlock(defActions);
+        }
+      }
+
+      if (TERMINAL_ACTION_TYPES.has(actType)) {
+        hitTerminalInSequence = true;
+        terminalActionName = actType;
+      }
+    }
+  };
+
+  // Validate Tasks
   const tasksEntry = topLevelEntries.find((e) => e.key === 'tasks');
   if (tasksEntry) {
     const tasksIdx = parsed.indexOf(tasksEntry);
@@ -1380,13 +1928,14 @@ export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResul
             severity: 'error',
             field: `task.${prop.key}`,
             message: `Zeile ${prop.lineNumber}: Unbekanntes Task-Feld "${prop.key}".`,
-            suggestion: 'Erlaubte Task-Felder: name, refId, actions.',
+            suggestion: 'Erlaubte Task-Felder: name, refId, variables, actions.',
           });
         }
       }
 
       const taskNameProp = taskProps.find((p) => p.key === 'name');
       const taskRefIdProp = taskProps.find((p) => p.key === 'refId');
+      const taskVarsProp = taskProps.find((p) => p.key === 'variables');
       const taskActionsProp = taskProps.find((p) => p.key === 'actions');
 
       if (!taskNameProp || !taskNameProp.unquotedValue) {
@@ -1423,6 +1972,10 @@ export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResul
         }
       }
 
+      if (taskVarsProp) {
+        validateVariablesBlock(taskVarsProp, 'task');
+      }
+
       if (!taskActionsProp) {
         errors.push({
           lineNumber: taskItem.lineNumber,
@@ -1434,200 +1987,11 @@ export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResul
         continue;
       }
 
-      const actionsIdx = parsed.indexOf(taskActionsProp);
-      const actionsBlock = collectIndentedBlock(parsed, actionsIdx);
-      const actionItems = actionsBlock.filter((a) => a.indent === 10 && a.isListItem);
-
-      for (const actItem of actionItems) {
-        actionCount += 1;
-        const actType = actItem.key || '';
-        const schemaRule = ARCHY_ACTION_SCHEMA[actType];
-
-        if (!schemaRule) {
-          errors.push({
-            lineNumber: actItem.lineNumber,
-            code: 'UNKNOWN_ACTION_TYPE',
-            severity: 'error',
-            field: actType || actItem.rawValue,
-            message: `Zeile ${actItem.lineNumber}: Unbekannter oder nicht erlaubter Archy-Action-Key "${actType || actItem.rawValue}".`,
-            suggestion:
-              'Verwende ausschließlich offizielle Archy-Actions (z. B. playAudio, transferToAcd, callDataAction, evaluateScheduleGroup, disconnect).',
-          });
-          continue;
-        }
-
-        const actGlobalIdx = parsed.indexOf(actItem);
-        const actChildren = collectIndentedBlock(parsed, actGlobalIdx);
-        const actProps = actChildren.filter((c) => c.indent === 14 && !c.isListItem);
-        const seenActProps = new Map<string, ParsedYamlLine>();
-
-        for (const prop of actProps) {
-          if (!prop.key) continue;
-          if (seenActProps.has(prop.key)) {
-            errors.push({
-              lineNumber: prop.lineNumber,
-              code: 'DUPLICATE_KEY',
-              severity: 'error',
-              field: `${actType}.${prop.key}`,
-              message: `Zeile ${prop.lineNumber}: Doppeltes Feld "${prop.key}" in Action "${actType}".`,
-            });
-          } else {
-            seenActProps.set(prop.key, prop);
-          }
-
-          if (!schemaRule.allowed.has(prop.key)) {
-            errors.push({
-              lineNumber: prop.lineNumber,
-              code: 'UNKNOWN_ACTION_PROPERTY',
-              severity: 'error',
-              field: `${actType}.${prop.key}`,
-              message: `Zeile ${prop.lineNumber}: Nicht erlaubtes Feld "${prop.key}" in Action "${actType}".`,
-              suggestion: `Erlaubte Felder für ${actType}: ${Array.from(schemaRule.allowed).join(', ')}.`,
-            });
-          }
-        }
-
-        for (const reqProp of schemaRule.required) {
-          if (!seenActProps.has(reqProp)) {
-            errors.push({
-              lineNumber: actItem.lineNumber,
-              code: 'MISSING_ACTION_PROPERTY',
-              severity: 'error',
-              field: `${actType}.${reqProp}`,
-              message: `Zeile ${actItem.lineNumber}: Action "${actType}" fehlt das Pflichtfeld "${reqProp}:".`,
-              suggestion: `Ergänze "${reqProp}:" innerhalb von "${actType}".`,
-            });
-          }
-        }
-
-        // Action-specific semantic & sub-property validation
-        if (actType === 'callTask') {
-          const refProp = seenActProps.get('targetTaskRef');
-          if (refProp) {
-            const m = refProp.unquotedValue.match(
-              /^\/inboundCall\/tasks\/task\[([A-Za-z_][A-Za-z0-9_.-]*)\]$/
-            );
-            if (!m) {
-              errors.push({
-                lineNumber: refProp.lineNumber,
-                code: 'INVALID_REF_SYNTAX',
-                severity: 'error',
-                field: 'callTask.targetTaskRef',
-                message: `Zeile ${refProp.lineNumber}: Ungültige targetTaskRef-Syntax "${refProp.unquotedValue}".`,
-                suggestion: 'Erwartetes Format: "/inboundCall/tasks/task[<RefId>]".',
-              });
-            } else {
-              referencedCallTaskRefs.push({ refId: m[1], lineNumber: refProp.lineNumber });
-            }
-          }
-        } else if (actType === 'callDataAction') {
-          const daProp = seenActProps.get('dataAction');
-          if (daProp) {
-            const daChildren = collectIndentedBlock(parsed, parsed.indexOf(daProp));
-            const hasCat = daChildren.some((c) => c.key === 'category' && Boolean(c.unquotedValue));
-            const hasName = daChildren.some(
-              (c) => c.key === 'dataAction' && Boolean(c.unquotedValue)
-            );
-            if (!hasCat) {
-              errors.push({
-                lineNumber: daProp.lineNumber,
-                code: 'MISSING_ACTION_PROPERTY',
-                severity: 'error',
-                field: 'callDataAction.dataAction.category',
-                message: `Zeile ${daProp.lineNumber}: callDataAction fehlt "category:" (z. B. Oracle_Integration oder FlixCheck_API).`,
-              });
-            }
-            if (!hasName) {
-              errors.push({
-                lineNumber: daProp.lineNumber,
-                code: 'MISSING_ACTION_PROPERTY',
-                severity: 'error',
-                field: 'callDataAction.dataAction.dataAction',
-                message: `Zeile ${daProp.lineNumber}: callDataAction fehlt der Name unter "dataAction:".`,
-              });
-            }
-          }
-        } else if (actType === 'loop') {
-          const maxProp = seenActProps.get('maxLoopCount');
-          if (maxProp) {
-            const num = Number(maxProp.unquotedValue);
-            if (!Number.isInteger(num) || num <= 0) {
-              errors.push({
-                lineNumber: maxProp.lineNumber,
-                code: 'INVALID_ACTION_VALUE',
-                severity: 'error',
-                field: 'loop.maxLoopCount',
-                message: `Zeile ${maxProp.lineNumber}: "maxLoopCount" muss eine positive Ganzzahl > 0 sein (gefunden: "${maxProp.unquotedValue}").`,
-                suggestion: 'Setze z. B. "maxLoopCount: 5".',
-              });
-            }
-          }
-        } else if (actType === 'transferToVoicemail') {
-          if (!seenActProps.has('targetQueue') && !seenActProps.has('targetUser')) {
-            errors.push({
-              lineNumber: actItem.lineNumber,
-              code: 'MISSING_ACTION_PROPERTY',
-              severity: 'error',
-              field: 'transferToVoicemail.targetQueue',
-              message: `Zeile ${actItem.lineNumber}: transferToVoicemail benötigt entweder "targetQueue:" oder "targetUser:".`,
-            });
-          }
-        } else if (actType === 'delay') {
-          const secProp = seenActProps.get('seconds');
-          if (secProp) {
-            const secChildren = collectIndentedBlock(parsed, parsed.indexOf(secProp));
-            const litNode = secChildren.find((c) => c.key === 'lit');
-            const expNode = secChildren.find((c) => c.key === 'exp');
-            if (!litNode && !expNode) {
-              errors.push({
-                lineNumber: secProp.lineNumber,
-                code: 'INVALID_VALUE_WRAPPER',
-                severity: 'error',
-                field: 'delay.seconds',
-                message: `Zeile ${secProp.lineNumber}: "delay.seconds" benötigt "lit:" oder "exp:".`,
-              });
-            } else if (litNode && (!Number.isFinite(Number(litNode.unquotedValue)) || Number(litNode.unquotedValue) <= 0)) {
-              errors.push({
-                lineNumber: litNode.lineNumber,
-                code: 'INVALID_ACTION_VALUE',
-                severity: 'error',
-                field: 'delay.seconds.lit',
-                message: `Zeile ${litNode.lineNumber}: "delay.seconds.lit" muss eine positive Zahl > 0 sein.`,
-              });
-            }
-          }
-        } else if (actType === 'evaluateScheduleGroup') {
-          const outProp = seenActProps.get('outputs');
-          if (outProp) {
-            const outChildren = collectIndentedBlock(parsed, parsed.indexOf(outProp));
-            const hasBranch = outChildren.some(
-              (c) => c.key === 'open' || c.key === 'closed' || c.key === 'holiday'
-            );
-            if (!hasBranch) {
-              warnings.push({
-                lineNumber: outProp.lineNumber,
-                code: 'INCOMPLETE_SCHEDULE_OUTPUTS',
-                severity: 'warning',
-                field: 'evaluateScheduleGroup.outputs',
-                message: `Zeile ${outProp.lineNumber}: evaluateScheduleGroup enthält keine Ausgänge (open/closed/holiday).`,
-                suggestion: 'Definiere mindestens die Pfade "open:", "closed:" und "holiday:".',
-              });
-            }
-          }
-        } else if (actType === 'playHoldMusic') {
-          warnings.push({
-            lineNumber: actItem.lineNumber,
-            code: 'IN_QUEUE_ACTION_HINT',
-            severity: 'warning',
-            field: 'playHoldMusic',
-            message: `Zeile ${actItem.lineNumber}: playHoldMusic wird in Genesys Cloud üblicherweise in einem In-Queue Call Flow konfiguriert.`,
-          });
-        }
-      }
+      validateActionListBlock(taskActionsProp);
     }
   }
 
-  // Pass 6: Cross-Reference Integrity (startUpRef & callTask targetTaskRef)
+  // Pass 6: Cross-Reference Integrity (startUpRef, callTask & jumpToReusableTask targetTaskRef)
   if (expectedStartupRefId && !declaredTaskRefIds.has(expectedStartupRefId)) {
     errors.push({
       lineNumber: startUpRefEntry?.lineNumber || 1,
@@ -1642,14 +2006,14 @@ export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResul
     });
   }
 
-  for (const ref of referencedCallTaskRefs) {
+  for (const ref of referencedTaskRefs) {
     if (!declaredTaskRefIds.has(ref.refId)) {
       errors.push({
         lineNumber: ref.lineNumber,
         code: 'UNRESOLVED_TASK_REF',
         severity: 'error',
-        field: 'callTask.targetTaskRef',
-        message: `Zeile ${ref.lineNumber}: callTask verweist auf unbekannte lokale Task-refId "${ref.refId}".`,
+        field: ref.field,
+        message: `Zeile ${ref.lineNumber}: ${ref.field} verweist auf unbekannte lokale Task-refId "${ref.refId}".`,
         suggestion: `Definiere einen Task mit "refId: ${ref.refId}" unter "tasks:" oder nutze "callCommonModule:".`,
       });
     }
@@ -1668,10 +2032,10 @@ export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResul
   };
 }
 
-/**
- * Generates Genesys Cloud Architect Mermaid (`flowchart TD`) with unmistakable Genesys labels
- * and dedicated `classDef` styling, for either a single script or the whole workspace overview.
- */
+// ============================================================================
+// EBENE 2B: GRAPH-BASED GENESYS MERMAID RENDERER (True Branching & Terminals)
+// ============================================================================
+
 export function generateGenesysMermaid(
   input: GenesysScriptTranslation | GenesysWorkspaceTranslation,
   options?: { scriptNumber?: string }
@@ -1690,10 +2054,11 @@ export function generateGenesysMermaid(
 }
 
 function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): string {
+  const graph = script.migrationGraph;
   const lines: string[] = [];
   lines.push('flowchart TD');
   lines.push(
-    `  %% Genesys Cloud Architect Ziel-Flow (${script.fileName} | Readiness: ${script.readiness})`
+    `  %% Genesys Cloud Architect Ziel-Flow (${script.fileName} | Readiness: ${script.readiness} | Branches: ${graph.diagnostics.branchNodeCount} | Dead Paths Pruned: ${graph.diagnostics.prunedUnreachableCount})`
   );
 
   const startId = 'GC_START';
@@ -1730,164 +2095,340 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
     gcSysVar: [],
   };
 
-  let prevNodeId = startId;
+  let nodeSeq = 0;
+  const taskEntryNodeByRefId = new Map<string, string>();
+  const deferredTaskEdges: Array<{ fromId: string; targetRefId: string; label: string; dashed: boolean }> = [];
 
-  if (script.actions.length === 0) {
-    lines.push('  GC_END(["Disconnect"])');
-    lines.push(`  ${startId} --> GC_END`);
-    classBuckets.gcDisconnect.push('GC_END');
-  } else {
-    script.actions.forEach((action, idx) => {
-      const nodeId = toSafeMermaidId('GC_ACT', `${action.kind}_${idx + 1}`);
-      const targetClean = escapeMermaidLabel(action.target || action.variableName || '');
-      const lineHint = action.lineNumber > 0 ? ` · Z.${action.lineNumber}` : '';
+  const emitNode = (step: MigrationStep): string => {
+    nodeSeq += 1;
+    const nodeId = toSafeMermaidId('GC_N', `${step.kind}_${nodeSeq}`);
+    const targetClean = escapeMermaidLabel(step.target || step.variableName || '');
+    const lineHint = step.lineNumber > 0 ? ` · Z.${step.lineNumber}` : '';
 
-      switch (action.kind) {
-        case 'playAudio':
-          lines.push(`  ${nodeId}["Play Audio: Prompt.${targetClean}${lineHint}"]`);
-          classBuckets.gcAudio.push(nodeId);
-          break;
-        case 'collectInput':
-          lines.push(`  ${nodeId}{"Collect Input: Task.collectedDigits (${targetClean})"}`);
-          classBuckets.gcDecision.push(nodeId);
-          break;
-        case 'menu':
-          lines.push(`  ${nodeId}{"Menu: ${targetClean}${lineHint}"}`);
-          classBuckets.gcDecision.push(nodeId);
-          break;
-        case 'callDataAction':
-          if (action.dataActionCategory === 'FlixCheck_API') {
-            lines.push(`  ${nodeId}["Data Action: FlixCheck (${targetClean})"]`);
-            classBuckets.gcFlixcheck.push(nodeId);
-          } else if (action.dataActionCategory === 'Genesys_Cloud_Data_Actions') {
-            lines.push(`  ${nodeId}["Data Action: Queue Observations (${targetClean})"]`);
-            classBuckets.gcPriority.push(nodeId);
-          } else {
-            lines.push(`  ${nodeId}["Data Action: Oracle (${targetClean})"]`);
-            classBuckets.gcOracle.push(nodeId);
-          }
-          break;
-        case 'callCommonModule':
-          lines.push(`  ${nodeId}[["Common Module: ${targetClean}"]]`);
-          if (action.isBrokenTarget) classBuckets.gcBroken.push(nodeId);
-          else classBuckets.gcCommon.push(nodeId);
-          break;
-        case 'callTask':
-          lines.push(`  ${nodeId}["Call Task: ${targetClean}"]`);
-          if (action.isBrokenTarget) classBuckets.gcBroken.push(nodeId);
-          else classBuckets.gcTask.push(nodeId);
-          break;
-        case 'decision':
-        case 'switch':
-          if (action.isEmergencyCheck) {
-            lines.push(
-              `  ${nodeId}{"Emergency Group Check: ${escapeMermaidLabel(action.conditionLabel || targetClean || 'Notfall')}"}`
-            );
-            classBuckets.gcEmergency.push(nodeId);
-          } else {
-            lines.push(
-              `  ${nodeId}{"${action.kind === 'switch' ? 'Switch' : 'Decision'}: ${escapeMermaidLabel(action.conditionLabel || targetClean || 'Bedingung')}"}`
-            );
-            classBuckets.gcDecision.push(nodeId);
-          }
-          break;
-        case 'loop':
-          lines.push(
-            `  ${nodeId}{{"Loop (max ${action.maxLoopCount ?? 5}): ${targetClean} [Warnung: Rueckwaerts-GOTO]"}}`
-          );
-          classBuckets.gcLoop.push(nodeId);
-          break;
-        case 'setParticipantData':
-          lines.push(`  ${nodeId}[/"Set Participant Data: ${targetClean}"/]`);
-          classBuckets.gcData.push(nodeId);
-          break;
-        case 'getParticipantData':
-          lines.push(`  ${nodeId}[/"Get Participant Data: ${targetClean}"/]`);
-          classBuckets.gcData.push(nodeId);
-          break;
-        case 'updateData':
-          if (action.expressionValue && /^Call\./.test(action.expressionValue)) {
-            lines.push(
-              `  ${nodeId}[/"System-Variable: ${escapeMermaidLabel(action.archyVariableName || targetClean)} = ${escapeMermaidLabel(action.expressionValue)}"/]`
-            );
-            classBuckets.gcSysVar.push(nodeId);
-          } else {
-            lines.push(
-              `  ${nodeId}["Update Data: ${escapeMermaidLabel(action.archyVariableName || targetClean)}"]`
-            );
-            classBuckets.gcData.push(nodeId);
-          }
-          break;
-        case 'transferToAcd':
-          if (action.isMultiSkillset) {
-            const skillList = escapeMermaidLabel((action.skills || []).join(', '));
-            lines.push(
-              `  ${nodeId}[("ACD Queue + Bullseye: ${targetClean} | Skills: ${skillList}")]`
-            );
-            classBuckets.gcBullseye.push(nodeId);
-          } else {
-            lines.push(`  ${nodeId}[("ACD Queue: ${targetClean}")]`);
-            classBuckets.gcQueue.push(nodeId);
-          }
-          break;
-        case 'transferToNumber':
-          lines.push(`  ${nodeId}["Transfer to Number: ${targetClean}"]`);
-          classBuckets.gcTransfer.push(nodeId);
-          break;
-        case 'disconnect':
-          lines.push(
-            `  ${nodeId}(["Disconnect${targetClean ? `: ${targetClean}` : ''}"])`
-          );
-          classBuckets.gcDisconnect.push(nodeId);
-          break;
-        case 'evaluateScheduleGroup':
-          lines.push(`  ${nodeId}{{"Schedule Group: ${targetClean} (open/closed/holiday)"}}`);
-          classBuckets.gcSchedule.push(nodeId);
-          break;
-        case 'playHoldMusic':
-          lines.push(`  ${nodeId}["Hold Music (In-Queue): ${targetClean}"]`);
-          classBuckets.gcInQueue.push(nodeId);
-          break;
-        case 'delay':
-          lines.push(`  ${nodeId}["Delay (In-Queue): ${action.delaySeconds ?? 10}s"]`);
-          classBuckets.gcInQueue.push(nodeId);
-          break;
-        case 'setPriority':
-          lines.push(`  ${nodeId}["Set Priority: ${action.priorityValue ?? 50}"]`);
+    switch (step.kind) {
+      case 'playAudio':
+        lines.push(`  ${nodeId}["Play Audio: Prompt.${escapeMermaidLabel(step.targetSlug || targetClean)}${lineHint}"]`);
+        classBuckets.gcAudio.push(nodeId);
+        break;
+      case 'collectInput':
+        lines.push(
+          `  ${nodeId}{"Collect Input: ${escapeMermaidLabel(step.inputVarRef || 'Task.collectedDigits')} (${targetClean})"}`
+        );
+        classBuckets.gcDecision.push(nodeId);
+        break;
+      case 'menu':
+        lines.push(`  ${nodeId}{"Menu: ${targetClean}${lineHint}"}`);
+        classBuckets.gcDecision.push(nodeId);
+        break;
+      case 'callDataAction':
+        if (step.dataActionCategory === 'FlixCheck_API') {
+          lines.push(`  ${nodeId}["Data Action: FlixCheck (${targetClean})"]`);
+          classBuckets.gcFlixcheck.push(nodeId);
+        } else if (step.dataActionCategory === 'Genesys_Cloud_Data_Actions') {
+          lines.push(`  ${nodeId}["Data Action: Queue Observations (${targetClean})"]`);
           classBuckets.gcPriority.push(nodeId);
-          break;
-        case 'createCallback':
-          lines.push(`  ${nodeId}["Create Callback: ${targetClean} (Call.Ani)"]`);
-          classBuckets.gcCallback.push(nodeId);
-          break;
-        case 'transferToVoicemail':
-          lines.push(`  ${nodeId}[("Transfer to Voicemail: ${targetClean}")]`);
-          classBuckets.gcCallback.push(nodeId);
-          break;
-        case 'setLanguage':
-          lines.push(`  ${nodeId}["Set Language: ${escapeMermaidLabel(action.languageCode || 'de-de')}"]`);
-          classBuckets.gcCallback.push(nodeId);
-          break;
-        case 'callDataTableLookup':
-          lines.push(`  ${nodeId}[("Data Table Lookup: ${targetClean}")]`);
-          classBuckets.gcDataTable.push(nodeId);
-          break;
-        case 'setUuiData':
-          lines.push(`  ${nodeId}[/"Set UUI Data: ${escapeMermaidLabel(action.expressionValue || 'Call.UserToUserInformation')}"/]`);
+        } else {
+          lines.push(`  ${nodeId}["Data Action: Oracle (${targetClean})"]`);
+          classBuckets.gcOracle.push(nodeId);
+        }
+        break;
+      case 'callCommonModule':
+        lines.push(`  ${nodeId}[["Common Module: ${targetClean}"]]`);
+        if (step.isBrokenTarget) classBuckets.gcBroken.push(nodeId);
+        else classBuckets.gcCommon.push(nodeId);
+        break;
+      case 'callTask':
+        lines.push(`  ${nodeId}["Call Task: ${targetClean}"]`);
+        if (step.isBrokenTarget) classBuckets.gcBroken.push(nodeId);
+        else classBuckets.gcTask.push(nodeId);
+        break;
+      case 'jumpToReusableTask':
+        lines.push(`  ${nodeId}["Jump to Task: ${escapeMermaidLabel(step.targetTaskRefId || targetClean)}"]`);
+        classBuckets.gcTask.push(nodeId);
+        break;
+      case 'decision':
+        if (step.isEmergencyCheck) {
+          lines.push(`  ${nodeId}{"Emergency Check: ${escapeMermaidLabel(step.expression || 'Emergency')}"}`);
+          classBuckets.gcEmergency.push(nodeId);
+        } else {
+          lines.push(`  ${nodeId}{"Decision: ${escapeMermaidLabel(step.expression || step.conditionLabel || 'Check')}"}`);
+          classBuckets.gcDecision.push(nodeId);
+        }
+        break;
+      case 'switch':
+        lines.push(`  ${nodeId}{"Switch: ${escapeMermaidLabel(step.variableRef || targetClean || 'Auswahl')}"}`);
+        classBuckets.gcDecision.push(nodeId);
+        break;
+      case 'loop':
+        lines.push(
+          `  ${nodeId}{{"Loop (max ${step.maxLoopCount ?? 5}): ${targetClean} [Warnung: Rueckwaerts-GOTO]"}}`
+        );
+        classBuckets.gcLoop.push(nodeId);
+        break;
+      case 'setParticipantData':
+        lines.push(`  ${nodeId}[/"Set Participant Data: ${targetClean}"/]`);
+        classBuckets.gcData.push(nodeId);
+        break;
+      case 'getParticipantData':
+        lines.push(`  ${nodeId}[/"Get Participant Data: ${targetClean}"/]`);
+        classBuckets.gcData.push(nodeId);
+        break;
+      case 'updateData':
+        if (step.expressionValue && /^Call\./.test(step.expressionValue)) {
+          lines.push(
+            `  ${nodeId}[/"System-Variable: ${escapeMermaidLabel(step.variableRef || targetClean)} = ${escapeMermaidLabel(step.expressionValue)}"/]`
+          );
           classBuckets.gcSysVar.push(nodeId);
-          break;
-      }
+        } else {
+          lines.push(`  ${nodeId}["Update Data: ${escapeMermaidLabel(step.variableRef || targetClean)}"]`);
+          classBuckets.gcData.push(nodeId);
+        }
+        break;
+      case 'transferToAcd':
+        if (step.isMultiSkillset) {
+          const skillList = escapeMermaidLabel((step.skills || []).join(', '));
+          lines.push(`  ${nodeId}[("ACD Queue + Bullseye: ${targetClean} | Skills: ${skillList}")]`);
+          classBuckets.gcBullseye.push(nodeId);
+        } else {
+          lines.push(`  ${nodeId}[("ACD Queue: ${targetClean}")]`);
+          classBuckets.gcQueue.push(nodeId);
+        }
+        break;
+      case 'transferToNumber':
+        lines.push(`  ${nodeId}["Transfer to Number: ${escapeMermaidLabel(step.normalizedE164 || targetClean)}"]`);
+        classBuckets.gcTransfer.push(nodeId);
+        break;
+      case 'disconnect':
+        lines.push(`  ${nodeId}(["Disconnect${targetClean ? `: ${targetClean}` : ''}"])`);
+        classBuckets.gcDisconnect.push(nodeId);
+        break;
+      case 'evaluateScheduleGroup':
+        lines.push(`  ${nodeId}{{"Schedule Group: ${targetClean}"}}`);
+        classBuckets.gcSchedule.push(nodeId);
+        break;
+      case 'playHoldMusic':
+        lines.push(`  ${nodeId}["Hold Music (In-Queue): ${targetClean}"]`);
+        classBuckets.gcInQueue.push(nodeId);
+        break;
+      case 'delay':
+        lines.push(`  ${nodeId}["Delay (In-Queue): ${step.delaySeconds ?? 10}s"]`);
+        classBuckets.gcInQueue.push(nodeId);
+        break;
+      case 'setPriority':
+        lines.push(`  ${nodeId}["Set Priority: ${step.priorityValue ?? 50}"]`);
+        classBuckets.gcPriority.push(nodeId);
+        break;
+      case 'createCallback':
+        lines.push(`  ${nodeId}["Create Callback: ${targetClean} (Call.Ani)"]`);
+        classBuckets.gcCallback.push(nodeId);
+        break;
+      case 'transferToVoicemail':
+        lines.push(`  ${nodeId}[("Transfer to Voicemail: ${targetClean}")]`);
+        classBuckets.gcCallback.push(nodeId);
+        break;
+      case 'setLanguage':
+        lines.push(`  ${nodeId}["Set Language: ${escapeMermaidLabel(step.languageCode || 'de-de')}"]`);
+        classBuckets.gcCallback.push(nodeId);
+        break;
+      case 'callDataTableLookup':
+        lines.push(`  ${nodeId}[("Data Table Lookup: ${targetClean}")]`);
+        classBuckets.gcDataTable.push(nodeId);
+        break;
+      case 'setUuiData':
+        lines.push(
+          `  ${nodeId}[/"Set UUI Data: ${escapeMermaidLabel(step.expressionValue || 'Call.UserToUserInformation')}"/]`
+        );
+        classBuckets.gcSysVar.push(nodeId);
+        break;
+    }
 
-      if (action.kind === 'loop') {
-        lines.push(`  ${prevNodeId} -.->|"Rueckwaerts-GOTO -> Loop"| ${nodeId}`);
-      } else if (action.isBrokenTarget) {
-        lines.push(`  ${prevNodeId} -.->|"Broken Target"| ${nodeId}`);
+    return nodeId;
+  };
+
+  const connectFromParents = (
+    parents: Array<{ id: string; label?: string; dashed?: boolean }>,
+    childId: string
+  ) => {
+    for (const p of parents) {
+      if (p.dashed) {
+        if (p.label) lines.push(`  ${p.id} -.->|"${escapeMermaidLabel(p.label)}"| ${childId}`);
+        else lines.push(`  ${p.id} -.-> ${childId}`);
+      } else if (p.label) {
+        lines.push(`  ${p.id} -->|"${escapeMermaidLabel(p.label)}"| ${childId}`);
       } else {
-        lines.push(`  ${prevNodeId} --> ${nodeId}`);
+        lines.push(`  ${p.id} --> ${childId}`);
+      }
+    }
+  };
+
+  /**
+   * Renders a sequence of MigrationSteps and returns the list of non-terminal exit connectors.
+   */
+  const renderStepSequence = (
+    steps: MigrationStep[],
+    incoming: Array<{ id: string; label?: string; dashed?: boolean }>
+  ): Array<{ id: string; label?: string; dashed?: boolean }> => {
+    let currentExits = incoming;
+
+    for (const step of steps) {
+      if (currentExits.length === 0) break;
+      const nodeId = emitNode(step);
+      connectFromParents(
+        currentExits.map((e) => ({
+          ...e,
+          dashed: e.dashed || step.kind === 'loop' || Boolean(step.isBrokenTarget),
+          label:
+            e.label ||
+            (step.kind === 'loop'
+              ? 'Rueckwaerts-GOTO -> Loop'
+              : step.isBrokenTarget
+              ? 'Broken Target'
+              : undefined),
+        })),
+        nodeId
+      );
+
+      if (step.kind === 'jumpToReusableTask' && step.targetTaskRefId) {
+        deferredTaskEdges.push({
+          fromId: nodeId,
+          targetRefId: step.targetTaskRefId,
+          label: 'Jump',
+          dashed: false,
+        });
+        currentExits = [];
+        break;
       }
 
-      prevNodeId = nodeId;
-    });
+      if (step.kind === 'callTask' && step.targetTaskRefId) {
+        deferredTaskEdges.push({
+          fromId: nodeId,
+          targetRefId: step.targetTaskRefId,
+          label: 'Subtask',
+          dashed: true,
+        });
+      }
+
+      if (step.isTerminal) {
+        currentExits = [];
+        break;
+      }
+
+      if (step.kind === 'decision') {
+        const yesExits =
+          step.yesSteps && step.yesSteps.length > 0
+            ? renderStepSequence(step.yesSteps, [{ id: nodeId, label: 'Ja' }])
+            : [{ id: nodeId, label: 'Ja' }];
+        const noExits =
+          step.noSteps && step.noSteps.length > 0
+            ? renderStepSequence(step.noSteps, [{ id: nodeId, label: 'Nein' }])
+            : [{ id: nodeId, label: 'Nein' }];
+        currentExits = [...yesExits, ...noExits];
+      } else if (step.kind === 'evaluateScheduleGroup') {
+        const openExits =
+          step.openSteps && step.openSteps.length > 0
+            ? renderStepSequence(step.openSteps, [{ id: nodeId, label: 'Offen' }])
+            : [{ id: nodeId, label: 'Offen' }];
+        const closedExits =
+          step.closedSteps && step.closedSteps.length > 0
+            ? renderStepSequence(step.closedSteps, [{ id: nodeId, label: 'Geschlossen' }])
+            : [];
+        const holidayExits =
+          step.holidaySteps && step.holidaySteps.length > 0
+            ? renderStepSequence(step.holidaySteps, [{ id: nodeId, label: 'Feiertag' }])
+            : [];
+        currentExits = [...openExits, ...closedExits, ...holidayExits];
+      } else if (step.kind === 'collectInput') {
+        const succExits =
+          step.successSteps && step.successSteps.length > 0
+            ? renderStepSequence(step.successSteps, [{ id: nodeId, label: 'Eingabe OK' }])
+            : [{ id: nodeId, label: 'Eingabe OK' }];
+        const failExits =
+          step.failureSteps && step.failureSteps.length > 0
+            ? renderStepSequence(step.failureSteps, [{ id: nodeId, label: 'Fehler/Timeout', dashed: true }])
+            : [];
+        currentExits = [...succExits, ...failExits];
+      } else if (step.kind === 'callDataAction') {
+        const succExits =
+          step.successSteps && step.successSteps.length > 0
+            ? renderStepSequence(step.successSteps, [{ id: nodeId, label: 'Erfolg' }])
+            : [{ id: nodeId, label: 'Erfolg' }];
+        const failExits =
+          step.failureSteps && step.failureSteps.length > 0
+            ? renderStepSequence(step.failureSteps, [{ id: nodeId, label: 'Fehler', dashed: true }])
+            : [];
+        const toExits =
+          step.timeoutSteps && step.timeoutSteps.length > 0
+            ? renderStepSequence(step.timeoutSteps, [{ id: nodeId, label: 'Timeout', dashed: true }])
+            : [];
+        currentExits = [...succExits, ...failExits, ...toExits];
+      } else if (step.kind === 'switch') {
+        const allExits: Array<{ id: string; label?: string; dashed?: boolean }> = [];
+        for (const c of step.cases || []) {
+          const ce =
+            c.steps.length > 0
+              ? renderStepSequence(c.steps, [{ id: nodeId, label: `Wert "${c.value}"` }])
+              : [{ id: nodeId, label: `Wert "${c.value}"` }];
+          allExits.push(...ce);
+        }
+        const de =
+          step.defaultSteps && step.defaultSteps.length > 0
+            ? renderStepSequence(step.defaultSteps, [{ id: nodeId, label: 'Default', dashed: true }])
+            : [{ id: nodeId, label: 'Default', dashed: true }];
+        currentExits = [...allExits, ...de];
+      } else if (step.kind === 'callDataTableLookup') {
+        const foundExits =
+          step.foundSteps && step.foundSteps.length > 0
+            ? renderStepSequence(step.foundSteps, [{ id: nodeId, label: 'Gefunden' }])
+            : [{ id: nodeId, label: 'Gefunden' }];
+        const notFoundExits =
+          step.notFoundSteps && step.notFoundSteps.length > 0
+            ? renderStepSequence(step.notFoundSteps, [{ id: nodeId, label: 'Nicht gefunden', dashed: true }])
+            : [];
+        currentExits = [...foundExits, ...notFoundExits];
+      } else {
+        currentExits = [{ id: nodeId }];
+      }
+    }
+
+    return currentExits;
+  };
+
+  // Render entry task directly from GC_START
+  const entryTask = graph.tasks.find((t) => t.refId === graph.entryTaskRefId) || graph.tasks[0];
+  if (entryTask) {
+    taskEntryNodeByRefId.set(entryTask.refId, startId);
+    renderStepSequence(entryTask.steps, [{ id: startId }]);
+  }
+
+  // Render secondary Reusable Tasks (SECTIONs, hydrated subscripts, Fallback_Error_Task)
+  for (const task of graph.tasks) {
+    if (entryTask && task.refId === entryTask.refId) continue;
+    const taskHeaderId = toSafeMermaidId('GC_TASK', task.refId);
+    taskEntryNodeByRefId.set(task.refId, taskHeaderId);
+    const kindLabel =
+      task.kind === 'section'
+        ? 'Section Task'
+        : task.kind === 'fallback'
+        ? 'Fallback Task'
+        : 'Reusable Task';
+    lines.push(`  ${taskHeaderId}[["${kindLabel}: ${escapeMermaidLabel(task.name)}"]]`);
+    classBuckets.gcTask.push(taskHeaderId);
+    renderStepSequence(task.steps, [{ id: taskHeaderId }]);
+  }
+
+  // Connect cross-task jumps & calls
+  const emittedCross = new Set<string>();
+  for (const edge of deferredTaskEdges) {
+    const targetNodeId = taskEntryNodeByRefId.get(edge.targetRefId);
+    if (!targetNodeId || targetNodeId === edge.fromId) continue;
+    const key = `${edge.fromId}->${targetNodeId}`;
+    if (emittedCross.has(key)) continue;
+    emittedCross.add(key);
+    if (edge.dashed) {
+      lines.push(`  ${edge.fromId} -.->|"${escapeMermaidLabel(edge.label)}"| ${targetNodeId}`);
+    } else {
+      lines.push(`  ${edge.fromId} -->|"${escapeMermaidLabel(edge.label)}"| ${targetNodeId}`);
+    }
   }
 
   appendGenesysClassDefs(lines, classBuckets);
@@ -1925,7 +2466,6 @@ function generateWorkspaceOverviewGenesysMermaid(
     gcBroken: [],
   };
 
-  // Select entry points + common modules + top connected/high-readiness scripts (keep readable at 350 scripts)
   const selectedScripts = new Map<string, GenesysScriptTranslation>();
   for (const s of workspace.scripts) {
     if (s.isEntryPoint || s.isCommonModuleTarget || s.readiness === 'HIGH') {
@@ -2065,963 +2605,505 @@ function appendGenesysClassDefs(
   }
 }
 
-function translateSingleModule(
-  node: ParsedScriptNode,
-  mod: ScriptModule | undefined,
-  ctx: {
-    knownKeyLookup: Map<string, string>;
-    incomingCallCountByKey: Map<string, number>;
-    brokenTargetKeysForScript: Set<string>;
-  }
-): GenesysScriptTranslation {
-  const rawText = mod?.rawText || '';
-  const strippedLines = rawText ? stripCommentsPreservingLines(rawText) : [];
-  const oclVars = extractOclDeclaredVariables(strippedLines);
-  const scopedVariables = extractScopedVariables(strippedLines);
+// ============================================================================
+// SUBTASK HYDRATION (Real translated logic instead of empty placeholders)
+// ============================================================================
 
-  // Pre-scan SECTION <Name> definitions with exact 1-based line numbers
-  const sectionLineByName = new Map<string, number>();
-  for (let i = 0; i < strippedLines.length; i += 1) {
-    const m = strippedLines[i].match(
-      /^\s*SECTION\s+([A-Za-zÄÖÜäöüß_][A-Za-z0-9ÄÖÜäöüß_.-]*)/i
-    );
-    if (m) {
-      const secKey = m[1].trim().toLowerCase();
-      if (!sectionLineByName.has(secKey)) {
-        sectionLineByName.set(secKey, i + 1);
-      }
-    }
-  }
+function cloneStepsWithRefRemap(
+  steps: MigrationStep[],
+  remapRef: (refId: string) => string,
+  idPrefix: string
+): MigrationStep[] {
+  return steps.map((s) => ({
+    ...s,
+    id: `${idPrefix}_${s.id}`,
+    targetTaskRefId: s.targetTaskRefId ? remapRef(s.targetTaskRefId) : undefined,
+    yesSteps: s.yesSteps ? cloneStepsWithRefRemap(s.yesSteps, remapRef, idPrefix) : undefined,
+    noSteps: s.noSteps ? cloneStepsWithRefRemap(s.noSteps, remapRef, idPrefix) : undefined,
+    openSteps: s.openSteps ? cloneStepsWithRefRemap(s.openSteps, remapRef, idPrefix) : undefined,
+    closedSteps: s.closedSteps
+      ? cloneStepsWithRefRemap(s.closedSteps, remapRef, idPrefix)
+      : undefined,
+    holidaySteps: s.holidaySteps
+      ? cloneStepsWithRefRemap(s.holidaySteps, remapRef, idPrefix)
+      : undefined,
+    successSteps: s.successSteps
+      ? cloneStepsWithRefRemap(s.successSteps, remapRef, idPrefix)
+      : undefined,
+    failureSteps: s.failureSteps
+      ? cloneStepsWithRefRemap(s.failureSteps, remapRef, idPrefix)
+      : undefined,
+    timeoutSteps: s.timeoutSteps
+      ? cloneStepsWithRefRemap(s.timeoutSteps, remapRef, idPrefix)
+      : undefined,
+    foundSteps: s.foundSteps ? cloneStepsWithRefRemap(s.foundSteps, remapRef, idPrefix) : undefined,
+    notFoundSteps: s.notFoundSteps
+      ? cloneStepsWithRefRemap(s.notFoundSteps, remapRef, idPrefix)
+      : undefined,
+    bodySteps: s.bodySteps ? cloneStepsWithRefRemap(s.bodySteps, remapRef, idPrefix) : undefined,
+    defaultSteps: s.defaultSteps
+      ? cloneStepsWithRefRemap(s.defaultSteps, remapRef, idPrefix)
+      : undefined,
+    cases: s.cases
+      ? s.cases.map((c) => ({
+          ...c,
+          steps: cloneStepsWithRefRemap(c.steps, remapRef, idPrefix),
+        }))
+      : undefined,
+  }));
+}
 
-  const actions: GenesysMappedAction[] = [];
-  const warnings: GenesysScriptWarning[] = [];
-  const localReusableTasksMap = new Map<
-    string,
-    { name: string; refId: string; originalTarget: string }
-  >();
-  const actionDedup = new Set<string>();
+/**
+ * Generates domain-aware Reusable Task logic when a called Avaya sub-block (e.g. Menu,
+ * MobilNummerEingeben, Check_Response) has no separate `.s` file loaded in the workspace.
+ */
+function buildDomainAwareFallbackSubtask(
+  ref: { name: string; refId: string; originalTarget: string },
+  hasFallbackTask: boolean
+): MigrationTaskGraph {
+  const lower = ref.originalTarget.toLowerCase();
 
-  const pushAction = (action: Omit<GenesysMappedAction, 'id'>) => {
-    const key = `${action.kind}::${action.target || action.variableName || ''}::${action.lineNumber}`;
-    if (actionDedup.has(key)) return;
-    actionDedup.add(key);
-    actions.push({
-      ...action,
-      id: `ga-${actions.length + 1}`,
-    });
-  };
-
-  let backwardGotoCount = 0;
-  let hasMultiSkillset = false;
-  let oracleApiCount = 0;
-  let flixcheckApiCount = 0;
-  let commonModuleCallCount = 0;
-  let callTaskCount = 0;
-  const uniqueSkillsets = new Set<string>();
-
-  const resolveStaticVar = (tok: string): string => {
-    const clean = tok.trim().replace(/^["']|["']$/g, '');
-    return oclVars.staticStringLiterals.get(clean.toLowerCase()) || clean;
-  };
-
-  const handleSubscriptOrExternalCall = (
-    rawToken: string,
-    cmdLabel: string,
-    lineNumber: number
-  ) => {
-    const resolved = resolveStaticVar(rawToken);
-    const clean = normalizeScriptRef(stripKnownScriptExtension(resolved));
-    if (
-      !clean ||
-      isDeactivatedSentinelTarget(clean) ||
-      isDynamicAvayaVariableTarget(clean, oclVars.declaredVars)
-    ) {
-      return;
-    }
-
-    const matchKey = canonicalScriptMatchKey(clean);
-    const knownPrimaryKey = ctx.knownKeyLookup.get(matchKey);
-
-    // Check FlixCheck / Oracle first if not a regular local script (or explicitly FlixCheck/Oracle)
-    const waypointReason = classifyAvayaWaypointTarget(clean, {
-      knownScriptKeys: ctx.knownKeyLookup,
-      declaredVars: oclVars.declaredVars,
-    });
-
-    if (!knownPrimaryKey && (FLIXCHECK_RE.test(clean) || /flixcheck/i.test(waypointReason || ''))) {
-      flixcheckApiCount += 1;
-      pushAction({
-        kind: 'callDataAction',
-        avayaCommand: cmdLabel,
-        genesysLabel: `Data Action: FlixCheck (${clean})`,
-        lineNumber,
-        target: clean,
-        targetSlug: toArchySlug(clean),
-        dataActionCategory: 'FlixCheck_API',
-      });
-      return;
-    }
-
-    if (!knownPrimaryKey && (ORACLE_RE.test(clean) || /oracle/i.test(waypointReason || ''))) {
-      oracleApiCount += 1;
-      pushAction({
-        kind: 'callDataAction',
-        avayaCommand: cmdLabel,
-        genesysLabel: `Data Action: Oracle (${clean})`,
-        lineNumber,
-        target: clean,
-        targetSlug: toArchySlug(clean),
-        dataActionCategory: 'Oracle_Integration',
-      });
-      return;
-    }
-
-    // Pure numeric CDN not in known scripts -> Transfer to Number
-    if (!knownPrimaryKey && /^\+?\d{2,16}$/.test(clean)) {
-      pushAction({
-        kind: 'transferToNumber',
-        avayaCommand: cmdLabel,
-        genesysLabel: `Transfer to Number: ${clean}`,
-        lineNumber,
-        target: clean,
-      });
-      return;
-    }
-
-    const targetPoolKey = knownPrimaryKey || matchKey;
-    const incomingCalls = ctx.incomingCallCountByKey.get(targetPoolKey) || 0;
-    const isBroken = !knownPrimaryKey && ctx.brokenTargetKeysForScript.has(matchKey);
-
-    // Binding Rule: Aufrufe >= 3 -> Call Common Module, Aufrufe < 3 -> Call Task
-    if (incomingCalls >= 3) {
-      commonModuleCallCount += 1;
-      pushAction({
-        kind: 'callCommonModule',
-        avayaCommand: cmdLabel,
-        genesysLabel: `Common Module: ${clean}`,
-        lineNumber,
-        target: clean,
-        targetSlug: toArchySlug(clean),
-        isBrokenTarget: isBroken,
-      });
-    } else {
-      callTaskCount += 1;
-      const taskSlug = toArchySlug(clean, 'SubTask');
-      if (!localReusableTasksMap.has(taskSlug)) {
-        localReusableTasksMap.set(taskSlug, {
-          name: taskSlug,
-          refId: taskSlug,
-          originalTarget: clean,
-        });
-      }
-      pushAction({
-        kind: 'callTask',
-        avayaCommand: cmdLabel,
-        genesysLabel: `Call Task: ${clean}`,
-        lineNumber,
-        target: clean,
-        targetSlug: taskSlug,
-        isBrokenTarget: isBroken,
-      });
-    }
-  };
-
-  // Line-accurate deterministic OCL scan
-  for (let i = 0; i < strippedLines.length; i += 1) {
-    const lineNumber = i + 1;
-    const line = strippedLines[i].trim();
-    if (!line) continue;
-
-    // Detect CV_ / GV_ / LV_ variable reads or assignments
-    const assignMatch =
-      line.match(/\bSET\s+((?:CV|GV|LV)_[A-Za-z0-9_]+)\s*(?:=|:=)/i) ||
-      line.match(/\bASSIGN\s+.+?\s+TO\s+((?:CV|GV|LV)_[A-Za-z0-9_]+)\b/i) ||
-      line.match(/\bASSIGN\s+((?:CV|GV|LV)_[A-Za-z0-9_]+)\s*=/i);
-    if (assignMatch && assignMatch[1]) {
-      const vName = assignMatch[1];
-      const info = resolveVariablePrefixInfo(vName);
-      if (info) {
-        if (info.scope === 'participantData') {
-          pushAction({
-            kind: 'setParticipantData',
-            avayaCommand: 'SET/ASSIGN CV_*',
-            genesysLabel: `Set Participant Data: ${vName}`,
-            lineNumber,
-            variableName: vName,
-            archyVariableName: info.archyName,
-          });
-        } else {
-          pushAction({
-            kind: 'updateData',
-            avayaCommand: `SET/ASSIGN ${info.scope === 'flow' ? 'GV_*' : 'LV_*'}`,
-            genesysLabel: `Update Data: ${info.archyName}`,
-            lineNumber,
-            variableName: vName,
-            archyVariableName: info.archyName,
-          });
-        }
-      }
-    } else if (/\b(?:IF|WHERE|READVAR|GET)\b/i.test(line)) {
-      const cvRead = line.match(/\b(CV_[A-Za-z0-9_]+)\b/i);
-      if (cvRead && cvRead[1]) {
-        const info = resolveVariablePrefixInfo(cvRead[1])!;
-        pushAction({
-          kind: 'getParticipantData',
-          avayaCommand: 'READ CV_*',
-          genesysLabel: `Get Participant Data: ${cvRead[1]}`,
-          lineNumber,
-          variableName: cvRead[1],
-          archyVariableName: info.archyName,
-        });
-      }
-    }
-
-    const clauses = splitInlineIfThenElseClauses(line);
-    const statements: string[] = [];
-    for (const clause of clauses) {
-      if (clause.kind === 'if-then' || clause.kind === 'else-if-then') {
-        const cond = (clause.condition || '').trim();
-        let handledConditionSpecial = false;
-
-        if (cond) {
-          // Telephony Block 6 inside IF conditions: CLID / DNIS
-          if (/\b(?:CLID|CALLING[\s_]*NUMBER|CALL\.ANI)\b/i.test(cond)) {
-            pushAction({
-              kind: 'updateData',
-              avayaCommand: 'CLID / ANI',
-              genesysLabel: 'System-Variable: Flow.callerAni = Call.Ani',
-              lineNumber,
-              variableName: 'CLID',
-              archyVariableName: 'Flow.callerAni',
-              expressionValue: 'Call.Ani',
-            });
-          }
-          if (/\b(?:DNIS|DIALED[\s_]*NUMBER|CALL\.DNIS)\b/i.test(cond)) {
-            pushAction({
-              kind: 'updateData',
-              avayaCommand: 'DNIS',
-              genesysLabel: 'System-Variable: Flow.dialedDnis = Call.Dnis',
-              lineNumber,
-              variableName: 'DNIS',
-              archyVariableName: 'Flow.dialedDnis',
-              expressionValue: 'Call.Dnis',
-            });
-          }
-
-          // Telephony Block 1 inside IF conditions: Schedule & Holiday checks
-          if (
-            /\b(?:DAY\s+OF\s+WEEK|TIME\s+OF\s+DAY|DATE\s+OF\s+YEAR|SONDZEIT|HOLIDAY|FEIERTAG|OEFFNUNGSZEIT|OPEN[\s_]*HOURS)\b/i.test(
-              cond
-            )
-          ) {
-            const sgName = `${toArchySlug(node.scriptNumber || 'Default')}_ScheduleGroup`;
-            pushAction({
-              kind: 'evaluateScheduleGroup',
-              avayaCommand: 'TIME / DAY OF WEEK / HOLIDAY',
-              genesysLabel: `Schedule Group: ${sgName}`,
-              lineNumber,
-              target: sgName,
-              targetSlug: sgName,
-            });
-            handledConditionSpecial = true;
-          }
-
-          // Telephony Block 5 inside IF conditions: Emergency / Night Service
-          if (/\b(?:EMERGENCY|NIGHT\s+SERVICE|OUT\s+OF\s+SERVICE|NOTFALL|STOERUNG)\b/i.test(cond)) {
-            warnings.push({
-              code: 'EMERGENCY_GROUP_REQUIRED',
-              severity: 'warning',
-              message: `Notfall-/Night-Service-Logik in Zeile ${lineNumber}: In Genesys Cloud über zentrale Emergency Group oder Data Table steuern.`,
-              lineNumber,
-            });
-            pushAction({
-              kind: 'decision',
-              avayaCommand: 'EMERGENCY / NIGHT SERVICE',
-              genesysLabel: 'Emergency Group Check',
-              lineNumber,
-              target: 'Emergency_Group',
-              conditionLabel: 'Emergency_Override',
-              isEmergencyCheck: true,
-            });
-            handledConditionSpecial = true;
-          }
-
-          // Telephony Block 3 inside IF conditions: EWT & Logged Agents
-          if (/\b(?:EXPECTED\s+WAIT\s+TIME|EWT)\b/i.test(cond)) {
-            warnings.push({
-              code: 'IN_QUEUE_FLOW_REQUIRED',
-              severity: 'warning',
-              message: `Expected Wait Time (EWT) in Zeile ${lineNumber}: In Genesys Cloud über Call.EstimatedWaitTime (Ansage im In-Queue Flow) abbilden.`,
-              lineNumber,
-            });
-            pushAction({
-              kind: 'updateData',
-              avayaCommand: 'EXPECTED WAIT TIME',
-              genesysLabel: 'System-Variable: Flow.estimatedWaitTime = Call.EstimatedWaitTime',
-              lineNumber,
-              variableName: 'EWT',
-              archyVariableName: 'Flow.estimatedWaitTime',
-              expressionValue: 'Call.EstimatedWaitTime',
-            });
-          }
-
-          if (
-            /\b(?:LOGGED\s+AGENTS|AGENTS\s+TOTAL|AVAILABLE\s+AGENTS|STAFFED\s+AGENTS|QUEUE\s+AGENTS)\b/i.test(
-              cond
-            )
-          ) {
-            warnings.push({
-              code: 'QUEUE_OBSERVATIONS_API',
-              severity: 'warning',
-              message: `Agenten-Verfügbarkeitsprüfung (LOGGED AGENTS) in Zeile ${lineNumber}: In Genesys Cloud über Data Action (Get Queue Observations API) abbilden.`,
-              lineNumber,
-            });
-            pushAction({
-              kind: 'callDataAction',
-              avayaCommand: 'LOGGED AGENTS',
-              genesysLabel: 'Data Action: Queue Observations (Agenten-Status)',
-              lineNumber,
-              target: 'Get_Queue_Observations',
-              targetSlug: 'Get_Queue_Observations',
-              dataActionCategory: 'Genesys_Cloud_Data_Actions',
-            });
-          }
-        }
-
-        if (!handledConditionSpecial && cond && !/\bGOTO\b/i.test(clause.action || '')) {
-          pushAction({
-            kind: 'decision',
-            avayaCommand: 'IF ... THEN',
-            genesysLabel: `Decision: ${cond.slice(0, 48)}`,
-            lineNumber,
-            conditionLabel: cond.slice(0, 48),
-          });
-        }
-      }
-      if (!clause.action) continue;
-      for (const stmt of splitOclStatementsOutsideQuotes(clause.action)) {
-        const trimmed = stmt.trim();
-        if (trimmed) statements.push(trimmed);
-      }
-    }
-
-    for (const stmt of statements) {
-      // 1. Oracle / FlixCheck API commands (SEND REQUEST, HOST, SEND INFO, GET RESPONSE)
-      const apiMatch = stmt.match(
-        /^(SEND\s+REQUEST|GET\s+RESPONSE|SEND\s+INFO|HOST(?:\s+CALL)?)\b(.*)$/i
-      );
-      if (apiMatch) {
-        const cmdLabel = apiMatch[1].replace(/\s+/g, ' ').toUpperCase();
-        const rest = (apiMatch[2] || '').trim();
-        const firstArg =
-          rest.match(/["']([^"']+)["']/)?.[1] || rest.split(/[\s,;]+/)[0] || '';
-        const apiKind =
-          cmdLabel === 'SEND REQUEST'
-            ? 'send-request'
-            : cmdLabel === 'GET RESPONSE'
-            ? 'get-response'
-            : cmdLabel === 'SEND INFO'
-            ? 'send-info'
-            : 'host-call';
-        const flixMeta = detectExternalApiIntegration({
-          commandKind: apiKind,
-          providerId: firstArg || undefined,
-          argsText: rest,
-          rawLine: stmt,
-          activeVars: oclVars.staticStringLiterals,
-          moduleContextText: mod?.scriptName || node.scriptNumber,
-        });
-
-        if (flixMeta?.isFlixcheck || FLIXCHECK_RE.test(stmt)) {
-          flixcheckApiCount += 1;
-          const target = flixMeta?.providerId || firstArg || 'FlixCheck_Action';
-          pushAction({
-            kind: 'callDataAction',
-            avayaCommand: cmdLabel,
-            genesysLabel: `Data Action: FlixCheck (${target})`,
-            lineNumber,
-            target,
-            targetSlug: toArchySlug(target),
-            dataActionCategory: 'FlixCheck_API',
-          });
-        } else if (ORACLE_RE.test(stmt) || cmdLabel.startsWith('HOST')) {
-          oracleApiCount += 1;
-          const target = firstArg || 'Oracle_Host_Action';
-          pushAction({
-            kind: 'callDataAction',
-            avayaCommand: cmdLabel,
-            genesysLabel: `Data Action: Oracle (${target})`,
-            lineNumber,
-            target,
-            targetSlug: toArchySlug(target),
-            dataActionCategory: 'Oracle_Integration',
-          });
-        }
-        continue;
-      }
-
-      // 1b. Telephony Block 6: System Variables (CLID/ANI, DNIS, UUI/SIP Header)
-      if (/\b(?:CLID|CALLING[\s_]*NUMBER|CALL\.ANI)\b/i.test(stmt)) {
-        pushAction({
-          kind: 'updateData',
-          avayaCommand: 'CLID / ANI',
-          genesysLabel: 'System-Variable: Flow.callerAni = Call.Ani',
-          lineNumber,
-          variableName: 'CLID',
-          archyVariableName: 'Flow.callerAni',
-          expressionValue: 'Call.Ani',
-        });
-      }
-      if (/\b(?:DNIS|DIALED[\s_]*NUMBER|CALL\.DNIS)\b/i.test(stmt)) {
-        pushAction({
-          kind: 'updateData',
-          avayaCommand: 'DNIS',
-          genesysLabel: 'System-Variable: Flow.dialedDnis = Call.Dnis',
-          lineNumber,
-          variableName: 'DNIS',
-          archyVariableName: 'Flow.dialedDnis',
-          expressionValue: 'Call.Dnis',
-        });
-      }
-      if (/\b(?:SET\s+UUI|SEND\s+UUI|UUI[\s_]*DATA|SIP[\s_]*HEADER|ATTACHED[\s_]*DATA)\b/i.test(stmt)) {
-        pushAction({
-          kind: 'setUuiData',
-          avayaCommand: 'UUI / SIP HEADER',
-          genesysLabel: 'Set UUI Data (Call.UserToUserInformation)',
-          lineNumber,
-          target: 'SIP_UUI',
-          expressionValue: 'Call.UserToUserInformation',
-        });
-      }
-
-      // 1c. Telephony Block 1: Schedule & Holiday checks (DAY OF WEEK, TIME OF DAY, SondZeit, HOLIDAY)
-      if (
-        /\b(?:DAY\s+OF\s+WEEK|TIME\s+OF\s+DAY|DATE\s+OF\s+YEAR|SONDZEIT|HOLIDAY|FEIERTAG|OEFFNUNGSZEIT|OPEN[\s_]*HOURS)\b/i.test(
-          stmt
-        ) &&
-        !/\b(?:EXECUTE|CALL\s+SCRIPT|SUBSCRIPT)\b/i.test(stmt)
-      ) {
-        const sgName = `${toArchySlug(node.scriptNumber || 'Default')}_ScheduleGroup`;
-        pushAction({
-          kind: 'evaluateScheduleGroup',
-          avayaCommand: 'TIME / DAY OF WEEK / HOLIDAY',
-          genesysLabel: `Schedule Group: ${sgName}`,
-          lineNumber,
-          target: sgName,
-          targetSlug: sgName,
-        });
-      }
-
-      // 1d. Telephony Block 5: Emergency / Night Service & Data Table Lookup
-      if (/\b(?:EMERGENCY|NIGHT\s+SERVICE|OUT\s+OF\s+SERVICE|NOTFALL|STOERUNG)\b/i.test(stmt)) {
-        warnings.push({
-          code: 'EMERGENCY_GROUP_REQUIRED',
-          severity: 'warning',
-          message: `Notfall-/Night-Service-Logik in Zeile ${lineNumber}: In Genesys Cloud über zentrale Emergency Group oder Data Table steuern.`,
-          lineNumber,
-        });
-        pushAction({
-          kind: 'decision',
-          avayaCommand: 'EMERGENCY / NIGHT SERVICE',
-          genesysLabel: 'Emergency Group Check',
-          lineNumber,
-          target: 'Emergency_Group',
-          conditionLabel: 'Emergency_Override',
-          isEmergencyCheck: true,
-        });
-      }
-
-      const dataTableMatch = stmt.match(
-        /\b(?:LOOKUP|DATA\s+TABLE|READ\s+TABLE|ROUTING\s+TABLE)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]*))/i
-      );
-      if (dataTableMatch) {
-        const tableName = (dataTableMatch[1] || dataTableMatch[2] || dataTableMatch[3] || 'Routing_Table').trim();
-        pushAction({
-          kind: 'callDataTableLookup',
-          avayaCommand: 'DATA TABLE LOOKUP',
-          genesysLabel: `Data Table Lookup: ${tableName}`,
-          lineNumber,
-          target: tableName,
-          targetSlug: toArchySlug(tableName),
-          dataTableKey: 'Call.Dnis',
-        });
-        continue;
-      }
-
-      // 1e. Telephony Block 3: EWT, Logged Agents & Standalone Priority
-      if (/\b(?:EXPECTED\s+WAIT\s+TIME|EWT)\b/i.test(stmt)) {
-        warnings.push({
-          code: 'IN_QUEUE_FLOW_REQUIRED',
-          severity: 'warning',
-          message: `Expected Wait Time (EWT) in Zeile ${lineNumber}: In Genesys Cloud über Call.EstimatedWaitTime (Ansage im In-Queue Flow) abbilden.`,
-          lineNumber,
-        });
-        pushAction({
-          kind: 'updateData',
-          avayaCommand: 'EXPECTED WAIT TIME',
-          genesysLabel: 'System-Variable: Flow.estimatedWaitTime = Call.EstimatedWaitTime',
-          lineNumber,
-          variableName: 'EWT',
-          archyVariableName: 'Flow.estimatedWaitTime',
-          expressionValue: 'Call.EstimatedWaitTime',
-        });
-      }
-
-      if (/\b(?:LOGGED\s+AGENTS|AGENTS\s+TOTAL|AVAILABLE\s+AGENTS|STAFFED\s+AGENTS)\b/i.test(stmt)) {
-        warnings.push({
-          code: 'QUEUE_OBSERVATIONS_API',
-          severity: 'warning',
-          message: `Agenten-Abfrage (${stmt.slice(0, 42)}) in Zeile ${lineNumber}: Erfordert Genesys Platform API Data Action (GET /api/v2/routing/queues/{id}/observations).`,
-          lineNumber,
-        });
-        pushAction({
-          kind: 'callDataAction',
-          avayaCommand: 'LOGGED AGENTS',
-          genesysLabel: 'Data Action: Queue Observations (Get_Queue_Observations)',
-          lineNumber,
-          target: 'Get_Queue_Observations',
-          targetSlug: 'Get_Queue_Observations',
-          dataActionCategory: 'Genesys_Cloud_Data_Actions',
-        });
-      }
-
-      const standalonePrioMatch =
-        stmt.match(/\bASSIGN\s+(\d{1,5})\s+TO\s+PRIORITY\b/i) ||
-        stmt.match(/\bSET\s+PRIORITY\s*(?:=|:=)\s*(\d{1,5})\b/i);
-      if (standalonePrioMatch) {
-        const prioVal = Number(standalonePrioMatch[1]);
-        pushAction({
-          kind: 'setPriority',
-          avayaCommand: 'ASSIGN/SET PRIORITY',
-          genesysLabel: `Set Priority: ${prioVal}`,
-          lineNumber,
-          target: String(prioVal),
-          priorityValue: Number.isFinite(prioVal) ? prioVal : 50,
-        });
-        continue;
-      }
-
-      // 1f. Telephony Block 4: Callback, Voicemail & Set Language
-      const callbackMatch = stmt.match(
-        /\b(?:OFFER\s+CALLBACK|CREATE\s+CALLBACK|CALLBACK|RUECKRUF)\b(?:\s+(?:TO\s+)?(?:"([^"]+)"|'([^']+)'|([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]*)))?/i
-      );
-      if (callbackMatch && !/\b(?:EXECUTE|CALL\s+SCRIPT|SUBSCRIPT)\b/i.test(stmt)) {
-        const cbTarget = (
-          callbackMatch[1] ||
-          callbackMatch[2] ||
-          callbackMatch[3] ||
-          `${node.scriptNumber}_Callback`
-        ).trim();
-        pushAction({
-          kind: 'createCallback',
-          avayaCommand: 'CALLBACK',
-          genesysLabel: `Create Callback: ${cbTarget}`,
-          lineNumber,
-          target: cbTarget,
-          targetSlug: toArchySlug(cbTarget),
-        });
-        continue;
-      }
-
-      const voicemailMatch = stmt.match(
-        /\b(?:TRANSFER\s+TO\s+VOICEMAIL|GIVE\s+VOICEMAIL|VOICEMAIL|ANRUFBEANTWORTER)\b(?:\s+(?:TO\s+)?(?:"([^"]+)"|'([^']+)'|([A-Za-zÄÖÜäöüß0-9_.-]+)))?/i
-      );
-      if (voicemailMatch && !/\b(?:EXECUTE|CALL\s+SCRIPT|SUBSCRIPT)\b/i.test(stmt)) {
-        const vmTarget = (
-          voicemailMatch[1] ||
-          voicemailMatch[2] ||
-          voicemailMatch[3] ||
-          `${node.scriptNumber}_Voicemail`
-        ).trim();
-        pushAction({
-          kind: 'transferToVoicemail',
-          avayaCommand: 'VOICEMAIL',
-          genesysLabel: `Transfer to Voicemail: ${vmTarget}`,
-          lineNumber,
-          target: vmTarget,
-          targetSlug: toArchySlug(vmTarget),
-        });
-        continue;
-      }
-
-      const langMatch = stmt.match(
-        /\b(?:SET\s+LANGUAGE|LANGUAGE\s*=)\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_-]{2,12}))/i
-      );
-      if (langMatch) {
-        const rawLang = (langMatch[1] || langMatch[2] || langMatch[3] || 'de-de').trim().toLowerCase();
-        const normalizedLang =
-          rawLang === 'de' || rawLang === 'deutsch' || rawLang === 'german'
-            ? 'de-de'
-            : rawLang === 'en' || rawLang === 'english' || rawLang === 'englisch'
-            ? 'en-us'
-            : rawLang === 'fr' || rawLang === 'french'
-            ? 'fr-fr'
-            : /^[a-z]{2}-[a-z]{2}$/.test(rawLang)
-            ? rawLang
-            : 'de-de';
-        pushAction({
-          kind: 'setLanguage',
-          avayaCommand: 'SET LANGUAGE',
-          genesysLabel: `Set Language: ${normalizedLang}`,
-          lineNumber,
-          target: normalizedLang,
-          languageCode: normalizedLang,
-        });
-        continue;
-      }
-
-      // 2a. Telephony Block 2: GIVE MUSIC / GIVE RINGBACK / GIVE BUSY / WAIT n (In-Queue Treatment)
-      const holdMusicMatch = stmt.match(
-        /\bGIVE\s+(MUSIC|RINGBACK)\b(?:\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+)))?/i
-      );
-      if (holdMusicMatch) {
-        const kindWord = holdMusicMatch[1].toUpperCase();
-        const musicName = (
-          holdMusicMatch[2] ||
-          holdMusicMatch[3] ||
-          holdMusicMatch[4] ||
-          (kindWord === 'RINGBACK' ? 'Ringback_Tone' : 'Default_Hold_Music')
-        ).trim();
-        warnings.push({
-          code: 'IN_QUEUE_FLOW_REQUIRED',
-          severity: 'warning',
-          message: `Wartebehandlung (GIVE ${kindWord}) in Zeile ${lineNumber}: Wartemusik/Ringback in Genesys Cloud in einen eigenen In-Queue Call Flow auslagern.`,
-          lineNumber,
-        });
-        pushAction({
-          kind: 'playHoldMusic',
-          avayaCommand: `GIVE ${kindWord}`,
-          genesysLabel: `Hold Music (In-Queue): ${musicName}`,
-          lineNumber,
-          target: musicName,
-          targetSlug: toArchySlug(musicName),
-        });
-        continue;
-      }
-
-      if (/\bGIVE\s+BUSY\b/i.test(stmt)) {
-        pushAction({
-          kind: 'disconnect',
-          avayaCommand: 'GIVE BUSY',
-          genesysLabel: 'Disconnect (Busy Tone)',
-          lineNumber,
-          target: 'Busy_Tone',
-        });
-        continue;
-      }
-
-      const waitMatch = stmt.match(/^\s*WAIT\s+(\d{1,5})(?:\s*(?:SEC|SECONDS|S))?\b/i);
-      if (waitMatch) {
-        const secs = Math.max(1, Number(waitMatch[1]) || 10);
-        warnings.push({
-          code: 'IN_QUEUE_FLOW_REQUIRED',
-          severity: 'warning',
-          message: `WAIT ${secs}s in Zeile ${lineNumber}: Warte-Pausen in Warteschleifen in Genesys Cloud über In-Queue Call Flow / Delay abbilden.`,
-          lineNumber,
-        });
-        pushAction({
-          kind: 'delay',
-          avayaCommand: `WAIT ${secs}`,
-          genesysLabel: `Delay (In-Queue): ${secs}s`,
-          lineNumber,
-          target: `${secs}s`,
-          delaySeconds: secs,
-        });
-        continue;
-      }
-
-      // 2b. GIVE RAN / PLAY PROMPT -> Play Audio
-      const promptMatch = stmt.match(
-        /\b(?:GIVE\s+(?:RAN|ANNOUNCEMENT)|PLAY\s+(?:PROMPT|AUDIO|ANNOUNCEMENT))\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
-      );
-      if (promptMatch) {
-        const promptName = (promptMatch[1] || promptMatch[2] || promptMatch[3] || '').trim();
-        if (promptName) {
-          pushAction({
-            kind: 'playAudio',
-            avayaCommand: 'GIVE RAN / PLAY PROMPT',
-            genesysLabel: `Play Audio: Prompt.${toArchySlug(promptName)}`,
-            lineNumber,
-            target: promptName,
-            targetSlug: toArchySlug(promptName),
-          });
-        }
-        continue;
-      }
-
-      // 3. COLLECT DIGITS / GIVE IVR -> Collect Input / Menu
-      const collectMatch = stmt.match(
-        /\b(COLLECT\s+\d*\s*DIGITS|COLLECT\s+DIGITS|GIVE\s+IVR)\b(.*)$/i
-      );
-      if (collectMatch) {
-        const rest = (collectMatch[2] || '').trim();
-        const promptTok =
-          rest.match(/["']([^"']+)["']/)?.[1] || rest.split(/\s+/)[0] || 'DTMF_Input';
-        pushAction({
+  // Phone / Mobile number input block (e.g. MobilNummerEingeben)
+  if (/mobil|handy|nummer|phone|tel|eingab/i.test(lower)) {
+    const mobileVar: MigrationVariableDecl = {
+      name: 'mobileNumber',
+      refName: 'Task.mobileNumber',
+      originalName: 'mobileNumber',
+      scope: 'task',
+      isParticipantData: false,
+      dataType: 'string',
+      initialValue: '',
+    };
+    return {
+      refId: ref.refId,
+      name: ref.name,
+      kind: 'subscript',
+      originalTarget: ref.originalTarget,
+      taskVariables: [mobileVar],
+      steps: [
+        {
+          id: `sub_${ref.refId}_col`,
           kind: 'collectInput',
-          avayaCommand: collectMatch[1].replace(/\s+/g, ' ').toUpperCase(),
-          genesysLabel: `Collect Input: Task.collectedDigits`,
-          lineNumber,
-          target: promptTok,
-          targetSlug: toArchySlug(promptTok, 'DTMF_Input'),
-        });
-        continue;
-      }
-
-      // 4. QUEUE TO SKILLSET (1 vs Multi-Skillset Bullseye + inline WITH PRIORITY)
-      const queueMatch = stmt.match(
-        /\bQUEUE\s+TO\s+(?:NETWORK\s+)?(?:SKILLSET|AGENT)\s+(.+?)(?:\s+WITH\s+PRIORITY\s+(\d{1,5})|\s+PRIORITY\s+(\d{1,5})|$)/i
-      );
-      if (queueMatch) {
-        const inlinePrioRaw = queueMatch[2] || queueMatch[3];
-        if (inlinePrioRaw) {
-          const prioVal = Number(inlinePrioRaw);
-          if (Number.isFinite(prioVal)) {
-            pushAction({
-              kind: 'setPriority',
-              avayaCommand: 'QUEUE WITH PRIORITY',
-              genesysLabel: `Set Priority: ${prioVal}`,
-              lineNumber,
-              target: String(prioVal),
-              priorityValue: prioVal,
-            });
-          }
-        }
-        const items = queueMatch[1]
-          .split(',')
-          .map((item) => normalizeScriptRef(item.trim().replace(/^["']|["']$/g, '')))
-          .filter((item) => Boolean(item) && !isDeactivatedSentinelTarget(item));
-
-        if (items.length > 0) {
-          items.forEach((s) => uniqueSkillsets.add(s));
-          const isMulti = items.length > 1;
-          if (isMulti) {
-            hasMultiSkillset = true;
-            warnings.push({
-              code: 'MULTI_SKILLSET_BULLSEYE',
-              severity: 'warning',
-              message: `Multi-Skillset-Queueing (${items.join(', ')}) in Zeile ${lineNumber}: Genesys queuet nicht parallel in mehrere Queues – eine Ziel-Queue plus ACD Skills & Bullseye-Ringe nutzen.`,
-              lineNumber,
-            });
-          }
-          pushAction({
-            kind: 'transferToAcd',
-            avayaCommand: isMulti ? 'QUEUE TO SKILLSET (Multi)' : 'QUEUE TO SKILLSET',
-            genesysLabel: isMulti
-              ? `ACD Queue + Bullseye: ${items[0]} (${items.join(', ')})`
-              : `ACD Queue: ${items[0]}`,
-            lineNumber,
-            target: items[0],
-            targetSlug: toArchySlug(items[0]),
-            skills: isMulti ? items : undefined,
-            isMultiSkillset: isMulti,
-            warning: isMulti
-              ? 'Multi-Skillset in eine Ziel-Queue + ACD Skills & Bullseye-Ringe umbauen'
-              : undefined,
-          });
-        }
-        continue;
-      }
-
-      // 5. GOTO <Target> (Forward vs Backward Loop!)
-      const gotoMatch = stmt.match(
-        /\bGOTO\s+(?:"([^"]+)"|'([^']+)'|([A-Za-zÄÖÜäöüß0-9_.-]+))/i
-      );
-      if (gotoMatch) {
-        const rawTarget = (gotoMatch[1] || gotoMatch[2] || gotoMatch[3] || '').trim();
-        if (rawTarget) {
-          const secLine = sectionLineByName.get(rawTarget.toLowerCase());
-          if (secLine !== undefined) {
-            if (secLine <= lineNumber) {
-              // Rückwärts-GOTO -> Loop + verbindliche Warnung
-              backwardGotoCount += 1;
-              const msg = `Unstrukturiertes Rückwärts-GOTO in Loop umbauen (GOTO ${rawTarget} in Zeile ${lineNumber} -> SECTION ${rawTarget} in Zeile ${secLine}).`;
-              warnings.push({
-                code: 'BACKWARD_GOTO_LOOP',
-                severity: 'warning',
-                message: msg,
-                lineNumber,
-              });
-              pushAction({
-                kind: 'loop',
-                avayaCommand: 'GOTO (rückwärts)',
-                genesysLabel: `Loop: ${rawTarget}`,
-                lineNumber,
-                target: rawTarget,
-                targetSlug: toArchySlug(rawTarget),
-                isBackwardGoto: true,
-                maxLoopCount: 5,
-                warning: msg,
-              });
-            } else {
-              // Vorwärts-GOTO -> Decision / Task Branch
-              pushAction({
-                kind: 'decision',
-                avayaCommand: 'GOTO (vorwärts)',
-                genesysLabel: `Decision -> ${rawTarget}`,
-                lineNumber,
-                target: rawTarget,
-                conditionLabel: `Jump_${rawTarget}`,
-              });
-            }
-          } else {
-            // External fallback GOTO
-            const targetKey = canonicalScriptMatchKey(stripKnownScriptExtension(rawTarget));
-            if (ctx.knownKeyLookup.has(targetKey)) {
-              handleSubscriptOrExternalCall(rawTarget, 'GOTO', lineNumber);
-            }
-          }
-        }
-        continue;
-      }
-
-      // 6. GIVE CDN / TRANSFER TO / ROUTE CALL -> Transfer to Number
-      const transferMatch = stmt.match(
-        /\b(GIVE\s+CDN|TRANSFER\s+TO|ROUTE\s+CALL(?:\s+TO)?)\s+(?:CDN\s+|VDN\s+|SCRIPT\s+)?(?:"([^"]+)"|'([^']+)'|(\+?\d{2,16}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]*))/i
-      );
-      if (transferMatch) {
-        const cmd = transferMatch[1].replace(/\s+/g, ' ').trim().toUpperCase();
-        const target = (transferMatch[2] || transferMatch[3] || transferMatch[4] || '').trim();
-        if (target) {
-          pushAction({
-            kind: 'transferToNumber',
-            avayaCommand: cmd,
-            genesysLabel: `Transfer to Number: ${target}`,
-            lineNumber,
-            target,
-          });
-        }
-        continue;
-      }
-
-      // 7. DISCONNECT / ROUTE END / DROP CALL -> Disconnect
-      if (/\b(?:DISCONNECT|ROUTE\s+END|DROP\s+CALL)\b/i.test(stmt)) {
-        pushAction({
-          kind: 'disconnect',
-          avayaCommand: /\bROUTE\s+END\b/i.test(stmt)
-            ? 'ROUTE END'
-            : /\bDROP\s+CALL\b/i.test(stmt)
-            ? 'DROP CALL'
-            : 'DISCONNECT',
-          genesysLabel: 'Disconnect',
-          lineNumber,
-        });
-        continue;
-      }
-
-      // 8. EXECUTE / CALL SCRIPT / SUBSCRIPT -> Call Task (<3) or Call Common Module (>=3)
-      const execMatch =
-        stmt.match(
-          /\b(EXECUTE(?:\s+SCRIPT)?|CALL\s+SCRIPT|SUBSCRIPT)\s+(?:"([^"]+)"|'([^']+)'|(\+?\d{2,16}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]*))/i
-        ) ||
-        stmt.match(
-          /^(CALL)\s+(?:"([^"]+)"|'([^']+)'|(\+?\d{2,16}|[A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]*))/i
-        );
-      if (execMatch) {
-        const cmd = execMatch[1].replace(/\s+/g, ' ').trim().toUpperCase();
-        const token = (execMatch[2] || execMatch[3] || execMatch[4] || '').trim();
-        if (token) {
-          handleSubscriptOrExternalCall(token, cmd, lineNumber);
-        }
-      }
-    }
+          lineNumber: 0,
+          avayaCommand: 'SUBTASK_COLLECT_MOBILE',
+          label: `Collect Mobile Number (${ref.originalTarget})`,
+          target: ref.originalTarget,
+          targetSlug: ref.refId,
+          ttsText: 'Bitte geben Sie Ihre Mobilfunknummer ein und bestaetigen Sie mit der Raute-Taste.',
+          inputVarName: mobileVar.name,
+          inputVarRef: mobileVar.refName,
+          digitSpec: { mode: 'range', min: 8, max: 16 },
+          noEntryTimeoutSec: 6,
+          interDigitTimeoutSec: 3,
+          terminatingCharacter: '#',
+          noEntryTts: 'Es wurde keine Mobilfunknummer eingegeben.',
+          noMatchTts: 'Die eingegebene Nummer ist ungueltig.',
+          successSteps: [
+            {
+              id: `sub_${ref.refId}_chk`,
+              kind: 'decision',
+              lineNumber: 0,
+              avayaCommand: 'VALIDATE_MOBILE',
+              label: 'Validate Mobile Number Length',
+              conditionLabel: 'MobileNumber_Valid',
+              expression: 'Length(Task.mobileNumber) >= 8',
+              yesSteps: [
+                {
+                  id: `sub_${ref.refId}_spd`,
+                  kind: 'setParticipantData',
+                  lineNumber: 0,
+                  avayaCommand: 'STORE_MOBILE',
+                  label: 'Store Mobile Number',
+                  variableName: 'MobileNumber',
+                  variableRef: 'Task.mobileNumber',
+                  expressionValue: 'Task.mobileNumber',
+                  isTerminal: false,
+                },
+              ],
+              noSteps: [
+                {
+                  id: `sub_${ref.refId}_inv`,
+                  kind: 'playAudio',
+                  lineNumber: 0,
+                  avayaCommand: 'INVALID_MOBILE_AUDIO',
+                  label: 'Play Invalid Number Notice',
+                  target: 'Ungueltige_Mobilnummer',
+                  targetSlug: 'Ungueltige_Mobilnummer',
+                  ttsText: 'Die eingegebene Mobilfunknummer ist zu kurz.',
+                  isTerminal: false,
+                },
+              ],
+              isTerminal: false,
+            },
+          ],
+          failureSteps: hasFallbackTask
+            ? [
+                {
+                  id: `sub_${ref.refId}_fb`,
+                  kind: 'jumpToReusableTask',
+                  lineNumber: 0,
+                  avayaCommand: 'FALLBACK',
+                  label: 'Fallback on Mobile Input Failure',
+                  target: 'Fallback_Error_Task',
+                  targetTaskRefId: 'Fallback_Error_Task',
+                  isTerminal: true,
+                },
+              ]
+            : [
+                {
+                  id: `sub_${ref.refId}_disc`,
+                  kind: 'disconnect',
+                  lineNumber: 0,
+                  avayaCommand: 'DISCONNECT',
+                  label: `Disconnect (${ref.name} Input Failure)`,
+                  target: `${ref.name}_Failure`,
+                  isTerminal: true,
+                },
+              ],
+          isTerminal: false,
+        },
+      ],
+    };
   }
 
-  // Supplement from AuditNode edges & ScriptRules (for Visio flows / shorthand scripts without raw OCL commands)
-  if (actions.length === 0) {
-    const hasScheduleRule = (mod?.rules || []).some((r) => Boolean(r.schedule || r.holiday));
-    if (hasScheduleRule) {
-      const sgName = `${toArchySlug(node.scriptNumber || 'Default')}_ScheduleGroup`;
-      pushAction({
-        kind: 'evaluateScheduleGroup',
-        avayaCommand: 'Zeitplan / Feiertag',
-        genesysLabel: `Schedule Group: ${sgName}`,
+  // Menu / IVR selection block (e.g. Menu)
+  if (/menu|menue|auswahl|ivr/i.test(lower)) {
+    const selVar: MigrationVariableDecl = {
+      name: 'menuSelection',
+      refName: 'Task.menuSelection',
+      originalName: 'menuSelection',
+      scope: 'task',
+      isParticipantData: false,
+      dataType: 'string',
+      initialValue: '',
+    };
+    return {
+      refId: ref.refId,
+      name: ref.name,
+      kind: 'subscript',
+      originalTarget: ref.originalTarget,
+      taskVariables: [selVar],
+      steps: [
+        {
+          id: `sub_${ref.refId}_col`,
+          kind: 'collectInput',
+          lineNumber: 0,
+          avayaCommand: 'SUBTASK_MENU',
+          label: `Menu Selection (${ref.originalTarget})`,
+          target: ref.originalTarget,
+          targetSlug: ref.refId,
+          ttsText: `Bitte treffen Sie Ihre Auswahl fuer ${ref.originalTarget}.`,
+          inputVarName: selVar.name,
+          inputVarRef: selVar.refName,
+          digitSpec: { mode: 'exact', exact: 1 },
+          noEntryTimeoutSec: 5,
+          interDigitTimeoutSec: 3,
+          noEntryTts: 'Es wurde keine Auswahl getroffen.',
+          noMatchTts: 'Diese Auswahl ist nicht verfuegbar.',
+          successSteps: [
+            {
+              id: `sub_${ref.refId}_sw`,
+              kind: 'switch',
+              lineNumber: 0,
+              avayaCommand: 'MENU_SWITCH',
+              label: `Switch ${selVar.refName}`,
+              variableName: selVar.name,
+              variableRef: selVar.refName,
+              expression: selVar.refName,
+              cases: [
+                {
+                  value: '1',
+                  label: 'Option_1',
+                  steps: [
+                    {
+                      id: `sub_${ref.refId}_opt1`,
+                      kind: 'setParticipantData',
+                      lineNumber: 0,
+                      avayaCommand: 'MENU_CHOICE_1',
+                      label: 'Store Menu Choice 1',
+                      variableName: 'MenuSelection',
+                      variableRef: selVar.refName,
+                      expressionValue: selVar.refName,
+                      isTerminal: false,
+                    },
+                  ],
+                },
+              ],
+              defaultSteps: [
+                {
+                  id: `sub_${ref.refId}_def`,
+                  kind: 'playAudio',
+                  lineNumber: 0,
+                  avayaCommand: 'MENU_DEFAULT',
+                  label: 'Play Menu Default Hint',
+                  target: 'Menue_Hinweis',
+                  targetSlug: 'Menue_Hinweis',
+                  ttsText: 'Ihre Auswahl wird weiterverarbeitet.',
+                  isTerminal: false,
+                },
+              ],
+              isTerminal: false,
+            },
+          ],
+          failureSteps: [
+            {
+              id: `sub_${ref.refId}_fail`,
+              kind: 'disconnect',
+              lineNumber: 0,
+              avayaCommand: 'MENU_TIMEOUT',
+              label: `Disconnect (${ref.name} Timeout)`,
+              target: `${ref.name}_Timeout`,
+              isTerminal: true,
+            },
+          ],
+          isTerminal: false,
+        },
+      ],
+    };
+  }
+
+  // Response / Validation block (e.g. Check_Response)
+  if (/check|response|valid|blacklist|vip/i.test(lower)) {
+    const statusVar: MigrationVariableDecl = {
+      name: 'checkResult',
+      refName: 'Task.checkResult',
+      originalName: 'checkResult',
+      scope: 'task',
+      isParticipantData: false,
+      dataType: 'boolean',
+      initialValue: false,
+    };
+    return {
+      refId: ref.refId,
+      name: ref.name,
+      kind: 'subscript',
+      originalTarget: ref.originalTarget,
+      taskVariables: [statusVar],
+      steps: [
+        {
+          id: `sub_${ref.refId}_dec`,
+          kind: 'decision',
+          lineNumber: 0,
+          avayaCommand: 'SUBTASK_CHECK',
+          label: `Evaluate ${ref.originalTarget}`,
+          conditionLabel: `${ref.refId}_Passed`,
+          expression: 'Task.checkResult == true',
+          yesSteps: [
+            {
+              id: `sub_${ref.refId}_ok`,
+              kind: 'setParticipantData',
+              lineNumber: 0,
+              avayaCommand: 'CHECK_OK',
+              label: `Set ${ref.refId} Result`,
+              variableName: `${ref.refId}_Status`,
+              expressionValue: '"OK"',
+              isTerminal: false,
+            },
+          ],
+          noSteps: [
+            {
+              id: `sub_${ref.refId}_nok`,
+              kind: 'setParticipantData',
+              lineNumber: 0,
+              avayaCommand: 'CHECK_NOK',
+              label: `Set ${ref.refId} Failed`,
+              variableName: `${ref.refId}_Status`,
+              expressionValue: '"FAILED"',
+              isTerminal: false,
+            },
+          ],
+          isTerminal: false,
+        },
+      ],
+    };
+  }
+
+  // Generic unloaded internal Avaya building block
+  return {
+    refId: ref.refId,
+    name: ref.name,
+    kind: 'subscript',
+    originalTarget: ref.originalTarget,
+    taskVariables: [],
+    steps: [
+      {
+        id: `sub_${ref.refId}_spd`,
+        kind: 'setParticipantData',
         lineNumber: 0,
-        target: sgName,
-        targetSlug: sgName,
-      });
+        avayaCommand: 'SUBTASK_TRACE',
+        label: `Trace Subtask ${ref.originalTarget}`,
+        variableName: `AvayaSubtask_${ref.refId}`,
+        expressionValue: `"${ref.originalTarget}"`,
+        isTerminal: false,
+      },
+    ],
+  };
+}
+
+/**
+ * Hydrates local Reusable Tasks referenced by `callTask`:
+ * - If the target `.s` script is loaded in the workspace, embeds its REAL translated graph logic!
+ * - Otherwise, builds a structured domain-aware Reusable Task (never an empty stub).
+ */
+function hydrateLocalSubscriptTasks(
+  callerGraph: MigrationFlowGraph,
+  localSubscriptRefs: Array<{ name: string; refId: string; originalTarget: string; targetKey: string }>,
+  allGraphsByKey: Map<string, MigrationFlowGraph>
+): void {
+  const existingTaskIds = new Set(callerGraph.tasks.map((t) => t.refId));
+  const existingFlowVarKeys = new Set(callerGraph.flowVariables.map((v) => v.name.toLowerCase()));
+  let ensureFallback = existingTaskIds.has('Fallback_Error_Task');
+
+  for (const ref of localSubscriptRefs) {
+    if (existingTaskIds.has(ref.refId)) continue;
+    const loadedTarget = allGraphsByKey.get(ref.targetKey);
+
+    if (loadedTarget && loadedTarget.scriptKey !== callerGraph.scriptKey) {
+      // Merge any flow variables required by the embedded sub-script
+      for (const fv of loadedTarget.flowVariables) {
+        if (fv.name === 'avayaOriginScript') continue;
+        if (!existingFlowVarKeys.has(fv.name.toLowerCase())) {
+          existingFlowVarKeys.add(fv.name.toLowerCase());
+          callerGraph.flowVariables.push({ ...fv });
+        }
+      }
+
+      // Build remap table for any secondary section tasks inside the loaded sub-script
+      const remapMap = new Map<string, string>();
+      const secondaryTasksToAdd: MigrationTaskGraph[] = [];
+      for (const subT of loadedTarget.tasks) {
+        if (subT.refId === loadedTarget.entryTaskRefId) {
+          remapMap.set(subT.refId, ref.refId);
+        } else if (subT.refId === 'Fallback_Error_Task') {
+          remapMap.set('Fallback_Error_Task', 'Fallback_Error_Task');
+          ensureFallback = true;
+        } else {
+          const prefixedRef = toArchySlug(`${ref.refId}_${subT.refId}`, `${ref.refId}_Sec`);
+          remapMap.set(subT.refId, prefixedRef);
+          secondaryTasksToAdd.push(subT);
+        }
+      }
+
+      const remapRef = (r: string) => remapMap.get(r) || r;
+      const entrySub =
+        loadedTarget.tasks.find((t) => t.refId === loadedTarget.entryTaskRefId) ||
+        loadedTarget.tasks[0];
+
+      if (entrySub) {
+        // Only embed steps that don't point to unresolved nested callTasks unless we also guard them
+        const safeSteps = cloneStepsWithRefRemap(entrySub.steps, remapRef, `sub_${ref.refId}`);
+        // Rewrite nested callTask targets that aren't in caller's tasks into callCommonModule so targetTaskRef stays 100% valid
+        const sanitizeNestedCalls = (list: MigrationStep[]) => {
+          for (const st of list) {
+            if (st.kind === 'callTask' && st.targetTaskRefId) {
+              const mapped = remapRef(st.targetTaskRefId);
+              if (
+                !existingTaskIds.has(mapped) &&
+                mapped !== ref.refId &&
+                !Array.from(remapMap.values()).includes(mapped) &&
+                !localSubscriptRefs.some((lr) => lr.refId === mapped)
+              ) {
+                st.kind = 'callCommonModule';
+                st.targetSlug = toArchySlug(st.target || mapped, 'CommonModule');
+                st.targetTaskRefId = undefined;
+              }
+            }
+            if (st.yesSteps) sanitizeNestedCalls(st.yesSteps);
+            if (st.noSteps) sanitizeNestedCalls(st.noSteps);
+            if (st.openSteps) sanitizeNestedCalls(st.openSteps);
+            if (st.closedSteps) sanitizeNestedCalls(st.closedSteps);
+            if (st.holidaySteps) sanitizeNestedCalls(st.holidaySteps);
+            if (st.successSteps) sanitizeNestedCalls(st.successSteps);
+            if (st.failureSteps) sanitizeNestedCalls(st.failureSteps);
+            if (st.timeoutSteps) sanitizeNestedCalls(st.timeoutSteps);
+            if (st.foundSteps) sanitizeNestedCalls(st.foundSteps);
+            if (st.notFoundSteps) sanitizeNestedCalls(st.notFoundSteps);
+            if (st.bodySteps) sanitizeNestedCalls(st.bodySteps);
+            if (st.defaultSteps) sanitizeNestedCalls(st.defaultSteps);
+            if (st.cases) st.cases.forEach((c) => sanitizeNestedCalls(c.steps));
+          }
+        };
+        sanitizeNestedCalls(safeSteps);
+
+        callerGraph.tasks.push({
+          refId: ref.refId,
+          name: ref.name,
+          kind: 'subscript',
+          originalTarget: ref.originalTarget,
+          taskVariables: entrySub.taskVariables.map((v) => ({ ...v })),
+          steps: safeSteps,
+        });
+        existingTaskIds.add(ref.refId);
+
+        for (const secT of secondaryTasksToAdd) {
+          const newRef = remapRef(secT.refId);
+          if (existingTaskIds.has(newRef)) continue;
+          const secSteps = cloneStepsWithRefRemap(secT.steps, remapRef, `sub_${newRef}`);
+          sanitizeNestedCalls(secSteps);
+          callerGraph.tasks.push({
+            refId: newRef,
+            name: newRef,
+            kind: 'section',
+            originalTarget: secT.originalTarget,
+            taskVariables: secT.taskVariables.map((v) => ({ ...v })),
+            steps: secSteps,
+          });
+          existingTaskIds.add(newRef);
+        }
+        continue;
+      }
     }
-    for (const rule of mod?.rules || []) {
-      if (rule.announcement) {
-        pushAction({
+
+    // Subscript not loaded in workspace -> domain-aware Reusable Task
+    const fallbackSubtask = buildDomainAwareFallbackSubtask(ref, ensureFallback);
+    callerGraph.tasks.push(fallbackSubtask);
+    existingTaskIds.add(ref.refId);
+  }
+
+  if (ensureFallback && !existingTaskIds.has('Fallback_Error_Task')) {
+    callerGraph.tasks.push({
+      refId: 'Fallback_Error_Task',
+      name: 'Fallback_Error_Task',
+      kind: 'fallback',
+      originalTarget: 'System Fallback',
+      taskVariables: [],
+      steps: [
+        {
+          id: 'fb_hydrated_aud',
           kind: 'playAudio',
-          avayaCommand: 'Ansage',
-          genesysLabel: `Play Audio: Prompt.${toArchySlug(rule.announcement)}`,
-          lineNumber: rule.prio || 0,
-          target: rule.announcement,
-          targetSlug: toArchySlug(rule.announcement),
-        });
-      }
-      if (rule.choices && rule.choices.length > 0) {
-        pushAction({
-          kind: 'menu',
-          avayaCommand: 'DTMF / Auswahl',
-          genesysLabel: `Menu: ${rule.stepName || 'Auswahl'}`,
-          lineNumber: rule.prio || 0,
-          target: rule.stepName || 'Auswahl',
-          choices: rule.choices.map((c) => ({ digit: c.choice, target: c.targetNumber })),
-        });
-      }
-    }
-
-    for (const edge of node.edges) {
-      if (edge.targetType === 'SKILLSET_QUEUE') {
-        uniqueSkillsets.add(edge.rawTarget);
-        pushAction({
-          kind: 'transferToAcd',
-          avayaCommand: edge.command,
-          genesysLabel: `ACD Queue: ${edge.rawTarget}`,
-          lineNumber: edge.lineNumber,
-          target: edge.rawTarget,
-          targetSlug: toArchySlug(edge.rawTarget),
-        });
-      } else if (edge.targetType === 'FLIXCHECK') {
-        flixcheckApiCount += 1;
-        pushAction({
-          kind: 'callDataAction',
-          avayaCommand: edge.command,
-          genesysLabel: `Data Action: FlixCheck (${edge.rawTarget})`,
-          lineNumber: edge.lineNumber,
-          target: edge.rawTarget,
-          targetSlug: toArchySlug(edge.rawTarget),
-          dataActionCategory: 'FlixCheck_API',
-        });
-      } else if (edge.targetType === 'ORACLE') {
-        oracleApiCount += 1;
-        pushAction({
-          kind: 'callDataAction',
-          avayaCommand: edge.command,
-          genesysLabel: `Data Action: Oracle (${edge.rawTarget})`,
-          lineNumber: edge.lineNumber,
-          target: edge.rawTarget,
-          targetSlug: toArchySlug(edge.rawTarget),
-          dataActionCategory: 'Oracle_Integration',
-        });
-      } else if (edge.targetType === 'CDN_NUMBER') {
-        pushAction({
-          kind: 'transferToNumber',
-          avayaCommand: edge.command,
-          genesysLabel: `Transfer to Number: ${edge.rawTarget}`,
-          lineNumber: edge.lineNumber,
-          target: edge.rawTarget,
-        });
-      } else if (edge.targetType === 'LOCAL_SCRIPT' || edge.targetType === 'MISSING_OR_BROKEN') {
-        handleSubscriptOrExternalCall(edge.rawTarget, edge.command, edge.lineNumber);
-      }
-    }
-
-    if (node.hasTermination && !actions.some((a) => a.kind === 'disconnect')) {
-      pushAction({
-        kind: 'disconnect',
-        avayaCommand: node.terminationCommands[0] || 'DISCONNECT',
-        genesysLabel: 'Disconnect',
-        lineNumber: 0,
-      });
-    }
+          lineNumber: 0,
+          avayaCommand: 'FALLBACK_AUDIO',
+          label: 'Fallback Hinweis-Ansage',
+          target: 'Technischer_Hinweis',
+          targetSlug: 'Technischer_Hinweis',
+          ttsText: 'Entschuldigung, aktuell liegt eine technische Stoerung vor. Bitte versuchen Sie es spaeter erneut.',
+          isTerminal: false,
+        },
+        {
+          id: 'fb_hydrated_disc',
+          kind: 'disconnect',
+          lineNumber: 0,
+          avayaCommand: 'FALLBACK_DISCONNECT',
+          label: 'Disconnect (Fallback Error)',
+          target: 'Fallback_Error',
+          isTerminal: true,
+        },
+      ],
+    });
   }
 
-  // Record Broken Link warnings from AuditReport
-  const brokenLinkCount = ctx.brokenTargetKeysForScript.size;
+  callerGraph.flowVariables.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function finalizeScriptTranslation(
+  node: ParsedScriptNode,
+  built: BuildMigrationGraphResult,
+  incomingCallCount: number,
+  brokenLinkCount: number
+): GenesysScriptTranslation {
+  const { graph, localSubscriptRefs, metrics } = built;
+  const warnings: GenesysScriptWarning[] = built.warnings.map((w) => ({ ...w }));
+
   if (brokenLinkCount > 0) {
     warnings.push({
       code: 'BROKEN_LINK',
@@ -3030,7 +3112,7 @@ function translateSingleModule(
     });
   }
 
-  const externalApiCount = oracleApiCount + flixcheckApiCount;
+  const externalApiCount = metrics.oracleApiCount + metrics.flixcheckApiCount;
   if (externalApiCount > 2) {
     warnings.push({
       code: 'HIGH_EXTERNAL_API_COUNT',
@@ -3039,23 +3121,87 @@ function translateSingleModule(
     });
   }
 
-  const callVariableCount = scopedVariables.filter((v) => v.scope === 'participantData').length;
-  const subscriptCallCount = commonModuleCallCount + callTaskCount;
+  // Build flat compatibility views (`variables`, `actions`) from the finalized Level-1 graph
+  const allVarDecls: GenesysVariableDecl[] = [];
+  const seenFlatVar = new Set<string>();
+  for (const fv of graph.flowVariables) {
+    if (fv.name === 'avayaOriginScript') continue;
+    const key = `flow:${fv.name.toLowerCase()}`;
+    if (seenFlatVar.has(key)) continue;
+    seenFlatVar.add(key);
+    allVarDecls.push({
+      name: fv.name,
+      originalName: fv.originalName,
+      archyName: fv.refName,
+      scope: fv.isParticipantData ? 'participantData' : 'flow',
+      dataType: fv.dataType,
+      initialValue: String(fv.initialValue ?? ''),
+    });
+  }
+  for (const t of graph.tasks) {
+    if (t.kind === 'fallback') continue;
+    for (const tv of t.taskVariables) {
+      const key = `task:${tv.name.toLowerCase()}`;
+      if (seenFlatVar.has(key)) continue;
+      seenFlatVar.add(key);
+      allVarDecls.push({
+        name: tv.name,
+        originalName: tv.originalName,
+        archyName: tv.refName,
+        scope: 'task',
+        dataType: tv.dataType,
+        initialValue: String(tv.initialValue ?? ''),
+      });
+    }
+  }
+
+  const flatSteps = flattenMigrationSteps(graph);
+  const actions: GenesysMappedAction[] = flatSteps.map((s) => ({
+    id: s.id,
+    kind: s.kind,
+    avayaCommand: s.avayaCommand,
+    genesysLabel: s.label,
+    lineNumber: s.lineNumber,
+    target: s.target,
+    targetSlug: s.targetSlug,
+    dataActionCategory: s.dataActionCategory,
+    skills: s.skills,
+    isMultiSkillset: s.isMultiSkillset,
+    isBackwardGoto: s.isBackwardGoto,
+    maxLoopCount: s.maxLoopCount,
+    priorityValue: s.priorityValue,
+    delaySeconds: s.delaySeconds,
+    languageCode: s.languageCode,
+    expressionValue: s.expressionValue,
+    dataTableKey: s.dataTableKey,
+    isEmergencyCheck: s.isEmergencyCheck,
+    variableName: s.variableName,
+    archyVariableName: s.variableRef,
+    conditionLabel: s.conditionLabel,
+    choices: s.choices,
+    isBrokenTarget: s.isBrokenTarget,
+    warning: s.warning,
+  }));
+
+  const callVariableCount = allVarDecls.filter((v) => v.scope === 'participantData').length;
+  const subscriptCallCount = metrics.commonModuleCallCount + metrics.callTaskCount;
 
   // Binding Readiness Classification (LOW | MEDIUM | HIGH)
   const readinessReasons: string[] = [];
   let readiness: GenesysReadinessLevel = 'LOW';
 
-  if (hasMultiSkillset) readinessReasons.push('Multi-Skillset-Queueing (Bullseye erforderlich)');
-  if (backwardGotoCount > 0) {
-    readinessReasons.push(`${backwardGotoCount} Rückwärts-GOTO-Schleife(n)`);
+  if (metrics.hasMultiSkillset) {
+    readinessReasons.push('Multi-Skillset-Queueing (Bullseye erforderlich)');
+  }
+  if (metrics.backwardGotoCount > 0) {
+    readinessReasons.push(`${metrics.backwardGotoCount} Rückwärts-GOTO-Schleife(n)`);
   }
   if (externalApiCount > 2) readinessReasons.push(`${externalApiCount} externe APIs (> 2)`);
   if (brokenLinkCount > 0) readinessReasons.push(`${brokenLinkCount} Broken Link(s)`);
 
   if (
-    hasMultiSkillset ||
-    backwardGotoCount > 0 ||
+    metrics.hasMultiSkillset ||
+    metrics.backwardGotoCount > 0 ||
     externalApiCount > 2 ||
     brokenLinkCount > 0
   ) {
@@ -3067,33 +3213,34 @@ function translateSingleModule(
     if (callVariableCount > 0) {
       readinessReasons.push(`${callVariableCount} Call-Variable(n) (CV_* -> Participant Data)`);
     }
-    if (oracleApiCount > 0) readinessReasons.push(`${oracleApiCount} Oracle Data Action(s)`);
-    if (flixcheckApiCount > 0) {
-      readinessReasons.push(`${flixcheckApiCount} FlixCheck Data Action(s)`);
+    if (metrics.oracleApiCount > 0) {
+      readinessReasons.push(`${metrics.oracleApiCount} Oracle Data Action(s)`);
+    }
+    if (metrics.flixcheckApiCount > 0) {
+      readinessReasons.push(`${metrics.flixcheckApiCount} FlixCheck Data Action(s)`);
     }
 
     if (
       subscriptCallCount >= 2 ||
       callVariableCount > 0 ||
-      oracleApiCount > 0 ||
-      flixcheckApiCount > 0
+      metrics.oracleApiCount > 0 ||
+      metrics.flixcheckApiCount > 0
     ) {
       readiness = 'MEDIUM';
     } else {
       readiness = 'LOW';
-      readinessReasons.push('Linearer Flow (max. 1 Skillset, keine Rückwärts-GOTOs, keine Blocker)');
+      readinessReasons.push(
+        'Linearer Flow (max. 1 Skillset, keine Rückwärts-GOTOs, keine Blocker)'
+      );
     }
   }
-
-  const cleanName = toArchySlug(node.scriptNumber || node.fileName, 'Avaya_Flow');
-  const incomingCallCount = ctx.incomingCallCountByKey.get(node.scriptKey) || 0;
 
   const partial: GenesysScriptTranslation = {
     scriptKey: node.scriptKey,
     scriptNumber: node.scriptNumber,
     fileName: node.fileName,
-    cleanName,
-    archyFilename: `${cleanName}.yaml`,
+    cleanName: graph.cleanName,
+    archyFilename: `${graph.cleanName}.yaml`,
     isEntryPoint: node.isEntryPoint,
     incomingCallCount,
     isCommonModuleTarget: incomingCallCount >= 3,
@@ -3102,20 +3249,28 @@ function translateSingleModule(
     metrics: {
       actionCount: actions.length,
       subscriptCallCount,
-      commonModuleCallCount,
-      callTaskCount,
-      skillsetCount: uniqueSkillsets.size,
-      hasMultiSkillset,
-      backwardGotoCount,
+      commonModuleCallCount: metrics.commonModuleCallCount,
+      callTaskCount: metrics.callTaskCount,
+      skillsetCount: metrics.uniqueSkillsets.length,
+      hasMultiSkillset: metrics.hasMultiSkillset,
+      backwardGotoCount: metrics.backwardGotoCount,
       externalApiCount,
-      oracleApiCount,
-      flixcheckApiCount,
+      oracleApiCount: metrics.oracleApiCount,
+      flixcheckApiCount: metrics.flixcheckApiCount,
       callVariableCount,
       brokenLinkCount,
+      prunedDeadPathCount: graph.diagnostics.prunedUnreachableCount,
+      realExpressionCount: graph.diagnostics.realExpressionCount,
+      normalizedTargetCount: graph.diagnostics.normalizedTargetCount,
     },
-    variables: scopedVariables,
+    variables: allVarDecls,
     actions,
-    localReusableTasks: Array.from(localReusableTasksMap.values()),
+    localReusableTasks: localSubscriptRefs.map(({ name, refId, originalTarget }) => ({
+      name,
+      refId,
+      originalTarget,
+    })),
+    migrationGraph: graph,
     warnings,
     archyYaml: '',
     yamlValidation: {
@@ -3135,7 +3290,7 @@ function translateSingleModule(
 
 /**
  * Deterministically translates an entire Avaya AACC workspace (or ScriptModule[])
- * into Genesys Cloud Architect structures (Mermaid `flowchart TD`, Archy YAML, Readiness).
+ * via the 2-stage pipeline (Level 1 Neutral Migration Graph -> Level 2 Archy YAML & Mermaid).
  */
 export function translateAvayaWorkspaceToGenesys(
   input: ScriptWorkspace | ScriptModule[],
@@ -3169,7 +3324,6 @@ export function translateAvayaWorkspaceToGenesys(
     }
   }
 
-  // Count incoming calls across workspace so >= 3 triggers Call Common Module
   const incomingCallCountByKey = new Map<string, number>();
   for (const node of auditReport.nodes) {
     for (const edge of node.edges) {
@@ -3189,15 +3343,37 @@ export function translateAvayaWorkspaceToGenesys(
     brokenByScriptKey.set(bl.sourceScriptKey, set);
   }
 
+  // Pass 1 (Ebene 1): Build Neutral Migration Graph for every script
+  const builtByKey = new Map<string, { node: ParsedScriptNode; built: BuildMigrationGraphResult }>();
+  const allGraphsByKey = new Map<string, MigrationFlowGraph>();
+
+  for (const node of auditReport.nodes) {
+    const built = buildMigrationFlowGraph(
+      node,
+      moduleByKey.get(node.scriptKey),
+      {
+        knownKeyLookup,
+        incomingCallCountByKey,
+        brokenTargetKeysForScript: brokenByScriptKey.get(node.scriptKey) || new Set<string>(),
+      },
+      '1.4.7'
+    );
+    builtByKey.set(node.scriptKey, { node, built });
+    allGraphsByKey.set(node.scriptKey, built.graph);
+  }
+
+  // Pass 2 (Ebene 2): Hydrate real Reusable Subscript Task bodies & render Archy YAML + Mermaid
   const scripts: GenesysScriptTranslation[] = [];
   const scriptsByKey: Record<string, GenesysScriptTranslation> = {};
 
-  for (const node of auditReport.nodes) {
-    const translated = translateSingleModule(node, moduleByKey.get(node.scriptKey), {
-      knownKeyLookup,
-      incomingCallCountByKey,
-      brokenTargetKeysForScript: brokenByScriptKey.get(node.scriptKey) || new Set<string>(),
-    });
+  for (const { node, built } of builtByKey.values()) {
+    hydrateLocalSubscriptTasks(built.graph, built.localSubscriptRefs, allGraphsByKey);
+    const translated = finalizeScriptTranslation(
+      node,
+      built,
+      incomingCallCountByKey.get(node.scriptKey) || 0,
+      (brokenByScriptKey.get(node.scriptKey) || new Set<string>()).size
+    );
     scripts.push(translated);
     scriptsByKey[translated.scriptKey] = translated;
   }
@@ -3209,7 +3385,7 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.4.6',
+    schemaVersion: '1.4.7',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     overallReadiness,
@@ -3227,6 +3403,8 @@ export function translateAvayaWorkspaceToGenesys(
       brokenLinks: auditReport.summary.brokenLinkCount,
       yamlValidScriptCount: scripts.filter((s) => s.yamlValidation.isValid).length,
       yamlErrorCount: scripts.reduce((acc, s) => acc + s.yamlValidation.errors.length, 0),
+      totalPrunedDeadPaths: scripts.reduce((acc, s) => acc + s.metrics.prunedDeadPathCount, 0),
+      totalNormalizedTargets: scripts.reduce((acc, s) => acc + s.metrics.normalizedTargetCount, 0),
     },
     scripts,
     scriptsByKey,
@@ -3239,25 +3417,27 @@ export function translateAvayaWorkspaceToGenesys(
 }
 
 /**
- * Packages all generated Genesys Archy YAML files plus a Readiness README.md into a
- * 100% in-memory ZIP Blob (`genesys-archy-flows.zip`) using JSZip.
+ * Packages all generated Genesys Archy YAML files, Level-1 Neutral Migration Graphs (JSON),
+ * overview Mermaid diagram, and Readiness README.md into a 100% in-memory ZIP Blob.
  */
 export async function exportAllArchyYamlsZipBlob(
   translation: GenesysWorkspaceTranslation
 ): Promise<Blob> {
   const zip = new JSZip();
   const flowsFolder = zip.folder('archy-flows') || zip;
+  const graphsFolder = zip.folder('migration-graphs') || zip;
   const usedNames = new Set<string>();
 
   for (const script of translation.scripts) {
-    let fname = script.archyFilename;
+    let baseName = script.cleanName;
     let counter = 2;
-    while (usedNames.has(fname.toLowerCase())) {
-      fname = `${script.cleanName}_${counter}.yaml`;
+    while (usedNames.has(baseName.toLowerCase())) {
+      baseName = `${script.cleanName}_${counter}`;
       counter += 1;
     }
-    usedNames.add(fname.toLowerCase());
-    flowsFolder.file(fname, script.archyYaml);
+    usedNames.add(baseName.toLowerCase());
+    flowsFolder.file(`${baseName}.yaml`, script.archyYaml);
+    graphsFolder.file(`${baseName}.graph.json`, JSON.stringify(script.migrationGraph, null, 2));
   }
 
   const readmeLines: string[] = [
@@ -3267,11 +3447,13 @@ export async function exportAllArchyYamlsZipBlob(
     `- **Gesamt-Komplexität (Readiness):** ${translation.overallReadiness}`,
     `- **Skripte gesamt:** ${translation.summary.totalScripts} (LOW: ${translation.summary.lowCount} · MEDIUM: ${translation.summary.mediumCount} · HIGH: ${translation.summary.highCount})`,
     `- **Common Module Kandidaten (>= 3 Aufrufe):** ${translation.summary.commonModuleCount}`,
+    `- **Bereinigte Dead Paths (nach terminalen Aktionen):** ${translation.summary.totalPrunedDeadPaths}`,
+    `- **Normalisierte Rufnummern-/CDN-Ziele:** ${translation.summary.totalNormalizedTargets}`,
     `- **Warnungen:** ${translation.summary.totalWarnings} (Rückwärts-GOTO: ${translation.summary.backwardGotoScripts} · Multi-Skillset: ${translation.summary.multiSkillsetScripts} · Broken Links: ${translation.summary.brokenLinks})`,
     `- **Archy-YAML-Validierung:** ${translation.summary.yamlValidScriptCount}/${translation.summary.totalScripts} valide (${translation.summary.yamlErrorCount} Schema-Fehler)`,
     '',
-    '| Avaya Datei | Archy YAML | Readiness | YAML-Status | Warnungen | Gründe |',
-    '| --- | --- | --- | --- | ---: | --- |',
+    '| Avaya Datei | Archy YAML | Migrations-Graph (IR) | Readiness | YAML-Status | Branches | Dead Paths | Gründe |',
+    '| --- | --- | --- | --- | --- | ---: | ---: | --- |',
   ];
 
   for (const s of translation.scripts) {
@@ -3279,7 +3461,7 @@ export async function exportAllArchyYamlsZipBlob(
       ? 'Valide'
       : `${s.yamlValidation.errors.length} Fehler`;
     readmeLines.push(
-      `| \`${s.fileName}\` | \`archy-flows/${s.archyFilename}\` | **${s.readiness}** | ${yamlBadge} | ${s.warnings.length} | ${s.readinessReasons.join('; ')} |`
+      `| \`${s.fileName}\` | \`archy-flows/${s.archyFilename}\` | \`migration-graphs/${s.cleanName}.graph.json\` | **${s.readiness}** | ${yamlBadge} | ${s.migrationGraph.diagnostics.branchNodeCount} | ${s.metrics.prunedDeadPathCount} | ${s.readinessReasons.join('; ')} |`
     );
   }
 

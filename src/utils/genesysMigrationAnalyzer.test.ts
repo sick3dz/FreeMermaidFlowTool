@@ -59,23 +59,25 @@ SECTION Start
     expect(script.yamlValidation.isValid).toBe(true);
     expect(script.yamlValidation.errors).toHaveLength(0);
 
-    // Archy YAML strict schema check
+    // Archy YAML strict schema check (clean unscoped declaration name, terminal pruning after transferToAcd)
     expect(script.archyYaml).toContain('inboundCall:');
     expect(script.archyYaml).toContain('defaultLanguage: de-de');
     expect(script.archyYaml).toContain('startUpRef: "/inboundCall/tasks/task[Main_Task]"');
-    expect(script.archyYaml).toContain('name: Flow.avayaOriginScript');
+    expect(script.archyYaml).toContain('name: avayaOriginScript');
+    expect(script.archyYaml).not.toContain('name: Flow.avayaOriginScript');
     expect(script.archyYaml).toContain('playAudio:');
     expect(script.archyYaml).toContain('Prompt.S_1001');
     expect(script.archyYaml).toContain('transferToAcd:');
     expect(script.archyYaml).toContain('targetQueue:');
     expect(script.archyYaml).toContain('Sales_DE');
-    expect(script.archyYaml).toContain('disconnect:');
+    // Unreachable DISCONNECT after terminal transferToAcd is cleanly pruned
+    expect(script.metrics.prunedDeadPathCount).toBe(1);
+    expect(script.archyYaml).not.toContain('- disconnect:');
 
     // Genesys Mermaid flowchart TD check
     expect(script.genesysMermaid).toMatch(/^flowchart TD/);
     expect(script.genesysMermaid).toContain('Play Audio');
     expect(script.genesysMermaid).toContain('ACD Queue: Sales_DE');
-    expect(script.genesysMermaid).toContain('Disconnect');
     expect(script.genesysMermaid).toContain('classDef ');
   });
 
@@ -210,8 +212,9 @@ SECTION Check_Api
     expect(script.archyYaml).toContain('updateData:');
     expect(script.archyYaml).toContain('Flow.GV_Region');
     expect(script.archyYaml).toContain('Task.LV_Retry');
-    expect(script.archyYaml).toContain('transferToNumber:');
-    expect(script.archyYaml).toContain('4711');
+    // Short internal Avaya CDN 4711 is normalized to ACD Queue target CDN_4711 (not raw PSTN transferToNumber)
+    expect(script.archyYaml).toContain('transferToAcd:');
+    expect(script.archyYaml).toContain('CDN_4711');
 
     expect(script.genesysMermaid).toContain('Data Action: Oracle');
     expect(script.genesysMermaid).toContain('Data Action: FlixCheck');
@@ -287,7 +290,7 @@ SECTION Routing_And_Control
     // Block 5: Emergency & Data Table Lookup
     expect(script.actions.some((a) => a.isEmergencyCheck)).toBe(true);
     expect(script.actions.some((a) => a.kind === 'callDataTableLookup')).toBe(true);
-    expect(script.archyYaml).toContain('Flow.emergencyOverride == \\"true\\"');
+    expect(script.archyYaml).toContain('Flow.emergencyOverride == true');
     expect(script.archyYaml).toContain('callDataTableLookup:');
     expect(script.warnings.some((w) => w.code === 'EMERGENCY_GROUP_REQUIRED')).toBe(true);
 
@@ -329,6 +332,7 @@ SECTION Routing_And_Control
     const loadedZip = await JSZip.loadAsync(arrayBuf);
     const fileNames = Object.keys(loadedZip.files);
     expect(fileNames.some((n) => n.endsWith('.yaml'))).toBe(true);
+    expect(fileNames.some((n) => n.startsWith('migration-graphs/') && n.endsWith('.graph.json'))).toBe(true);
     expect(fileNames).toContain('genesys-overview.mmd');
     expect(fileNames).toContain('README.md');
   });
@@ -646,6 +650,181 @@ SECTION Start
       )
     ).toBe(false);
   });
+
+  it('v2 Level-1 Graph -> Level-2 Renderer: real branching expressions, terminal dead-path pruning, clean Flow/Task variable scoping, E.164 vs CDN normalization, populated schedule/input/dataAction branches, hydrated subtasks, and unique action names', () => {
+    const mainMod = makeModule(
+      'Schaden_Service_RHLD',
+      `
+SECTION Start
+  IF DAY OF WEEK = MONDAY..FRIDAY AND TIME OF DAY = 08:00..18:00 THEN
+    IF CDN = 7401 THEN
+      EXECUTE Menu
+      IF NOT FLIXCHECK_KFZ_Schaden_RHLD THEN
+        TRANSFER TO 002218277279035
+        TRANSFER TO 2510
+        EXECUTE MobilNummerEingeben
+      ELSE
+        EXECUTE MobilNummerEingeben
+        SEND REQUEST FlixCheck_Schaden
+        QUEUE TO SKILLSET Schaden_KFZ
+      END IF
+    ELSE
+      GIVE CDN 2510
+    END IF
+  ELSE
+    GIVE RAN 9001
+    DISCONNECT
+    DISCONNECT
+    IF COUNTER >= 3 THEN
+      GIVE RAN 9999
+    END IF
+  END IF
+`
+    );
+
+    const menuMod = makeModule(
+      'Menu',
+      `
+SECTION Menu_Main
+  GIVE RAN 3010
+  COLLECT 1 DIGITS INTO LV_Choice
+  WHERE LV_Choice EQUALS
+    VALUE "1":
+      QUEUE TO SKILLSET KFZ_Team
+    VALUE "2":
+      QUEUE TO SKILLSET Sach_Team
+    DEFAULT:
+      DISCONNECT
+  END WHERE
+`
+    );
+
+    const mobileMod = makeModule(
+      'MobilNummerEingeben',
+      `
+SECTION Mobile_Entry
+  GIVE RAN 3020
+  COLLECT DIGITS INTO LV_MobileNr
+  IF LV_MobileNr <> "" THEN
+    SET CV_Mobilnummer = "OK"
+  ELSE
+    DISCONNECT
+  END IF
+`
+    );
+
+    const ws = buildScriptWorkspace([mainMod, menuMod, mobileMod]);
+    const res = translateAvayaWorkspaceToGenesys(ws);
+    const main = res.scriptsByKey['schaden_service_rhld'];
+
+    expect(main).toBeDefined();
+    expect(main.yamlValidation.isValid).toBe(true);
+    expect(main.yamlValidation.errors).toHaveLength(0);
+
+    // 1. ZERO dummy Flow.avayaCondition == "true" placeholders!
+    expect(main.archyYaml).not.toContain('Flow.avayaCondition');
+    // Real Architect expressions compiled from Avaya OCL
+    expect(main.archyYaml).toContain('Call.Dnis == \\"7401\\"');
+    expect(main.archyYaml).toContain('!Flow.FLIXCHECK_KFZ_Schaden_RHLD');
+
+    // 2. Schedule Group has populated open, closed, holiday branches (never empty actions: [])
+    expect(main.archyYaml).toContain('evaluateScheduleGroup:');
+    expect(main.archyYaml).not.toMatch(/open:\s*\n\s*actions: \[\]/);
+    expect(main.archyYaml).not.toMatch(/closed:\s*\n\s*actions: \[\]/);
+    expect(main.archyYaml).not.toMatch(/holiday:\s*\n\s*actions: \[\]/);
+
+    // 3. Terminal cutoff & dead-path pruning:
+    //    - After TRANSFER TO 002218277279035 -> trailing TRANSFER TO 2510 & EXECUTE MobilNummerEingeben pruned
+    //    - After first DISCONNECT in ELSE -> second DISCONNECT & trailing IF COUNTER >= 3 pruned
+    expect(main.metrics.prunedDeadPathCount).toBeGreaterThanOrEqual(3);
+    expect(main.archyYaml).not.toContain('Prompt.S_9999');
+
+    // 4. Target normalization:
+    //    - 002218277279035 -> canonical E.164 "+2218277279035" in transferToNumber
+    //    - 2510 -> internal ACD Queue "CDN_2510" in transferToAcd (NOT raw PSTN transferToNumber)
+    expect(main.archyYaml).toContain('lit: "+2218277279035"');
+    expect(main.archyYaml).not.toContain('lit: "002218277279035"');
+    expect(main.archyYaml).toContain('name: "CDN_2510"');
+    expect(main.archyYaml).not.toContain('lit: "2510"');
+
+    // 5. Clean Variable Scoping (Flow vs Task separated; NO Flow./Task. in declaration names)
+    expect(main.archyYaml).toContain('name: avayaOriginScript');
+    expect(main.archyYaml).toContain('name: FLIXCHECK_KFZ_Schaden_RHLD');
+    expect(main.archyYaml).not.toMatch(/^\s+name:\s+(?:Flow|Task)\./m);
+    // Task variables (LV_Choice, LV_MobileNr) live inside their respective tasks, NOT in inboundCall.variables
+    const inboundVarsSection = main.archyYaml.split('  tasks:')[0];
+    expect(inboundVarsSection).not.toContain('LV_Choice');
+    expect(inboundVarsSection).not.toContain('LV_MobileNr');
+    expect(inboundVarsSection).not.toContain('collectedDigits');
+
+    // 6. Data Action has full inputs, successOutputs, and success/failure/timeout branches
+    expect(main.archyYaml).toContain('category: "FlixCheck_API"');
+    expect(main.archyYaml).toContain('inputs:');
+    expect(main.archyYaml).toContain('successOutputs:');
+    expect(main.archyYaml).toContain('timeout:');
+
+    // 7. Hydrated Reusable Tasks (Menu & MobilNummerEingeben contain REAL translated logic, not dummy stubs!)
+    expect(main.archyYaml).not.toContain('Subtask Placeholder');
+    expect(main.archyYaml).toContain('refId: Menu');
+    expect(main.archyYaml).toContain('refId: MobilNummerEingeben');
+    expect(main.archyYaml).toContain('numberOfDigits:');
+    expect(main.archyYaml).toContain('noEntryTimeout:');
+    expect(main.archyYaml).toContain('terminatingCharacter:');
+    expect(main.archyYaml).toContain('KFZ_Team');
+    expect(main.archyYaml).toContain('Sach_Team');
+
+    // 8. Unique action names (0 DUPLICATE_ACTION_NAME warnings!)
+    expect(main.yamlValidation.warnings.some((w) => w.code === 'DUPLICATE_ACTION_NAME')).toBe(false);
+    expect(main.yamlValidation.warnings.some((w) => w.code === 'PLACEHOLDER_CONDITION')).toBe(false);
+    expect(main.yamlValidation.warnings.some((w) => w.code === 'EMPTY_DECISION_BRANCHES')).toBe(false);
+
+    // 9. Graph-based Genesys Mermaid has real branch labels
+    expect(main.genesysMermaid).toContain('|"Offen"|');
+    expect(main.genesysMermaid).toContain('|"Geschlossen"|');
+    expect(main.genesysMermaid).toContain('|"Feiertag"|');
+    expect(main.genesysMermaid).toContain('|"Ja"|');
+    expect(main.genesysMermaid).toContain('|"Nein"|');
+  });
+
+  it('recursive validator catches unreachable actions after terminal, scope prefixes in declarations, duplicate action names, and placeholder conditions inside nested branches', () => {
+    const badNestedYaml = [
+      'inboundCall:',
+      '  name: Bad_Nested_Flow',
+      '  defaultLanguage: de-de',
+      '  startUpRef: "/inboundCall/tasks/task[Main_Task]"',
+      '  variables:',
+      '    - stringVariable:',
+      '        name: Task.wrongScopeInFlow',
+      '        initialValue:',
+      '          lit: ""',
+      '  tasks:',
+      '    - task:',
+      '        name: Main_Task',
+      '        refId: Main_Task',
+      '        actions:',
+      '          - decision:',
+      '              name: "Dummy Check"',
+      '              condition:',
+      '                exp: "Flow.avayaCondition == \\"true\\""',
+      '              outputs:',
+      '                yes:',
+      '                  actions:',
+      '                    - disconnect:',
+      '                        name: "Disconnect Call"',
+      '                    - disconnect:',
+      '                        name: "Disconnect Call"',
+      '                no:',
+      '                  actions: []',
+    ].join('\n');
+
+    const res = validateArchyYaml(badNestedYaml);
+    expect(res.isValid).toBe(false);
+    expect(res.errors.some((e) => e.code === 'INVALID_VARIABLE_SCOPE')).toBe(true);
+    expect(res.errors.some((e) => e.code === 'UNREACHABLE_AFTER_TERMINAL')).toBe(true);
+    expect(res.warnings.some((w) => w.code === 'DUPLICATE_ACTION_NAME')).toBe(true);
+    expect(res.warnings.some((w) => w.code === 'PLACEHOLDER_CONDITION')).toBe(true);
+  });
 });
+
 
 
