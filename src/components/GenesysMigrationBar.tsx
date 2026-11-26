@@ -1,20 +1,26 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
   Check,
+  CheckCircle2,
   Code2,
   Copy,
   Download,
   FileCode2,
   Layers,
+  Pencil,
+  RotateCcw,
   X,
+  XCircle,
 } from 'lucide-react';
 import {
+  ArchyYamlValidationIssue,
   GenesysReadinessLevel,
   GenesysScriptTranslation,
   GenesysWorkspaceTranslation,
   exportAllArchyYamlsZipBlob,
+  validateArchyYaml,
 } from '../utils/genesysMigrationAnalyzer';
 
 interface GenesysMigrationBarProps {
@@ -22,6 +28,11 @@ interface GenesysMigrationBarProps {
   activeScript?: GenesysScriptTranslation | null;
   isMasterView: boolean;
   onSelectDetailScript?: (scriptNumber: string) => void;
+}
+
+interface ScopedValidationIssue extends ArchyYamlValidationIssue {
+  fileName: string;
+  scriptNumber: string;
 }
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -55,6 +66,9 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
 }) => {
   const [showYamlPreview, setShowYamlPreview] = useState(false);
   const [showWarnings, setShowWarnings] = useState(false);
+  const [showValidationPanel, setShowValidationPanel] = useState(false);
+  const [isEditingYaml, setIsEditingYaml] = useState(false);
+  const [customYamlText, setCustomYamlText] = useState('');
   const [copiedYaml, setCopiedYaml] = useState(false);
   const [isExportingZip, setIsExportingZip] = useState(false);
 
@@ -66,6 +80,16 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
       null
     );
   }, [activeScript, translation.scripts]);
+
+  useEffect(() => {
+    setCustomYamlText(effectiveScript?.archyYaml || '');
+    setIsEditingYaml(false);
+  }, [effectiveScript?.scriptKey, effectiveScript?.archyYaml]);
+
+  const liveEditorValidation = useMemo(() => {
+    if (!isEditingYaml || !effectiveScript) return null;
+    return validateArchyYaml(customYamlText);
+  }, [isEditingYaml, customYamlText, effectiveScript]);
 
   const displayedReadiness: GenesysReadinessLevel = isMasterView
     ? translation.overallReadiness
@@ -88,9 +112,87 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
     );
   }, [isMasterView, effectiveScript, translation.scripts]);
 
+  const displayedValidation = useMemo(() => {
+    if (isEditingYaml && effectiveScript && liveEditorValidation) {
+      const errors: ScopedValidationIssue[] = liveEditorValidation.errors.map((e) => ({
+        ...e,
+        fileName: effectiveScript.archyFilename,
+        scriptNumber: effectiveScript.scriptNumber,
+      }));
+      const warnings: ScopedValidationIssue[] = liveEditorValidation.warnings.map((w) => ({
+        ...w,
+        fileName: effectiveScript.archyFilename,
+        scriptNumber: effectiveScript.scriptNumber,
+      }));
+      return {
+        isValid: liveEditorValidation.isValid,
+        errorCount: errors.length,
+        warningCount: warnings.length,
+        validScriptCount: liveEditorValidation.isValid ? 1 : 0,
+        totalScriptCount: 1,
+        stats: liveEditorValidation.stats,
+        errors,
+        warnings,
+        isCustomEdited: true,
+      };
+    }
+
+    if (!isMasterView && effectiveScript) {
+      const v = effectiveScript.yamlValidation;
+      return {
+        isValid: v.isValid,
+        errorCount: v.errors.length,
+        warningCount: v.warnings.length,
+        validScriptCount: v.isValid ? 1 : 0,
+        totalScriptCount: 1,
+        stats: v.stats,
+        errors: v.errors.map((e) => ({
+          ...e,
+          fileName: effectiveScript.archyFilename,
+          scriptNumber: effectiveScript.scriptNumber,
+        })),
+        warnings: v.warnings.map((w) => ({
+          ...w,
+          fileName: effectiveScript.archyFilename,
+          scriptNumber: effectiveScript.scriptNumber,
+        })),
+        isCustomEdited: false,
+      };
+    }
+
+    const errors: ScopedValidationIssue[] = translation.scripts.flatMap((s) =>
+      s.yamlValidation.errors.map((e) => ({
+        ...e,
+        fileName: s.archyFilename,
+        scriptNumber: s.scriptNumber,
+      }))
+    );
+    const warnings: ScopedValidationIssue[] = translation.scripts.flatMap((s) =>
+      s.yamlValidation.warnings.map((w) => ({
+        ...w,
+        fileName: s.archyFilename,
+        scriptNumber: s.scriptNumber,
+      }))
+    );
+    return {
+      isValid: errors.length === 0,
+      errorCount: errors.length,
+      warningCount: warnings.length,
+      validScriptCount: translation.summary.yamlValidScriptCount,
+      totalScriptCount: translation.summary.totalScripts,
+      stats: null,
+      errors,
+      warnings,
+      isCustomEdited: false,
+    };
+  }, [isEditingYaml, liveEditorValidation, isMasterView, effectiveScript, translation]);
+
+  const activeYamlContent =
+    isEditingYaml && effectiveScript ? customYamlText : effectiveScript?.archyYaml || '';
+
   const handleDownloadSingleYaml = () => {
     if (!effectiveScript) return;
-    const blob = new Blob([effectiveScript.archyYaml], {
+    const blob = new Blob([activeYamlContent], {
       type: 'application/x-yaml;charset=utf-8',
     });
     downloadBlob(blob, effectiveScript.archyFilename);
@@ -110,12 +212,17 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
   const handleCopyYaml = async () => {
     if (!effectiveScript) return;
     try {
-      await navigator.clipboard.writeText(effectiveScript.archyYaml);
+      await navigator.clipboard.writeText(activeYamlContent);
       setCopiedYaml(true);
       setTimeout(() => setCopiedYaml(false), 2000);
     } catch {
       // Ignore if clipboard blocked
     }
+  };
+
+  const handleResetCustomYaml = () => {
+    if (!effectiveScript) return;
+    setCustomYamlText(effectiveScript.archyYaml);
   };
 
   if (translation.scripts.length === 0) {
@@ -128,11 +235,21 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
     );
   }
 
+  const validationBadgeLabel = displayedValidation.isValid
+    ? isMasterView && !displayedValidation.isCustomEdited
+      ? `YAML valide (${displayedValidation.validScriptCount}/${displayedValidation.totalScriptCount})`
+      : displayedValidation.warningCount > 0
+      ? `YAML valide · ${displayedValidation.warningCount} ${
+          displayedValidation.warningCount === 1 ? 'Hinweis' : 'Hinweise'
+        }`
+      : 'YAML valide'
+    : `${displayedValidation.errorCount} YAML-Fehler`;
+
   return (
     <div className="border-b border-orange-500/35 bg-slate-950/95 shrink-0">
       {/* Compact Primary Bar */}
       <div className="px-3 py-2 flex flex-wrap items-center justify-between gap-2">
-        {/* Left: Active Mode + Readiness Badge + Summary */}
+        {/* Left: Active Mode + Readiness Badge + Live YAML Validation Badge + Warnings */}
         <div className="flex flex-wrap items-center gap-2 min-w-0">
           <span className="px-2 py-0.5 rounded bg-orange-600/25 border border-orange-500/50 text-orange-200 text-[11px] font-semibold whitespace-nowrap flex items-center gap-1">
             <Layers className="w-3.5 h-3.5 text-orange-400 shrink-0" />
@@ -156,14 +273,40 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             Readiness: {displayedReadiness}
           </span>
 
+          <button
+            type="button"
+            onClick={() => setShowValidationPanel((v) => !v)}
+            title={
+              displayedValidation.isValid
+                ? 'Archy-YAML Vollprüfung bestanden (Schema-Keys, Einrückung, RefIds & Variablen) — klicken für Details'
+                : `${displayedValidation.errorCount} Archy-YAML Schema-Fehler gefunden — klicken für Fehlerdetails (Export bleibt möglich)`
+            }
+            className={`px-2 py-0.5 rounded border text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap tabular-nums ${
+              displayedValidation.isValid
+                ? showValidationPanel
+                  ? 'bg-emerald-500/30 border-emerald-400 text-emerald-100'
+                  : 'bg-emerald-500/15 border-emerald-500/45 text-emerald-200 hover:bg-emerald-500/25'
+                : showValidationPanel
+                ? 'bg-rose-500/35 border-rose-400 text-rose-100'
+                : 'bg-rose-500/20 border-rose-500/55 text-rose-200 hover:bg-rose-500/30'
+            }`}
+          >
+            {displayedValidation.isValid ? (
+              <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+            ) : (
+              <XCircle className="w-3 h-3 text-rose-400 shrink-0" />
+            )}
+            <span>{validationBadgeLabel}</span>
+          </button>
+
           {isMasterView ? (
-            <span className="text-[11px] font-mono text-slate-400 tabular-nums hidden md:inline">
+            <span className="text-[11px] font-mono text-slate-400 tabular-nums hidden xl:inline">
               LOW {translation.summary.lowCount} · MED {translation.summary.mediumCount} · HIGH{' '}
               {translation.summary.highCount} · Common Modules:{' '}
               {translation.summary.commonModuleCount}
             </span>
           ) : effectiveScript ? (
-            <span className="text-[11px] text-slate-400 truncate max-w-[320px] hidden lg:inline">
+            <span className="text-[11px] text-slate-400 truncate max-w-[260px] hidden xl:inline">
               {effectiveScript.readinessReasons.join(' · ')}
             </span>
           ) : null}
@@ -187,7 +330,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
           )}
         </div>
 
-        {/* Right: Archy YAML Preview & Downloads */}
+        {/* Right: Archy YAML Preview & Downloads (Export remains always enabled) */}
         <div className="flex flex-wrap items-center gap-1.5 shrink-0">
           <button
             type="button"
@@ -206,11 +349,18 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             <button
               type="button"
               onClick={handleDownloadSingleYaml}
-              title={`Einzelnes Genesys Archy YAML (${effectiveScript.archyFilename}) aus dem RAM herunterladen`}
+              title={
+                displayedValidation.isValid
+                  ? `Einzelnes Genesys Archy YAML (${effectiveScript.archyFilename}) aus dem RAM herunterladen`
+                  : `Hinweis: Enthält ${displayedValidation.errorCount} Schema-Fehler — Export bleibt trotzdem möglich`
+              }
               className="px-2.5 py-1 rounded-md bg-orange-600 hover:bg-orange-500 text-white text-[11px] font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
             >
               <Download className="w-3.5 h-3.5 shrink-0" />
               <span>{effectiveScript.archyFilename}</span>
+              {!displayedValidation.isValid && (
+                <AlertTriangle className="w-3 h-3 text-amber-200 shrink-0" />
+              )}
             </button>
           )}
 
@@ -218,7 +368,11 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             type="button"
             onClick={handleDownloadZipAll}
             disabled={isExportingZip}
-            title="Alle generierten Archy-YAML-Dateien + Readiness-Übersicht als ZIP aus dem RAM herunterladen"
+            title={
+              translation.summary.yamlErrorCount === 0
+                ? 'Alle generierten Archy-YAML-Dateien + Readiness-Übersicht als ZIP aus dem RAM herunterladen'
+                : `Hinweis: ${translation.summary.yamlErrorCount} Schema-Fehler im Workspace — ZIP-Export bleibt trotzdem möglich`
+            }
             className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-[11px] font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60"
           >
             <Archive className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
@@ -230,6 +384,104 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Expandable Archy YAML Validation Panel */}
+      {showValidationPanel && (
+        <div className="px-3 py-2 border-t border-slate-800 bg-slate-900/95 max-h-52 overflow-y-auto space-y-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-wide pb-0.5">
+            <div className="flex items-center gap-2">
+              <span className={displayedValidation.isValid ? 'text-emerald-300' : 'text-rose-300'}>
+                Archy-YAML Vollprüfung ({displayedValidation.errorCount} Fehler ·{' '}
+                {displayedValidation.warningCount} Hinweise)
+              </span>
+              {displayedValidation.stats && (
+                <span className="font-mono text-slate-400 normal-case font-normal">
+                  {displayedValidation.stats.lineCount} Zeilen · {displayedValidation.stats.taskCount}{' '}
+                  Tasks · {displayedValidation.stats.actionCount} Actions ·{' '}
+                  {displayedValidation.stats.variableCount} Variablen
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowValidationPanel(false)}
+              className="text-slate-400 hover:text-slate-200 cursor-pointer"
+              aria-label="Validierungsdetails schließen"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {displayedValidation.errors.length === 0 && displayedValidation.warnings.length === 0 && (
+            <div className="flex items-center gap-2 text-[11px] bg-emerald-950/40 border border-emerald-500/35 rounded px-2.5 py-1.5 text-emerald-200">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>
+                Alle Schema-Keys, 2-Space-Einrückungen, RefIds und Variablen-Scopes entsprechen dem verbindlichen Genesys Archy YAML-Schema.
+              </span>
+            </div>
+          )}
+
+          {displayedValidation.errors.map((err, idx) => (
+            <div
+              key={`err-${err.fileName}-${err.code}-${err.lineNumber}-${idx}`}
+              className="flex items-start justify-between gap-2 text-[11px] bg-rose-950/35 border border-rose-500/35 rounded px-2.5 py-1.5"
+            >
+              <div className="min-w-0 space-y-0.5">
+                <div>
+                  <span className="font-mono text-rose-300 font-semibold mr-1.5">
+                    {err.fileName} · Zeile {err.lineNumber} [{err.code}]
+                  </span>
+                  <span className="text-slate-100">{err.message}</span>
+                </div>
+                {err.suggestion && (
+                  <div className="text-[10.5px] text-rose-200/80">
+                    Empfehlung: {err.suggestion}
+                  </div>
+                )}
+              </div>
+              {isMasterView && !displayedValidation.isCustomEdited && onSelectDetailScript && (
+                <button
+                  type="button"
+                  onClick={() => onSelectDetailScript(err.scriptNumber)}
+                  className="text-[10.5px] font-semibold text-cyan-300 hover:text-cyan-200 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Flow öffnen →
+                </button>
+              )}
+            </div>
+          ))}
+
+          {displayedValidation.warnings.map((warn, idx) => (
+            <div
+              key={`warn-${warn.fileName}-${warn.code}-${warn.lineNumber}-${idx}`}
+              className="flex items-start justify-between gap-2 text-[11px] bg-amber-950/30 border border-amber-500/30 rounded px-2.5 py-1.5"
+            >
+              <div className="min-w-0 space-y-0.5">
+                <div>
+                  <span className="font-mono text-amber-300 font-semibold mr-1.5">
+                    {warn.fileName} · Zeile {warn.lineNumber} [{warn.code}]
+                  </span>
+                  <span className="text-slate-200">{warn.message}</span>
+                </div>
+                {warn.suggestion && (
+                  <div className="text-[10.5px] text-amber-200/80">
+                    Hinweis: {warn.suggestion}
+                  </div>
+                )}
+              </div>
+              {isMasterView && !displayedValidation.isCustomEdited && onSelectDetailScript && (
+                <button
+                  type="button"
+                  onClick={() => onSelectDetailScript(warn.scriptNumber)}
+                  className="text-[10.5px] font-semibold text-cyan-300 hover:text-cyan-200 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  Flow öffnen →
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Expandable Warnings Drawer */}
       {showWarnings && displayedWarnings.length > 0 && (
@@ -268,19 +520,46 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
         </div>
       )}
 
-      {/* Expandable Archy YAML Drawer */}
+      {/* Expandable Archy YAML Drawer with Interactive Live-Validator */}
       {showYamlPreview && effectiveScript && (
         <div className="px-3 py-2.5 border-t border-slate-800 bg-slate-950 space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-[11px] font-mono text-slate-300">
+            <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-slate-300">
               <FileCode2 className="w-3.5 h-3.5 text-orange-400 shrink-0" />
               <span>{effectiveScript.archyFilename}</span>
               <span className="text-slate-500">·</span>
               <span className="text-slate-400">
                 Quelle: {effectiveScript.fileName} ({effectiveScript.metrics.actionCount} Actions)
               </span>
+              {isEditingYaml && (
+                <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 text-[10px] font-sans font-semibold">
+                  Live-Prüfmodus aktiv
+                </span>
+              )}
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setIsEditingYaml((v) => !v)}
+                className={`px-2 py-1 rounded border text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors ${
+                  isEditingYaml
+                    ? 'bg-cyan-600/25 border-cyan-400/60 text-cyan-100'
+                    : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200'
+                }`}
+              >
+                <Pencil className="w-3 h-3" />
+                <span>{isEditingYaml ? 'Vorschau-Modus' : 'Live-Prüfen / Bearbeiten'}</span>
+              </button>
+              {isEditingYaml && customYamlText !== effectiveScript.archyYaml && (
+                <button
+                  type="button"
+                  onClick={handleResetCustomYaml}
+                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Zurücksetzen</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handleCopyYaml}
@@ -303,9 +582,87 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
               </button>
             </div>
           </div>
-          <pre className="text-[11px] font-mono text-slate-200 bg-slate-900/90 border border-slate-800 rounded-lg p-3 max-h-60 overflow-auto whitespace-pre leading-relaxed select-text">
-            {effectiveScript.archyYaml}
-          </pre>
+
+          {isEditingYaml ? (
+            <div className="space-y-2">
+              <textarea
+                value={customYamlText}
+                onChange={(e) => setCustomYamlText(e.target.value)}
+                spellCheck={false}
+                aria-label="Archy YAML Live-Editor"
+                className="w-full h-56 text-[11px] font-mono text-slate-100 bg-slate-900 border border-cyan-500/40 focus:border-cyan-400 focus:outline-none rounded-lg p-3 leading-relaxed resize-y"
+              />
+              {liveEditorValidation && (
+                <div
+                  className={`rounded-lg border p-2.5 text-[11px] space-y-1.5 ${
+                    liveEditorValidation.isValid
+                      ? 'bg-emerald-950/30 border-emerald-500/35 text-emerald-200'
+                      : 'bg-rose-950/35 border-rose-500/40 text-rose-100'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2 font-semibold">
+                    <span className="flex items-center gap-1.5">
+                      {liveEditorValidation.isValid ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      ) : (
+                        <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                      )}
+                      <span>
+                        {liveEditorValidation.isValid
+                          ? `Live-Validierung bestanden (${liveEditorValidation.stats.taskCount} Tasks · ${liveEditorValidation.stats.actionCount} Actions · ${liveEditorValidation.stats.variableCount} Variablen)`
+                          : `${liveEditorValidation.errors.length} Schema-Fehler erkannt (Export bleibt möglich)`}
+                      </span>
+                    </span>
+                    {liveEditorValidation.warnings.length > 0 && (
+                      <span className="text-amber-300 font-mono text-[10.5px]">
+                        {liveEditorValidation.warnings.length}{' '}
+                        {liveEditorValidation.warnings.length === 1 ? 'Hinweis' : 'Hinweise'}
+                      </span>
+                    )}
+                  </div>
+                  {liveEditorValidation.errors.length > 0 && (
+                    <div className="space-y-1 max-h-32 overflow-y-auto pt-1">
+                      {liveEditorValidation.errors.map((err, idx) => (
+                        <div
+                          key={`live-err-${err.code}-${err.lineNumber}-${idx}`}
+                          className="bg-slate-950/60 border border-rose-500/25 rounded px-2 py-1"
+                        >
+                          <span className="font-mono text-rose-300 font-semibold mr-1.5">
+                            Zeile {err.lineNumber} [{err.code}]:
+                          </span>
+                          <span className="text-slate-100">{err.message}</span>
+                          {err.suggestion && (
+                            <span className="block text-[10.5px] text-rose-200/80 mt-0.5">
+                              Empfehlung: {err.suggestion}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {liveEditorValidation.warnings.length > 0 && (
+                    <div className="space-y-1 max-h-24 overflow-y-auto pt-0.5">
+                      {liveEditorValidation.warnings.map((warn, idx) => (
+                        <div
+                          key={`live-warn-${warn.code}-${warn.lineNumber}-${idx}`}
+                          className="bg-slate-950/60 border border-amber-500/25 rounded px-2 py-1 text-amber-100"
+                        >
+                          <span className="font-mono text-amber-300 font-semibold mr-1.5">
+                            Zeile {warn.lineNumber} [{warn.code}]:
+                          </span>
+                          <span>{warn.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <pre className="text-[11px] font-mono text-slate-200 bg-slate-900/90 border border-slate-800 rounded-lg p-3 max-h-60 overflow-auto whitespace-pre leading-relaxed select-text">
+              {effectiveScript.archyYaml}
+            </pre>
+          )}
         </div>
       )}
     </div>

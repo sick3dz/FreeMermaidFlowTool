@@ -45,7 +45,37 @@ export type GenesysActionKind =
   | 'updateData'
   | 'transferToAcd'
   | 'transferToNumber'
-  | 'disconnect';
+  | 'disconnect'
+  | 'evaluateScheduleGroup'
+  | 'playHoldMusic'
+  | 'delay'
+  | 'setPriority'
+  | 'createCallback'
+  | 'transferToVoicemail'
+  | 'setLanguage'
+  | 'callDataTableLookup'
+  | 'setUuiData';
+
+export interface ArchyYamlValidationIssue {
+  lineNumber: number;
+  code: string;
+  severity: 'error' | 'warning';
+  field?: string;
+  message: string;
+  suggestion?: string;
+}
+
+export interface ArchyYamlValidationResult {
+  isValid: boolean;
+  errors: ArchyYamlValidationIssue[];
+  warnings: ArchyYamlValidationIssue[];
+  stats: {
+    lineCount: number;
+    taskCount: number;
+    actionCount: number;
+    variableCount: number;
+  };
+}
 
 export interface GenesysVariableDecl {
   originalName: string;
@@ -62,11 +92,20 @@ export interface GenesysMappedAction {
   lineNumber: number;
   target?: string;
   targetSlug?: string;
-  dataActionCategory?: 'Oracle_Integration' | 'FlixCheck_API';
+  dataActionCategory?:
+    | 'Oracle_Integration'
+    | 'FlixCheck_API'
+    | 'Genesys_Cloud_Data_Actions';
   skills?: string[];
   isMultiSkillset?: boolean;
   isBackwardGoto?: boolean;
   maxLoopCount?: number;
+  priorityValue?: number;
+  delaySeconds?: number;
+  languageCode?: string;
+  expressionValue?: string;
+  dataTableKey?: string;
+  isEmergencyCheck?: boolean;
   variableName?: string;
   archyVariableName?: string;
   conditionLabel?: string;
@@ -80,7 +119,11 @@ export interface GenesysScriptWarning {
     | 'BACKWARD_GOTO_LOOP'
     | 'MULTI_SKILLSET_BULLSEYE'
     | 'BROKEN_LINK'
-    | 'HIGH_EXTERNAL_API_COUNT';
+    | 'HIGH_EXTERNAL_API_COUNT'
+    | 'IN_QUEUE_FLOW_REQUIRED'
+    | 'QUEUE_OBSERVATIONS_API'
+    | 'EMERGENCY_GROUP_REQUIRED'
+    | 'ARCHY_YAML_VALIDATION_ERROR';
   severity: 'warning' | 'blocker';
   message: string;
   lineNumber?: number;
@@ -116,6 +159,7 @@ export interface GenesysScriptTranslation {
   localReusableTasks: Array<{ name: string; refId: string; originalTarget: string }>;
   warnings: GenesysScriptWarning[];
   archyYaml: string;
+  yamlValidation: ArchyYamlValidationResult;
   genesysMermaid: string;
 }
 
@@ -136,6 +180,8 @@ export interface GenesysWorkspaceTranslation {
     oracleCalls: number;
     flixcheckCalls: number;
     brokenLinks: number;
+    yamlValidScriptCount: number;
+    yamlErrorCount: number;
   };
   scripts: GenesysScriptTranslation[];
   scriptsByKey: Record<string, GenesysScriptTranslation>;
@@ -332,7 +378,15 @@ export function generateArchyYaml(script: GenesysScriptTranslation): string {
   const hasCollectInput = script.actions.some(
     (a) => a.kind === 'collectInput' || a.kind === 'menu'
   );
-  const hasDecision = script.actions.some((a) => a.kind === 'decision' || a.kind === 'switch');
+  const hasDecision = script.actions.some(
+    (a) => (a.kind === 'decision' && !a.isEmergencyCheck) || a.kind === 'switch'
+  );
+  const hasEmergency = script.actions.some((a) => a.isEmergencyCheck);
+  const hasCallerAni = script.actions.some((a) => a.archyVariableName === 'Flow.callerAni');
+  const hasDialedDnis = script.actions.some((a) => a.archyVariableName === 'Flow.dialedDnis');
+  const hasEstimatedWaitTime = script.actions.some(
+    (a) => a.archyVariableName === 'Flow.estimatedWaitTime'
+  );
 
   if (hasCollectInput) {
     lines.push('    - stringVariable:');
@@ -348,10 +402,42 @@ export function generateArchyYaml(script: GenesysScriptTranslation): string {
     lines.push('          lit: "true"');
   }
 
+  if (hasEmergency) {
+    lines.push('    - stringVariable:');
+    lines.push('        name: Flow.emergencyOverride');
+    lines.push('        initialValue:');
+    lines.push('          lit: "false"');
+  }
+
+  if (hasCallerAni) {
+    lines.push('    - stringVariable:');
+    lines.push('        name: Flow.callerAni');
+    lines.push('        initialValue:');
+    lines.push('          lit: ""');
+  }
+
+  if (hasDialedDnis) {
+    lines.push('    - stringVariable:');
+    lines.push('        name: Flow.dialedDnis');
+    lines.push('        initialValue:');
+    lines.push('          lit: ""');
+  }
+
+  if (hasEstimatedWaitTime) {
+    lines.push('    - stringVariable:');
+    lines.push('        name: Flow.estimatedWaitTime');
+    lines.push('        initialValue:');
+    lines.push('          lit: ""');
+  }
+
   const emittedVarNames = new Set<string>([
     'Flow.avayaOriginScript',
     'Task.collectedDigits',
     'Flow.avayaCondition',
+    'Flow.emergencyOverride',
+    'Flow.callerAni',
+    'Flow.dialedDnis',
+    'Flow.estimatedWaitTime',
   ]);
 
   for (const v of script.variables) {
@@ -417,7 +503,11 @@ export function generateArchyYaml(script: GenesysScriptTranslation): string {
           const category = action.dataActionCategory || 'Oracle_Integration';
           const targetSlug = toArchySlug(action.target || category, 'ExternalAction');
           const prefixLabel =
-            category === 'FlixCheck_API' ? 'FlixCheck' : 'Oracle';
+            category === 'FlixCheck_API'
+              ? 'FlixCheck'
+              : category === 'Genesys_Cloud_Data_Actions'
+              ? 'QueueObs'
+              : 'Oracle';
           lines.push('          - callDataAction:');
           lines.push(
             `              name: "${prefixLabel} ${escapeYamlString(targetSlug)}"`
@@ -448,10 +538,13 @@ export function generateArchyYaml(script: GenesysScriptTranslation): string {
           const condName = escapeYamlString(
             action.conditionLabel || action.target || 'Branch'
           );
+          const condExp = action.isEmergencyCheck
+            ? 'Flow.emergencyOverride == \\"true\\"'
+            : 'Flow.avayaCondition == \\"true\\"';
           lines.push('          - decision:');
           lines.push(`              name: "Check ${condName}"`);
           lines.push('              condition:');
-          lines.push('                exp: "Flow.avayaCondition == \\"true\\""');
+          lines.push(`                exp: "${condExp}"`);
           lines.push('              outputs:');
           lines.push('                yes:');
           lines.push('                  actions: []');
@@ -510,7 +603,11 @@ export function generateArchyYaml(script: GenesysScriptTranslation): string {
           lines.push('                - string:');
           lines.push(`                    variable: ${escapeYamlString(varName)}`);
           lines.push('                    value:');
-          lines.push('                      lit: ""');
+          if (action.expressionValue) {
+            lines.push(`                      exp: "${escapeYamlString(action.expressionValue)}"`);
+          } else {
+            lines.push('                      lit: ""');
+          }
           break;
         }
         case 'transferToAcd': {
@@ -542,7 +639,109 @@ export function generateArchyYaml(script: GenesysScriptTranslation): string {
         }
         case 'disconnect': {
           lines.push('          - disconnect:');
-          lines.push('              name: "Disconnect Call"');
+          lines.push(
+            `              name: "${escapeYamlString(action.target ? `Disconnect (${action.target})` : 'Disconnect Call')}"`
+          );
+          break;
+        }
+        case 'evaluateScheduleGroup': {
+          const sgSlug = toArchySlug(action.target || 'Default_ScheduleGroup', 'Default_ScheduleGroup');
+          lines.push('          - evaluateScheduleGroup:');
+          lines.push(`              name: "Evaluate ${escapeYamlString(sgSlug)}"`);
+          lines.push('              scheduleGroup:');
+          lines.push('                lit:');
+          lines.push(`                  name: "${escapeYamlString(sgSlug)}"`);
+          lines.push('              outputs:');
+          lines.push('                open:');
+          lines.push('                  actions: []');
+          lines.push('                closed:');
+          lines.push('                  actions: []');
+          lines.push('                holiday:');
+          lines.push('                  actions: []');
+          break;
+        }
+        case 'playHoldMusic': {
+          const musicSlug = toArchySlug(action.target || 'Hold_Music', 'Hold_Music');
+          lines.push('          - playHoldMusic:');
+          lines.push(`              name: "Play Hold Music ${escapeYamlString(musicSlug)}"`);
+          lines.push('              audio:');
+          lines.push(
+            `                tts: "Platzhalter Wartemusik ${escapeYamlString(musicSlug)}"`
+          );
+          break;
+        }
+        case 'delay': {
+          const secs = Math.max(1, Math.round(action.delaySeconds || 10));
+          lines.push('          - delay:');
+          lines.push(`              name: "Wait ${secs}s"`);
+          lines.push('              seconds:');
+          lines.push(`                lit: ${secs}`);
+          break;
+        }
+        case 'setPriority': {
+          const prio = Number.isFinite(action.priorityValue) ? Math.round(action.priorityValue!) : 50;
+          lines.push('          - setPriority:');
+          lines.push(`              name: "Set Priority ${prio}"`);
+          lines.push('              priority:');
+          lines.push(`                lit: ${prio}`);
+          break;
+        }
+        case 'createCallback': {
+          const cbQueue = toArchySlug(action.target || 'Callback_Queue', 'Callback_Queue');
+          lines.push('          - createCallback:');
+          lines.push(`              name: "Offer Callback ${escapeYamlString(cbQueue)}"`);
+          lines.push('              queue:');
+          lines.push('                lit:');
+          lines.push(`                  name: "${escapeYamlString(cbQueue)}"`);
+          lines.push('              callbackNumber:');
+          lines.push('                exp: "Call.Ani"');
+          lines.push('              outputs:');
+          lines.push('                success:');
+          lines.push('                  actions: []');
+          lines.push('                failure:');
+          lines.push('                  actions: []');
+          break;
+        }
+        case 'transferToVoicemail': {
+          const vmQueue = toArchySlug(action.target || 'Voicemail_Queue', 'Voicemail_Queue');
+          lines.push('          - transferToVoicemail:');
+          lines.push(`              name: "Transfer to Voicemail ${escapeYamlString(vmQueue)}"`);
+          lines.push('              targetQueue:');
+          lines.push('                lit:');
+          lines.push(`                  name: "${escapeYamlString(vmQueue)}"`);
+          break;
+        }
+        case 'setLanguage': {
+          const langCode = escapeYamlString(action.languageCode || 'de-de');
+          lines.push('          - setLanguage:');
+          lines.push(`              name: "Set Language ${langCode}"`);
+          lines.push('              language:');
+          lines.push(`                lit: "${langCode}"`);
+          break;
+        }
+        case 'callDataTableLookup': {
+          const dtSlug = toArchySlug(action.target || 'Routing_DataTable', 'Routing_DataTable');
+          const keyExp = escapeYamlString(action.dataTableKey || 'Call.Dnis');
+          lines.push('          - callDataTableLookup:');
+          lines.push(`              name: "Lookup ${escapeYamlString(dtSlug)}"`);
+          lines.push('              dataTable:');
+          lines.push('                lit:');
+          lines.push(`                  name: "${escapeYamlString(dtSlug)}"`);
+          lines.push('              lookupKey:');
+          lines.push(`                exp: "${keyExp}"`);
+          lines.push('              outputs:');
+          lines.push('                found:');
+          lines.push('                  actions: []');
+          lines.push('                notFound:');
+          lines.push('                  actions: []');
+          break;
+        }
+        case 'setUuiData': {
+          const uuiExp = escapeYamlString(action.expressionValue || 'Call.UserToUserInformation');
+          lines.push('          - setUuiData:');
+          lines.push(`              name: "Set UUI ${escapeYamlString(action.target || 'SIP_UUI')}"`);
+          lines.push('              uuiData:');
+          lines.push(`                exp: "${uuiExp}"`);
           break;
         }
       }
@@ -566,6 +765,903 @@ export function generateArchyYaml(script: GenesysScriptTranslation): string {
   }
 
   return lines.join('\n');
+}
+
+// ============================================================================
+// STRICT ARCHY YAML SCHEMA VALIDATOR (100 % Offline & In-Memory)
+// ============================================================================
+
+const ARCHY_INBOUND_ALLOWED_KEYS = new Set<string>([
+  'name',
+  'description',
+  'division',
+  'defaultLanguage',
+  'supportedLanguages',
+  'startUpRef',
+  'variables',
+  'tasks',
+]);
+
+const ARCHY_VARIABLE_TYPES = new Set<string>([
+  'stringVariable',
+  'integerVariable',
+  'booleanVariable',
+]);
+
+const ARCHY_TASK_ALLOWED_KEYS = new Set<string>(['name', 'refId', 'actions']);
+
+interface ArchyActionRule {
+  required: string[];
+  allowed: Set<string>;
+}
+
+const ARCHY_ACTION_SCHEMA: Record<string, ArchyActionRule> = {
+  playAudio: {
+    required: ['name', 'audio'],
+    allowed: new Set(['name', 'audio', 'outputs']),
+  },
+  collectInput: {
+    required: ['name', 'inputAudio', 'inputData'],
+    allowed: new Set(['name', 'inputAudio', 'inputData', 'outputs']),
+  },
+  menu: {
+    required: ['name', 'audio'],
+    allowed: new Set(['name', 'audio', 'choices', 'outputs']),
+  },
+  callDataAction: {
+    required: ['name', 'dataAction'],
+    allowed: new Set(['name', 'dataAction', 'inputs', 'outputs']),
+  },
+  callCommonModule: {
+    required: ['name', 'commonModule'],
+    allowed: new Set(['name', 'commonModule', 'inputs', 'outputs']),
+  },
+  callTask: {
+    required: ['name', 'targetTaskRef'],
+    allowed: new Set(['name', 'targetTaskRef']),
+  },
+  decision: {
+    required: ['name', 'condition', 'outputs'],
+    allowed: new Set(['name', 'condition', 'outputs']),
+  },
+  switch: {
+    required: ['name', 'default'],
+    allowed: new Set(['name', 'cases', 'default']),
+  },
+  loop: {
+    required: ['name', 'maxLoopCount', 'actions'],
+    allowed: new Set(['name', 'maxLoopCount', 'currentIndexDataName', 'actions']),
+  },
+  setParticipantData: {
+    required: ['name', 'attributes'],
+    allowed: new Set(['name', 'attributes']),
+  },
+  getParticipantData: {
+    required: ['name', 'attributes'],
+    allowed: new Set(['name', 'attributes']),
+  },
+  updateData: {
+    required: ['name', 'statements'],
+    allowed: new Set(['name', 'statements']),
+  },
+  transferToAcd: {
+    required: ['name', 'targetQueue'],
+    allowed: new Set(['name', 'targetQueue', 'priority', 'skills', 'languageSkill', 'outputs']),
+  },
+  transferToNumber: {
+    required: ['name', 'targetNumber'],
+    allowed: new Set(['name', 'targetNumber', 'outputs']),
+  },
+  disconnect: {
+    required: ['name'],
+    allowed: new Set(['name']),
+  },
+  evaluateScheduleGroup: {
+    required: ['name', 'scheduleGroup', 'outputs'],
+    allowed: new Set(['name', 'scheduleGroup', 'outputs']),
+  },
+  playHoldMusic: {
+    required: ['name', 'audio'],
+    allowed: new Set(['name', 'audio']),
+  },
+  delay: {
+    required: ['name', 'seconds'],
+    allowed: new Set(['name', 'seconds']),
+  },
+  setPriority: {
+    required: ['name', 'priority'],
+    allowed: new Set(['name', 'priority']),
+  },
+  createCallback: {
+    required: ['name', 'queue', 'callbackNumber'],
+    allowed: new Set(['name', 'queue', 'callbackNumber', 'callbackName', 'outputs']),
+  },
+  transferToVoicemail: {
+    required: ['name'],
+    allowed: new Set(['name', 'targetQueue', 'targetUser', 'outputs']),
+  },
+  setLanguage: {
+    required: ['name', 'language'],
+    allowed: new Set(['name', 'language']),
+  },
+  callDataTableLookup: {
+    required: ['name', 'dataTable', 'lookupKey'],
+    allowed: new Set(['name', 'dataTable', 'lookupKey', 'outputs']),
+  },
+  setUuiData: {
+    required: ['name', 'uuiData'],
+    allowed: new Set(['name', 'uuiData']),
+  },
+};
+
+interface ParsedYamlLine {
+  lineNumber: number;
+  indent: number;
+  isListItem: boolean;
+  key: string | null;
+  rawValue: string;
+  unquotedValue: string;
+  rawLine: string;
+}
+
+function hasUnclosedQuote(str: string): boolean {
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < str.length; i += 1) {
+    const ch = str[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"' && i + 1 < str.length) {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '#' && (i === 0 || /\s/.test(str[i - 1]))) {
+      break;
+    }
+  }
+  return quote !== null;
+}
+
+function stripInlineYamlComment(val: string): string {
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < val.length; i += 1) {
+    const ch = val[i];
+    if (quote) {
+      if (ch === '\\' && quote === '"' && i + 1 < val.length) {
+        i += 1;
+        continue;
+      }
+      if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === '#' && (i === 0 || /\s/.test(val[i - 1]))) {
+      return val.slice(0, i).trim();
+    }
+  }
+  return val.trim();
+}
+
+function unquoteYamlScalar(raw: string): string {
+  const cleaned = stripInlineYamlComment(raw);
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"') && cleaned.length >= 2) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'") && cleaned.length >= 2)
+  ) {
+    return cleaned.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+  return cleaned;
+}
+
+function collectIndentedBlock(lines: ParsedYamlLine[], parentIndex: number): ParsedYamlLine[] {
+  const parent = lines[parentIndex];
+  const block: ParsedYamlLine[] = [];
+  for (let i = parentIndex + 1; i < lines.length; i += 1) {
+    if (lines[i].indent <= parent.indent) break;
+    block.push(lines[i]);
+  }
+  return block;
+}
+
+/**
+ * Full offline schema, indentation, RefId and variable-scope validator for Genesys Cloud Archy YAML.
+ * Returns structured UI-ready errors and warnings with exact 1-based line numbers.
+ */
+export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResult {
+  const errors: ArchyYamlValidationIssue[] = [];
+  const warnings: ArchyYamlValidationIssue[] = [];
+
+  const rawText = typeof yamlContent === 'string' ? yamlContent : '';
+  const rawLines = rawText.split(/\r?\n/);
+
+  if (!rawText.trim()) {
+    errors.push({
+      lineNumber: 1,
+      code: 'EMPTY_YAML',
+      severity: 'error',
+      message: 'Das Archy YAML ist leer.',
+      suggestion: 'Erzeuge ein Flow-YAML mit Root-Block "inboundCall:".',
+    });
+    return {
+      isValid: false,
+      errors,
+      warnings,
+      stats: { lineCount: 0, taskCount: 0, actionCount: 0, variableCount: 0 },
+    };
+  }
+
+  // Pass 1: Lexical, Indentation & Quote Checks
+  const parsed: ParsedYamlLine[] = [];
+  for (let i = 0; i < rawLines.length; i += 1) {
+    const lineNumber = i + 1;
+    const rawLine = rawLines[i];
+    if (!rawLine.trim() || /^\s*#/.test(rawLine)) continue;
+
+    const leadingWsMatch = rawLine.match(/^([ \t]*)/);
+    const leadingWs = leadingWsMatch ? leadingWsMatch[1] : '';
+    if (leadingWs.includes('\t')) {
+      errors.push({
+        lineNumber,
+        code: 'TAB_INDENTATION',
+        severity: 'error',
+        message: `Zeile ${lineNumber}: Tabulator-Einrückung ist in Archy YAML nicht erlaubt.`,
+        suggestion: 'Ersetze Tabs durch exakt 2 Leerzeichen pro Ebene.',
+      });
+    }
+
+    const indent = leadingWs.replace(/\t/g, '  ').length;
+    if (indent % 2 !== 0) {
+      errors.push({
+        lineNumber,
+        code: 'ODD_INDENTATION',
+        severity: 'error',
+        message: `Zeile ${lineNumber}: Ungerade Einrückung (${indent} Leerzeichen). Archy YAML erfordert 2-Space-Stufen.`,
+        suggestion: 'Richte die Einrückung an einer geraden Anzahl Leerzeichen (2, 4, 6, …) aus.',
+      });
+    }
+
+    const trimmed = rawLine.trim();
+    if (hasUnclosedQuote(trimmed)) {
+      errors.push({
+        lineNumber,
+        code: 'UNCLOSED_QUOTE',
+        severity: 'error',
+        message: `Zeile ${lineNumber}: Nicht geschlossenes Anführungszeichen erkannt.`,
+        suggestion: 'Schließe den String mit passendem " oder \' ab.',
+      });
+    }
+
+    const isListItem = trimmed.startsWith('- ') || trimmed === '-';
+    const body = isListItem ? trimmed.slice(1).trim() : trimmed;
+    const kvMatch = body.match(/^([A-Za-z_][A-Za-z0-9_.-]*)\s*:(?:\s*(.*))?$/);
+
+    if (!kvMatch) {
+      if (!isListItem) {
+        errors.push({
+          lineNumber,
+          code: 'INVALID_YAML_SYNTAX',
+          severity: 'error',
+          message: `Zeile ${lineNumber}: Ungültige YAML-Syntax ("${trimmed.slice(0, 48)}").`,
+          suggestion: 'Verwende gültige "key: value"-Paare oder "- item"-Listen.',
+        });
+      }
+      parsed.push({
+        lineNumber,
+        indent,
+        isListItem,
+        key: null,
+        rawValue: body,
+        unquotedValue: unquoteYamlScalar(body),
+        rawLine,
+      });
+      continue;
+    }
+
+    const key = kvMatch[1];
+    const rawValue = (kvMatch[2] || '').trim();
+    parsed.push({
+      lineNumber,
+      indent,
+      isListItem,
+      key,
+      rawValue,
+      unquotedValue: unquoteYamlScalar(rawValue),
+      rawLine,
+    });
+  }
+
+  if (parsed.length === 0) {
+    errors.push({
+      lineNumber: 1,
+      code: 'EMPTY_YAML',
+      severity: 'error',
+      message: 'Das Archy YAML enthält keine aktiven YAML-Einträge (nur Kommentare oder Leerzeilen).',
+      suggestion: 'Erzeuge ein Flow-YAML mit Root-Block "inboundCall:".',
+    });
+    return {
+      isValid: false,
+      errors,
+      warnings,
+      stats: { lineCount: rawLines.length, taskCount: 0, actionCount: 0, variableCount: 0 },
+    };
+  }
+
+  // Pass 2: Root Check (inboundCall)
+  const rootEntries = parsed.filter((p) => p.indent === 0);
+  const inboundRoot = rootEntries.find((p) => p.key === 'inboundCall');
+
+  for (const r of rootEntries) {
+    if (r.key && r.key !== 'inboundCall') {
+      errors.push({
+        lineNumber: r.lineNumber,
+        code: 'UNKNOWN_ROOT_KEY',
+        severity: 'error',
+        field: r.key,
+        message: `Zeile ${r.lineNumber}: Unbekannter Root-Key "${r.key}". Erwartet wird ausschließlich "inboundCall:".`,
+        suggestion: 'Entferne nicht-konforme Root-Keys und nutze "inboundCall:".',
+      });
+    }
+  }
+
+  if (!inboundRoot) {
+    errors.push({
+      lineNumber: parsed[0]?.lineNumber || 1,
+      code: 'MISSING_ROOT_INBOUND_CALL',
+      severity: 'error',
+      field: 'inboundCall',
+      message: 'Pflicht-Root-Knoten "inboundCall:" fehlt.',
+      suggestion: 'Beginne das Archy YAML mit "inboundCall:" auf Einrückungsebene 0.',
+    });
+    return {
+      isValid: false,
+      errors,
+      warnings,
+      stats: { lineCount: rawLines.length, taskCount: 0, actionCount: 0, variableCount: 0 },
+    };
+  }
+
+  // Pass 3: Top-Level Keys under inboundCall (indent === 2)
+  const inboundIdx = parsed.indexOf(inboundRoot);
+  const inboundBlock = collectIndentedBlock(parsed, inboundIdx);
+  const topLevelEntries = inboundBlock.filter((p) => p.indent === 2 && !p.isListItem);
+  const seenTopKeys = new Map<string, number>();
+
+  for (const entry of topLevelEntries) {
+    if (!entry.key) continue;
+    if (seenTopKeys.has(entry.key)) {
+      errors.push({
+        lineNumber: entry.lineNumber,
+        code: 'DUPLICATE_KEY',
+        severity: 'error',
+        field: entry.key,
+        message: `Zeile ${entry.lineNumber}: Doppelter Key "${entry.key}" unter inboundCall (bereits in Zeile ${seenTopKeys.get(entry.key)}).`,
+        suggestion: 'Entferne das doppelte Feld.',
+      });
+    } else {
+      seenTopKeys.set(entry.key, entry.lineNumber);
+    }
+
+    if (!ARCHY_INBOUND_ALLOWED_KEYS.has(entry.key)) {
+      errors.push({
+        lineNumber: entry.lineNumber,
+        code: 'UNKNOWN_TOP_LEVEL_KEY',
+        severity: 'error',
+        field: entry.key,
+        message: `Zeile ${entry.lineNumber}: Nicht erlaubter Archy-Key "${entry.key}" unter inboundCall.`,
+        suggestion: `Erlaubte Keys: ${Array.from(ARCHY_INBOUND_ALLOWED_KEYS).join(', ')}.`,
+      });
+    }
+  }
+
+  const requiredTopFields = ['name', 'defaultLanguage', 'startUpRef', 'tasks'];
+  for (const req of requiredTopFields) {
+    if (!seenTopKeys.has(req)) {
+      errors.push({
+        lineNumber: inboundRoot.lineNumber,
+        code: 'MISSING_REQUIRED_FIELD',
+        severity: 'error',
+        field: req,
+        message: `Pflichtfeld "inboundCall.${req}" fehlt im Archy YAML.`,
+        suggestion: `Ergänze "${req}:" direkt unter "inboundCall:".`,
+      });
+    }
+  }
+
+  const nameEntry = topLevelEntries.find((e) => e.key === 'name');
+  if (nameEntry) {
+    if (!nameEntry.unquotedValue || !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(nameEntry.unquotedValue)) {
+      errors.push({
+        lineNumber: nameEntry.lineNumber,
+        code: 'INVALID_FLOW_NAME',
+        severity: 'error',
+        field: 'inboundCall.name',
+        message: `Zeile ${nameEntry.lineNumber}: Ungültiger Flow-Name "${nameEntry.unquotedValue}" (keine Leerzeichen/Umlaute erlaubt).`,
+        suggestion: 'Verwende einen YAML-sicheren Slug wie "Main_Inbound_Flow".',
+      });
+    }
+  }
+
+  const langEntry = topLevelEntries.find((e) => e.key === 'defaultLanguage');
+  if (langEntry) {
+    if (!/^[a-z]{2}-[a-z]{2}$/i.test(langEntry.unquotedValue)) {
+      errors.push({
+        lineNumber: langEntry.lineNumber,
+        code: 'INVALID_LANGUAGE_CODE',
+        severity: 'error',
+        field: 'inboundCall.defaultLanguage',
+        message: `Zeile ${langEntry.lineNumber}: Ungültiger Sprachcode "${langEntry.unquotedValue}".`,
+        suggestion: 'Nutze einen gültigen BCP-47-Code wie "de-de" oder "en-us".',
+      });
+    }
+  }
+
+  const startUpRefEntry = topLevelEntries.find((e) => e.key === 'startUpRef');
+  let expectedStartupRefId: string | null = null;
+  if (startUpRefEntry) {
+    const refMatch = startUpRefEntry.unquotedValue.match(
+      /^\/inboundCall\/tasks\/task\[([A-Za-z_][A-Za-z0-9_.-]*)\]$/
+    );
+    if (!refMatch) {
+      errors.push({
+        lineNumber: startUpRefEntry.lineNumber,
+        code: 'INVALID_REF_SYNTAX',
+        severity: 'error',
+        field: 'inboundCall.startUpRef',
+        message: `Zeile ${startUpRefEntry.lineNumber}: Ungültige startUpRef-Syntax "${startUpRefEntry.unquotedValue}".`,
+        suggestion: 'Erwartetes Format: "/inboundCall/tasks/task[Main_Task]".',
+      });
+    } else {
+      expectedStartupRefId = refMatch[1];
+    }
+  }
+
+  // Pass 4: Variables Validation (indent 4 list items -> indent 8 properties)
+  let variableCount = 0;
+  const declaredVariables = new Set<string>();
+  const variablesEntry = topLevelEntries.find((e) => e.key === 'variables');
+  if (variablesEntry) {
+    const varSectionIdx = parsed.indexOf(variablesEntry);
+    const varBlock = collectIndentedBlock(parsed, varSectionIdx);
+    for (let i = 0; i < varBlock.length; i += 1) {
+      const item = varBlock[i];
+      if (item.indent === 4 && item.isListItem) {
+        variableCount += 1;
+        if (!item.key || !ARCHY_VARIABLE_TYPES.has(item.key)) {
+          errors.push({
+            lineNumber: item.lineNumber,
+            code: 'UNKNOWN_VARIABLE_TYPE',
+            severity: 'error',
+            field: item.key || 'variable',
+            message: `Zeile ${item.lineNumber}: Ungültiger Variablentyp "${item.key || item.rawValue}".`,
+            suggestion: 'Erlaubt sind: stringVariable, integerVariable, booleanVariable.',
+          });
+          continue;
+        }
+        const itemGlobalIdx = parsed.indexOf(item);
+        const itemChildren = collectIndentedBlock(parsed, itemGlobalIdx);
+        const directProps = itemChildren.filter((c) => c.indent === 8 && !c.isListItem);
+        const vNameProp = directProps.find((p) => p.key === 'name');
+        const vInitProp = directProps.find((p) => p.key === 'initialValue');
+
+        if (!vNameProp || !vNameProp.unquotedValue) {
+          errors.push({
+            lineNumber: item.lineNumber,
+            code: 'MISSING_VARIABLE_NAME',
+            severity: 'error',
+            field: 'variables[].name',
+            message: `Zeile ${item.lineNumber}: Variablen-Definition ohne "name:"-Feld.`,
+            suggestion: 'Vergib einen Namen mit gültigem Scope, z. B. "Flow.avayaOriginScript".',
+          });
+        } else {
+          const fullVarName = vNameProp.unquotedValue;
+          if (!/^(?:Flow|Task)\./.test(fullVarName)) {
+            errors.push({
+              lineNumber: vNameProp.lineNumber,
+              code: 'INVALID_VARIABLE_SCOPE',
+              severity: 'error',
+              field: fullVarName,
+              message: `Zeile ${vNameProp.lineNumber}: Ungültiger Variablen-Scope "${fullVarName}".`,
+              suggestion: 'Archy-Variablen müssen mit "Flow." oder "Task." beginnen.',
+            });
+          } else if (!/^(?:Flow|Task)\.[A-Za-z_][A-Za-z0-9_]*$/.test(fullVarName)) {
+            errors.push({
+              lineNumber: vNameProp.lineNumber,
+              code: 'INVALID_VARIABLE_NAME',
+              severity: 'error',
+              field: fullVarName,
+              message: `Zeile ${vNameProp.lineNumber}: Ungültiger Variablenname "${fullVarName}" (Sonderzeichen/Leerzeichen nicht erlaubt).`,
+              suggestion: 'Nutze nur Buchstaben, Ziffern und Unterstriche nach "Flow." oder "Task.".',
+            });
+          } else if (declaredVariables.has(fullVarName)) {
+            errors.push({
+              lineNumber: vNameProp.lineNumber,
+              code: 'DUPLICATE_VARIABLE',
+              severity: 'error',
+              field: fullVarName,
+              message: `Zeile ${vNameProp.lineNumber}: Variable "${fullVarName}" wurde doppelt deklariert.`,
+              suggestion: 'Entferne die doppelte Variablendeklaration.',
+            });
+          } else {
+            declaredVariables.add(fullVarName);
+          }
+        }
+
+        if (!vInitProp) {
+          errors.push({
+            lineNumber: item.lineNumber,
+            code: 'MISSING_INITIAL_VALUE',
+            severity: 'error',
+            field: 'variables[].initialValue',
+            message: `Zeile ${item.lineNumber}: Variable "${vNameProp?.unquotedValue || '?'}" fehlt "initialValue:".`,
+            suggestion: 'Ergänze "initialValue:" mit "lit:" oder "noValue: true".',
+          });
+        } else {
+          const initChildren = collectIndentedBlock(parsed, parsed.indexOf(vInitProp));
+          const hasWrapper = initChildren.some(
+            (c) => c.key === 'lit' || c.key === 'exp' || c.key === 'noValue'
+          );
+          if (!hasWrapper && !/^(?:lit|exp|noValue)\s*:/.test(vInitProp.rawValue)) {
+            errors.push({
+              lineNumber: vInitProp.lineNumber,
+              code: 'INVALID_VALUE_WRAPPER',
+              severity: 'error',
+              field: 'initialValue',
+              message: `Zeile ${vInitProp.lineNumber}: "initialValue" benötigt einen Archy-Wrapper ("lit:", "exp:" oder "noValue:").`,
+              suggestion: 'Schreibe z. B. "lit: \\"\\"" unterhalb von "initialValue:".',
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Pass 5: Tasks, RefIds & Strict Action Schema Validation
+  let taskCount = 0;
+  let actionCount = 0;
+  const declaredTaskRefIds = new Map<string, number>();
+  const referencedCallTaskRefs: Array<{ refId: string; lineNumber: number }> = [];
+
+  const tasksEntry = topLevelEntries.find((e) => e.key === 'tasks');
+  if (tasksEntry) {
+    const tasksIdx = parsed.indexOf(tasksEntry);
+    const tasksBlock = collectIndentedBlock(parsed, tasksIdx);
+    const taskItems = tasksBlock.filter((p) => p.indent === 4 && p.isListItem);
+
+    if (taskItems.length === 0) {
+      errors.push({
+        lineNumber: tasksEntry.lineNumber,
+        code: 'EMPTY_TASKS',
+        severity: 'error',
+        field: 'inboundCall.tasks',
+        message: `Zeile ${tasksEntry.lineNumber}: "tasks:" enthält keinen "- task:"-Block.`,
+        suggestion: 'Füge mindestens einen Task (z. B. Main_Task) unter "tasks:" ein.',
+      });
+    }
+
+    for (const taskItem of taskItems) {
+      if (taskItem.key !== 'task') {
+        errors.push({
+          lineNumber: taskItem.lineNumber,
+          code: 'UNKNOWN_TASK_ITEM',
+          severity: 'error',
+          field: taskItem.key || 'tasks[]',
+          message: `Zeile ${taskItem.lineNumber}: Ungültiges Element "${taskItem.key || taskItem.rawValue}" unter "tasks:". Erwartet "- task:".`,
+          suggestion: 'Verwende "- task:" für jeden Task-Eintrag.',
+        });
+        continue;
+      }
+
+      taskCount += 1;
+      const taskGlobalIdx = parsed.indexOf(taskItem);
+      const taskChildren = collectIndentedBlock(parsed, taskGlobalIdx);
+      const taskProps = taskChildren.filter((c) => c.indent === 8 && !c.isListItem);
+
+      const seenTaskKeys = new Set<string>();
+      for (const prop of taskProps) {
+        if (!prop.key) continue;
+        if (seenTaskKeys.has(prop.key)) {
+          errors.push({
+            lineNumber: prop.lineNumber,
+            code: 'DUPLICATE_KEY',
+            severity: 'error',
+            field: `task.${prop.key}`,
+            message: `Zeile ${prop.lineNumber}: Doppelter Key "${prop.key}" im Task-Block.`,
+          });
+        }
+        seenTaskKeys.add(prop.key);
+        if (!ARCHY_TASK_ALLOWED_KEYS.has(prop.key)) {
+          errors.push({
+            lineNumber: prop.lineNumber,
+            code: 'UNKNOWN_TASK_PROPERTY',
+            severity: 'error',
+            field: `task.${prop.key}`,
+            message: `Zeile ${prop.lineNumber}: Unbekanntes Task-Feld "${prop.key}".`,
+            suggestion: 'Erlaubte Task-Felder: name, refId, actions.',
+          });
+        }
+      }
+
+      const taskNameProp = taskProps.find((p) => p.key === 'name');
+      const taskRefIdProp = taskProps.find((p) => p.key === 'refId');
+      const taskActionsProp = taskProps.find((p) => p.key === 'actions');
+
+      if (!taskNameProp || !taskNameProp.unquotedValue) {
+        errors.push({
+          lineNumber: taskItem.lineNumber,
+          code: 'MISSING_TASK_FIELD',
+          severity: 'error',
+          field: 'task.name',
+          message: `Zeile ${taskItem.lineNumber}: Task fehlt das Pflichtfeld "name:".`,
+        });
+      }
+      if (!taskRefIdProp || !taskRefIdProp.unquotedValue) {
+        errors.push({
+          lineNumber: taskItem.lineNumber,
+          code: 'MISSING_TASK_FIELD',
+          severity: 'error',
+          field: 'task.refId',
+          message: `Zeile ${taskItem.lineNumber}: Task fehlt das Pflichtfeld "refId:".`,
+          suggestion: 'Ergänze eine eindeutige refId (z. B. "refId: Main_Task").',
+        });
+      } else {
+        const refIdVal = taskRefIdProp.unquotedValue;
+        if (declaredTaskRefIds.has(refIdVal)) {
+          errors.push({
+            lineNumber: taskRefIdProp.lineNumber,
+            code: 'DUPLICATE_TASK_REF_ID',
+            severity: 'error',
+            field: refIdVal,
+            message: `Zeile ${taskRefIdProp.lineNumber}: Doppelte Task-refId "${refIdVal}" (bereits in Zeile ${declaredTaskRefIds.get(refIdVal)}).`,
+            suggestion: 'Jeder Task benötigt eine eindeutige refId.',
+          });
+        } else {
+          declaredTaskRefIds.set(refIdVal, taskRefIdProp.lineNumber);
+        }
+      }
+
+      if (!taskActionsProp) {
+        errors.push({
+          lineNumber: taskItem.lineNumber,
+          code: 'MISSING_TASK_FIELD',
+          severity: 'error',
+          field: 'task.actions',
+          message: `Zeile ${taskItem.lineNumber}: Task "${taskNameProp?.unquotedValue || '?'}" fehlt der Block "actions:".`,
+        });
+        continue;
+      }
+
+      const actionsIdx = parsed.indexOf(taskActionsProp);
+      const actionsBlock = collectIndentedBlock(parsed, actionsIdx);
+      const actionItems = actionsBlock.filter((a) => a.indent === 10 && a.isListItem);
+
+      for (const actItem of actionItems) {
+        actionCount += 1;
+        const actType = actItem.key || '';
+        const schemaRule = ARCHY_ACTION_SCHEMA[actType];
+
+        if (!schemaRule) {
+          errors.push({
+            lineNumber: actItem.lineNumber,
+            code: 'UNKNOWN_ACTION_TYPE',
+            severity: 'error',
+            field: actType || actItem.rawValue,
+            message: `Zeile ${actItem.lineNumber}: Unbekannter oder nicht erlaubter Archy-Action-Key "${actType || actItem.rawValue}".`,
+            suggestion:
+              'Verwende ausschließlich offizielle Archy-Actions (z. B. playAudio, transferToAcd, callDataAction, evaluateScheduleGroup, disconnect).',
+          });
+          continue;
+        }
+
+        const actGlobalIdx = parsed.indexOf(actItem);
+        const actChildren = collectIndentedBlock(parsed, actGlobalIdx);
+        const actProps = actChildren.filter((c) => c.indent === 14 && !c.isListItem);
+        const seenActProps = new Map<string, ParsedYamlLine>();
+
+        for (const prop of actProps) {
+          if (!prop.key) continue;
+          if (seenActProps.has(prop.key)) {
+            errors.push({
+              lineNumber: prop.lineNumber,
+              code: 'DUPLICATE_KEY',
+              severity: 'error',
+              field: `${actType}.${prop.key}`,
+              message: `Zeile ${prop.lineNumber}: Doppeltes Feld "${prop.key}" in Action "${actType}".`,
+            });
+          } else {
+            seenActProps.set(prop.key, prop);
+          }
+
+          if (!schemaRule.allowed.has(prop.key)) {
+            errors.push({
+              lineNumber: prop.lineNumber,
+              code: 'UNKNOWN_ACTION_PROPERTY',
+              severity: 'error',
+              field: `${actType}.${prop.key}`,
+              message: `Zeile ${prop.lineNumber}: Nicht erlaubtes Feld "${prop.key}" in Action "${actType}".`,
+              suggestion: `Erlaubte Felder für ${actType}: ${Array.from(schemaRule.allowed).join(', ')}.`,
+            });
+          }
+        }
+
+        for (const reqProp of schemaRule.required) {
+          if (!seenActProps.has(reqProp)) {
+            errors.push({
+              lineNumber: actItem.lineNumber,
+              code: 'MISSING_ACTION_PROPERTY',
+              severity: 'error',
+              field: `${actType}.${reqProp}`,
+              message: `Zeile ${actItem.lineNumber}: Action "${actType}" fehlt das Pflichtfeld "${reqProp}:".`,
+              suggestion: `Ergänze "${reqProp}:" innerhalb von "${actType}".`,
+            });
+          }
+        }
+
+        // Action-specific semantic & sub-property validation
+        if (actType === 'callTask') {
+          const refProp = seenActProps.get('targetTaskRef');
+          if (refProp) {
+            const m = refProp.unquotedValue.match(
+              /^\/inboundCall\/tasks\/task\[([A-Za-z_][A-Za-z0-9_.-]*)\]$/
+            );
+            if (!m) {
+              errors.push({
+                lineNumber: refProp.lineNumber,
+                code: 'INVALID_REF_SYNTAX',
+                severity: 'error',
+                field: 'callTask.targetTaskRef',
+                message: `Zeile ${refProp.lineNumber}: Ungültige targetTaskRef-Syntax "${refProp.unquotedValue}".`,
+                suggestion: 'Erwartetes Format: "/inboundCall/tasks/task[<RefId>]".',
+              });
+            } else {
+              referencedCallTaskRefs.push({ refId: m[1], lineNumber: refProp.lineNumber });
+            }
+          }
+        } else if (actType === 'callDataAction') {
+          const daProp = seenActProps.get('dataAction');
+          if (daProp) {
+            const daChildren = collectIndentedBlock(parsed, parsed.indexOf(daProp));
+            const hasCat = daChildren.some((c) => c.key === 'category' && Boolean(c.unquotedValue));
+            const hasName = daChildren.some(
+              (c) => c.key === 'dataAction' && Boolean(c.unquotedValue)
+            );
+            if (!hasCat) {
+              errors.push({
+                lineNumber: daProp.lineNumber,
+                code: 'MISSING_ACTION_PROPERTY',
+                severity: 'error',
+                field: 'callDataAction.dataAction.category',
+                message: `Zeile ${daProp.lineNumber}: callDataAction fehlt "category:" (z. B. Oracle_Integration oder FlixCheck_API).`,
+              });
+            }
+            if (!hasName) {
+              errors.push({
+                lineNumber: daProp.lineNumber,
+                code: 'MISSING_ACTION_PROPERTY',
+                severity: 'error',
+                field: 'callDataAction.dataAction.dataAction',
+                message: `Zeile ${daProp.lineNumber}: callDataAction fehlt der Name unter "dataAction:".`,
+              });
+            }
+          }
+        } else if (actType === 'loop') {
+          const maxProp = seenActProps.get('maxLoopCount');
+          if (maxProp) {
+            const num = Number(maxProp.unquotedValue);
+            if (!Number.isInteger(num) || num <= 0) {
+              errors.push({
+                lineNumber: maxProp.lineNumber,
+                code: 'INVALID_ACTION_VALUE',
+                severity: 'error',
+                field: 'loop.maxLoopCount',
+                message: `Zeile ${maxProp.lineNumber}: "maxLoopCount" muss eine positive Ganzzahl > 0 sein (gefunden: "${maxProp.unquotedValue}").`,
+                suggestion: 'Setze z. B. "maxLoopCount: 5".',
+              });
+            }
+          }
+        } else if (actType === 'transferToVoicemail') {
+          if (!seenActProps.has('targetQueue') && !seenActProps.has('targetUser')) {
+            errors.push({
+              lineNumber: actItem.lineNumber,
+              code: 'MISSING_ACTION_PROPERTY',
+              severity: 'error',
+              field: 'transferToVoicemail.targetQueue',
+              message: `Zeile ${actItem.lineNumber}: transferToVoicemail benötigt entweder "targetQueue:" oder "targetUser:".`,
+            });
+          }
+        } else if (actType === 'delay') {
+          const secProp = seenActProps.get('seconds');
+          if (secProp) {
+            const secChildren = collectIndentedBlock(parsed, parsed.indexOf(secProp));
+            const litNode = secChildren.find((c) => c.key === 'lit');
+            const expNode = secChildren.find((c) => c.key === 'exp');
+            if (!litNode && !expNode) {
+              errors.push({
+                lineNumber: secProp.lineNumber,
+                code: 'INVALID_VALUE_WRAPPER',
+                severity: 'error',
+                field: 'delay.seconds',
+                message: `Zeile ${secProp.lineNumber}: "delay.seconds" benötigt "lit:" oder "exp:".`,
+              });
+            } else if (litNode && (!Number.isFinite(Number(litNode.unquotedValue)) || Number(litNode.unquotedValue) <= 0)) {
+              errors.push({
+                lineNumber: litNode.lineNumber,
+                code: 'INVALID_ACTION_VALUE',
+                severity: 'error',
+                field: 'delay.seconds.lit',
+                message: `Zeile ${litNode.lineNumber}: "delay.seconds.lit" muss eine positive Zahl > 0 sein.`,
+              });
+            }
+          }
+        } else if (actType === 'evaluateScheduleGroup') {
+          const outProp = seenActProps.get('outputs');
+          if (outProp) {
+            const outChildren = collectIndentedBlock(parsed, parsed.indexOf(outProp));
+            const hasBranch = outChildren.some(
+              (c) => c.key === 'open' || c.key === 'closed' || c.key === 'holiday'
+            );
+            if (!hasBranch) {
+              warnings.push({
+                lineNumber: outProp.lineNumber,
+                code: 'INCOMPLETE_SCHEDULE_OUTPUTS',
+                severity: 'warning',
+                field: 'evaluateScheduleGroup.outputs',
+                message: `Zeile ${outProp.lineNumber}: evaluateScheduleGroup enthält keine Ausgänge (open/closed/holiday).`,
+                suggestion: 'Definiere mindestens die Pfade "open:", "closed:" und "holiday:".',
+              });
+            }
+          }
+        } else if (actType === 'playHoldMusic') {
+          warnings.push({
+            lineNumber: actItem.lineNumber,
+            code: 'IN_QUEUE_ACTION_HINT',
+            severity: 'warning',
+            field: 'playHoldMusic',
+            message: `Zeile ${actItem.lineNumber}: playHoldMusic wird in Genesys Cloud üblicherweise in einem In-Queue Call Flow konfiguriert.`,
+          });
+        }
+      }
+    }
+  }
+
+  // Pass 6: Cross-Reference Integrity (startUpRef & callTask targetTaskRef)
+  if (expectedStartupRefId && !declaredTaskRefIds.has(expectedStartupRefId)) {
+    errors.push({
+      lineNumber: startUpRefEntry?.lineNumber || 1,
+      code: 'UNRESOLVED_STARTUP_REF',
+      severity: 'error',
+      field: 'inboundCall.startUpRef',
+      message: `Zeile ${startUpRefEntry?.lineNumber || 1}: startUpRef verweist auf nicht existierende Task-refId "${expectedStartupRefId}".`,
+      suggestion:
+        declaredTaskRefIds.size > 0
+          ? `Verfügbare Task-refIds: ${Array.from(declaredTaskRefIds.keys()).join(', ')}.`
+          : 'Lege einen Task mit dieser refId unter "tasks:" an.',
+    });
+  }
+
+  for (const ref of referencedCallTaskRefs) {
+    if (!declaredTaskRefIds.has(ref.refId)) {
+      errors.push({
+        lineNumber: ref.lineNumber,
+        code: 'UNRESOLVED_TASK_REF',
+        severity: 'error',
+        field: 'callTask.targetTaskRef',
+        message: `Zeile ${ref.lineNumber}: callTask verweist auf unbekannte lokale Task-refId "${ref.refId}".`,
+        suggestion: `Definiere einen Task mit "refId: ${ref.refId}" unter "tasks:" oder nutze "callCommonModule:".`,
+      });
+    }
+  }
+
+  return {
+    isValid: errors.length === 0,
+    errors,
+    warnings,
+    stats: {
+      lineCount: rawLines.length,
+      taskCount,
+      actionCount,
+      variableCount,
+    },
+  };
 }
 
 /**
@@ -621,6 +1717,13 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
     gcTransfer: [],
     gcDisconnect: [],
     gcBroken: [],
+    gcSchedule: [],
+    gcInQueue: [],
+    gcPriority: [],
+    gcCallback: [],
+    gcEmergency: [],
+    gcDataTable: [],
+    gcSysVar: [],
   };
 
   let prevNodeId = startId;
@@ -652,6 +1755,9 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
           if (action.dataActionCategory === 'FlixCheck_API') {
             lines.push(`  ${nodeId}["Data Action: FlixCheck (${targetClean})"]`);
             classBuckets.gcFlixcheck.push(nodeId);
+          } else if (action.dataActionCategory === 'Genesys_Cloud_Data_Actions') {
+            lines.push(`  ${nodeId}["Data Action: Queue Observations (${targetClean})"]`);
+            classBuckets.gcPriority.push(nodeId);
           } else {
             lines.push(`  ${nodeId}["Data Action: Oracle (${targetClean})"]`);
             classBuckets.gcOracle.push(nodeId);
@@ -669,10 +1775,17 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
           break;
         case 'decision':
         case 'switch':
-          lines.push(
-            `  ${nodeId}{"${action.kind === 'switch' ? 'Switch' : 'Decision'}: ${escapeMermaidLabel(action.conditionLabel || targetClean || 'Bedingung')}"}`
-          );
-          classBuckets.gcDecision.push(nodeId);
+          if (action.isEmergencyCheck) {
+            lines.push(
+              `  ${nodeId}{"Emergency Group Check: ${escapeMermaidLabel(action.conditionLabel || targetClean || 'Notfall')}"}`
+            );
+            classBuckets.gcEmergency.push(nodeId);
+          } else {
+            lines.push(
+              `  ${nodeId}{"${action.kind === 'switch' ? 'Switch' : 'Decision'}: ${escapeMermaidLabel(action.conditionLabel || targetClean || 'Bedingung')}"}`
+            );
+            classBuckets.gcDecision.push(nodeId);
+          }
           break;
         case 'loop':
           lines.push(
@@ -689,10 +1802,17 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
           classBuckets.gcData.push(nodeId);
           break;
         case 'updateData':
-          lines.push(
-            `  ${nodeId}["Update Data: ${escapeMermaidLabel(action.archyVariableName || targetClean)}"]`
-          );
-          classBuckets.gcData.push(nodeId);
+          if (action.expressionValue && /^Call\./.test(action.expressionValue)) {
+            lines.push(
+              `  ${nodeId}[/"System-Variable: ${escapeMermaidLabel(action.archyVariableName || targetClean)} = ${escapeMermaidLabel(action.expressionValue)}"/]`
+            );
+            classBuckets.gcSysVar.push(nodeId);
+          } else {
+            lines.push(
+              `  ${nodeId}["Update Data: ${escapeMermaidLabel(action.archyVariableName || targetClean)}"]`
+            );
+            classBuckets.gcData.push(nodeId);
+          }
           break;
         case 'transferToAcd':
           if (action.isMultiSkillset) {
@@ -711,8 +1831,46 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
           classBuckets.gcTransfer.push(nodeId);
           break;
         case 'disconnect':
-          lines.push(`  ${nodeId}(["Disconnect"])`);
+          lines.push(
+            `  ${nodeId}(["Disconnect${targetClean ? `: ${targetClean}` : ''}"])`
+          );
           classBuckets.gcDisconnect.push(nodeId);
+          break;
+        case 'evaluateScheduleGroup':
+          lines.push(`  ${nodeId}{{"Schedule Group: ${targetClean} (open/closed/holiday)"}}`);
+          classBuckets.gcSchedule.push(nodeId);
+          break;
+        case 'playHoldMusic':
+          lines.push(`  ${nodeId}["Hold Music (In-Queue): ${targetClean}"]`);
+          classBuckets.gcInQueue.push(nodeId);
+          break;
+        case 'delay':
+          lines.push(`  ${nodeId}["Delay (In-Queue): ${action.delaySeconds ?? 10}s"]`);
+          classBuckets.gcInQueue.push(nodeId);
+          break;
+        case 'setPriority':
+          lines.push(`  ${nodeId}["Set Priority: ${action.priorityValue ?? 50}"]`);
+          classBuckets.gcPriority.push(nodeId);
+          break;
+        case 'createCallback':
+          lines.push(`  ${nodeId}["Create Callback: ${targetClean} (Call.Ani)"]`);
+          classBuckets.gcCallback.push(nodeId);
+          break;
+        case 'transferToVoicemail':
+          lines.push(`  ${nodeId}[("Transfer to Voicemail: ${targetClean}")]`);
+          classBuckets.gcCallback.push(nodeId);
+          break;
+        case 'setLanguage':
+          lines.push(`  ${nodeId}["Set Language: ${escapeMermaidLabel(action.languageCode || 'de-de')}"]`);
+          classBuckets.gcCallback.push(nodeId);
+          break;
+        case 'callDataTableLookup':
+          lines.push(`  ${nodeId}[("Data Table Lookup: ${targetClean}")]`);
+          classBuckets.gcDataTable.push(nodeId);
+          break;
+        case 'setUuiData':
+          lines.push(`  ${nodeId}[/"Set UUI Data: ${escapeMermaidLabel(action.expressionValue || 'Call.UserToUserInformation')}"/]`);
+          classBuckets.gcSysVar.push(nodeId);
           break;
       }
 
@@ -887,6 +2045,13 @@ function appendGenesysClassDefs(
   lines.push('  classDef gcTransfer fill:#374151,stroke:#9ca3af,stroke-width:1.5px,color:#f9fafb;');
   lines.push('  classDef gcDisconnect fill:#111827,stroke:#64748b,stroke-width:1.5px,color:#cbd5e1;');
   lines.push('  classDef gcBroken fill:#7f1d1d,stroke:#f87171,stroke-width:2.5px,color:#fef2f2;');
+  lines.push('  classDef gcSchedule fill:#92400e,stroke:#fcd34d,stroke-width:2px,color:#fef3c7;');
+  lines.push('  classDef gcInQueue fill:#155e75,stroke:#67e8f9,stroke-width:1.5px,color:#cffafe;');
+  lines.push('  classDef gcPriority fill:#4c1d95,stroke:#c4b5fd,stroke-width:2px,color:#f5f3ff;');
+  lines.push('  classDef gcCallback fill:#065f46,stroke:#6ee7b7,stroke-width:2px,color:#ecfdf5;');
+  lines.push('  classDef gcEmergency fill:#991b1b,stroke:#fca5a5,stroke-width:2.5px,color:#fef2f2;');
+  lines.push('  classDef gcDataTable fill:#1e3a8a,stroke:#93c5fd,stroke-width:2px,color:#eff6ff;');
+  lines.push('  classDef gcSysVar fill:#1e293b,stroke:#38bdf8,stroke-width:1.5px,color:#e0f2fe;');
 
   for (const [cls, ids] of Object.entries(buckets)) {
     const uniq = Array.from(new Set(ids));
@@ -1111,13 +2276,121 @@ function translateSingleModule(
     const statements: string[] = [];
     for (const clause of clauses) {
       if (clause.kind === 'if-then' || clause.kind === 'else-if-then') {
-        if (clause.condition && !/\bGOTO\b/i.test(clause.action || '')) {
+        const cond = (clause.condition || '').trim();
+        let handledConditionSpecial = false;
+
+        if (cond) {
+          // Telephony Block 6 inside IF conditions: CLID / DNIS
+          if (/\b(?:CLID|CALLING[\s_]*NUMBER|CALL\.ANI)\b/i.test(cond)) {
+            pushAction({
+              kind: 'updateData',
+              avayaCommand: 'CLID / ANI',
+              genesysLabel: 'System-Variable: Flow.callerAni = Call.Ani',
+              lineNumber,
+              variableName: 'CLID',
+              archyVariableName: 'Flow.callerAni',
+              expressionValue: 'Call.Ani',
+            });
+          }
+          if (/\b(?:DNIS|DIALED[\s_]*NUMBER|CALL\.DNIS)\b/i.test(cond)) {
+            pushAction({
+              kind: 'updateData',
+              avayaCommand: 'DNIS',
+              genesysLabel: 'System-Variable: Flow.dialedDnis = Call.Dnis',
+              lineNumber,
+              variableName: 'DNIS',
+              archyVariableName: 'Flow.dialedDnis',
+              expressionValue: 'Call.Dnis',
+            });
+          }
+
+          // Telephony Block 1 inside IF conditions: Schedule & Holiday checks
+          if (
+            /\b(?:DAY\s+OF\s+WEEK|TIME\s+OF\s+DAY|DATE\s+OF\s+YEAR|SONDZEIT|HOLIDAY|FEIERTAG|OEFFNUNGSZEIT|OPEN[\s_]*HOURS)\b/i.test(
+              cond
+            )
+          ) {
+            const sgName = `${toArchySlug(node.scriptNumber || 'Default')}_ScheduleGroup`;
+            pushAction({
+              kind: 'evaluateScheduleGroup',
+              avayaCommand: 'TIME / DAY OF WEEK / HOLIDAY',
+              genesysLabel: `Schedule Group: ${sgName}`,
+              lineNumber,
+              target: sgName,
+              targetSlug: sgName,
+            });
+            handledConditionSpecial = true;
+          }
+
+          // Telephony Block 5 inside IF conditions: Emergency / Night Service
+          if (/\b(?:EMERGENCY|NIGHT\s+SERVICE|OUT\s+OF\s+SERVICE|NOTFALL|STOERUNG)\b/i.test(cond)) {
+            warnings.push({
+              code: 'EMERGENCY_GROUP_REQUIRED',
+              severity: 'warning',
+              message: `Notfall-/Night-Service-Logik in Zeile ${lineNumber}: In Genesys Cloud über zentrale Emergency Group oder Data Table steuern.`,
+              lineNumber,
+            });
+            pushAction({
+              kind: 'decision',
+              avayaCommand: 'EMERGENCY / NIGHT SERVICE',
+              genesysLabel: 'Emergency Group Check',
+              lineNumber,
+              target: 'Emergency_Group',
+              conditionLabel: 'Emergency_Override',
+              isEmergencyCheck: true,
+            });
+            handledConditionSpecial = true;
+          }
+
+          // Telephony Block 3 inside IF conditions: EWT & Logged Agents
+          if (/\b(?:EXPECTED\s+WAIT\s+TIME|EWT)\b/i.test(cond)) {
+            warnings.push({
+              code: 'IN_QUEUE_FLOW_REQUIRED',
+              severity: 'warning',
+              message: `Expected Wait Time (EWT) in Zeile ${lineNumber}: In Genesys Cloud über Call.EstimatedWaitTime (Ansage im In-Queue Flow) abbilden.`,
+              lineNumber,
+            });
+            pushAction({
+              kind: 'updateData',
+              avayaCommand: 'EXPECTED WAIT TIME',
+              genesysLabel: 'System-Variable: Flow.estimatedWaitTime = Call.EstimatedWaitTime',
+              lineNumber,
+              variableName: 'EWT',
+              archyVariableName: 'Flow.estimatedWaitTime',
+              expressionValue: 'Call.EstimatedWaitTime',
+            });
+          }
+
+          if (
+            /\b(?:LOGGED\s+AGENTS|AGENTS\s+TOTAL|AVAILABLE\s+AGENTS|STAFFED\s+AGENTS|QUEUE\s+AGENTS)\b/i.test(
+              cond
+            )
+          ) {
+            warnings.push({
+              code: 'QUEUE_OBSERVATIONS_API',
+              severity: 'warning',
+              message: `Agenten-Verfügbarkeitsprüfung (LOGGED AGENTS) in Zeile ${lineNumber}: In Genesys Cloud über Data Action (Get Queue Observations API) abbilden.`,
+              lineNumber,
+            });
+            pushAction({
+              kind: 'callDataAction',
+              avayaCommand: 'LOGGED AGENTS',
+              genesysLabel: 'Data Action: Queue Observations (Agenten-Status)',
+              lineNumber,
+              target: 'Get_Queue_Observations',
+              targetSlug: 'Get_Queue_Observations',
+              dataActionCategory: 'Genesys_Cloud_Data_Actions',
+            });
+          }
+        }
+
+        if (!handledConditionSpecial && cond && !/\bGOTO\b/i.test(clause.action || '')) {
           pushAction({
             kind: 'decision',
             avayaCommand: 'IF ... THEN',
-            genesysLabel: `Decision: ${clause.condition.slice(0, 48)}`,
+            genesysLabel: `Decision: ${cond.slice(0, 48)}`,
             lineNumber,
-            conditionLabel: clause.condition.slice(0, 48),
+            conditionLabel: cond.slice(0, 48),
           });
         }
       }
@@ -1183,9 +2456,279 @@ function translateSingleModule(
         continue;
       }
 
-      // 2. GIVE RAN / PLAY PROMPT -> Play Audio
+      // 1b. Telephony Block 6: System Variables (CLID/ANI, DNIS, UUI/SIP Header)
+      if (/\b(?:CLID|CALLING[\s_]*NUMBER|CALL\.ANI)\b/i.test(stmt)) {
+        pushAction({
+          kind: 'updateData',
+          avayaCommand: 'CLID / ANI',
+          genesysLabel: 'System-Variable: Flow.callerAni = Call.Ani',
+          lineNumber,
+          variableName: 'CLID',
+          archyVariableName: 'Flow.callerAni',
+          expressionValue: 'Call.Ani',
+        });
+      }
+      if (/\b(?:DNIS|DIALED[\s_]*NUMBER|CALL\.DNIS)\b/i.test(stmt)) {
+        pushAction({
+          kind: 'updateData',
+          avayaCommand: 'DNIS',
+          genesysLabel: 'System-Variable: Flow.dialedDnis = Call.Dnis',
+          lineNumber,
+          variableName: 'DNIS',
+          archyVariableName: 'Flow.dialedDnis',
+          expressionValue: 'Call.Dnis',
+        });
+      }
+      if (/\b(?:SET\s+UUI|SEND\s+UUI|UUI[\s_]*DATA|SIP[\s_]*HEADER|ATTACHED[\s_]*DATA)\b/i.test(stmt)) {
+        pushAction({
+          kind: 'setUuiData',
+          avayaCommand: 'UUI / SIP HEADER',
+          genesysLabel: 'Set UUI Data (Call.UserToUserInformation)',
+          lineNumber,
+          target: 'SIP_UUI',
+          expressionValue: 'Call.UserToUserInformation',
+        });
+      }
+
+      // 1c. Telephony Block 1: Schedule & Holiday checks (DAY OF WEEK, TIME OF DAY, SondZeit, HOLIDAY)
+      if (
+        /\b(?:DAY\s+OF\s+WEEK|TIME\s+OF\s+DAY|DATE\s+OF\s+YEAR|SONDZEIT|HOLIDAY|FEIERTAG|OEFFNUNGSZEIT|OPEN[\s_]*HOURS)\b/i.test(
+          stmt
+        ) &&
+        !/\b(?:EXECUTE|CALL\s+SCRIPT|SUBSCRIPT)\b/i.test(stmt)
+      ) {
+        const sgName = `${toArchySlug(node.scriptNumber || 'Default')}_ScheduleGroup`;
+        pushAction({
+          kind: 'evaluateScheduleGroup',
+          avayaCommand: 'TIME / DAY OF WEEK / HOLIDAY',
+          genesysLabel: `Schedule Group: ${sgName}`,
+          lineNumber,
+          target: sgName,
+          targetSlug: sgName,
+        });
+      }
+
+      // 1d. Telephony Block 5: Emergency / Night Service & Data Table Lookup
+      if (/\b(?:EMERGENCY|NIGHT\s+SERVICE|OUT\s+OF\s+SERVICE|NOTFALL|STOERUNG)\b/i.test(stmt)) {
+        warnings.push({
+          code: 'EMERGENCY_GROUP_REQUIRED',
+          severity: 'warning',
+          message: `Notfall-/Night-Service-Logik in Zeile ${lineNumber}: In Genesys Cloud über zentrale Emergency Group oder Data Table steuern.`,
+          lineNumber,
+        });
+        pushAction({
+          kind: 'decision',
+          avayaCommand: 'EMERGENCY / NIGHT SERVICE',
+          genesysLabel: 'Emergency Group Check',
+          lineNumber,
+          target: 'Emergency_Group',
+          conditionLabel: 'Emergency_Override',
+          isEmergencyCheck: true,
+        });
+      }
+
+      const dataTableMatch = stmt.match(
+        /\b(?:LOOKUP|DATA\s+TABLE|READ\s+TABLE|ROUTING\s+TABLE)\s+(?:"([^"]+)"|'([^']+)'|([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]*))/i
+      );
+      if (dataTableMatch) {
+        const tableName = (dataTableMatch[1] || dataTableMatch[2] || dataTableMatch[3] || 'Routing_Table').trim();
+        pushAction({
+          kind: 'callDataTableLookup',
+          avayaCommand: 'DATA TABLE LOOKUP',
+          genesysLabel: `Data Table Lookup: ${tableName}`,
+          lineNumber,
+          target: tableName,
+          targetSlug: toArchySlug(tableName),
+          dataTableKey: 'Call.Dnis',
+        });
+        continue;
+      }
+
+      // 1e. Telephony Block 3: EWT, Logged Agents & Standalone Priority
+      if (/\b(?:EXPECTED\s+WAIT\s+TIME|EWT)\b/i.test(stmt)) {
+        warnings.push({
+          code: 'IN_QUEUE_FLOW_REQUIRED',
+          severity: 'warning',
+          message: `Expected Wait Time (EWT) in Zeile ${lineNumber}: In Genesys Cloud über Call.EstimatedWaitTime (Ansage im In-Queue Flow) abbilden.`,
+          lineNumber,
+        });
+        pushAction({
+          kind: 'updateData',
+          avayaCommand: 'EXPECTED WAIT TIME',
+          genesysLabel: 'System-Variable: Flow.estimatedWaitTime = Call.EstimatedWaitTime',
+          lineNumber,
+          variableName: 'EWT',
+          archyVariableName: 'Flow.estimatedWaitTime',
+          expressionValue: 'Call.EstimatedWaitTime',
+        });
+      }
+
+      if (/\b(?:LOGGED\s+AGENTS|AGENTS\s+TOTAL|AVAILABLE\s+AGENTS|STAFFED\s+AGENTS)\b/i.test(stmt)) {
+        warnings.push({
+          code: 'QUEUE_OBSERVATIONS_API',
+          severity: 'warning',
+          message: `Agenten-Abfrage (${stmt.slice(0, 42)}) in Zeile ${lineNumber}: Erfordert Genesys Platform API Data Action (GET /api/v2/routing/queues/{id}/observations).`,
+          lineNumber,
+        });
+        pushAction({
+          kind: 'callDataAction',
+          avayaCommand: 'LOGGED AGENTS',
+          genesysLabel: 'Data Action: Queue Observations (Get_Queue_Observations)',
+          lineNumber,
+          target: 'Get_Queue_Observations',
+          targetSlug: 'Get_Queue_Observations',
+          dataActionCategory: 'Genesys_Cloud_Data_Actions',
+        });
+      }
+
+      const standalonePrioMatch =
+        stmt.match(/\bASSIGN\s+(\d{1,5})\s+TO\s+PRIORITY\b/i) ||
+        stmt.match(/\bSET\s+PRIORITY\s*(?:=|:=)\s*(\d{1,5})\b/i);
+      if (standalonePrioMatch) {
+        const prioVal = Number(standalonePrioMatch[1]);
+        pushAction({
+          kind: 'setPriority',
+          avayaCommand: 'ASSIGN/SET PRIORITY',
+          genesysLabel: `Set Priority: ${prioVal}`,
+          lineNumber,
+          target: String(prioVal),
+          priorityValue: Number.isFinite(prioVal) ? prioVal : 50,
+        });
+        continue;
+      }
+
+      // 1f. Telephony Block 4: Callback, Voicemail & Set Language
+      const callbackMatch = stmt.match(
+        /\b(?:OFFER\s+CALLBACK|CREATE\s+CALLBACK|CALLBACK|RUECKRUF)\b(?:\s+(?:TO\s+)?(?:"([^"]+)"|'([^']+)'|([A-Za-zÄÖÜäöüß][A-Za-z0-9ÄÖÜäöüß_.-]*)))?/i
+      );
+      if (callbackMatch && !/\b(?:EXECUTE|CALL\s+SCRIPT|SUBSCRIPT)\b/i.test(stmt)) {
+        const cbTarget = (
+          callbackMatch[1] ||
+          callbackMatch[2] ||
+          callbackMatch[3] ||
+          `${node.scriptNumber}_Callback`
+        ).trim();
+        pushAction({
+          kind: 'createCallback',
+          avayaCommand: 'CALLBACK',
+          genesysLabel: `Create Callback: ${cbTarget}`,
+          lineNumber,
+          target: cbTarget,
+          targetSlug: toArchySlug(cbTarget),
+        });
+        continue;
+      }
+
+      const voicemailMatch = stmt.match(
+        /\b(?:TRANSFER\s+TO\s+VOICEMAIL|GIVE\s+VOICEMAIL|VOICEMAIL|ANRUFBEANTWORTER)\b(?:\s+(?:TO\s+)?(?:"([^"]+)"|'([^']+)'|([A-Za-zÄÖÜäöüß0-9_.-]+)))?/i
+      );
+      if (voicemailMatch && !/\b(?:EXECUTE|CALL\s+SCRIPT|SUBSCRIPT)\b/i.test(stmt)) {
+        const vmTarget = (
+          voicemailMatch[1] ||
+          voicemailMatch[2] ||
+          voicemailMatch[3] ||
+          `${node.scriptNumber}_Voicemail`
+        ).trim();
+        pushAction({
+          kind: 'transferToVoicemail',
+          avayaCommand: 'VOICEMAIL',
+          genesysLabel: `Transfer to Voicemail: ${vmTarget}`,
+          lineNumber,
+          target: vmTarget,
+          targetSlug: toArchySlug(vmTarget),
+        });
+        continue;
+      }
+
+      const langMatch = stmt.match(
+        /\b(?:SET\s+LANGUAGE|LANGUAGE\s*=)\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_-]{2,12}))/i
+      );
+      if (langMatch) {
+        const rawLang = (langMatch[1] || langMatch[2] || langMatch[3] || 'de-de').trim().toLowerCase();
+        const normalizedLang =
+          rawLang === 'de' || rawLang === 'deutsch' || rawLang === 'german'
+            ? 'de-de'
+            : rawLang === 'en' || rawLang === 'english' || rawLang === 'englisch'
+            ? 'en-us'
+            : rawLang === 'fr' || rawLang === 'french'
+            ? 'fr-fr'
+            : /^[a-z]{2}-[a-z]{2}$/.test(rawLang)
+            ? rawLang
+            : 'de-de';
+        pushAction({
+          kind: 'setLanguage',
+          avayaCommand: 'SET LANGUAGE',
+          genesysLabel: `Set Language: ${normalizedLang}`,
+          lineNumber,
+          target: normalizedLang,
+          languageCode: normalizedLang,
+        });
+        continue;
+      }
+
+      // 2a. Telephony Block 2: GIVE MUSIC / GIVE RINGBACK / GIVE BUSY / WAIT n (In-Queue Treatment)
+      const holdMusicMatch = stmt.match(
+        /\bGIVE\s+(MUSIC|RINGBACK)\b(?:\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+)))?/i
+      );
+      if (holdMusicMatch) {
+        const kindWord = holdMusicMatch[1].toUpperCase();
+        const musicName = (
+          holdMusicMatch[2] ||
+          holdMusicMatch[3] ||
+          holdMusicMatch[4] ||
+          (kindWord === 'RINGBACK' ? 'Ringback_Tone' : 'Default_Hold_Music')
+        ).trim();
+        warnings.push({
+          code: 'IN_QUEUE_FLOW_REQUIRED',
+          severity: 'warning',
+          message: `Wartebehandlung (GIVE ${kindWord}) in Zeile ${lineNumber}: Wartemusik/Ringback in Genesys Cloud in einen eigenen In-Queue Call Flow auslagern.`,
+          lineNumber,
+        });
+        pushAction({
+          kind: 'playHoldMusic',
+          avayaCommand: `GIVE ${kindWord}`,
+          genesysLabel: `Hold Music (In-Queue): ${musicName}`,
+          lineNumber,
+          target: musicName,
+          targetSlug: toArchySlug(musicName),
+        });
+        continue;
+      }
+
+      if (/\bGIVE\s+BUSY\b/i.test(stmt)) {
+        pushAction({
+          kind: 'disconnect',
+          avayaCommand: 'GIVE BUSY',
+          genesysLabel: 'Disconnect (Busy Tone)',
+          lineNumber,
+          target: 'Busy_Tone',
+        });
+        continue;
+      }
+
+      const waitMatch = stmt.match(/^\s*WAIT\s+(\d{1,5})(?:\s*(?:SEC|SECONDS|S))?\b/i);
+      if (waitMatch) {
+        const secs = Math.max(1, Number(waitMatch[1]) || 10);
+        warnings.push({
+          code: 'IN_QUEUE_FLOW_REQUIRED',
+          severity: 'warning',
+          message: `WAIT ${secs}s in Zeile ${lineNumber}: Warte-Pausen in Warteschleifen in Genesys Cloud über In-Queue Call Flow / Delay abbilden.`,
+          lineNumber,
+        });
+        pushAction({
+          kind: 'delay',
+          avayaCommand: `WAIT ${secs}`,
+          genesysLabel: `Delay (In-Queue): ${secs}s`,
+          lineNumber,
+          target: `${secs}s`,
+          delaySeconds: secs,
+        });
+        continue;
+      }
+
+      // 2b. GIVE RAN / PLAY PROMPT -> Play Audio
       const promptMatch = stmt.match(
-        /\b(?:GIVE\s+(?:RAN|ANNOUNCEMENT|MUSIC)|PLAY\s+(?:PROMPT|AUDIO|ANNOUNCEMENT))\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
+        /\b(?:GIVE\s+(?:RAN|ANNOUNCEMENT)|PLAY\s+(?:PROMPT|AUDIO|ANNOUNCEMENT))\s+(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9ÄÖÜäöüß_.-]+))/i
       );
       if (promptMatch) {
         const promptName = (promptMatch[1] || promptMatch[2] || promptMatch[3] || '').trim();
@@ -1221,11 +2764,25 @@ function translateSingleModule(
         continue;
       }
 
-      // 4. QUEUE TO SKILLSET (1 vs Multi-Skillset Bullseye)
+      // 4. QUEUE TO SKILLSET (1 vs Multi-Skillset Bullseye + inline WITH PRIORITY)
       const queueMatch = stmt.match(
-        /\bQUEUE\s+TO\s+(?:NETWORK\s+)?(?:SKILLSET|AGENT)\s+(.+?)(?:\s+WITH\s+PRIORITY\b|\s+PRIORITY\b|$)/i
+        /\bQUEUE\s+TO\s+(?:NETWORK\s+)?(?:SKILLSET|AGENT)\s+(.+?)(?:\s+WITH\s+PRIORITY\s+(\d{1,5})|\s+PRIORITY\s+(\d{1,5})|$)/i
       );
       if (queueMatch) {
+        const inlinePrioRaw = queueMatch[2] || queueMatch[3];
+        if (inlinePrioRaw) {
+          const prioVal = Number(inlinePrioRaw);
+          if (Number.isFinite(prioVal)) {
+            pushAction({
+              kind: 'setPriority',
+              avayaCommand: 'QUEUE WITH PRIORITY',
+              genesysLabel: `Set Priority: ${prioVal}`,
+              lineNumber,
+              target: String(prioVal),
+              priorityValue: prioVal,
+            });
+          }
+        }
         const items = queueMatch[1]
           .split(',')
           .map((item) => normalizeScriptRef(item.trim().replace(/^["']|["']$/g, '')))
@@ -1368,6 +2925,18 @@ function translateSingleModule(
 
   // Supplement from AuditNode edges & ScriptRules (for Visio flows / shorthand scripts without raw OCL commands)
   if (actions.length === 0) {
+    const hasScheduleRule = (mod?.rules || []).some((r) => Boolean(r.schedule || r.holiday));
+    if (hasScheduleRule) {
+      const sgName = `${toArchySlug(node.scriptNumber || 'Default')}_ScheduleGroup`;
+      pushAction({
+        kind: 'evaluateScheduleGroup',
+        avayaCommand: 'Zeitplan / Feiertag',
+        genesysLabel: `Schedule Group: ${sgName}`,
+        lineNumber: 0,
+        target: sgName,
+        targetSlug: sgName,
+      });
+    }
     for (const rule of mod?.rules || []) {
       if (rule.announcement) {
         pushAction({
@@ -1545,10 +3114,17 @@ function translateSingleModule(
     localReusableTasks: Array.from(localReusableTasksMap.values()),
     warnings,
     archyYaml: '',
+    yamlValidation: {
+      isValid: true,
+      errors: [],
+      warnings: [],
+      stats: { lineCount: 0, taskCount: 0, actionCount: 0, variableCount: 0 },
+    },
     genesysMermaid: '',
   };
 
   partial.archyYaml = generateArchyYaml(partial);
+  partial.yamlValidation = validateArchyYaml(partial.archyYaml);
   partial.genesysMermaid = generateSingleScriptGenesysMermaid(partial);
   return partial;
 }
@@ -1629,7 +3205,7 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.4.0',
+    schemaVersion: '1.4.1',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     overallReadiness,
@@ -1645,6 +3221,8 @@ export function translateAvayaWorkspaceToGenesys(
       oracleCalls: scripts.reduce((acc, s) => acc + s.metrics.oracleApiCount, 0),
       flixcheckCalls: scripts.reduce((acc, s) => acc + s.metrics.flixcheckApiCount, 0),
       brokenLinks: auditReport.summary.brokenLinkCount,
+      yamlValidScriptCount: scripts.filter((s) => s.yamlValidation.isValid).length,
+      yamlErrorCount: scripts.reduce((acc, s) => acc + s.yamlValidation.errors.length, 0),
     },
     scripts,
     scriptsByKey,
@@ -1686,14 +3264,18 @@ export async function exportAllArchyYamlsZipBlob(
     `- **Skripte gesamt:** ${translation.summary.totalScripts} (LOW: ${translation.summary.lowCount} · MEDIUM: ${translation.summary.mediumCount} · HIGH: ${translation.summary.highCount})`,
     `- **Common Module Kandidaten (>= 3 Aufrufe):** ${translation.summary.commonModuleCount}`,
     `- **Warnungen:** ${translation.summary.totalWarnings} (Rückwärts-GOTO: ${translation.summary.backwardGotoScripts} · Multi-Skillset: ${translation.summary.multiSkillsetScripts} · Broken Links: ${translation.summary.brokenLinks})`,
+    `- **Archy-YAML-Validierung:** ${translation.summary.yamlValidScriptCount}/${translation.summary.totalScripts} valide (${translation.summary.yamlErrorCount} Schema-Fehler)`,
     '',
-    '| Avaya Datei | Archy YAML | Readiness | Warnungen | Gründe |',
-    '| --- | --- | --- | ---: | --- |',
+    '| Avaya Datei | Archy YAML | Readiness | YAML-Status | Warnungen | Gründe |',
+    '| --- | --- | --- | --- | ---: | --- |',
   ];
 
   for (const s of translation.scripts) {
+    const yamlBadge = s.yamlValidation.isValid
+      ? 'Valide'
+      : `${s.yamlValidation.errors.length} Fehler`;
     readmeLines.push(
-      `| \`${s.fileName}\` | \`archy-flows/${s.archyFilename}\` | **${s.readiness}** | ${s.warnings.length} | ${s.readinessReasons.join('; ')} |`
+      `| \`${s.fileName}\` | \`archy-flows/${s.archyFilename}\` | **${s.readiness}** | ${yamlBadge} | ${s.warnings.length} | ${s.readinessReasons.join('; ')} |`
     );
   }
 

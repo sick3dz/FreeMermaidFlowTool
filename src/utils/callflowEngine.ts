@@ -3735,6 +3735,27 @@ export interface InteractiveCallflowHtmlView {
   }>;
   genesysArchyYaml?: string;
   genesysArchyFilename?: string;
+  genesysYamlValidation?: {
+    isValid: boolean;
+    errorCount: number;
+    warningCount: number;
+    validScriptCount?: number;
+    totalScriptCount?: number;
+    errors: Array<{
+      lineNumber: number;
+      code: string;
+      message: string;
+      suggestion?: string;
+      fileName?: string;
+    }>;
+    warnings: Array<{
+      lineNumber: number;
+      code: string;
+      message: string;
+      suggestion?: string;
+      fileName?: string;
+    }>;
+  };
 }
 
 export interface InteractiveCallflowHtmlAnalysisPayload {
@@ -3866,6 +3887,7 @@ export function generateInteractiveCallflowHtml(
       genesysWarnings: v.genesysWarnings || [],
       genesysArchyYaml: v.genesysArchyYaml || null,
       genesysArchyFilename: v.genesysArchyFilename || null,
+      genesysYamlValidation: v.genesysYamlValidation || null,
     };
   });
 
@@ -4117,6 +4139,16 @@ export function generateInteractiveCallflowHtml(
       color: var(--warn-text);
     }
     .genesys-badge-high {
+      background: var(--err-bg);
+      border-color: var(--err-border);
+      color: var(--err-text);
+    }
+    .genesys-yaml-valid {
+      background: var(--ok-bg);
+      border-color: var(--ok-border);
+      color: var(--ok-text);
+    }
+    .genesys-yaml-invalid {
       background: var(--err-bg);
       border-color: var(--err-border);
       color: var(--err-text);
@@ -5591,6 +5623,7 @@ export function generateInteractiveCallflowHtml(
           <div class="genesys-subbar-left">
             <span class="genesys-pill" id="genesys-flow-label">Genesys Cloud Architect</span>
             <span class="genesys-pill" id="genesys-readiness-badge">Readiness: LOW</span>
+            <button type="button" id="btn-genesys-yaml-status" style="display:none;padding:3px 8px;font-size:11px;font-weight:600;"></button>
             <span id="genesys-readiness-reasons" style="font-size:11px;color:var(--text-muted);"></span>
             <button type="button" id="btn-genesys-warnings" style="display:none;padding:3px 8px;font-size:11px;" class="amber"></button>
           </div>
@@ -5599,6 +5632,7 @@ export function generateInteractiveCallflowHtml(
             <button type="button" id="btn-genesys-yaml-download" style="display:none;padding:4px 9px;font-size:11px;font-weight:600;background:#ea580c;border-color:#f97316;color:#fff;">Download .yaml</button>
           </div>
         </div>
+        <div id="genesys-validation-drawer" class="genesys-drawer"></div>
         <div id="genesys-warnings-drawer" class="genesys-drawer"></div>
         <div id="genesys-yaml-drawer" class="genesys-drawer">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
@@ -6988,10 +7022,12 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
     const genesysSubbar = document.getElementById('genesys-subbar');
     const genesysFlowLabel = document.getElementById('genesys-flow-label');
     const genesysReadinessBadge = document.getElementById('genesys-readiness-badge');
+    const btnGenesysYamlStatus = document.getElementById('btn-genesys-yaml-status');
     const genesysReadinessReasons = document.getElementById('genesys-readiness-reasons');
     const btnGenesysWarnings = document.getElementById('btn-genesys-warnings');
     const btnGenesysYamlToggle = document.getElementById('btn-genesys-yaml-toggle');
     const btnGenesysYamlDownload = document.getElementById('btn-genesys-yaml-download');
+    const genesysValidationDrawer = document.getElementById('genesys-validation-drawer');
     const genesysWarningsDrawer = document.getElementById('genesys-warnings-drawer');
     const genesysYamlDrawer = document.getElementById('genesys-yaml-drawer');
     const genesysYamlFilename = document.getElementById('genesys-yaml-filename');
@@ -7003,6 +7039,7 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       const viewObj = viewsByKey.get(activeViewKey);
       if (activePlatformMode !== 'genesys' || activeViewKey === 'welcome' || !viewObj || !viewObj.genesysSvg) {
         genesysSubbar.classList.remove('open');
+        if (genesysValidationDrawer) genesysValidationDrawer.classList.remove('open');
         if (genesysWarningsDrawer) genesysWarningsDrawer.classList.remove('open');
         if (genesysYamlDrawer) genesysYamlDrawer.classList.remove('open');
         return;
@@ -7015,6 +7052,55 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       if (genesysReadinessBadge) {
         genesysReadinessBadge.textContent = 'Readiness: ' + rLevel;
         genesysReadinessBadge.className = 'genesys-pill ' + (rLevel === 'HIGH' ? 'genesys-badge-high' : rLevel === 'MEDIUM' ? 'genesys-badge-medium' : 'genesys-badge-low');
+      }
+      const yamlVal = viewObj.genesysYamlValidation || null;
+      if (btnGenesysYamlStatus) {
+        if (yamlVal) {
+          btnGenesysYamlStatus.style.display = 'inline-flex';
+          const isOk = Boolean(yamlVal.isValid) && (yamlVal.errorCount || 0) === 0;
+          btnGenesysYamlStatus.className = isOk ? 'genesys-yaml-valid' : 'genesys-yaml-invalid';
+          if (isOk) {
+            if (yamlVal.totalScriptCount && yamlVal.totalScriptCount > 1) {
+              btnGenesysYamlStatus.textContent = 'YAML valide (' + (yamlVal.validScriptCount || 0) + '/' + yamlVal.totalScriptCount + ')';
+            } else if ((yamlVal.warningCount || 0) > 0) {
+              btnGenesysYamlStatus.textContent = 'YAML valide · ' + yamlVal.warningCount + (yamlVal.warningCount === 1 ? ' Hinweis' : ' Hinweise');
+            } else {
+              btnGenesysYamlStatus.textContent = 'YAML valide';
+            }
+          } else {
+            btnGenesysYamlStatus.textContent = (yamlVal.errorCount || 0) + ' YAML-Fehler';
+          }
+        } else {
+          btnGenesysYamlStatus.style.display = 'none';
+          if (genesysValidationDrawer) genesysValidationDrawer.classList.remove('open');
+        }
+      }
+      if (genesysValidationDrawer) {
+        if (!yamlVal) {
+          genesysValidationDrawer.innerHTML = '';
+        } else {
+          const valErrors = yamlVal.errors || [];
+          const valWarns = yamlVal.warnings || [];
+          if (valErrors.length === 0 && valWarns.length === 0) {
+            genesysValidationDrawer.innerHTML = '<div style="font-size:11.5px;padding:4px 0;color:var(--ok-text);font-weight:600;">Archy-YAML Vollprüfung bestanden: Schema-Keys, Einrückung, RefIds &amp; Variablen sind valide.</div>';
+          } else {
+            const errHtml = valErrors.map(function (e) {
+              const prefix = (e.fileName ? escapeHtml(e.fileName) + ' · ' : '') + 'Zeile ' + (e.lineNumber || 1) + ' [' + escapeHtml(e.code || 'ERROR') + ']';
+              const sugg = e.suggestion ? '<div style="font-size:10.5px;color:var(--text-muted);margin-top:2px;">Empfehlung: ' + escapeHtml(e.suggestion) + '</div>' : '';
+              return '<div style="font-size:11.5px;padding:5px 0;border-bottom:1px solid var(--border);color:var(--text-main);">'
+                + '<strong style="color:var(--err-text);margin-right:6px;">' + prefix + '</strong>'
+                + escapeHtml(e.message || '') + sugg + '</div>';
+            }).join('');
+            const warnHtml = valWarns.map(function (w) {
+              const prefix = (w.fileName ? escapeHtml(w.fileName) + ' · ' : '') + 'Zeile ' + (w.lineNumber || 1) + ' [' + escapeHtml(w.code || 'HINWEIS') + ']';
+              const sugg = w.suggestion ? '<div style="font-size:10.5px;color:var(--text-muted);margin-top:2px;">Hinweis: ' + escapeHtml(w.suggestion) + '</div>' : '';
+              return '<div style="font-size:11.5px;padding:5px 0;border-bottom:1px solid var(--border);color:var(--text-main);">'
+                + '<strong style="color:var(--warn-text);margin-right:6px;">' + prefix + '</strong>'
+                + escapeHtml(w.message || '') + sugg + '</div>';
+            }).join('');
+            genesysValidationDrawer.innerHTML = errHtml + warnHtml;
+          }
+        }
       }
       if (genesysReadinessReasons) {
         genesysReadinessReasons.textContent = (viewObj.genesysReadinessReasons || []).join(' · ');
@@ -9826,6 +9912,11 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       });
     });
 
+    if (btnGenesysYamlStatus && genesysValidationDrawer) {
+      btnGenesysYamlStatus.addEventListener('click', function () {
+        genesysValidationDrawer.classList.toggle('open');
+      });
+    }
     if (btnGenesysWarnings && genesysWarningsDrawer) {
       btnGenesysWarnings.addEventListener('click', function () {
         genesysWarningsDrawer.classList.toggle('open');

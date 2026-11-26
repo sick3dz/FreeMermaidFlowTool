@@ -4535,6 +4535,34 @@ function OfflineStudioApp() {
             lineNumber: w.lineNumber,
           }))
         );
+        const workspaceGenesysYamlErrors = exportGenesysTranslation.scripts.flatMap((s) =>
+          s.yamlValidation.errors.map((e) => ({
+            lineNumber: e.lineNumber,
+            code: e.code,
+            message: e.message,
+            suggestion: e.suggestion,
+            fileName: s.archyFilename,
+          }))
+        );
+        const workspaceGenesysYamlWarnings = exportGenesysTranslation.scripts.flatMap((s) =>
+          s.yamlValidation.warnings.map((w) => ({
+            lineNumber: w.lineNumber,
+            code: w.code,
+            message: w.message,
+            suggestion: w.suggestion,
+            fileName: s.archyFilename,
+          }))
+        );
+        const workspaceGenesysYamlValidation: InteractiveCallflowHtmlView['genesysYamlValidation'] =
+          {
+            isValid: workspaceGenesysYamlErrors.length === 0,
+            errorCount: workspaceGenesysYamlErrors.length,
+            warningCount: workspaceGenesysYamlWarnings.length,
+            validScriptCount: exportGenesysTranslation.summary.yamlValidScriptCount,
+            totalScriptCount: exportGenesysTranslation.summary.totalScripts,
+            errors: workspaceGenesysYamlErrors,
+            warnings: workspaceGenesysYamlWarnings,
+          };
         let cachedMasterGenesysSvg: string | null = null;
         let cachedMasterGenesysGraph: CallflowGraph | undefined = undefined;
 
@@ -4918,6 +4946,7 @@ function OfflineStudioApp() {
             let genesysWarnings: InteractiveCallflowHtmlView['genesysWarnings'];
             let genesysArchyYaml: string | undefined;
             let genesysArchyFilename: string | undefined;
+            let genesysYamlValidation: InteractiveCallflowHtmlView['genesysYamlValidation'];
 
             try {
               if (spec.key === 'master' || spec.key === 'master:detailed') {
@@ -4943,6 +4972,7 @@ function OfflineStudioApp() {
                   genesysWarnings = workspaceGenesysWarnings;
                   genesysArchyYaml = primaryGenesysEntryScript?.archyYaml;
                   genesysArchyFilename = primaryGenesysEntryScript?.archyFilename;
+                  genesysYamlValidation = workspaceGenesysYamlValidation;
                 }
               } else if (spec.scriptNumber) {
                 const gScript =
@@ -4966,6 +4996,27 @@ function OfflineStudioApp() {
                     }));
                     genesysArchyYaml = gScript.archyYaml;
                     genesysArchyFilename = gScript.archyFilename;
+                    genesysYamlValidation = {
+                      isValid: gScript.yamlValidation.isValid,
+                      errorCount: gScript.yamlValidation.errors.length,
+                      warningCount: gScript.yamlValidation.warnings.length,
+                      validScriptCount: gScript.yamlValidation.isValid ? 1 : 0,
+                      totalScriptCount: 1,
+                      errors: gScript.yamlValidation.errors.map((e) => ({
+                        lineNumber: e.lineNumber,
+                        code: e.code,
+                        message: e.message,
+                        suggestion: e.suggestion,
+                        fileName: gScript.archyFilename,
+                      })),
+                      warnings: gScript.yamlValidation.warnings.map((w) => ({
+                        lineNumber: w.lineNumber,
+                        code: w.code,
+                        message: w.message,
+                        suggestion: w.suggestion,
+                        fileName: gScript.archyFilename,
+                      })),
+                    };
                   }
                 }
               }
@@ -4988,6 +5039,7 @@ function OfflineStudioApp() {
               genesysWarnings,
               genesysArchyYaml,
               genesysArchyFilename,
+              genesysYamlValidation,
             });
           }
 
