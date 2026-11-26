@@ -77,7 +77,7 @@ export interface SbomPackageItem {
   corporateNote: string;
 }
 
-export const AUDIT_APP_VERSION = '1.3.1';
+export const AUDIT_APP_VERSION = '1.4.0';
 
 export const ENTERPRISE_HIGHLIGHT_TILES: EnterpriseHighlightTile[] = [
   {
@@ -684,7 +684,7 @@ if (incomingHasData || !existingCache.hasProjectData) {
     codeExcerpt: `export function runCallflowAudit(input: ScriptWorkspace | ScriptModule[]): AuditReport {
   // Reine RAM-Auswertung ohne fs/fetch; speichert niemals rawText oder rawLine:
   return {
-    schemaVersion: '1.3.1',
+    schemaVersion: '1.4.0',
     privacyMode: '100%-in-memory-metadata-only',
     summary, nodes, brokenLinks, orphanScripts, deadEndScripts, circularLoops, externalIntegrations,
   };

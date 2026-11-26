@@ -186,6 +186,12 @@ import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { CanvasMinimap } from './components/CanvasMinimap';
 import { LocalHtmlBuilderLanding } from './components/LocalHtmlBuilderLanding';
 import OnlineProjectLanding from './components/OnlineProjectLanding';
+import { GenesysMigrationBar } from './components/GenesysMigrationBar';
+import {
+  GenesysScriptTranslation,
+  GenesysWorkspaceTranslation,
+  translateAvayaWorkspaceToGenesys,
+} from './utils/genesysMigrationAnalyzer';
 import {
   getInitialOfflineShellView,
   isRunningAsOfflineSingleFile,
@@ -452,6 +458,7 @@ function OfflineStudioApp() {
   const [masterDensityMode, setMasterDensityMode] = useState<'auto' | 'compact' | 'detailed'>(
     'auto'
   );
+  const [platformViewMode, setPlatformViewMode] = useState<'avaya' | 'genesys'>('avaya');
   const isMasterCompact =
     masterDensityMode === 'compact' ||
     (masterDensityMode === 'auto' && scriptWorkspace.modules.length >= 16);
@@ -794,12 +801,29 @@ function OfflineStudioApp() {
     }
   }, [callflowGraph, selectedCallflowNodeId, selectedCallflowEdge]);
 
-  // Determine effective Mermaid code to render (either full code or isolated sub-callflow)
+  // Determine effective Mermaid code to render (Avaya full/isolated OR deterministic Genesys Cloud target)
   const currentDirection = useMemo(() => getDiagramDirection(code), [code]);
+
+  const genesysTranslation = useMemo<GenesysWorkspaceTranslation | null>(() => {
+    if (platformViewMode !== 'genesys') return null;
+    return translateAvayaWorkspaceToGenesys(scriptWorkspace);
+  }, [platformViewMode, scriptWorkspace]);
+
+  const activeGenesysScript = useMemo<GenesysScriptTranslation | null>(() => {
+    if (!genesysTranslation || callflowViewLevel.level !== 'detail') return null;
+    const key = canonicalScriptMatchKey(callflowViewLevel.scriptNumber);
+    return genesysTranslation.scriptsByKey[key] || null;
+  }, [genesysTranslation, callflowViewLevel]);
 
   const effectiveMermaidCode = useMemo(() => {
     if (callflowViewLevel.level === 'welcome') {
       return '';
+    }
+    if (platformViewMode === 'genesys' && genesysTranslation && genesysTranslation.scripts.length > 0) {
+      if (callflowViewLevel.level === 'detail' && activeGenesysScript) {
+        return activeGenesysScript.genesysMermaid;
+      }
+      return genesysTranslation.masterGenesysMermaid;
     }
     if (isolateSubgraphMode && callflowTrace) {
       return buildIsolatedPathMermaidCode(
@@ -813,6 +837,9 @@ function OfflineStudioApp() {
     return code;
   }, [
     callflowViewLevel.level,
+    platformViewMode,
+    genesysTranslation,
+    activeGenesysScript,
     code,
     isolateSubgraphMode,
     callflowTrace,
@@ -884,11 +911,14 @@ function OfflineStudioApp() {
   ]);
 
   const activeWorkspaceViewKey = useMemo(() => {
-    if (scriptWorkspace.modules.length === 0) return 'standalone';
-    return callflowViewLevel.level === 'detail'
-      ? `script:${callflowViewLevel.scriptNumber}`
-      : 'master';
-  }, [scriptWorkspace.modules.length, callflowViewLevel]);
+    const baseKey =
+      scriptWorkspace.modules.length === 0
+        ? 'standalone'
+        : callflowViewLevel.level === 'detail'
+        ? `script:${callflowViewLevel.scriptNumber}`
+        : 'master';
+    return platformViewMode === 'genesys' ? `genesys:${baseKey}` : baseKey;
+  }, [scriptWorkspace.modules.length, callflowViewLevel, platformViewMode]);
 
   activeViewKeyRef.current = activeWorkspaceViewKey;
 
@@ -1158,6 +1188,21 @@ function OfflineStudioApp() {
       };
     }
 
+    if (platformViewMode === 'genesys') {
+      return {
+        baseColoredSvg: baseRenderedSvg,
+        logicSummary: {
+          activeMode: smartColorMode,
+          recommendedMode: 'semantic',
+          recommendationReason: 'Genesys Cloud Architect Ziel-Farben (classDef)',
+          legend: [],
+          nodeCount: 0,
+          clusterCount: 0,
+          asyncEdgeCount: 0,
+        },
+      };
+    }
+
     const processed = applySmartLogicColoring(
       baseRenderedSvg,
       effectiveMermaidCode,
@@ -1175,6 +1220,7 @@ function OfflineStudioApp() {
   }, [
     baseRenderedSvg,
     effectiveMermaidCode,
+    platformViewMode,
     smartColorMode,
     pathColorMode,
     hiddenSmartNodeTypes,
@@ -1198,7 +1244,10 @@ function OfflineStudioApp() {
     const validKeys = new Set<string>([
       'master',
       'standalone',
+      'genesys:master',
+      'genesys:standalone',
       ...scriptWorkspace.modules.map((m) => `script:${m.scriptNumber}`),
+      ...scriptWorkspace.modules.map((m) => `genesys:script:${m.scriptNumber}`),
     ]);
     for (const k of cache.keys()) {
       if (!validKeys.has(k)) {
@@ -4473,6 +4522,73 @@ function OfflineStudioApp() {
           exportScriptLabelMap[canonicalScriptMatchKey(mod.scriptNumber)] = mod.scriptName;
         });
 
+        const exportGenesysTranslation = translateAvayaWorkspaceToGenesys(scriptWorkspace);
+        const primaryGenesysEntryScript =
+          exportGenesysTranslation.scripts.find((s) => s.isEntryPoint) ||
+          exportGenesysTranslation.scripts[0] ||
+          null;
+        const workspaceGenesysWarnings = exportGenesysTranslation.scripts.flatMap((s) =>
+          s.warnings.map((w) => ({
+            code: w.code,
+            severity: w.severity,
+            message: `${s.fileName}: ${w.message}`,
+            lineNumber: w.lineNumber,
+          }))
+        );
+        let cachedMasterGenesysSvg: string | null = null;
+        let cachedMasterGenesysGraph: CallflowGraph | undefined = undefined;
+
+        const renderGenesysMermaidForExport = async (
+          gMermaid: string,
+          gTitle: string
+        ): Promise<{ svg: string | null; graph: CallflowGraph | undefined }> => {
+          const trimmedG = gMermaid.trim();
+          if (!trimmedG) return { svg: null, graph: undefined };
+          let gGraph: CallflowGraph | undefined;
+          try {
+            gGraph = parseCallflowGraph(trimmedG);
+          } catch {
+            gGraph = undefined;
+          }
+          const gComplexity = shouldUseFastDeterministicVectorLayout(trimmedG);
+          if (gComplexity.useFastVector && gGraph && gGraph.nodes.size > 0) {
+            const elkRes = await renderElkWorkerFlowchartSvg({
+              mermaidCode: trimmedG,
+              graph: gGraph,
+              surface: targetSurface,
+              direction: 'TB',
+              title: gTitle,
+              timeoutMs: 12000,
+              signal,
+            });
+            return { svg: elkRes.aborted ? null : elkRes.svg, graph: gGraph };
+          }
+          const gRes = await renderLocalMermaidDiagram(trimmedG, dagreFallbackTheme, true, {
+            timeoutMs: 8000,
+            skipParseDiagnostics: true,
+            signal,
+          });
+          if (gRes.timedOut) {
+            resetMermaidRenderQueue();
+          }
+          if (gRes.svg) {
+            return { svg: gRes.svg, graph: gGraph };
+          }
+          if (gGraph && gGraph.nodes.size > 0 && !signal.aborted) {
+            const rescueRes = await renderElkWorkerFlowchartSvg({
+              mermaidCode: trimmedG,
+              graph: gGraph,
+              surface: targetSurface,
+              direction: 'TB',
+              title: gTitle,
+              timeoutMs: 12000,
+              signal,
+            });
+            return { svg: rescueRes.aborted ? null : rescueRes.svg, graph: gGraph };
+          }
+          return { svg: null, graph: gGraph };
+        };
+
         const views: InteractiveCallflowHtmlView[] = [];
         for (let idx = 0; idx < viewSpecs.length; idx++) {
           if (signal.aborted) {
@@ -4794,6 +4910,69 @@ function OfflineStudioApp() {
               // Keep rendered SVG even if optional node detail precomputation hits an unexpected edge case
             }
 
+            // Render deterministic Genesys Cloud target diagram + metadata for direct Avaya <-> Genesys toggling in Callflow.html
+            let genesysSvg: string | undefined;
+            let genesysGraph: CallflowGraph | undefined;
+            let genesysReadiness: 'LOW' | 'MEDIUM' | 'HIGH' | undefined;
+            let genesysReadinessReasons: string[] | undefined;
+            let genesysWarnings: InteractiveCallflowHtmlView['genesysWarnings'];
+            let genesysArchyYaml: string | undefined;
+            let genesysArchyFilename: string | undefined;
+
+            try {
+              if (spec.key === 'master' || spec.key === 'master:detailed') {
+                if (!cachedMasterGenesysSvg && exportGenesysTranslation.masterGenesysMermaid) {
+                  const rendered = await renderGenesysMermaidForExport(
+                    exportGenesysTranslation.masterGenesysMermaid,
+                    'Genesys Cloud Ziel-Architektur'
+                  );
+                  if (signal.aborted) return { html: null, aborted: true };
+                  cachedMasterGenesysSvg = rendered.svg;
+                  cachedMasterGenesysGraph = rendered.graph;
+                }
+                if (cachedMasterGenesysSvg) {
+                  genesysSvg = cachedMasterGenesysSvg;
+                  genesysGraph = cachedMasterGenesysGraph;
+                  genesysReadiness = exportGenesysTranslation.overallReadiness;
+                  genesysReadinessReasons = [
+                    `LOW ${exportGenesysTranslation.summary.lowCount}`,
+                    `MEDIUM ${exportGenesysTranslation.summary.mediumCount}`,
+                    `HIGH ${exportGenesysTranslation.summary.highCount}`,
+                    `Common Modules: ${exportGenesysTranslation.summary.commonModuleCount}`,
+                  ];
+                  genesysWarnings = workspaceGenesysWarnings;
+                  genesysArchyYaml = primaryGenesysEntryScript?.archyYaml;
+                  genesysArchyFilename = primaryGenesysEntryScript?.archyFilename;
+                }
+              } else if (spec.scriptNumber) {
+                const gScript =
+                  exportGenesysTranslation.scriptsByKey[canonicalScriptMatchKey(spec.scriptNumber)];
+                if (gScript) {
+                  const rendered = await renderGenesysMermaidForExport(
+                    gScript.genesysMermaid,
+                    `Genesys Flow: ${gScript.cleanName}`
+                  );
+                  if (signal.aborted) return { html: null, aborted: true };
+                  if (rendered.svg) {
+                    genesysSvg = rendered.svg;
+                    genesysGraph = rendered.graph;
+                    genesysReadiness = gScript.readiness;
+                    genesysReadinessReasons = gScript.readinessReasons;
+                    genesysWarnings = gScript.warnings.map((w) => ({
+                      code: w.code,
+                      severity: w.severity,
+                      message: w.message,
+                      lineNumber: w.lineNumber,
+                    }));
+                    genesysArchyYaml = gScript.archyYaml;
+                    genesysArchyFilename = gScript.archyFilename;
+                  }
+                }
+              }
+            } catch {
+              // Keep Avaya export resilient even if a single Genesys target render fails
+            }
+
             views.push({
               key: spec.key,
               label: spec.label,
@@ -4802,6 +4981,13 @@ function OfflineStudioApp() {
               svg: finalSvg,
               graph: parsedGraph,
               nodeDetails,
+              genesysSvg,
+              genesysGraph,
+              genesysReadiness,
+              genesysReadinessReasons,
+              genesysWarnings,
+              genesysArchyYaml,
+              genesysArchyFilename,
             });
           }
 
@@ -5061,6 +5247,7 @@ function OfflineStudioApp() {
     setMasterRenderError(null);
     pendingAutoFitRef.current = false;
     setCallflowViewLevel({ level: 'master' });
+    setPlatformViewMode('avaya');
     setSelectedCallflowNodeId(null);
     setIsolateSubgraphMode(false);
     setBaseRenderedSvg(null);
@@ -5165,6 +5352,42 @@ function OfflineStudioApp() {
               <span className="hidden md:inline text-[10px] font-normal opacity-90">
                 (Editor &amp; Studio)
               </span>
+            </button>
+          </div>
+
+          <div
+            role="group"
+            aria-label="Ziel-Plattform wählen"
+            className="flex items-center gap-0.5 p-0.5 sm:p-1 bg-slate-900 border border-slate-800 rounded-lg shrink-0"
+          >
+            <button
+              type="button"
+              onClick={() => setPlatformViewMode('avaya')}
+              title="Original Avaya AACC (OCL) Callflow anzeigen"
+              className={`px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                platformViewMode === 'avaya'
+                  ? 'bg-sky-600 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Avaya AACC
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setPlatformViewMode('genesys');
+                if (callflowViewLevel.level === 'welcome' && scriptWorkspace.modules.length > 0) {
+                  handleSwitchCallflowViewLevel({ level: 'master' });
+                }
+              }}
+              title="Deterministische Genesys Cloud Architect Ziel-Ansicht (Diagramm, Readiness & Archy YAML)"
+              className={`px-2 sm:px-2.5 py-1 text-[11px] sm:text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                platformViewMode === 'genesys'
+                  ? 'bg-orange-600 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-orange-300'
+              }`}
+            >
+              Genesys Cloud
             </button>
           </div>
         </div>
@@ -6178,6 +6401,18 @@ function OfflineStudioApp() {
                 </button>
               </div>
             </div>
+          )}
+
+          {/* Compact Genesys Cloud Architect Bar (Readiness, Warnings, Archy YAML preview & RAM downloads) */}
+          {platformViewMode === 'genesys' && genesysTranslation && (
+            <GenesysMigrationBar
+              translation={genesysTranslation}
+              activeScript={activeGenesysScript}
+              isMasterView={callflowViewLevel.level !== 'detail'}
+              onSelectDetailScript={(scriptNumber) =>
+                handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber })
+              }
+            />
           )}
 
           {/* Mobile Live-Map Prompt Banner for next missing script in Masterscript checklist */}

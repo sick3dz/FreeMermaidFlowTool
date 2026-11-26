@@ -3723,6 +3723,18 @@ export interface InteractiveCallflowHtmlView {
   scriptNumber?: string;
   masterViewVariant?: 'compact' | 'detailed';
   nodeDetails?: Record<string, InteractiveCallflowHtmlNodeDetail>;
+  genesysSvg?: string;
+  genesysGraph?: CallflowGraph;
+  genesysReadiness?: 'LOW' | 'MEDIUM' | 'HIGH';
+  genesysReadinessReasons?: string[];
+  genesysWarnings?: Array<{
+    code: string;
+    severity: 'warning' | 'blocker' | 'info' | 'error';
+    message: string;
+    lineNumber?: number;
+  }>;
+  genesysArchyYaml?: string;
+  genesysArchyFilename?: string;
 }
 
 export interface InteractiveCallflowHtmlAnalysisPayload {
@@ -3842,8 +3854,22 @@ export function generateInteractiveCallflowHtml(
         edges: v.graph.edges,
       },
       nodeDetails: serializedNodeDetails,
+      genesysSvg: v.genesysSvg || null,
+      genesysGraph: v.genesysGraph
+        ? {
+            nodes: Array.from(v.genesysGraph.nodes.values()),
+            edges: v.genesysGraph.edges,
+          }
+        : null,
+      genesysReadiness: v.genesysReadiness || null,
+      genesysReadinessReasons: v.genesysReadinessReasons || [],
+      genesysWarnings: v.genesysWarnings || [],
+      genesysArchyYaml: v.genesysArchyYaml || null,
+      genesysArchyFilename: v.genesysArchyFilename || null,
     };
   });
+
+  const hasGenesysViews = effectiveViews.some((v) => Boolean(v.genesysSvg));
 
   const drillTargetsByNodeId: Record<string, { viewKey: string; scriptRef: string }> = {};
   const viewKeyByScriptNumber: Record<string, string> = {};
@@ -3897,6 +3923,7 @@ export function generateInteractiveCallflowHtml(
     globalSearchIndex: options?.globalSearchIndex || [],
     includeOriginalScripts: hasOriginalScriptsEnabled,
     rawScriptsByNumber: sanitizedRawScriptsByNumber,
+    hasGenesysViews,
   }).replace(/<\/script>/gi, '<\\/script>');
 
   const hasMultiViews = effectiveViews.length > 1;
@@ -4030,6 +4057,95 @@ export function generateInteractiveCallflowHtml(
       background: var(--accent);
       color: #ffffff;
       font-weight: 600;
+    }
+    .seg-btn.genesys-active {
+      background: #ea580c;
+      color: #ffffff;
+      font-weight: 600;
+    }
+    #genesys-subbar {
+      display: none;
+      flex-direction: column;
+      background: var(--bg-header);
+      border-bottom: 1px solid rgba(234, 88, 12, 0.45);
+      flex-shrink: 0;
+      z-index: 9;
+    }
+    #genesys-subbar.open {
+      display: flex;
+    }
+    .genesys-subbar-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 14px;
+    }
+    .genesys-subbar-left, .genesys-subbar-right {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+    .genesys-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 8px;
+      border-radius: 5px;
+      font-size: 11px;
+      font-weight: 600;
+      border: 1px solid rgba(234, 88, 12, 0.5);
+      background: rgba(234, 88, 12, 0.16);
+      color: #fdba74;
+      white-space: nowrap;
+    }
+    html.light .genesys-pill {
+      color: #9a3412;
+      background: rgba(234, 88, 12, 0.12);
+    }
+    .genesys-badge-low {
+      background: var(--ok-bg);
+      border-color: var(--ok-border);
+      color: var(--ok-text);
+    }
+    .genesys-badge-medium {
+      background: var(--warn-bg);
+      border-color: var(--warn-border);
+      color: var(--warn-text);
+    }
+    .genesys-badge-high {
+      background: var(--err-bg);
+      border-color: var(--err-border);
+      color: var(--err-text);
+    }
+    .genesys-drawer {
+      display: none;
+      border-top: 1px solid var(--border);
+      background: var(--bg-card);
+      padding: 10px 14px;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+    .genesys-drawer.open {
+      display: block;
+    }
+    .genesys-yaml-pre {
+      margin: 6px 0 0;
+      padding: 10px 12px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: var(--bg-seg);
+      color: var(--text-main);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      white-space: pre;
+      overflow: auto;
+      max-height: 185px;
+      user-select: text;
     }
     input[type="text"], select, button {
       background: var(--bg-input);
@@ -5434,6 +5550,10 @@ export function generateInteractiveCallflowHtml(
         <button id="btn-master-back" style="display:none;" title="Zurück zur Master-Gesamtkarte (Ebene 1)">← Master-Karte</button>
         <button id="btn-welcome-home" style="display:none;" title="Zurück zur leeren Willkommensseite (Ansicht schließen)">Startseite</button>
       </div>
+      <div class="seg-group" id="platform-mode-group" style="display:${hasGenesysViews ? 'inline-flex' : 'none'};" title="Direkt umschalten zwischen Avaya AACC Callflow und Genesys Cloud Architect Ziel-Callflow">
+        <button type="button" class="seg-btn active" data-platform="avaya">Avaya AACC</button>
+        <button type="button" class="seg-btn" data-platform="genesys">Genesys Cloud</button>
+      </div>
       <div class="seg-group" id="pathmode-group" title="Pfad-Färbung umschalten: Modus A (Semantik) vs. Modus B (Verzweigungen)">
         <button class="seg-btn${initialPathColorMode === 'semantic' ? ' active' : ''}" data-pathmode="semantic">A: Semantik</button>
         <button class="seg-btn${initialPathColorMode === 'branches' ? ' active' : ''}" data-pathmode="branches">B: Verzweigung</button>
@@ -5466,6 +5586,28 @@ export function generateInteractiveCallflowHtml(
   </header>
   <main id="main-layout">
     <div class="canvas-col">
+      <div id="genesys-subbar" aria-label="Genesys Cloud Architect Migrationsleiste">
+        <div class="genesys-subbar-row">
+          <div class="genesys-subbar-left">
+            <span class="genesys-pill" id="genesys-flow-label">Genesys Cloud Architect</span>
+            <span class="genesys-pill" id="genesys-readiness-badge">Readiness: LOW</span>
+            <span id="genesys-readiness-reasons" style="font-size:11px;color:var(--text-muted);"></span>
+            <button type="button" id="btn-genesys-warnings" style="display:none;padding:3px 8px;font-size:11px;" class="amber"></button>
+          </div>
+          <div class="genesys-subbar-right">
+            <button type="button" id="btn-genesys-yaml-toggle" style="display:none;padding:4px 9px;font-size:11px;font-weight:600;">Archy YAML</button>
+            <button type="button" id="btn-genesys-yaml-download" style="display:none;padding:4px 9px;font-size:11px;font-weight:600;background:#ea580c;border-color:#f97316;color:#fff;">Download .yaml</button>
+          </div>
+        </div>
+        <div id="genesys-warnings-drawer" class="genesys-drawer"></div>
+        <div id="genesys-yaml-drawer" class="genesys-drawer">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <span id="genesys-yaml-filename" style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--text-main);font-weight:600;"></span>
+            <button type="button" id="btn-genesys-yaml-copy" style="padding:3px 9px;font-size:11px;">YAML kopieren</button>
+          </div>
+          <pre id="genesys-yaml-code" class="genesys-yaml-pre"></pre>
+        </div>
+      </div>
       <div id="canvas-wrap">
         <div id="svg-stage">
           <div id="svg-stage-frame">
@@ -5693,8 +5835,22 @@ export function generateInteractiveCallflowHtml(
     const PAYLOAD = ${safePayloadJson};
     const viewsByKey = new Map(PAYLOAD.views.map(v => [v.key, v]));
     let isDarkSurface = PAYLOAD.initialSurface !== 'light';
+    let activePlatformMode = 'avaya';
     let activeViewKey = PAYLOAD.initialViewKey;
-    let GRAPH = (viewsByKey.get(activeViewKey) || { graph: { nodes: [], edges: [] } }).graph;
+    function getViewCacheKey(viewKey) {
+      return activePlatformMode === 'genesys' ? 'genesys::' + viewKey : viewKey;
+    }
+    function getViewActiveGraph(viewObj) {
+      if (!viewObj) return { nodes: [], edges: [] };
+      if (activePlatformMode === 'genesys' && viewObj.genesysGraph) return viewObj.genesysGraph;
+      return viewObj.graph || { nodes: [], edges: [] };
+    }
+    function getViewActiveSvg(viewObj) {
+      if (!viewObj) return '';
+      if (activePlatformMode === 'genesys' && viewObj.genesysSvg) return viewObj.genesysSvg;
+      return viewObj.svg || '';
+    }
+    let GRAPH = getViewActiveGraph(viewsByKey.get(activeViewKey));
     let nodeMap = new Map((GRAPH.nodes || []).map(n => [n.id, n]));
 
     const scriptDropdownWrap = document.getElementById('script-dropdown-wrap');
@@ -6172,8 +6328,10 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       }
       const activeSvg = svgLayer.querySelector('svg');
       if (activeSvg) {
-        applySvgSurfaceTheme(activeSvg, GRAPH, true);
-        viewThemeSigCache.set(activeViewKey, getCurrentThemeSig());
+        if (activePlatformMode !== 'genesys') {
+          applySvgSurfaceTheme(activeSvg, GRAPH, true);
+        }
+        viewThemeSigCache.set(getViewCacheKey(activeViewKey), getCurrentThemeSig());
         ensureGpuProxyForView(activeViewKey, activeSvg);
         if (minimapOpen) renderMinimapSvg(true);
       }
@@ -6553,7 +6711,8 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       const viewObj = targetView || viewsByKey.get(activeViewKey);
       const svgEl = targetSvg || svgLayer.querySelector('svg');
       if (!svgEl || !viewObj) return null;
-      const gObj = viewObj.graph;
+      const gObj = getViewActiveGraph(viewObj);
+      const scopedKey = getViewCacheKey(viewObj.key);
       const vb = (svgEl.getAttribute('viewBox') || '').trim().split(/[\\s,]+/).map(Number);
       if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) {
         const w = Math.ceil(vb[2]);
@@ -6568,12 +6727,14 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       }
       stampMissingNodeMetadata(svgEl, gObj);
       const targetThemeSig = (isDarkSurface ? 'dark' : 'light') + '|' + pathColorMode;
-      if (isDarkSurface !== (PAYLOAD.initialSurface !== 'light')) {
-        applySvgSurfaceTheme(svgEl, gObj, syncUi);
-      } else {
-        recolorExportEdges(svgEl, gObj, syncUi);
+      if (activePlatformMode !== 'genesys') {
+        if (isDarkSurface !== (PAYLOAD.initialSurface !== 'light')) {
+          applySvgSurfaceTheme(svgEl, gObj, syncUi);
+        } else {
+          recolorExportEdges(svgEl, gObj, syncUi);
+        }
       }
-      viewThemeSigCache.set(viewObj.key, targetThemeSig);
+      viewThemeSigCache.set(scopedKey, targetThemeSig);
 
       if (!svgEl.dataset.listenersBound) {
         svgEl.dataset.listenersBound = '1';
@@ -6613,8 +6774,8 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
         });
       }
 
-      normalizedSvgCache.set(viewObj.key, svgEl);
-      extractNodeBoxesForView(viewObj.key, svgEl, gObj);
+      normalizedSvgCache.set(scopedKey, svgEl);
+      extractNodeBoxesForView(scopedKey, svgEl, gObj);
       ensureGpuProxyForView(viewObj.key, svgEl);
       if (syncUi) renderNodeTypeFilters();
       return svgEl;
@@ -6679,7 +6840,7 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
     }
 
     function hitTestNodeAtClientPoint(clientX, clientY) {
-      const idx = viewNodeBoxCache.get(activeViewKey);
+      const idx = viewNodeBoxCache.get(getViewCacheKey(activeViewKey));
       if (!idx || !stageFrame) return null;
       const rect = stageFrame.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return null;
@@ -6721,11 +6882,12 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
     function syncGpuProxyState(forceGesture) {
       const activeViewObj = viewsByKey.get(activeViewKey);
       const activeSvgEl = svgLayer ? svgLayer.querySelector('svg') : null;
-      if (!activeViewObj || !activeSvgEl || !isLargeViewSvg(activeSvgEl, activeViewObj.graph)) {
+      const activeG = getViewActiveGraph(activeViewObj);
+      if (!activeViewObj || !activeSvgEl || !isLargeViewSvg(activeSvgEl, activeG)) {
         delete wrap.dataset.gpuProxy;
         return;
       }
-      const cacheKey = activeViewKey + '|' + getCurrentThemeSig();
+      const cacheKey = getViewCacheKey(activeViewKey) + '|' + getCurrentThemeSig();
       const entry = gpuProxyCache.get(cacheKey);
       if (!entry) {
         delete wrap.dataset.gpuProxy;
@@ -6746,15 +6908,17 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
     function ensureGpuProxyForView(viewKey, svgEl, forceForMinimap) {
       const viewObj = viewsByKey.get(viewKey);
       if (!svgEl || !viewObj) return;
-      if (!forceForMinimap && !isLargeViewSvg(svgEl, viewObj.graph) && !minimapOpen) {
+      const viewGraph = getViewActiveGraph(viewObj);
+      const scopedViewKey = getViewCacheKey(viewKey);
+      if (!forceForMinimap && !isLargeViewSvg(svgEl, viewGraph) && !minimapOpen) {
         if (viewKey === activeViewKey) applyProxyImgElement(null);
         return;
       }
-      const cacheKey = viewKey + '|' + getCurrentThemeSig();
+      const cacheKey = scopedViewKey + '|' + getCurrentThemeSig();
       const existing = gpuProxyCache.get(cacheKey);
       if (existing) {
         if (viewKey === activeViewKey) {
-          if (isLargeViewSvg(svgEl, viewObj.graph)) {
+          if (isLargeViewSvg(svgEl, viewGraph)) {
             applyProxyImgElement(existing);
             syncGpuProxyState(false);
           } else {
@@ -6797,8 +6961,8 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
                 const url = URL.createObjectURL(blob);
                 const entry = { url, width: w, height: h };
                 gpuProxyCache.set(cacheKey, entry);
-                if (viewKey === activeViewKey && cacheKey === activeViewKey + '|' + getCurrentThemeSig()) {
-                  if (isLargeViewSvg(svgEl, viewObj.graph)) {
+                if (viewKey === activeViewKey && cacheKey === getViewCacheKey(activeViewKey) + '|' + getCurrentThemeSig()) {
+                  if (isLargeViewSvg(svgEl, viewGraph)) {
                     applyProxyImgElement(entry);
                     syncGpuProxyState(false);
                   }
@@ -6821,6 +6985,91 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       }
     }
 
+    const genesysSubbar = document.getElementById('genesys-subbar');
+    const genesysFlowLabel = document.getElementById('genesys-flow-label');
+    const genesysReadinessBadge = document.getElementById('genesys-readiness-badge');
+    const genesysReadinessReasons = document.getElementById('genesys-readiness-reasons');
+    const btnGenesysWarnings = document.getElementById('btn-genesys-warnings');
+    const btnGenesysYamlToggle = document.getElementById('btn-genesys-yaml-toggle');
+    const btnGenesysYamlDownload = document.getElementById('btn-genesys-yaml-download');
+    const genesysWarningsDrawer = document.getElementById('genesys-warnings-drawer');
+    const genesysYamlDrawer = document.getElementById('genesys-yaml-drawer');
+    const genesysYamlFilename = document.getElementById('genesys-yaml-filename');
+    const genesysYamlCode = document.getElementById('genesys-yaml-code');
+    const btnGenesysYamlCopy = document.getElementById('btn-genesys-yaml-copy');
+
+    function renderGenesysSubbar() {
+      if (!genesysSubbar) return;
+      const viewObj = viewsByKey.get(activeViewKey);
+      if (activePlatformMode !== 'genesys' || activeViewKey === 'welcome' || !viewObj || !viewObj.genesysSvg) {
+        genesysSubbar.classList.remove('open');
+        if (genesysWarningsDrawer) genesysWarningsDrawer.classList.remove('open');
+        if (genesysYamlDrawer) genesysYamlDrawer.classList.remove('open');
+        return;
+      }
+      genesysSubbar.classList.add('open');
+      if (genesysFlowLabel) {
+        genesysFlowLabel.textContent = 'Genesys Cloud: ' + (viewObj.label || 'Flow');
+      }
+      const rLevel = viewObj.genesysReadiness || 'LOW';
+      if (genesysReadinessBadge) {
+        genesysReadinessBadge.textContent = 'Readiness: ' + rLevel;
+        genesysReadinessBadge.className = 'genesys-pill ' + (rLevel === 'HIGH' ? 'genesys-badge-high' : rLevel === 'MEDIUM' ? 'genesys-badge-medium' : 'genesys-badge-low');
+      }
+      if (genesysReadinessReasons) {
+        genesysReadinessReasons.textContent = (viewObj.genesysReadinessReasons || []).join(' · ');
+      }
+      const warns = viewObj.genesysWarnings || [];
+      if (btnGenesysWarnings) {
+        if (warns.length > 0) {
+          btnGenesysWarnings.style.display = 'inline-flex';
+          btnGenesysWarnings.textContent = warns.length + (warns.length === 1 ? ' Warnung' : ' Warnungen');
+        } else {
+          btnGenesysWarnings.style.display = 'none';
+          if (genesysWarningsDrawer) genesysWarningsDrawer.classList.remove('open');
+        }
+      }
+      if (genesysWarningsDrawer) {
+        genesysWarningsDrawer.innerHTML = warns.map(function (w) {
+          return '<div style="font-size:11.5px;padding:4px 0;border-bottom:1px solid var(--border);color:var(--text-main);">'
+            + '<strong style="color:var(--warn-text);margin-right:6px;">[' + escapeHtml(w.code || 'HINWEIS') + ']</strong>'
+            + escapeHtml(w.message || '')
+            + '</div>';
+        }).join('');
+      }
+      const hasYaml = Boolean(viewObj.genesysArchyYaml);
+      if (btnGenesysYamlToggle) btnGenesysYamlToggle.style.display = hasYaml ? 'inline-flex' : 'none';
+      if (btnGenesysYamlDownload) {
+        btnGenesysYamlDownload.style.display = hasYaml ? 'inline-flex' : 'none';
+        btnGenesysYamlDownload.textContent = viewObj.genesysArchyFilename || 'flow.yaml';
+      }
+      if (genesysYamlFilename) genesysYamlFilename.textContent = viewObj.genesysArchyFilename || 'flow.yaml';
+      if (genesysYamlCode) genesysYamlCode.textContent = viewObj.genesysArchyYaml || '';
+      if (!hasYaml && genesysYamlDrawer) genesysYamlDrawer.classList.remove('open');
+    }
+
+    function setPlatformMode(nextMode) {
+      const normalized = nextMode === 'genesys' && PAYLOAD.hasGenesysViews ? 'genesys' : 'avaya';
+      activePlatformMode = normalized;
+      document.querySelectorAll('#platform-mode-group .seg-btn').forEach(function (b) {
+        const isTarget = b.getAttribute('data-platform') === normalized;
+        b.classList.remove('active', 'genesys-active');
+        if (isTarget) {
+          b.classList.add(normalized === 'genesys' ? 'genesys-active' : 'active');
+        }
+      });
+      if (activeViewKey === 'welcome' && normalized === 'genesys') {
+        const fallbackKey = PAYLOAD.defaultTargetViewKey || (PAYLOAD.views[0] && PAYLOAD.views[0].key) || 'master';
+        switchView(fallbackKey);
+        return;
+      }
+      if (activeViewKey !== 'welcome') {
+        switchView(activeViewKey);
+      } else {
+        renderGenesysSubbar();
+      }
+    }
+
     function switchView(nextKey) {
       if (nextKey === 'welcome') {
         delete wrap.dataset.gpuProxy;
@@ -6835,6 +7084,7 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
         panX = 0;
         panY = 0;
         renderWelcomeOverlay();
+        renderGenesysSubbar();
         populateViewSelect();
         populateSelect();
         renderNodeTypeFilters();
@@ -6852,28 +7102,32 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       if (welcomeOverlay) welcomeOverlay.classList.remove('open');
       delete wrap.dataset.gpuProxy;
       activeViewKey = nextKey;
-      GRAPH = nextView.graph;
+      GRAPH = getViewActiveGraph(nextView);
       nodeMap = new Map(GRAPH.nodes.map(n => [n.id, n]));
       activeNodeId = '';
       activeEdge = null;
 
-      let cachedSvg = normalizedSvgCache.get(nextKey);
+      const scopedKey = getViewCacheKey(nextKey);
+      let cachedSvg = normalizedSvgCache.get(scopedKey);
       if (cachedSvg) {
         svgLayer.replaceChildren(cachedSvg);
         const curThemeSig = getCurrentThemeSig();
-        if (viewThemeSigCache.get(nextKey) !== curThemeSig) {
-          applySvgSurfaceTheme(cachedSvg, GRAPH, true);
-          viewThemeSigCache.set(nextKey, curThemeSig);
-        } else {
-          recolorExportEdges(cachedSvg, GRAPH, true);
+        if (activePlatformMode !== 'genesys') {
+          if (viewThemeSigCache.get(scopedKey) !== curThemeSig) {
+            applySvgSurfaceTheme(cachedSvg, GRAPH, true);
+            viewThemeSigCache.set(scopedKey, curThemeSig);
+          } else {
+            recolorExportEdges(cachedSvg, GRAPH, true);
+          }
         }
         ensureGpuProxyForView(nextKey, cachedSvg);
         renderNodeTypeFilters();
       } else {
-        svgLayer.innerHTML = nextView.svg;
+        svgLayer.innerHTML = getViewActiveSvg(nextView);
         normalizeSvgElement(svgLayer.querySelector('svg'), nextView, true);
       }
 
+      renderGenesysSubbar();
       populateViewSelect();
       populateSelect();
       applyCombinedCanvasState(false);
@@ -6921,7 +7175,7 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
         canvasNodeInfoBtn.style.display = 'none';
         return;
       }
-      const idx = viewNodeBoxCache.get(activeViewKey);
+      const idx = viewNodeBoxCache.get(getViewCacheKey(activeViewKey));
       if (!idx) {
         canvasNodeInfoBtn.style.display = 'none';
         return;
@@ -9566,6 +9820,50 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       welcomeHomeBtn.addEventListener('click', () => switchView('welcome'));
     }
 
+    document.querySelectorAll('#platform-mode-group .seg-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        setPlatformMode(btn.getAttribute('data-platform') || 'avaya');
+      });
+    });
+
+    if (btnGenesysWarnings && genesysWarningsDrawer) {
+      btnGenesysWarnings.addEventListener('click', function () {
+        genesysWarningsDrawer.classList.toggle('open');
+      });
+    }
+    if (btnGenesysYamlToggle && genesysYamlDrawer) {
+      btnGenesysYamlToggle.addEventListener('click', function () {
+        genesysYamlDrawer.classList.toggle('open');
+      });
+    }
+    if (btnGenesysYamlDownload) {
+      btnGenesysYamlDownload.addEventListener('click', function () {
+        const v = viewsByKey.get(activeViewKey);
+        if (!v || !v.genesysArchyYaml) return;
+        const blob = new Blob([v.genesysArchyYaml], { type: 'application/x-yaml;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = v.genesysArchyFilename || 'genesys-flow.yaml';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      });
+    }
+    if (btnGenesysYamlCopy) {
+      btnGenesysYamlCopy.addEventListener('click', function () {
+        const v = viewsByKey.get(activeViewKey);
+        if (!v || !v.genesysArchyYaml) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(v.genesysArchyYaml).then(function () {
+            btnGenesysYamlCopy.textContent = 'Kopiert!';
+            setTimeout(function () { btnGenesysYamlCopy.textContent = 'YAML kopieren'; }, 1800);
+          }).catch(function () {});
+        }
+      });
+    }
+
     document.querySelectorAll('#pathmode-group .seg-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('#pathmode-group .seg-btn').forEach(b => b.classList.remove('active'));
@@ -9573,8 +9871,10 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
         pathColorMode = btn.getAttribute('data-pathmode') || 'semantic';
         const activeSvg = svgLayer.querySelector('svg');
         if (activeSvg && activeViewKey !== 'welcome') {
-          recolorExportEdges(activeSvg, GRAPH, true);
-          viewThemeSigCache.set(activeViewKey, getCurrentThemeSig());
+          if (activePlatformMode !== 'genesys') {
+            recolorExportEdges(activeSvg, GRAPH, true);
+          }
+          viewThemeSigCache.set(getViewCacheKey(activeViewKey), getCurrentThemeSig());
           ensureGpuProxyForView(activeViewKey, activeSvg);
         }
         if (activeNodeId || activeEdge) {
@@ -9700,7 +10000,7 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
     function renderMinimapSvg(forceRefresh) {
       if (!minimapSvgHostEl) return;
       const activeSvg = svgLayer ? svgLayer.querySelector('svg') : null;
-      const sig = activeViewKey + '|' + getCurrentThemeSig() + '|' + (activeSvg ? 'svg' : 'none');
+      const sig = getViewCacheKey(activeViewKey) + '|' + getCurrentThemeSig() + '|' + (activeSvg ? 'svg' : 'none');
       if (!forceRefresh && minimapRenderedSig === sig && minimapSvgHostEl.childNodes.length > 0) {
         updateMinimapViewport();
         return;
