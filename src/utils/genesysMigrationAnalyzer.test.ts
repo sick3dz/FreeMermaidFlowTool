@@ -1336,7 +1336,70 @@ SECTION Start
     expect(Array.isArray(parsed.flowIR.transitions)).toBe(true);
     expect(Array.isArray(parsed.flowIR.findings)).toBe(true);
   });
+
+  it('L_CL_TOD pattern: transitively inlines chained sections with 0 UNRESOLVED_TASK_REF, uses Flow.HDX_Resp_cv directly in CHECK_RESPONSE without Task/getParticipantData, invents no Data Action, and prunes uncalled BESETZT/GET_SCHALTER subtasks', () => {
+    const lClTodMod = makeModule(
+      'L_CL_TOD',
+      `
+SECTION Start
+  EXECUTE BLACKLIST_VIP
+  GOTO STEP_QUERY
+
+SECTION STEP_QUERY
+  ASSIGN "25" TO HDX_QueryNum_cv
+  GOTO STEP_CHECK
+
+SECTION STEP_CHECK
+  EXECUTE CHECK_RESPONSE
+
+SECTION BESETZT
+  EXECUTE BESETZT
+  DISCONNECT
+
+SECTION UNUSED_SCHALTER
+  EXECUTE GET_SCHALTER
+  DISCONNECT
+`
+    );
+
+    const ws = buildScriptWorkspace([lClTodMod]);
+    const res = translateAvayaWorkspaceToGenesys(ws);
+    const script = res.scripts[0];
+
+    expect(script).toBeDefined();
+    // 1. 0 schema errors and 0 UNRESOLVED_TASK_REF (chained sections STEP_QUERY -> STEP_CHECK cleanly inlined!)
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.yamlValidation.errors).toHaveLength(0);
+    expect(script.yamlValidation.errors.some((e) => e.code === 'UNRESOLVED_TASK_REF')).toBe(false);
+    expect(script.archyYaml).not.toContain('Section_STEP_QUERY');
+    expect(script.archyYaml).not.toContain('Section_STEP_CHECK');
+    expect(script.archyYaml).not.toContain('Section_CHECK_RESPONSE');
+
+    // 2. Uncalled subtasks BESETZT & GET_SCHALTER automatically removed
+    expect(script.archyYaml).not.toContain('refId: BESETZT');
+    expect(script.archyYaml).not.toContain('refId: GET_SCHALTER');
+    expect(script.localReusableTasks.map((t) => t.refId)).toEqual(['BLACKLIST_VIP', 'CHECK_RESPONSE']);
+
+    // 3. CHECK_RESPONSE directly evaluates Flow.HDX_Resp_cv (NO Task.HDX_Resp_cv, NO getParticipantData, NO invented callDataAction!)
+    expect(script.archyYaml).toContain('refId: CHECK_RESPONSE');
+    expect(script.archyYaml).toContain('Flow.HDX_Resp_cv == \\"SUCCESS\\"');
+    expect(script.archyYaml).not.toContain('Task.HDX_Resp_cv');
+    expect(script.archyYaml).not.toContain('getParticipantData:');
+    expect(script.archyYaml).not.toContain('callDataAction:');
+    expect(script.archyYaml).toContain(
+      'OFFENE MIGRATIONSFRAGE: Flow.HDX_Resp_cv muss aus vorgeschaltetem Modul, Lookup oder externer Integration befuellt werden.'
+    );
+
+    // 4. BLACKLIST_VIP keeps clean Data Table lookup + Flow.MCF_Blacklist_flag_cv
+    expect(script.archyYaml).toContain('refId: BLACKLIST_VIP');
+    expect(script.archyYaml).toContain('BLACKLIST_VIP_Table');
+    expect(script.archyYaml).toContain('variable: Flow.MCF_Blacklist_flag_cv');
+
+    // 5. flowIR records transparent SWITCH_WITHOUT_SOURCE finding
+    expect(script.flowIR.findings.some((f) => f.code === 'SWITCH_WITHOUT_SOURCE')).toBe(true);
+  });
 });
+
 
 
 

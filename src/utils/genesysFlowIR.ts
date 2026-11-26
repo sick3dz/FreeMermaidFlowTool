@@ -1051,10 +1051,46 @@ export function buildFlowIRFromMigrationGraph(
   const entryTask =
     graph.tasks.find((t) => t.refId === graph.entryTaskRefId) || graph.tasks[0];
 
+  const collectSubscriptProvenanceFindings = (list: MigrationStep[], sectionLabel: string) => {
+    for (const st of list) {
+      if (st.provenanceFinding) {
+        preFindings.push({
+          severity: st.provenanceFinding.severity,
+          code: st.provenanceFinding.code,
+          message: st.provenanceFinding.message,
+          variableName: st.provenanceFinding.variableName,
+          sourceTrace: {
+            script: scriptName,
+            section: st.sectionHint || sectionLabel,
+            lineStart: Math.max(1, st.lineNumber || 1),
+            lineEnd: Math.max(1, st.lineNumber || 1),
+          },
+        });
+      }
+      if (st.yesSteps) collectSubscriptProvenanceFindings(st.yesSteps, sectionLabel);
+      if (st.noSteps) collectSubscriptProvenanceFindings(st.noSteps, sectionLabel);
+      if (st.openSteps) collectSubscriptProvenanceFindings(st.openSteps, sectionLabel);
+      if (st.closedSteps) collectSubscriptProvenanceFindings(st.closedSteps, sectionLabel);
+      if (st.holidaySteps) collectSubscriptProvenanceFindings(st.holidaySteps, sectionLabel);
+      if (st.successSteps) collectSubscriptProvenanceFindings(st.successSteps, sectionLabel);
+      if (st.failureSteps) collectSubscriptProvenanceFindings(st.failureSteps, sectionLabel);
+      if (st.timeoutSteps) collectSubscriptProvenanceFindings(st.timeoutSteps, sectionLabel);
+      if (st.foundSteps) collectSubscriptProvenanceFindings(st.foundSteps, sectionLabel);
+      if (st.notFoundSteps) collectSubscriptProvenanceFindings(st.notFoundSteps, sectionLabel);
+      if (st.bodySteps) collectSubscriptProvenanceFindings(st.bodySteps, sectionLabel);
+      if (st.defaultSteps) collectSubscriptProvenanceFindings(st.defaultSteps, sectionLabel);
+      if (st.cases) st.cases.forEach((c) => collectSubscriptProvenanceFindings(c.steps, sectionLabel));
+    }
+  };
+
   for (const t of graph.tasks) {
     if (!entryTask || t.refId === entryTask.refId) continue;
-    // Skip subscript tasks in main flow graph transitions (they are represented via invokeSubflow dependencies)
-    if (t.kind === 'subscript') continue;
+    // Skip subscript tasks in main flow graph transitions (they are represented via invokeSubflow dependencies),
+    // but still surface any provenance findings (e.g. SWITCH_WITHOUT_SOURCE in CHECK_RESPONSE) into flowIR.findings!
+    if (t.kind === 'subscript') {
+      collectSubscriptProvenanceFindings(t.steps, t.originalTarget || t.refId);
+      continue;
+    }
     const subRes = convertStepList(t.steps, t.originalTarget || t.refId, t.refId);
     if (subRes.firstId) {
       taskEntryIdMap.set(t.refId, subRes.firstId);

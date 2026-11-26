@@ -1082,7 +1082,7 @@ export function buildMigrationFlowGraph(
   node: ParsedScriptNode,
   mod: ScriptModule | undefined,
   ctx: BuildMigrationGraphContext,
-  schemaVersion = '1.5.0'
+  schemaVersion = '1.5.1'
 ): BuildMigrationGraphResult {
   const rawText = mod?.rawText || '';
   const strippedLines = rawText ? stripOclCommentsPreservingLines(rawText) : [];
@@ -3212,8 +3212,8 @@ export function buildMigrationFlowGraph(
         : undefined,
     }));
 
-  // Iteratively inline single-use non-cyclic Avaya SECTION tasks directly into caller branches
-  for (let pass = 0; pass < 4; pass += 1) {
+  // Iteratively & transitively inline single-use non-cyclic Avaya SECTION tasks directly into caller branches
+  for (let pass = 0; pass < 6; pass += 1) {
     const byRef = new Map<string, MigrationTaskGraph>(tasks.map((t) => [t.refId, t]));
     const refCounts = countJumpRefs(tasks);
     const inlineableRefs = new Set<string>();
@@ -3231,14 +3231,16 @@ export function buildMigrationFlowGraph(
     let didInline = false;
     const replaceJumps = (
       list: MigrationStep[],
-      hostTask: MigrationTaskGraph
+      hostTask: MigrationTaskGraph,
+      activeInlineChain: Set<string>
     ): MigrationStep[] => {
       const out: MigrationStep[] = [];
       for (const st of list) {
         if (
           st.kind === 'jumpToReusableTask' &&
           st.targetTaskRefId &&
-          inlineableRefs.has(st.targetTaskRefId)
+          inlineableRefs.has(st.targetTaskRefId) &&
+          !activeInlineChain.has(st.targetTaskRefId)
         ) {
           const targetTask = byRef.get(st.targetTaskRefId);
           if (targetTask) {
@@ -3250,7 +3252,14 @@ export function buildMigrationFlowGraph(
                 hostTask.taskVariables.push({ ...tv });
               }
             }
-            const cloned = cloneInlinedSteps(targetTask.steps, nextStepId('inl'));
+            const nextChain = new Set<string>(activeInlineChain);
+            nextChain.add(st.targetTaskRefId);
+            // Recursively inline chained single-use sections inside the cloned body so no dangling jump survives
+            const cloned = replaceJumps(
+              cloneInlinedSteps(targetTask.steps, nextStepId('inl')),
+              hostTask,
+              nextChain
+            );
             out.push(...cloned);
             inlinedSectionCount += 1;
             didInline = true;
@@ -3258,22 +3267,22 @@ export function buildMigrationFlowGraph(
           }
         }
         const copy: MigrationStep = { ...st };
-        if (copy.yesSteps) copy.yesSteps = replaceJumps(copy.yesSteps, hostTask);
-        if (copy.noSteps) copy.noSteps = replaceJumps(copy.noSteps, hostTask);
-        if (copy.openSteps) copy.openSteps = replaceJumps(copy.openSteps, hostTask);
-        if (copy.closedSteps) copy.closedSteps = replaceJumps(copy.closedSteps, hostTask);
-        if (copy.holidaySteps) copy.holidaySteps = replaceJumps(copy.holidaySteps, hostTask);
-        if (copy.successSteps) copy.successSteps = replaceJumps(copy.successSteps, hostTask);
-        if (copy.failureSteps) copy.failureSteps = replaceJumps(copy.failureSteps, hostTask);
-        if (copy.timeoutSteps) copy.timeoutSteps = replaceJumps(copy.timeoutSteps, hostTask);
-        if (copy.foundSteps) copy.foundSteps = replaceJumps(copy.foundSteps, hostTask);
-        if (copy.notFoundSteps) copy.notFoundSteps = replaceJumps(copy.notFoundSteps, hostTask);
-        if (copy.bodySteps) copy.bodySteps = replaceJumps(copy.bodySteps, hostTask);
-        if (copy.defaultSteps) copy.defaultSteps = replaceJumps(copy.defaultSteps, hostTask);
+        if (copy.yesSteps) copy.yesSteps = replaceJumps(copy.yesSteps, hostTask, activeInlineChain);
+        if (copy.noSteps) copy.noSteps = replaceJumps(copy.noSteps, hostTask, activeInlineChain);
+        if (copy.openSteps) copy.openSteps = replaceJumps(copy.openSteps, hostTask, activeInlineChain);
+        if (copy.closedSteps) copy.closedSteps = replaceJumps(copy.closedSteps, hostTask, activeInlineChain);
+        if (copy.holidaySteps) copy.holidaySteps = replaceJumps(copy.holidaySteps, hostTask, activeInlineChain);
+        if (copy.successSteps) copy.successSteps = replaceJumps(copy.successSteps, hostTask, activeInlineChain);
+        if (copy.failureSteps) copy.failureSteps = replaceJumps(copy.failureSteps, hostTask, activeInlineChain);
+        if (copy.timeoutSteps) copy.timeoutSteps = replaceJumps(copy.timeoutSteps, hostTask, activeInlineChain);
+        if (copy.foundSteps) copy.foundSteps = replaceJumps(copy.foundSteps, hostTask, activeInlineChain);
+        if (copy.notFoundSteps) copy.notFoundSteps = replaceJumps(copy.notFoundSteps, hostTask, activeInlineChain);
+        if (copy.bodySteps) copy.bodySteps = replaceJumps(copy.bodySteps, hostTask, activeInlineChain);
+        if (copy.defaultSteps) copy.defaultSteps = replaceJumps(copy.defaultSteps, hostTask, activeInlineChain);
         if (copy.cases) {
           copy.cases = copy.cases.map((c) => ({
             ...c,
-            steps: replaceJumps(c.steps, hostTask),
+            steps: replaceJumps(c.steps, hostTask, activeInlineChain),
           }));
         }
         out.push(copy);
@@ -3283,24 +3292,64 @@ export function buildMigrationFlowGraph(
 
     for (const t of tasks) {
       if (inlineableRefs.has(t.refId)) continue;
-      t.steps = pruneDeadPaths(replaceJumps(t.steps, t), deadPathCounter);
+      t.steps = pruneDeadPaths(replaceJumps(t.steps, t, new Set<string>([t.refId])), deadPathCounter);
       t.taskVariables.sort((a, b) => a.name.localeCompare(b.name));
     }
 
     if (!didInline) break;
-    // Remove all inlined section tasks
+
+    // Reference-safe deletion: recount across surviving non-inlineable tasks and ONLY remove sections with 0 remaining refs
+    const survivingTasks = tasks.filter((t) => !inlineableRefs.has(t.refId));
+    const remainingRefs = countJumpRefs(survivingTasks);
     for (let i = tasks.length - 1; i >= 0; i -= 1) {
-      if (inlineableRefs.has(tasks[i].refId)) {
+      const refId = tasks[i].refId;
+      if (inlineableRefs.has(refId) && (remainingRefs.get(refId) || 0) === 0) {
         tasks.splice(i, 1);
       }
     }
   }
 
-  // Drop completely unreferenced orphan section tasks (e.g. unreachable Section_BESETZT)
-  const finalJumpRefs = countJumpRefs(tasks);
+  // BFS reachability GC from entry task: drop unreachable orphan section tasks & mutually-referencing dead islands
+  const rootEntryRefId = tasks.find((t) => t.kind === 'entry')?.refId || tasks[0]?.refId || 'Main_Task';
+  const reachableSectionRefs = new Set<string>([rootEntryRefId]);
+  const bfsQueue: string[] = [rootEntryRefId];
+  const tasksByRefMap = new Map<string, MigrationTaskGraph>(tasks.map((t) => [t.refId, t]));
+  const collectTaskRefs = (list: MigrationStep[], outRefs: Set<string>) => {
+    for (const st of list) {
+      if ((st.kind === 'jumpToReusableTask' || st.kind === 'callTask') && st.targetTaskRefId) {
+        outRefs.add(st.targetTaskRefId);
+      }
+      if (st.yesSteps) collectTaskRefs(st.yesSteps, outRefs);
+      if (st.noSteps) collectTaskRefs(st.noSteps, outRefs);
+      if (st.openSteps) collectTaskRefs(st.openSteps, outRefs);
+      if (st.closedSteps) collectTaskRefs(st.closedSteps, outRefs);
+      if (st.holidaySteps) collectTaskRefs(st.holidaySteps, outRefs);
+      if (st.successSteps) collectTaskRefs(st.successSteps, outRefs);
+      if (st.failureSteps) collectTaskRefs(st.failureSteps, outRefs);
+      if (st.timeoutSteps) collectTaskRefs(st.timeoutSteps, outRefs);
+      if (st.foundSteps) collectTaskRefs(st.foundSteps, outRefs);
+      if (st.notFoundSteps) collectTaskRefs(st.notFoundSteps, outRefs);
+      if (st.bodySteps) collectTaskRefs(st.bodySteps, outRefs);
+      if (st.defaultSteps) collectTaskRefs(st.defaultSteps, outRefs);
+      if (st.cases) st.cases.forEach((c) => collectTaskRefs(c.steps, outRefs));
+    }
+  };
+  while (bfsQueue.length > 0) {
+    const curRef = bfsQueue.shift()!;
+    const curTask = tasksByRefMap.get(curRef);
+    if (!curTask) continue;
+    const outs = new Set<string>();
+    collectTaskRefs(curTask.steps, outs);
+    for (const nxt of outs) {
+      if (!reachableSectionRefs.has(nxt)) {
+        reachableSectionRefs.add(nxt);
+        bfsQueue.push(nxt);
+      }
+    }
+  }
   for (let i = tasks.length - 1; i >= 0; i -= 1) {
     const t = tasks[i];
-    if (t.kind === 'section' && (finalJumpRefs.get(t.refId) || 0) === 0) {
+    if ((t.kind === 'section' || t.kind === 'fallback') && !reachableSectionRefs.has(t.refId)) {
       tasks.splice(i, 1);
     }
   }
@@ -3445,13 +3494,12 @@ export function buildMigrationFlowGraph(
           }
         }
       } else if (copy.kind === 'switch' && copy.variableRef) {
-        let wrappedSwitchInDataAction = false;
         const refs = extractScopedVarsFromExpr(copy.variableRef);
         for (const r of refs) {
           const lower = r.name.toLowerCase();
           if (written.has(lower)) continue;
 
-          // If immediately preceded by a callDataAction, wire this response var straight into its outputs!
+          // If immediately preceded by a real callDataAction from Avaya, wire this response var straight into its outputs!
           const prevOut = out[out.length - 1];
           if (prevOut && prevOut.kind === 'callDataAction') {
             prevOut.dataActionOutputs = prevOut.dataActionOutputs || [];
@@ -3467,84 +3515,20 @@ export function buildMigrationFlowGraph(
             continue;
           }
 
-          synthesizedSourceCount += 1;
+          // Honest migration modeling: do NOT invent a fictional Data Action or redundant getParticipantData chain
+          // when the Avaya script doesn't show the upstream write — annotate transparently as OFFENE MIGRATIONSFRAGE!
           const prevWasSubflow =
             prevOut && (prevOut.kind === 'callTask' || prevOut.kind === 'callCommonModule');
-
-          if (/hdx|resp|response|host|oracle|status/i.test(r.name) && !prevWasSubflow) {
-            // Synthesize structured Data Action with Input/Output mapping and nest Switch inside successSteps!
-            needsFallbackErrorTask = true;
-            markWritten(r.name);
-            if (copy.cases) {
-              copy.cases = copy.cases.map((c) => ({
-                ...c,
-                steps: ensureProvenanceOnList(c.steps, written, hostTask),
-              }));
-            }
-            if (copy.defaultSteps) {
-              copy.defaultSteps = ensureProvenanceOnList(copy.defaultSteps, written, hostTask);
-            }
-            out.push({
-              id: nextStepId('da'),
-              kind: 'callDataAction',
-              lineNumber: copy.lineNumber,
-              avayaCommand: 'DATA_PROVENANCE_API',
-              label: `Data Action: Query_${toCleanGraphSlug(r.name, 'HDX')}`,
-              target: `Query_${toCleanGraphSlug(r.name, 'HDX')}`,
-              targetSlug: `Query_${toCleanGraphSlug(r.name, 'HDX')}`,
-              dataActionCategory: 'Oracle_Integration',
-              sectionHint: copy.sectionHint,
-              dataActionInputs: [
-                { name: 'callerAni', expr: 'Call.Ani' },
-                { name: 'dialedDnis', expr: 'Call.Dnis' },
-              ],
-              dataActionOutputs: [
-                {
-                  field: 'responseCode',
-                  targetVarName: r.name,
-                  targetVarRef: r.refName,
-                  dataType: 'string',
-                },
-              ],
-              yamlComment: `OFFENE MIGRATIONSFRAGE: Switch prueft "${r.name}" ohne sichtbare Zuweisung im Skript — Data Action Output-Mapping ergaenzt, bitte Ziel-Integration abstimmen.`,
-              provenanceFinding: {
-                severity: 'WARN',
-                code: 'SWITCH_WITHOUT_SOURCE',
-                variableName: r.name,
-                message: `Switch auf "${r.name}" in Zeile ${copy.lineNumber} ohne vorherige Zuweisung im Skript (Data Action Output-Mapping ergänzt).`,
-              },
-              successSteps: [copy],
-              failureSteps: [makeFallbackJumpStep(copy.lineNumber, `${r.name} Failure`)],
-              timeoutSteps: [makeFallbackJumpStep(copy.lineNumber, `${r.name} Timeout`)],
-              isTerminal: false,
-            });
-            wrappedSwitchInDataAction = true;
-            break;
-          } else {
-            out.push({
-              id: nextStepId('gpd'),
-              kind: 'getParticipantData',
-              lineNumber: copy.lineNumber,
-              avayaCommand: 'DATA_PROVENANCE_READ',
-              label: `Get Participant Data: ${r.name}`,
-              variableName: r.name,
-              variableRef: r.refName,
-              sectionHint: copy.sectionHint,
-              yamlComment: prevWasSubflow
-                ? `OFFENE MIGRATIONSFRAGE: "${r.name}" wird nach "${prevOut.target || 'Subflow'}" im Switch ausgewertet — bitte Rueckgabewert aus Subflow/Participant Data pruefen.`
-                : `OFFENE MIGRATIONSFRAGE: Switch prueft "${r.name}" ohne vorherige Zuweisung — Herkunft aus Participant Data ergaenzt.`,
-              provenanceFinding: {
-                severity: 'WARN',
-                code: 'SWITCH_WITHOUT_SOURCE',
-                variableName: r.name,
-                message: `Switch auf "${r.name}" in Zeile ${copy.lineNumber}: Quelle im Skript nicht explizit sichtbar (Übernahme nach ${prevWasSubflow ? prevOut.target : 'Participant Data'} markiert).`,
-              },
-              isTerminal: false,
-            });
-            markWritten(r.name);
-          }
+          copy.yamlComment = prevWasSubflow
+            ? `OFFENE MIGRATIONSFRAGE: ${r.refName} muss aus vorgeschaltetem Modul "${prevOut.target || 'Subflow'}", Lookup oder externer Integration befuellt werden.`
+            : `OFFENE MIGRATIONSFRAGE: ${r.refName} muss aus vorgeschaltetem Modul, Lookup oder externer Integration befuellt werden.`;
+          copy.provenanceFinding = {
+            severity: 'WARN',
+            code: 'SWITCH_WITHOUT_SOURCE',
+            variableName: r.name,
+            message: `Switch auf "${r.refName}" in Zeile ${copy.lineNumber}: Quelle im Avaya-Skript nicht explizit belegt (offene Migrationsfrage markiert, keine fiktive Data Action erfunden).`,
+          };
         }
-        if (wrappedSwitchInDataAction) continue;
       }
 
       // Record writes performed by this step

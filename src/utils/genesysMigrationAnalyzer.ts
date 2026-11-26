@@ -2719,7 +2719,8 @@ function cloneStepsWithRefRemap(
  */
 function buildDomainAwareFallbackSubtask(
   ref: { name: string; refId: string; originalTarget: string },
-  hasFallbackTask: boolean
+  hasFallbackTask: boolean,
+  callerFlowVars: MigrationVariableDecl[] = []
 ): MigrationTaskGraph {
   const lower = ref.originalTarget.toLowerCase();
 
@@ -2994,17 +2995,14 @@ function buildDomainAwareFallbackSubtask(
     };
   }
 
-  // Response / Validation unloaded block (e.g. Check_Response) — NEVER dummy checkResult: false!
+  // Response / Validation unloaded block (e.g. CHECK_RESPONSE) — directly uses Flow variable (NO Task duplicate, NO getParticipantData!)
   if (/check|response|valid/i.test(lower)) {
-    const respVar: MigrationVariableDecl = {
-      name: 'HDX_Resp_cv',
-      refName: 'Task.HDX_Resp_cv',
-      originalName: 'HDX_Resp_cv',
-      scope: 'task',
-      isParticipantData: true,
-      dataType: 'string',
-      initialValue: '',
-    };
+    const existingRespFlowVar =
+      callerFlowVars.find((v) => v.name.toLowerCase() === 'hdx_resp_cv') ||
+      callerFlowVars.find((v) => /(?:^|_)resp(?:onse)?(?:_cv)?$/i.test(v.name));
+    const respVarName = existingRespFlowVar?.name || 'HDX_Resp_cv';
+    const respVarRef = `Flow.${respVarName}`;
+
     const errorFallbackStep: MigrationStep = hasFallbackTask
       ? {
           id: `sub_${ref.refId}_fb`,
@@ -3021,8 +3019,24 @@ function buildDomainAwareFallbackSubtask(
           kind: 'disconnect',
           lineNumber: 0,
           avayaCommand: 'RESPONSE_DISCONNECT',
-          label: `Disconnect (${ref.name} Fehler)`,
+          label: `Disconnect (${ref.name}_Error)`,
           target: `${ref.name}_Error`,
+          isTerminal: true,
+        };
+
+    const defaultFallbackStep: MigrationStep = hasFallbackTask
+      ? {
+          ...errorFallbackStep,
+          id: `sub_${ref.refId}_def_err`,
+          label: `Fallback (${ref.name}_Default)`,
+        }
+      : {
+          id: `sub_${ref.refId}_def_disc`,
+          kind: 'disconnect',
+          lineNumber: 0,
+          avayaCommand: 'RESPONSE_DEFAULT_DISCONNECT',
+          label: `Disconnect (${ref.name}_Default)`,
+          target: `${ref.name}_Default`,
           isTerminal: true,
         };
 
@@ -3031,29 +3045,26 @@ function buildDomainAwareFallbackSubtask(
       name: ref.name,
       kind: 'subscript',
       originalTarget: ref.originalTarget,
-      yamlComment: `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" ohne .s-Quelldatei — wertet uebergebene Response-Variable ueber Get Participant Data + Switch statt Dummy-Flag aus.`,
-      taskVariables: [respVar],
+      yamlComment: `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" ohne .s-Quelldatei — wertet die globale Response-Variable direkt aus.`,
+      taskVariables: [],
       steps: [
-        {
-          id: `sub_${ref.refId}_gpd`,
-          kind: 'getParticipantData',
-          lineNumber: 0,
-          avayaCommand: 'READ_RESPONSE',
-          label: `Get Participant Data: ${respVar.name}`,
-          variableName: respVar.name,
-          variableRef: respVar.refName,
-          yamlComment: `OFFENE MIGRATIONSFRAGE: Rueckgabevariable fuer "${ref.originalTarget}" (z. B. HDX_Resp_cv) aus vorgeschaltetem Aufruf pruefen.`,
-          isTerminal: false,
-        },
         {
           id: `sub_${ref.refId}_sw`,
           kind: 'switch',
           lineNumber: 0,
           avayaCommand: 'CHECK_RESPONSE_SWITCH',
-          label: `Evaluate ${ref.originalTarget} (${respVar.refName})`,
-          variableName: respVar.name,
-          variableRef: respVar.refName,
-          expression: respVar.refName,
+          label: `Switch ${respVarName}`,
+          target: respVarName,
+          variableName: respVarName,
+          variableRef: respVarRef,
+          expression: respVarRef,
+          yamlComment: `OFFENE MIGRATIONSFRAGE: ${respVarRef} muss aus vorgeschaltetem Modul, Lookup oder externer Integration befuellt werden.`,
+          provenanceFinding: {
+            severity: 'WARN',
+            code: 'SWITCH_WITHOUT_SOURCE',
+            variableName: respVarName,
+            message: `Ungeklärt: ${respVarRef} wird in "${ref.originalTarget}" ausgewertet und muss vorab durch ein Modul, Lookup oder eine externe Integration befüllt werden.`,
+          },
           cases: [
             {
               value: 'SUCCESS',
@@ -3064,10 +3075,10 @@ function buildDomainAwareFallbackSubtask(
                   kind: 'callCommonModule',
                   lineNumber: 0,
                   avayaCommand: 'RESPONSE_OK_ROUTE',
-                  label: 'Continue Master Call Flow',
+                  label: `Call CommonModule ${ref.refId}_Success_Module`,
                   target: `${ref.refId}_Success_Module`,
                   targetSlug: `${ref.refId}_Success_Module`,
-                  yamlComment: `OFFENE MIGRATIONSFRAGE: Ziel-Routing bei SUCCESS aus "${ref.originalTarget}" konkretisieren.`,
+                  yamlComment: `OFFENE MIGRATIONSFRAGE: Ziel-Routing bei SUCCESS konkretisieren.`,
                   isTerminal: false,
                 },
               ],
@@ -3078,13 +3089,7 @@ function buildDomainAwareFallbackSubtask(
               steps: [errorFallbackStep],
             },
           ],
-          defaultSteps: [
-            {
-              ...errorFallbackStep,
-              id: `sub_${ref.refId}_def_err`,
-              label: `Fallback (${ref.name} Default)`,
-            },
-          ],
+          defaultSteps: [defaultFallbackStep],
           isTerminal: false,
         },
       ],
@@ -3132,127 +3137,203 @@ function hydrateLocalSubscriptTasks(
   const existingFlowVarKeys = new Set(callerGraph.flowVariables.map((v) => v.name.toLowerCase()));
   let ensureFallback = existingTaskIds.has('Fallback_Error_Task');
 
-  for (const ref of localSubscriptRefs) {
-    if (existingTaskIds.has(ref.refId)) continue;
-    const loadedTarget = allGraphsByKey.get(ref.targetKey);
+  const collectDirectTaskRefs = (list: MigrationStep[], out: Set<string>) => {
+    for (const st of list) {
+      if ((st.kind === 'callTask' || st.kind === 'jumpToReusableTask') && st.targetTaskRefId) {
+        out.add(st.targetTaskRefId);
+      }
+      if (st.yesSteps) collectDirectTaskRefs(st.yesSteps, out);
+      if (st.noSteps) collectDirectTaskRefs(st.noSteps, out);
+      if (st.openSteps) collectDirectTaskRefs(st.openSteps, out);
+      if (st.closedSteps) collectDirectTaskRefs(st.closedSteps, out);
+      if (st.holidaySteps) collectDirectTaskRefs(st.holidaySteps, out);
+      if (st.successSteps) collectDirectTaskRefs(st.successSteps, out);
+      if (st.failureSteps) collectDirectTaskRefs(st.failureSteps, out);
+      if (st.timeoutSteps) collectDirectTaskRefs(st.timeoutSteps, out);
+      if (st.foundSteps) collectDirectTaskRefs(st.foundSteps, out);
+      if (st.notFoundSteps) collectDirectTaskRefs(st.notFoundSteps, out);
+      if (st.bodySteps) collectDirectTaskRefs(st.bodySteps, out);
+      if (st.defaultSteps) collectDirectTaskRefs(st.defaultSteps, out);
+      if (st.cases) st.cases.forEach((c) => collectDirectTaskRefs(c.steps, out));
+    }
+  };
 
-    if (loadedTarget && loadedTarget.scriptKey !== callerGraph.scriptKey) {
-      // Merge any flow variables required by the embedded sub-script
-      for (const fv of loadedTarget.flowVariables) {
-        if (fv.name === 'avayaOriginScript') continue;
-        if (!existingFlowVarKeys.has(fv.name.toLowerCase())) {
-          existingFlowVarKeys.add(fv.name.toLowerCase());
-          callerGraph.flowVariables.push({ ...fv });
+  const computeReachableTaskRefs = (): Set<string> => {
+    const reachable = new Set<string>([callerGraph.entryTaskRefId]);
+    const queue: string[] = [callerGraph.entryTaskRefId];
+    const byRef = new Map<string, MigrationTaskGraph>(callerGraph.tasks.map((t) => [t.refId, t]));
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      const task = byRef.get(cur);
+      if (!task) continue;
+      const refs = new Set<string>();
+      collectDirectTaskRefs(task.steps, refs);
+      for (const r of refs) {
+        if (!reachable.has(r)) {
+          reachable.add(r);
+          queue.push(r);
         }
       }
+    }
+    return reachable;
+  };
 
-      // Build remap table for any secondary section tasks inside the loaded sub-script
-      const remapMap = new Map<string, string>();
-      const secondaryTasksToAdd: MigrationTaskGraph[] = [];
-      for (const subT of loadedTarget.tasks) {
-        if (subT.refId === loadedTarget.entryTaskRefId) {
-          remapMap.set(subT.refId, ref.refId);
-        } else if (subT.refId === 'Fallback_Error_Task') {
-          remapMap.set('Fallback_Error_Task', 'Fallback_Error_Task');
-          ensureFallback = true;
-        } else {
-          const prefixedRef = toArchySlug(`${ref.refId}_${subT.refId}`, `${ref.refId}_Sec`);
-          remapMap.set(subT.refId, prefixedRef);
-          secondaryTasksToAdd.push(subT);
-        }
-      }
+  const refById = new Map(localSubscriptRefs.map((r) => [r.refId, r]));
+  const processedSubRefs = new Set<string>();
 
-      const remapRef = (r: string) => remapMap.get(r) || r;
-      const entrySub =
-        loadedTarget.tasks.find((t) => t.refId === loadedTarget.entryTaskRefId) ||
-        loadedTarget.tasks[0];
+  // Hydrate ONLY subtasks that are actually reachable from entryTaskRefId (iteratively for nested calls)
+  for (let round = 0; round < 6; round += 1) {
+    const reachableNow = computeReachableTaskRefs();
+    let hydratedAny = false;
 
-      if (entrySub) {
-        // Only embed steps that don't point to unresolved nested callTasks unless we also guard them
-        const safeSteps = cloneStepsWithRefRemap(entrySub.steps, remapRef, `sub_${ref.refId}`);
-        // Rewrite nested callTask targets that aren't in caller's tasks into callCommonModule so targetTaskRef stays 100% valid
-        const sanitizeNestedCalls = (list: MigrationStep[]) => {
-          for (const st of list) {
-            if (st.kind === 'callTask' && st.targetTaskRefId) {
-              const mapped = remapRef(st.targetTaskRefId);
-              if (
-                !existingTaskIds.has(mapped) &&
-                mapped !== ref.refId &&
-                !Array.from(remapMap.values()).includes(mapped) &&
-                !localSubscriptRefs.some((lr) => lr.refId === mapped)
-              ) {
-                st.kind = 'callCommonModule';
-                st.targetSlug = toArchySlug(st.target || mapped, 'CommonModule');
-                st.targetTaskRefId = undefined;
-              }
-            }
-            if (st.yesSteps) sanitizeNestedCalls(st.yesSteps);
-            if (st.noSteps) sanitizeNestedCalls(st.noSteps);
-            if (st.openSteps) sanitizeNestedCalls(st.openSteps);
-            if (st.closedSteps) sanitizeNestedCalls(st.closedSteps);
-            if (st.holidaySteps) sanitizeNestedCalls(st.holidaySteps);
-            if (st.successSteps) sanitizeNestedCalls(st.successSteps);
-            if (st.failureSteps) sanitizeNestedCalls(st.failureSteps);
-            if (st.timeoutSteps) sanitizeNestedCalls(st.timeoutSteps);
-            if (st.foundSteps) sanitizeNestedCalls(st.foundSteps);
-            if (st.notFoundSteps) sanitizeNestedCalls(st.notFoundSteps);
-            if (st.bodySteps) sanitizeNestedCalls(st.bodySteps);
-            if (st.defaultSteps) sanitizeNestedCalls(st.defaultSteps);
-            if (st.cases) st.cases.forEach((c) => sanitizeNestedCalls(c.steps));
+    for (const refId of reachableNow) {
+      if (existingTaskIds.has(refId) || processedSubRefs.has(refId)) continue;
+      const ref = refById.get(refId);
+      if (!ref) continue;
+      processedSubRefs.add(refId);
+      hydratedAny = true;
+
+      const loadedTarget = allGraphsByKey.get(ref.targetKey);
+
+      if (loadedTarget && loadedTarget.scriptKey !== callerGraph.scriptKey) {
+        // Merge any flow variables required by the embedded sub-script
+        for (const fv of loadedTarget.flowVariables) {
+          if (fv.name === 'avayaOriginScript') continue;
+          if (!existingFlowVarKeys.has(fv.name.toLowerCase())) {
+            existingFlowVarKeys.add(fv.name.toLowerCase());
+            callerGraph.flowVariables.push({ ...fv });
           }
-        };
-        sanitizeNestedCalls(safeSteps);
-
-        callerGraph.tasks.push({
-          refId: ref.refId,
-          name: ref.name,
-          kind: 'subscript',
-          originalTarget: ref.originalTarget,
-          taskVariables: entrySub.taskVariables.map((v) => ({ ...v })),
-          steps: safeSteps,
-        });
-        existingTaskIds.add(ref.refId);
-
-        for (const secT of secondaryTasksToAdd) {
-          const newRef = remapRef(secT.refId);
-          if (existingTaskIds.has(newRef)) continue;
-          const secSteps = cloneStepsWithRefRemap(secT.steps, remapRef, `sub_${newRef}`);
-          sanitizeNestedCalls(secSteps);
-          callerGraph.tasks.push({
-            refId: newRef,
-            name: newRef,
-            kind: 'section',
-            originalTarget: secT.originalTarget,
-            taskVariables: secT.taskVariables.map((v) => ({ ...v })),
-            steps: secSteps,
-          });
-          existingTaskIds.add(newRef);
         }
-        continue;
+
+        // Build remap table for any secondary section tasks inside the loaded sub-script
+        const remapMap = new Map<string, string>();
+        const secondaryTasksToAdd: MigrationTaskGraph[] = [];
+        for (const subT of loadedTarget.tasks) {
+          if (subT.refId === loadedTarget.entryTaskRefId) {
+            remapMap.set(subT.refId, ref.refId);
+          } else if (subT.refId === 'Fallback_Error_Task') {
+            remapMap.set('Fallback_Error_Task', 'Fallback_Error_Task');
+            ensureFallback = true;
+          } else {
+            const prefixedRef = toArchySlug(`${ref.refId}_${subT.refId}`, `${ref.refId}_Sec`);
+            remapMap.set(subT.refId, prefixedRef);
+            secondaryTasksToAdd.push(subT);
+          }
+        }
+
+        const remapRef = (r: string) => remapMap.get(r) || r;
+        const entrySub =
+          loadedTarget.tasks.find((t) => t.refId === loadedTarget.entryTaskRefId) ||
+          loadedTarget.tasks[0];
+
+        if (entrySub) {
+          const safeSteps = cloneStepsWithRefRemap(entrySub.steps, remapRef, `sub_${ref.refId}`);
+          const sanitizeNestedCalls = (list: MigrationStep[]) => {
+            for (const st of list) {
+              if (st.kind === 'callTask' && st.targetTaskRefId) {
+                const mapped = remapRef(st.targetTaskRefId);
+                if (
+                  !existingTaskIds.has(mapped) &&
+                  mapped !== ref.refId &&
+                  !Array.from(remapMap.values()).includes(mapped) &&
+                  !refById.has(mapped)
+                ) {
+                  st.kind = 'callCommonModule';
+                  st.targetSlug = toArchySlug(st.target || mapped, 'CommonModule');
+                  st.targetTaskRefId = undefined;
+                }
+              }
+              if (st.yesSteps) sanitizeNestedCalls(st.yesSteps);
+              if (st.noSteps) sanitizeNestedCalls(st.noSteps);
+              if (st.openSteps) sanitizeNestedCalls(st.openSteps);
+              if (st.closedSteps) sanitizeNestedCalls(st.closedSteps);
+              if (st.holidaySteps) sanitizeNestedCalls(st.holidaySteps);
+              if (st.successSteps) sanitizeNestedCalls(st.successSteps);
+              if (st.failureSteps) sanitizeNestedCalls(st.failureSteps);
+              if (st.timeoutSteps) sanitizeNestedCalls(st.timeoutSteps);
+              if (st.foundSteps) sanitizeNestedCalls(st.foundSteps);
+              if (st.notFoundSteps) sanitizeNestedCalls(st.notFoundSteps);
+              if (st.bodySteps) sanitizeNestedCalls(st.bodySteps);
+              if (st.defaultSteps) sanitizeNestedCalls(st.defaultSteps);
+              if (st.cases) st.cases.forEach((c) => sanitizeNestedCalls(c.steps));
+            }
+          };
+          sanitizeNestedCalls(safeSteps);
+
+          callerGraph.tasks.push({
+            refId: ref.refId,
+            name: ref.name,
+            kind: 'subscript',
+            originalTarget: ref.originalTarget,
+            taskVariables: entrySub.taskVariables.map((v) => ({ ...v })),
+            steps: safeSteps,
+          });
+          existingTaskIds.add(ref.refId);
+
+          for (const secT of secondaryTasksToAdd) {
+            const newRef = remapRef(secT.refId);
+            if (existingTaskIds.has(newRef)) continue;
+            const secSteps = cloneStepsWithRefRemap(secT.steps, remapRef, `sub_${newRef}`);
+            sanitizeNestedCalls(secSteps);
+            callerGraph.tasks.push({
+              refId: newRef,
+              name: newRef,
+              kind: 'section',
+              originalTarget: secT.originalTarget,
+              taskVariables: secT.taskVariables.map((v) => ({ ...v })),
+              steps: secSteps,
+            });
+            existingTaskIds.add(newRef);
+          }
+          continue;
+        }
       }
+
+      // Subscript not loaded in workspace -> domain-aware Reusable Task + transparent MISSING_SUBFLOW_SOURCE finding
+      missingSubflows.push(ref.originalTarget);
+      const fallbackSubtask = buildDomainAwareFallbackSubtask(
+        ref,
+        ensureFallback,
+        callerGraph.flowVariables
+      );
+      // Ensure Flow.MCF_Blacklist_flag_cv is declared on flow if a Blacklist subtask writes it
+      if (
+        /blacklist|vip/i.test(ref.originalTarget) &&
+        !existingFlowVarKeys.has('mcf_blacklist_flag_cv')
+      ) {
+        existingFlowVarKeys.add('mcf_blacklist_flag_cv');
+        callerGraph.flowVariables.push({
+          name: 'MCF_Blacklist_flag_cv',
+          refName: 'Flow.MCF_Blacklist_flag_cv',
+          originalName: 'MCF_Blacklist_flag_cv',
+          scope: 'flow',
+          isParticipantData: true,
+          dataType: 'string',
+          initialValue: '',
+        });
+      }
+      // Ensure Flow.HDX_Resp_cv is declared on flow if a CHECK_RESPONSE subtask reads it directly
+      if (/check|response|valid/i.test(ref.originalTarget)) {
+        const respSwitch = fallbackSubtask.steps.find((s) => s.kind === 'switch');
+        const respName = respSwitch?.variableName || 'HDX_Resp_cv';
+        if (!existingFlowVarKeys.has(respName.toLowerCase())) {
+          existingFlowVarKeys.add(respName.toLowerCase());
+          callerGraph.flowVariables.push({
+            name: respName,
+            refName: `Flow.${respName}`,
+            originalName: respName,
+            scope: 'flow',
+            isParticipantData: true,
+            dataType: 'string',
+            initialValue: '',
+          });
+        }
+      }
+      callerGraph.tasks.push(fallbackSubtask);
+      existingTaskIds.add(ref.refId);
     }
 
-    // Subscript not loaded in workspace -> domain-aware Reusable Task + transparent MISSING_SUBFLOW_SOURCE finding
-    missingSubflows.push(ref.originalTarget);
-    const fallbackSubtask = buildDomainAwareFallbackSubtask(ref, ensureFallback);
-    // Ensure Flow.MCF_Blacklist_flag_cv is declared on flow if a Blacklist subtask writes it
-    if (
-      /blacklist|vip/i.test(ref.originalTarget) &&
-      !existingFlowVarKeys.has('mcf_blacklist_flag_cv')
-    ) {
-      existingFlowVarKeys.add('mcf_blacklist_flag_cv');
-      callerGraph.flowVariables.push({
-        name: 'MCF_Blacklist_flag_cv',
-        refName: 'Flow.MCF_Blacklist_flag_cv',
-        originalName: 'MCF_Blacklist_flag_cv',
-        scope: 'flow',
-        isParticipantData: true,
-        dataType: 'string',
-        initialValue: '',
-      });
-    }
-    callerGraph.tasks.push(fallbackSubtask);
-    existingTaskIds.add(ref.refId);
+    if (!hydratedAny) break;
   }
 
   if (ensureFallback && !existingTaskIds.has('Fallback_Error_Task')) {
@@ -3285,6 +3366,76 @@ function hydrateLocalSubscriptTasks(
         },
       ],
     });
+    existingTaskIds.add('Fallback_Error_Task');
+  }
+
+  // Final Cross-Reference Safety Net: guarantee 0 UNRESOLVED_TASK_REF across every surviving task
+  const sanitizeDanglingTaskRefs = (list: MigrationStep[]): MigrationStep[] => {
+    const out: MigrationStep[] = [];
+    for (const st of list) {
+      if (
+        (st.kind === 'jumpToReusableTask' || st.kind === 'callTask') &&
+        st.targetTaskRefId &&
+        !existingTaskIds.has(st.targetTaskRefId)
+      ) {
+        // Check if stripping Section_ prefix matches an existing task (e.g. Section_CHECK_RESPONSE -> CHECK_RESPONSE)
+        const stripped = st.targetTaskRefId.replace(/^Section_/i, '');
+        if (stripped && existingTaskIds.has(stripped)) {
+          out.push({
+            ...st,
+            kind: 'callTask',
+            targetTaskRefId: stripped,
+            targetSlug: stripped,
+            isTerminal: false,
+          });
+          continue;
+        }
+        // Unresolvable dangling ref: drop it cleanly if non-terminal, or omit if already preceded by a call/action
+        if (out.length === 0) {
+          out.push({
+            id: `${st.id}_safe_disc`,
+            kind: 'disconnect',
+            lineNumber: st.lineNumber,
+            avayaCommand: 'UNRESOLVED_REF_CLEANUP',
+            label: `Disconnect (${st.target || 'Unresolved'})`,
+            yamlComment: `OFFENE MIGRATIONSFRAGE: Urspruenglicher Sprung auf "${st.targetTaskRefId}" hatte kein gueltiges Ziel und wurde bereinigt.`,
+            isTerminal: true,
+          });
+        }
+        continue;
+      }
+      const copy: MigrationStep = { ...st };
+      if (copy.yesSteps) copy.yesSteps = sanitizeDanglingTaskRefs(copy.yesSteps);
+      if (copy.noSteps) copy.noSteps = sanitizeDanglingTaskRefs(copy.noSteps);
+      if (copy.openSteps) copy.openSteps = sanitizeDanglingTaskRefs(copy.openSteps);
+      if (copy.closedSteps) copy.closedSteps = sanitizeDanglingTaskRefs(copy.closedSteps);
+      if (copy.holidaySteps) copy.holidaySteps = sanitizeDanglingTaskRefs(copy.holidaySteps);
+      if (copy.successSteps) copy.successSteps = sanitizeDanglingTaskRefs(copy.successSteps);
+      if (copy.failureSteps) copy.failureSteps = sanitizeDanglingTaskRefs(copy.failureSteps);
+      if (copy.timeoutSteps) copy.timeoutSteps = sanitizeDanglingTaskRefs(copy.timeoutSteps);
+      if (copy.foundSteps) copy.foundSteps = sanitizeDanglingTaskRefs(copy.foundSteps);
+      if (copy.notFoundSteps) copy.notFoundSteps = sanitizeDanglingTaskRefs(copy.notFoundSteps);
+      if (copy.bodySteps) copy.bodySteps = sanitizeDanglingTaskRefs(copy.bodySteps);
+      if (copy.defaultSteps) copy.defaultSteps = sanitizeDanglingTaskRefs(copy.defaultSteps);
+      if (copy.cases) {
+        copy.cases = copy.cases.map((c) => ({ ...c, steps: sanitizeDanglingTaskRefs(c.steps) }));
+      }
+      out.push(copy);
+    }
+    return out;
+  };
+
+  for (const t of callerGraph.tasks) {
+    t.steps = sanitizeDanglingTaskRefs(t.steps);
+  }
+
+  // Final Reachable-Task GC (BFS from entryTaskRefId): removes any uncalled BESETZT / GET_SCHALTER / orphan Section / unused Fallback_Error_Task
+  const finalReachable = computeReachableTaskRefs();
+  for (let i = callerGraph.tasks.length - 1; i >= 0; i -= 1) {
+    const t = callerGraph.tasks[i];
+    if (t.refId !== callerGraph.entryTaskRefId && !finalReachable.has(t.refId)) {
+      callerGraph.tasks.splice(i, 1);
+    }
   }
 
   callerGraph.flowVariables.sort((a, b) => a.name.localeCompare(b.name));
@@ -3466,11 +3617,13 @@ function finalizeScriptTranslation(
     },
     variables: allVarDecls,
     actions,
-    localReusableTasks: localSubscriptRefs.map(({ name, refId, originalTarget }) => ({
-      name,
-      refId,
-      originalTarget,
-    })),
+    localReusableTasks: localSubscriptRefs
+      .filter((r) => graph.tasks.some((t) => t.refId === r.refId))
+      .map(({ name, refId, originalTarget }) => ({
+        name,
+        refId,
+        originalTarget,
+      })),
     migrationGraph: graph,
     flowIR,
     irValidation,
@@ -3569,7 +3722,7 @@ export function translateAvayaWorkspaceToGenesys(
         incomingCallCountByKey,
         brokenTargetKeysForScript: brokenByScriptKey.get(node.scriptKey) || new Set<string>(),
       },
-      '1.5.0'
+      '1.5.1'
     );
     builtByKey.set(node.scriptKey, { node, built });
     allGraphsByKey.set(node.scriptKey, built.graph);
@@ -3603,7 +3756,7 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.5.0',
+    schemaVersion: '1.5.1',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     overallReadiness,
