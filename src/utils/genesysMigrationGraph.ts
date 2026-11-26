@@ -186,16 +186,22 @@ export interface MigrationStep {
   /** v1.1-Zieltypisierung für Transfers. */
   resolvedTargetType?: 'queue' | 'user' | 'externalNumber' | 'extension' | 'flow' | 'unresolved';
   /** Strukturiertes Provenance-Finding, das ins FlowIR v1.1 übernommen wird. */
-  provenanceFinding?: {
-    severity: 'INFO' | 'WARN' | 'ERROR';
-    code:
-      | 'VAR_USED_BEFORE_SET'
-      | 'SWITCH_WITHOUT_SOURCE'
-      | 'DUMMY_CONDITION'
-      | 'MISSING_CONDITION_SOURCE';
-    message: string;
-    variableName?: string;
-  };
+  provenanceFinding?: StepProvenanceFinding;
+  /** Zusätzliche strukturierte Findings (z. B. Fallthrough oder Doppel-Feiertagslogik) auf demselben Schritt. */
+  additionalFindings?: StepProvenanceFinding[];
+}
+
+export interface StepProvenanceFinding {
+  severity: 'INFO' | 'WARN' | 'ERROR';
+  code:
+    | 'VAR_USED_BEFORE_SET'
+    | 'SWITCH_WITHOUT_SOURCE'
+    | 'DUMMY_CONDITION'
+    | 'MISSING_CONDITION_SOURCE'
+    | 'POTENTIAL_BRANCH_FALLTHROUGH'
+    | 'DUPLICATE_HOLIDAY_LOGIC';
+  message: string;
+  variableName?: string;
 }
 
 export interface MigrationTaskGraph {
@@ -219,7 +225,10 @@ export interface MigrationGraphWarning {
     | 'QUEUE_OBSERVATIONS_API'
     | 'EMERGENCY_GROUP_REQUIRED'
     | 'INTERNAL_CDN_NORMALIZED'
-    | 'UNREACHABLE_CODE_PRUNED';
+    | 'UNREACHABLE_CODE_PRUNED'
+    | 'UNPROVEN_VARIABLE_SOURCE'
+    | 'POTENTIAL_BRANCH_FALLTHROUGH'
+    | 'DUPLICATE_HOLIDAY_LOGIC';
   severity: 'warning' | 'blocker';
   message: string;
   lineNumber?: number;
@@ -253,6 +262,13 @@ export interface BuildMigrationGraphContext {
   knownKeyLookup: Map<string, string>;
   incomingCallCountByKey: Map<string, number>;
   brokenTargetKeysForScript: Set<string>;
+  /**
+   * Optionaler Kompatibilitäts-/Stub-Modus (Opt-In, Standard = false).
+   * Nur wenn true, werden unbelegte Variablen automatisch per getParticipantData / Lookup-Stub ergänzt.
+   * Im Standardmodus (false = Ehrliche Migration) werden fehlende Quellen nicht erfunden,
+   * sondern transparent als offene Migrationsfrage mit Kommentar & Finding markiert.
+   */
+  compatibilityStubMode?: boolean;
 }
 
 export interface BuildMigrationGraphResult {
@@ -749,12 +765,60 @@ export function compileOclConditionToArchitectExpr(
       return { expr: op, isNumeric: true, isString: false, isBoolean: false };
     }
 
-    // System telephony identifiers
+    // System telephony & date/time identifiers -> native Genesys Cloud Architect system context
     if (/^(?:CDN|DNIS|DIALED[\s_]*NUMBER|CALL\.DNIS)$/i.test(op)) {
       return { expr: 'Call.Dnis', isNumeric: false, isString: true, isBoolean: false };
     }
     if (/^(?:CLID|ANI|CALLING[\s_]*NUMBER|CALL\.ANI)$/i.test(op)) {
       return { expr: 'Call.Ani', isNumeric: false, isString: true, isBoolean: false };
+    }
+    if (/^(?:LANGUAGE|CALL\.LANGUAGE)$/i.test(op)) {
+      return { expr: 'Call.Language', isNumeric: false, isString: true, isBoolean: false };
+    }
+    if (/^(?:UUI|CALL\.USERTOUSERINFORMATION)$/i.test(op)) {
+      return { expr: 'Call.UserToUserInformation', isNumeric: false, isString: true, isBoolean: false };
+    }
+    if (
+      /^(?:DATE|CURRENT[\s_]*DATE|TODAY|SYS[\s_]*DATE|SYSTEM[\s_]*DATE|DATE\s+OF\s+YEAR)$/i.test(op) &&
+      !registry.flowVars.has(op.toLowerCase()) &&
+      !taskVars.has(op.toLowerCase())
+    ) {
+      return { expr: 'GetCurrentDateTimeUtc()', isNumeric: false, isString: true, isBoolean: false };
+    }
+    if (
+      /^(?:TIME|CURRENT[\s_]*TIME|SYS[\s_]*TIME|SYSTEM[\s_]*TIME|TIME\s+OF\s+DAY)$/i.test(op) &&
+      !registry.flowVars.has(op.toLowerCase()) &&
+      !taskVars.has(op.toLowerCase())
+    ) {
+      return { expr: 'GetCurrentDateTimeUtc()', isNumeric: false, isString: true, isBoolean: false };
+    }
+    if (
+      /^(?:DAY\s+OF\s+WEEK|DAY[\s_]*OF[\s_]*WEEK|DAYOFWEEK|WEEKDAY)$/i.test(op) &&
+      !registry.flowVars.has(op.toLowerCase()) &&
+      !taskVars.has(op.toLowerCase())
+    ) {
+      return { expr: 'DayOfWeek(GetCurrentDateTimeUtc())', isNumeric: true, isString: false, isBoolean: false };
+    }
+    if (
+      /^(?:CURRENT[\s_]*YEAR|SYS[\s_]*YEAR)$/i.test(op) &&
+      !registry.flowVars.has(op.toLowerCase()) &&
+      !taskVars.has(op.toLowerCase())
+    ) {
+      return { expr: 'Year(GetCurrentDateTimeUtc())', isNumeric: true, isString: false, isBoolean: false };
+    }
+    if (
+      /^(?:CURRENT[\s_]*MONTH|SYS[\s_]*MONTH)$/i.test(op) &&
+      !registry.flowVars.has(op.toLowerCase()) &&
+      !taskVars.has(op.toLowerCase())
+    ) {
+      return { expr: 'Month(GetCurrentDateTimeUtc())', isNumeric: true, isString: false, isBoolean: false };
+    }
+    if (
+      /^(?:CURRENT[\s_]*DAY|SYS[\s_]*DAY)$/i.test(op) &&
+      !registry.flowVars.has(op.toLowerCase()) &&
+      !taskVars.has(op.toLowerCase())
+    ) {
+      return { expr: 'Day(GetCurrentDateTimeUtc())', isNumeric: true, isString: false, isBoolean: false };
     }
     if (/^(?:EXPECTED\s+WAIT\s+TIME|EWT)$/i.test(op)) {
       const ewtVar = registry.ensureFlowVar('estimatedWaitTime', 'integer', 0);
@@ -1082,7 +1146,7 @@ export function buildMigrationFlowGraph(
   node: ParsedScriptNode,
   mod: ScriptModule | undefined,
   ctx: BuildMigrationGraphContext,
-  schemaVersion = '1.5.1'
+  schemaVersion = '1.5.5'
 ): BuildMigrationGraphResult {
   const rawText = mod?.rawText || '';
   const strippedLines = rawText ? stripOclCommentsPreservingLines(rawText) : [];
@@ -3377,6 +3441,45 @@ export function buildMigrationFlowGraph(
     return found;
   };
 
+  const compatibilityStubMode = Boolean(ctx.compatibilityStubMode);
+
+  const appendComment = (target: MigrationStep, line: string) => {
+    const clean = line.trim();
+    if (!clean) return;
+    const existing = (target.yamlComment || '')
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!existing.includes(clean)) {
+      existing.push(clean);
+      target.yamlComment = existing.join('\n');
+    }
+  };
+
+  const appendFinding = (target: MigrationStep, finding: StepProvenanceFinding) => {
+    if (!target.provenanceFinding) {
+      target.provenanceFinding = finding;
+      return;
+    }
+    if (
+      target.provenanceFinding.code === finding.code &&
+      target.provenanceFinding.variableName === finding.variableName &&
+      target.provenanceFinding.message === finding.message
+    ) {
+      return;
+    }
+    target.additionalFindings = target.additionalFindings || [];
+    const exists = target.additionalFindings.some(
+      (f) =>
+        f.code === finding.code &&
+        f.variableName === finding.variableName &&
+        f.message === finding.message
+    );
+    if (!exists) {
+      target.additionalFindings.push(finding);
+    }
+  };
+
   const ensureProvenanceOnList = (
     steps: MigrationStep[],
     inheritedWritten: Set<string>,
@@ -3391,7 +3494,10 @@ export function buildMigrationFlowGraph(
     };
 
     for (const st of steps) {
-      const copy: MigrationStep = { ...st };
+      const copy: MigrationStep = {
+        ...st,
+        additionalFindings: st.additionalFindings ? [...st.additionalFindings] : undefined,
+      };
 
       // Check unread variables in decision / switch BEFORE pushing the step
       if (copy.kind === 'decision' && copy.expression && !copy.isEmergencyCheck) {
@@ -3403,94 +3509,111 @@ export function buildMigrationFlowGraph(
             lower === 'estimatedwaittime' ||
             lower === 'queueagentsonline' ||
             lower === 'emergencyoverride' ||
-            lower === 'avayaoriginscript'
+            lower === 'avayaoriginscript' ||
+            lower === 'startdatetimeutc'
           ) {
             continue;
           }
 
-          if (/blacklist|vip/i.test(r.name)) {
-            synthesizedSourceCount += 1;
-            const tableName = `${toCleanGraphSlug(r.name.replace(/_flag|_cv/gi, ''), 'Blacklist')}_Table`;
-            const isBool = registry.flowVars.get(lower)?.dataType === 'boolean';
-            out.push({
-              id: nextStepId('dt'),
-              kind: 'callDataTableLookup',
-              lineNumber: copy.lineNumber,
-              avayaCommand: 'DATA_PROVENANCE_LOOKUP',
-              label: `Data Table Lookup: ${tableName}`,
-              target: tableName,
-              targetSlug: tableName,
-              dataTableKey: 'Call.Ani',
-              sectionHint: copy.sectionHint,
-              dataActionOutputs: [
-                {
-                  field: 'isListed',
-                  targetVarName: r.name,
-                  targetVarRef: r.refName,
-                  dataType: isBool ? 'boolean' : 'string',
+          if (compatibilityStubMode) {
+            // Optional opt-in Compatibility / Stub Mode: synthesize lookup or getParticipantData explicitly marked as stub
+            if (/blacklist|vip/i.test(r.name)) {
+              synthesizedSourceCount += 1;
+              const tableName = `${toCleanGraphSlug(r.name.replace(/_flag|_cv/gi, ''), 'Blacklist')}_Table`;
+              const isBool = registry.flowVars.get(lower)?.dataType === 'boolean';
+              out.push({
+                id: nextStepId('dt'),
+                kind: 'callDataTableLookup',
+                lineNumber: copy.lineNumber,
+                avayaCommand: 'DATA_PROVENANCE_LOOKUP',
+                label: `Data Table Lookup: ${tableName}`,
+                target: tableName,
+                targetSlug: tableName,
+                dataTableKey: 'Call.Ani',
+                sectionHint: copy.sectionHint,
+                dataActionOutputs: [
+                  {
+                    field: 'isListed',
+                    targetVarName: r.name,
+                    targetVarRef: r.refName,
+                    dataType: isBool ? 'boolean' : 'string',
+                  },
+                ],
+                yamlComment: `KOMPATIBILITAETS-STUB (OPT-IN): Quelle fuer "${r.name}" im Avaya-Skript nicht eindeutig enthalten — Data Table Lookup (${tableName} ueber Call.Ani) als Annahme ergaenzt, bitte Tabellenname/Schluessel in Genesys pruefen.`,
+                provenanceFinding: {
+                  severity: 'WARN',
+                  code: 'VAR_USED_BEFORE_SET',
+                  variableName: r.name,
+                  message: `Variable "${r.name}" wird in Zeile ${copy.lineNumber} geprüft, Quelle im Avaya-Skript nicht eindeutig gefunden (Kompatibilitäts-Stub: Data Table Lookup "${tableName}" als Zielannahme ergänzt).`,
                 },
-              ],
-              yamlComment: `OFFENE MIGRATIONSFRAGE: Quelle fuer "${r.name}" im Avaya-Skript nicht eindeutig enthalten — Data Table Lookup (${tableName} ueber Call.Ani) ergaenzt, bitte Tabellenname/Schluessel in Genesys pruefen.`,
-              provenanceFinding: {
-                severity: 'WARN',
-                code: 'VAR_USED_BEFORE_SET',
+                foundSteps: [
+                  {
+                    id: nextStepId('upd'),
+                    kind: 'updateData',
+                    lineNumber: copy.lineNumber,
+                    avayaCommand: 'SET_LOOKUP_MATCH',
+                    label: `Set ${r.refName} (Match)`,
+                    variableName: r.name,
+                    variableRef: r.refName,
+                    variableDataType: isBool ? 'boolean' : 'string',
+                    literalValue: isBool ? true : '1',
+                    sectionHint: copy.sectionHint,
+                    isTerminal: false,
+                  },
+                ],
+                notFoundSteps: [
+                  {
+                    id: nextStepId('upd'),
+                    kind: 'updateData',
+                    lineNumber: copy.lineNumber,
+                    avayaCommand: 'SET_LOOKUP_NOMATCH',
+                    label: `Set ${r.refName} (Not Found)`,
+                    variableName: r.name,
+                    variableRef: r.refName,
+                    variableDataType: isBool ? 'boolean' : 'string',
+                    literalValue: isBool ? false : '0',
+                    sectionHint: copy.sectionHint,
+                    isTerminal: false,
+                  },
+                ],
+                isTerminal: false,
+              });
+              markWritten(r.name);
+            } else {
+              synthesizedSourceCount += 1;
+              out.push({
+                id: nextStepId('gpd'),
+                kind: 'getParticipantData',
+                lineNumber: copy.lineNumber,
+                avayaCommand: 'DATA_PROVENANCE_READ',
+                label: `Get Participant Data: ${r.name}`,
                 variableName: r.name,
-                message: `Variable "${r.name}" wird in Zeile ${copy.lineNumber} geprüft, Quelle im Avaya-Skript nicht eindeutig gefunden (Data Table Lookup "${tableName}" als Zielquelle ergänzt).`,
-              },
-              foundSteps: [
-                {
-                  id: nextStepId('upd'),
-                  kind: 'updateData',
-                  lineNumber: copy.lineNumber,
-                  avayaCommand: 'SET_LOOKUP_MATCH',
-                  label: `Set ${r.refName} (Match)`,
+                variableRef: r.refName,
+                sectionHint: copy.sectionHint,
+                yamlComment: `KOMPATIBILITAETS-STUB (OPT-IN): "${r.name}" wird vor expliziter Zuweisung geprueft — Uebernahme aus Participant Data als bewusste Annahme ergaenzt.`,
+                provenanceFinding: {
+                  severity: 'WARN',
+                  code: 'VAR_USED_BEFORE_SET',
                   variableName: r.name,
-                  variableRef: r.refName,
-                  variableDataType: isBool ? 'boolean' : 'string',
-                  literalValue: isBool ? true : '1',
-                  sectionHint: copy.sectionHint,
-                  isTerminal: false,
+                  message: `Variable "${r.name}" wird in Zeile ${copy.lineNumber} geprüft, aber vorher im Skript nicht explizit gesetzt (Kompatibilitäts-Stub: Get Participant Data als Herkunftsannahme ergänzt).`,
                 },
-              ],
-              notFoundSteps: [
-                {
-                  id: nextStepId('upd'),
-                  kind: 'updateData',
-                  lineNumber: copy.lineNumber,
-                  avayaCommand: 'SET_LOOKUP_NOMATCH',
-                  label: `Set ${r.refName} (Not Found)`,
-                  variableName: r.name,
-                  variableRef: r.refName,
-                  variableDataType: isBool ? 'boolean' : 'string',
-                  literalValue: isBool ? false : '0',
-                  sectionHint: copy.sectionHint,
-                  isTerminal: false,
-                },
-              ],
-              isTerminal: false,
-            });
-            markWritten(r.name);
+                isTerminal: false,
+              });
+              markWritten(r.name);
+            }
           } else {
-            synthesizedSourceCount += 1;
-            out.push({
-              id: nextStepId('gpd'),
-              kind: 'getParticipantData',
-              lineNumber: copy.lineNumber,
-              avayaCommand: 'DATA_PROVENANCE_READ',
-              label: `Get Participant Data: ${r.name}`,
+            // Strict Honest Migration (Default): NEVER invent getParticipantData or synthetic Data Table Lookups.
+            // Mark transparently as open migration question via inline YAML comment + structured FlowIR finding.
+            appendComment(
+              copy,
+              `OFFENE MIGRATIONSFRAGE: Quelle fuer "${r.refName}" im Avaya-Skript nicht belegt — kein getParticipantData/Lookup erfunden; Herkunft (z. B. Participant Data, Data Table oder vorgeschaltetes Modul) bitte fachlich klaeren.`
+            );
+            appendFinding(copy, {
+              severity: 'WARN',
+              code: 'VAR_USED_BEFORE_SET',
               variableName: r.name,
-              variableRef: r.refName,
-              sectionHint: copy.sectionHint,
-              yamlComment: `OFFENE MIGRATIONSFRAGE: "${r.name}" wird vor expliziter Zuweisung geprueft — Uebernahme aus Participant Data / vorgeschaltetem Modul ergaenzt.`,
-              provenanceFinding: {
-                severity: 'WARN',
-                code: 'VAR_USED_BEFORE_SET',
-                variableName: r.name,
-                message: `Variable "${r.name}" wird in Zeile ${copy.lineNumber} geprüft, aber vorher im Skript nicht explizit gesetzt (Get Participant Data als Herkunft ergänzt).`,
-              },
-              isTerminal: false,
+              message: `Variable "${r.name}" wird in Zeile ${copy.lineNumber} geprüft, hat aber keine belegte Quelle im Avaya-Skript (kein getParticipantData/Lookup erfunden — offene Migrationsfrage).`,
             });
-            markWritten(r.name);
           }
         }
       } else if (copy.kind === 'switch' && copy.variableRef) {

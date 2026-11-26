@@ -24,12 +24,15 @@ import {
 import {
   BuildMigrationGraphResult,
   MigrationFlowGraph,
+  MigrationGraphWarning,
   MigrationStep,
   MigrationTaskGraph,
   MigrationVariableDataType,
   MigrationVariableDecl,
+  StepProvenanceFinding,
   buildMigrationFlowGraph,
   flattenMigrationSteps,
+  isStepListTerminal,
   toCleanGraphSlug,
 } from './genesysMigrationGraph';
 import {
@@ -179,6 +182,9 @@ export interface GenesysScriptWarning {
     | 'EMERGENCY_GROUP_REQUIRED'
     | 'INTERNAL_CDN_NORMALIZED'
     | 'UNREACHABLE_CODE_PRUNED'
+    | 'UNPROVEN_VARIABLE_SOURCE'
+    | 'POTENTIAL_BRANCH_FALLTHROUGH'
+    | 'DUPLICATE_HOLIDAY_LOGIC'
     | 'ARCHY_YAML_VALIDATION_ERROR';
   severity: 'warning' | 'blocker';
   message: string;
@@ -236,6 +242,8 @@ export interface GenesysWorkspaceTranslation {
   schemaVersion: string;
   generatedAt: string;
   privacyMode: '100%-in-memory-metadata-only';
+  /** false = Ehrliche Migration (Standard), true = Optionaler Kompatibilitäts-/Stub-Modus. */
+  compatibilityStubMode: boolean;
   overallReadiness: GenesysReadinessLevel;
   summary: {
     totalScripts: number;
@@ -2677,6 +2685,7 @@ function cloneStepsWithRefRemap(
   return steps.map((s) => ({
     ...s,
     id: `${idPrefix}_${s.id}`,
+    additionalFindings: s.additionalFindings ? s.additionalFindings.map((f) => ({ ...f })) : undefined,
     targetTaskRefId: s.targetTaskRefId ? remapRef(s.targetTaskRefId) : undefined,
     yesSteps: s.yesSteps ? cloneStepsWithRefRemap(s.yesSteps, remapRef, idPrefix) : undefined,
     noSteps: s.noSteps ? cloneStepsWithRefRemap(s.noSteps, remapRef, idPrefix) : undefined,
@@ -3442,6 +3451,342 @@ function hydrateLocalSubscriptTasks(
   return missingSubflows;
 }
 
+// ============================================================================
+// PASS 2 SEMANTIC AUDITS: Evidence-Based Terminality & Parallel Holiday Logic
+// ============================================================================
+
+function appendStepYamlComment(step: MigrationStep, comment: string): void {
+  const clean = comment.trim();
+  if (!clean) return;
+  const existing = (step.yamlComment || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!existing.includes(clean)) {
+    existing.push(clean);
+    step.yamlComment = existing.join('\n');
+  }
+}
+
+function appendStepFinding(step: MigrationStep, finding: StepProvenanceFinding): void {
+  if (!step.provenanceFinding) {
+    step.provenanceFinding = finding;
+    return;
+  }
+  if (
+    step.provenanceFinding.code === finding.code &&
+    step.provenanceFinding.variableName === finding.variableName &&
+    step.provenanceFinding.message === finding.message
+  ) {
+    return;
+  }
+  step.additionalFindings = step.additionalFindings || [];
+  const dup = step.additionalFindings.some(
+    (f) =>
+      f.code === finding.code &&
+      f.variableName === finding.variableName &&
+      f.message === finding.message
+  );
+  if (!dup) {
+    step.additionalFindings.push(finding);
+  }
+}
+
+function isStepListProvablyTerminal(
+  steps: MigrationStep[],
+  provenTerminalTaskRefs: Set<string>
+): boolean {
+  if (steps.length === 0) return false;
+  const last = steps[steps.length - 1];
+  if (last.isTerminal) return true;
+  if (
+    (last.kind === 'callTask' || last.kind === 'jumpToReusableTask') &&
+    last.targetTaskRefId &&
+    provenTerminalTaskRefs.has(last.targetTaskRefId)
+  ) {
+    return true;
+  }
+  if (last.kind === 'decision') {
+    return (
+      isStepListProvablyTerminal(last.yesSteps || [], provenTerminalTaskRefs) &&
+      isStepListProvablyTerminal(last.noSteps || [], provenTerminalTaskRefs)
+    );
+  }
+  if (last.kind === 'evaluateScheduleGroup') {
+    return (
+      isStepListProvablyTerminal(last.openSteps || [], provenTerminalTaskRefs) &&
+      isStepListProvablyTerminal(last.closedSteps || [], provenTerminalTaskRefs) &&
+      isStepListProvablyTerminal(last.holidaySteps || [], provenTerminalTaskRefs)
+    );
+  }
+  if (last.kind === 'collectInput') {
+    return (
+      isStepListProvablyTerminal(last.successSteps || [], provenTerminalTaskRefs) &&
+      isStepListProvablyTerminal(last.failureSteps || [], provenTerminalTaskRefs)
+    );
+  }
+  if (last.kind === 'callDataAction') {
+    return (
+      isStepListProvablyTerminal(last.successSteps || [], provenTerminalTaskRefs) &&
+      isStepListProvablyTerminal(last.failureSteps || [], provenTerminalTaskRefs) &&
+      isStepListProvablyTerminal(last.timeoutSteps || [], provenTerminalTaskRefs)
+    );
+  }
+  if (last.kind === 'switch') {
+    const cases = last.cases || [];
+    return (
+      cases.length > 0 &&
+      cases.every((c) => isStepListProvablyTerminal(c.steps, provenTerminalTaskRefs)) &&
+      isStepListProvablyTerminal(last.defaultSteps || [], provenTerminalTaskRefs)
+    );
+  }
+  return false;
+}
+
+/**
+ * Evidence-based branch fallthrough check after Pass 2 hydration:
+ * - Never invents a `disconnect` when a subtask / CommonModule branch is not provably terminal.
+ * - Only treats a `callTask` as terminal if the target task is loaded from real Avaya source
+ *   (not an unloaded fallback stub) and all of its paths terminate cleanly.
+ * - Otherwise preserves the honest fallthrough and emits POTENTIAL_BRANCH_FALLTHROUGH + YAML comment.
+ */
+function auditBranchFallthroughsAndTerminality(
+  graph: MigrationFlowGraph,
+  missingSubflows: string[],
+  warnings: MigrationGraphWarning[]
+): void {
+  const missingLower = new Set(missingSubflows.map((m) => m.toLowerCase()));
+
+  const isUnloadedFallbackTask = (task: MigrationTaskGraph): boolean => {
+    if (task.originalTarget && missingLower.has(task.originalTarget.toLowerCase())) {
+      return true;
+    }
+    if (
+      task.steps.length === 1 &&
+      task.steps[0].avayaCommand === 'UNLOADED_SUBFLOW_MODULE'
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  // Fixed-point computation of tasks whose terminality is strictly proven by loaded Avaya source
+  const provenTerminalTasks = new Set<string>();
+  for (let iter = 0; iter < 6; iter += 1) {
+    let changed = false;
+    for (const task of graph.tasks) {
+      if (provenTerminalTasks.has(task.refId)) continue;
+      if (isUnloadedFallbackTask(task)) continue;
+      if (
+        isStepListTerminal(task.steps) ||
+        isStepListProvablyTerminal(task.steps, provenTerminalTasks)
+      ) {
+        provenTerminalTasks.add(task.refId);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  const summarizeNextMainPath = (followingSteps: MigrationStep[]): string => {
+    const labels = followingSteps
+      .slice(0, 3)
+      .map((s) => s.target || s.targetTaskRefId || s.label || s.kind)
+      .filter(Boolean);
+    if (followingSteps.length > 3) {
+      labels.push('...');
+    }
+    return labels.join(' -> ') || 'nachfolgender Hauptpfad';
+  };
+
+  const inspectBranchForFallthrough = (
+    branchSteps: MigrationStep[] | undefined,
+    branchLabel: string,
+    parentStep: MigrationStep,
+    followingSteps: MigrationStep[]
+  ) => {
+    if (!branchSteps || branchSteps.length === 0) return;
+    const lastStep = branchSteps[branchSteps.length - 1];
+    if (isStepListProvablyTerminal(branchSteps, provenTerminalTasks)) {
+      return;
+    }
+
+    if (lastStep.kind === 'callTask' || lastStep.kind === 'callCommonModule') {
+      const targetName =
+        lastStep.targetTaskRefId || lastStep.targetSlug || lastStep.target || 'Subtask';
+      const nextPreview = summarizeNextMainPath(followingSteps);
+      const isTaskUnloaded =
+        lastStep.kind === 'callTask' &&
+        lastStep.targetTaskRefId &&
+        graph.tasks.some(
+          (t) => t.refId === lastStep.targetTaskRefId && isUnloadedFallbackTask(t)
+        );
+      const reasonDetail =
+        lastStep.kind === 'callCommonModule'
+          ? `Common Module "${targetName}" endet nicht automatisch terminal`
+          : isTaskUnloaded
+          ? `Ziel-Task "${targetName}" hat keine geladene Avaya-Quelldatei (Terminalitaet nicht belegt)`
+          : `Ziel-Task "${targetName}" hat im Avaya-Bestand keinen durchgehend terminalen Abschluss`;
+
+      const lineNum = lastStep.lineNumber || parentStep.lineNumber || 1;
+      appendStepYamlComment(
+        lastStep,
+        `OFFENE MIGRATIONSFRAGE: Zweig (${branchLabel}) ruft "${targetName}" auf, aber ${reasonDetail} — Hauptpfad (${nextPreview}) laeuft danach weiter. Kein disconnect erfunden; bitte pruefen, ob dieser Zweig terminal enden soll.`
+      );
+      appendStepFinding(lastStep, {
+        severity: 'WARN',
+        code: 'POTENTIAL_BRANCH_FALLTHROUGH',
+        message: `Möglicher Fallthrough nach "${targetName}" im Zweig "${branchLabel}" (Zeile ${lineNum}): ${reasonDetail}. Danach läuft der Hauptpfad (${nextPreview}) weiter — kein disconnect erfunden, bitte fachlich prüfen.`,
+      });
+      warnings.push({
+        code: 'POTENTIAL_BRANCH_FALLTHROUGH',
+        severity: 'warning',
+        lineNumber: lineNum,
+        message: `Zeile ${lineNum}: Möglicher Fallthrough nach "${targetName}" (${reasonDetail}) — Hauptpfad (${nextPreview}) läuft danach weiter. Kein disconnect erfunden.`,
+      });
+    }
+  };
+
+  const inspectStepList = (steps: MigrationStep[], inheritedFollowing: MigrationStep[]) => {
+    for (let i = 0; i < steps.length; i += 1) {
+      const step = steps[i];
+      const following = [...steps.slice(i + 1), ...inheritedFollowing];
+      const hasMainContinuation = following.length > 0;
+
+      if (step.kind === 'decision') {
+        if (hasMainContinuation) {
+          inspectBranchForFallthrough(step.yesSteps, 'yes', step, following);
+          inspectBranchForFallthrough(step.noSteps, 'no', step, following);
+        }
+        if (step.yesSteps) inspectStepList(step.yesSteps, following);
+        if (step.noSteps) inspectStepList(step.noSteps, following);
+      } else if (step.kind === 'switch') {
+        for (const c of step.cases || []) {
+          if (hasMainContinuation) {
+            inspectBranchForFallthrough(c.steps, `case ${c.value}`, step, following);
+          }
+          inspectStepList(c.steps, following);
+        }
+        if (step.defaultSteps) {
+          if (hasMainContinuation) {
+            inspectBranchForFallthrough(step.defaultSteps, 'default', step, following);
+          }
+          inspectStepList(step.defaultSteps, following);
+        }
+      } else if (step.kind === 'evaluateScheduleGroup') {
+        if (step.openSteps) inspectStepList(step.openSteps, following);
+        if (step.closedSteps) inspectStepList(step.closedSteps, following);
+        if (step.holidaySteps) inspectStepList(step.holidaySteps, following);
+      } else if (step.kind === 'collectInput' || step.kind === 'callDataAction') {
+        if (step.successSteps) inspectStepList(step.successSteps, following);
+        if (step.failureSteps) inspectStepList(step.failureSteps, following);
+        if (step.timeoutSteps) inspectStepList(step.timeoutSteps, following);
+      } else if (step.kind === 'callDataTableLookup') {
+        if (step.foundSteps) inspectStepList(step.foundSteps, following);
+        if (step.notFoundSteps) inspectStepList(step.notFoundSteps, following);
+      } else if (step.kind === 'loop' && step.bodySteps) {
+        inspectStepList(step.bodySteps, following);
+      }
+    }
+  };
+
+  for (const task of graph.tasks) {
+    if (task.kind === 'fallback') continue;
+    inspectStepList(task.steps, []);
+  }
+}
+
+/**
+ * Parallel Holiday Logic Transparency Audit:
+ * Preserves both `evaluateScheduleGroup.holiday` and any separate explicit holiday `decision`
+ * (e.g. `GetCurrentDateTimeUtc() == Flow.Sys_Feiertagliste_NRW`) without merging or emptying
+ * either branch, and flags the overlap as DUPLICATE_HOLIDAY_LOGIC for business clarification.
+ */
+function auditParallelHolidayLogic(
+  graph: MigrationFlowGraph,
+  warnings: MigrationGraphWarning[]
+): void {
+  const HOLIDAY_SIGNAL_RE = /(?:feiertag|holiday|sonderfeiertag|feiertags?liste)/i;
+
+  let scheduleHolidayStep: MigrationStep | null = null;
+  const explicitHolidayDecisions: MigrationStep[] = [];
+
+  const branchTargetsHoliday = (steps?: MigrationStep[]): boolean => {
+    if (!steps || steps.length === 0) return false;
+    return steps.some(
+      (s) =>
+        HOLIDAY_SIGNAL_RE.test(s.target || '') ||
+        HOLIDAY_SIGNAL_RE.test(s.targetTaskRefId || '') ||
+        HOLIDAY_SIGNAL_RE.test(s.targetSlug || '')
+    );
+  };
+
+  const scanSteps = (steps: MigrationStep[]) => {
+    for (const st of steps) {
+      if (st.kind === 'evaluateScheduleGroup' && (st.holidaySteps || []).length > 0) {
+        if (!scheduleHolidayStep) scheduleHolidayStep = st;
+      }
+      if (st.kind === 'decision') {
+        const condText = `${st.expression || ''} ${st.rawCondition || ''} ${st.conditionLabel || ''}`;
+        if (
+          HOLIDAY_SIGNAL_RE.test(condText) ||
+          branchTargetsHoliday(st.yesSteps) ||
+          branchTargetsHoliday(st.noSteps)
+        ) {
+          explicitHolidayDecisions.push(st);
+        }
+      }
+      if (st.yesSteps) scanSteps(st.yesSteps);
+      if (st.noSteps) scanSteps(st.noSteps);
+      if (st.openSteps) scanSteps(st.openSteps);
+      if (st.closedSteps) scanSteps(st.closedSteps);
+      if (st.holidaySteps) scanSteps(st.holidaySteps);
+      if (st.successSteps) scanSteps(st.successSteps);
+      if (st.failureSteps) scanSteps(st.failureSteps);
+      if (st.timeoutSteps) scanSteps(st.timeoutSteps);
+      if (st.foundSteps) scanSteps(st.foundSteps);
+      if (st.notFoundSteps) scanSteps(st.notFoundSteps);
+      if (st.bodySteps) scanSteps(st.bodySteps);
+      if (st.defaultSteps) scanSteps(st.defaultSteps);
+      if (st.cases) st.cases.forEach((c) => scanSteps(c.steps));
+    }
+  };
+
+  for (const task of graph.tasks) {
+    if (task.kind === 'fallback') continue;
+    scanSteps(task.steps);
+  }
+
+  if (!scheduleHolidayStep || explicitHolidayDecisions.length === 0) {
+    return;
+  }
+
+  const scheduleGroupName =
+    (scheduleHolidayStep as MigrationStep).targetSlug ||
+    (scheduleHolidayStep as MigrationStep).target ||
+    'Schedule_Group';
+
+  for (const dec of explicitHolidayDecisions) {
+    const condSummary = dec.expression || dec.conditionLabel || dec.label;
+    const lineNum = dec.lineNumber || 1;
+    appendStepYamlComment(
+      dec,
+      `OFFENE MIGRATIONSFRAGE: Moegliche doppelte Feiertagslogik — neben evaluateScheduleGroup.holiday ("${scheduleGroupName}") existiert diese zusaetzliche explizite Feiertagspruefung (${condSummary}). Beide Pfade wurden unveraendert beibehalten; bitte fachlich klaeren, ob Standard-Feiertage (Schedule Group) und Sonder-Feiertagsliste bewusst getrennt sind oder zusammengefasst werden koennen.`
+    );
+    appendStepFinding(dec, {
+      severity: 'WARN',
+      code: 'DUPLICATE_HOLIDAY_LOGIC',
+      message: `Mögliche doppelte Feiertagslogik (Zeile ${lineNum}): Neben evaluateScheduleGroup.holiday ("${scheduleGroupName}") existiert eine zusätzliche explizite Feiertagsprüfung (${condSummary}). Beide Pfade wurden getrennt beibehalten — offene fachliche Klärung.`,
+    });
+    warnings.push({
+      code: 'DUPLICATE_HOLIDAY_LOGIC',
+      severity: 'warning',
+      lineNumber: lineNum,
+      message: `Zeile ${lineNum}: Mögliche doppelte Feiertagslogik — evaluateScheduleGroup.holiday ("${scheduleGroupName}") und explizite Prüfung (${condSummary}) bestehen parallel. Beide wurden beibehalten; bitte fachlich klären.`,
+    });
+  }
+}
+
 function finalizeScriptTranslation(
   node: ParsedScriptNode,
   built: BuildMigrationGraphResult,
@@ -3660,8 +4005,14 @@ function finalizeScriptTranslation(
  */
 export function translateAvayaWorkspaceToGenesys(
   input: ScriptWorkspace | ScriptModule[],
-  options?: { precomputedAuditReport?: AuditReport; generatedAt?: string }
+  options?: {
+    precomputedAuditReport?: AuditReport;
+    generatedAt?: string;
+    /** Optionaler Kompatibilitäts-/Stub-Modus (Opt-In, Standard = false = Ehrliche Migration). */
+    compatibilityStubMode?: boolean;
+  }
 ): GenesysWorkspaceTranslation {
+  const compatibilityStubMode = Boolean(options?.compatibilityStubMode);
   const workspace: ScriptWorkspace = isScriptWorkspace(input)
     ? input
     : buildScriptWorkspace(input);
@@ -3721,14 +4072,16 @@ export function translateAvayaWorkspaceToGenesys(
         knownKeyLookup,
         incomingCallCountByKey,
         brokenTargetKeysForScript: brokenByScriptKey.get(node.scriptKey) || new Set<string>(),
+        compatibilityStubMode,
       },
-      '1.5.1'
+      '1.5.5'
     );
     builtByKey.set(node.scriptKey, { node, built });
     allGraphsByKey.set(node.scriptKey, built.graph);
   }
 
-  // Pass 2 (Ebene 2): Hydrate real Reusable Subscript Task bodies & render Archy YAML + Mermaid
+  // Pass 2 (Ebene 2): Hydrate real Reusable Subscript Task bodies, run evidence-based semantic audits,
+  // and render Archy YAML + canonical FlowIR + Mermaid
   const scripts: GenesysScriptTranslation[] = [];
   const scriptsByKey: Record<string, GenesysScriptTranslation> = {};
 
@@ -3738,6 +4091,9 @@ export function translateAvayaWorkspaceToGenesys(
       built.localSubscriptRefs,
       allGraphsByKey
     );
+    auditBranchFallthroughsAndTerminality(built.graph, missingSubflows, built.warnings);
+    auditParallelHolidayLogic(built.graph, built.warnings);
+
     const translated = finalizeScriptTranslation(
       node,
       built,
@@ -3756,9 +4112,10 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.5.1',
+    schemaVersion: '1.5.5',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
+    compatibilityStubMode,
     overallReadiness,
     summary: {
       totalScripts: scripts.length,

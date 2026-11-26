@@ -29,6 +29,8 @@ interface GenesysMigrationBarProps {
   activeScript?: GenesysScriptTranslation | null;
   isMasterView: boolean;
   onSelectDetailScript?: (scriptNumber: string) => void;
+  compatibilityStubMode?: boolean;
+  onToggleCompatibilityStubMode?: () => void;
 }
 
 interface ScopedValidationIssue extends ArchyYamlValidationIssue {
@@ -64,6 +66,8 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
   activeScript,
   isMasterView,
   onSelectDetailScript,
+  compatibilityStubMode = false,
+  onToggleCompatibilityStubMode,
 }) => {
   const [showYamlPreview, setShowYamlPreview] = useState(false);
   const [previewMode, setPreviewMode] = useState<'genesys' | 'avaya'>('genesys');
@@ -369,6 +373,25 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                 {displayedWarnings.length}{' '}
                 {displayedWarnings.length === 1 ? 'Warnung' : 'Warnungen'}
               </span>
+            </button>
+          )}
+
+          {onToggleCompatibilityStubMode && (
+            <button
+              type="button"
+              onClick={onToggleCompatibilityStubMode}
+              title={
+                compatibilityStubMode
+                  ? 'Kompatibilitäts-/Stub-Modus aktiv: Unbelegte Variablen werden testweise per getParticipantData/Lookup ergänzt. Klicken für strikte ehrliche Migration.'
+                  : 'Ehrliche Migration (Standard): Keine erfundenen getParticipantData- oder Lookup-Annahmen; fehlende Quellen werden als offene Migrationsfrage markiert. Klicken für optionalen Stub-Modus.'
+              }
+              className={`px-2 py-0.5 rounded border text-[11px] font-medium flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
+                compatibilityStubMode
+                  ? 'bg-amber-500/25 border-amber-400/70 text-amber-100 hover:bg-amber-500/35'
+                  : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800 hover:text-slate-100'
+              }`}
+            >
+              <span>{compatibilityStubMode ? 'Stub-Modus (Opt-In)' : 'Ehrliche Migration'}</span>
             </button>
           )}
         </div>

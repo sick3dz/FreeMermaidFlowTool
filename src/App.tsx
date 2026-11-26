@@ -460,6 +460,7 @@ function OfflineStudioApp() {
     'auto'
   );
   const [platformViewMode, setPlatformViewMode] = useState<'avaya' | 'genesys'>('avaya');
+  const [genesysCompatibilityStubMode, setGenesysCompatibilityStubMode] = useState<boolean>(false);
   const isMasterCompact =
     masterDensityMode === 'compact' ||
     (masterDensityMode === 'auto' && scriptWorkspace.modules.length >= 16);
@@ -813,8 +814,10 @@ function OfflineStudioApp() {
 
   const genesysTranslation = useMemo<GenesysWorkspaceTranslation | null>(() => {
     if (platformViewMode !== 'genesys') return null;
-    return translateAvayaWorkspaceToGenesys(scriptWorkspace);
-  }, [platformViewMode, scriptWorkspace]);
+    return translateAvayaWorkspaceToGenesys(scriptWorkspace, {
+      compatibilityStubMode: genesysCompatibilityStubMode,
+    });
+  }, [platformViewMode, scriptWorkspace, genesysCompatibilityStubMode]);
 
   const activeGenesysScript = useMemo<GenesysScriptTranslation | null>(() => {
     if (!genesysTranslation || callflowViewLevel.level !== 'detail') return null;
@@ -6653,6 +6656,10 @@ function OfflineStudioApp() {
               isMasterView={callflowViewLevel.level !== 'detail'}
               onSelectDetailScript={(scriptNumber) =>
                 handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber })
+              }
+              compatibilityStubMode={genesysCompatibilityStubMode}
+              onToggleCompatibilityStubMode={() =>
+                setGenesysCompatibilityStubMode((prev) => !prev)
               }
             />
           )}

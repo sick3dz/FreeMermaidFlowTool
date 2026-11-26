@@ -875,10 +875,19 @@ SECTION CHECK_RESPONSE
     expect(script.archyYaml).toContain('name: HDX_Resp_cv');
     expect(script.archyYaml).not.toMatch(/^\s+name:\s+(?:Flow|Task)\./m);
 
-    // 3. Variable provenance: blacklist lookup + OFFENE MIGRATIONSFRAGE comment before decision
-    expect(script.archyYaml).toContain('callDataTableLookup:');
+    // 3. Variable provenance (strict honest default): NO invented callDataTableLookup/getParticipantData,
+    //    transparent OFFENE MIGRATIONSFRAGE comment + VAR_USED_BEFORE_SET finding; lookup only in opt-in stub mode!
+    expect(script.archyYaml).not.toContain('callDataTableLookup:');
+    expect(script.archyYaml).not.toContain('getParticipantData:');
     expect(script.archyYaml).toContain('OFFENE MIGRATIONSFRAGE:');
     expect(script.archyYaml).toContain('Flow.MCF_Blacklist_flag_cv == \\"1\\"');
+    expect(
+      script.flowIR.findings.some(
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'MCF_Blacklist_flag_cv'
+      )
+    ).toBe(true);
+    const stubKpv = translateAvayaWorkspaceToGenesys(ws, { compatibilityStubMode: true }).scripts[0];
+    expect(stubKpv.archyYaml).toContain('callDataTableLookup:');
 
     // 4. Single-use sections BESETZT and CHECK_RESPONSE are inlined directly (no goto-style Section_BESETZT task)
     expect(script.migrationGraph.diagnostics.inlinedSectionCount).toBeGreaterThanOrEqual(2);
@@ -1398,7 +1407,118 @@ SECTION UNUSED_SCHALTER
     // 5. flowIR records transparent SWITCH_WITHOUT_SOURCE finding
     expect(script.flowIR.findings.some((f) => f.code === 'SWITCH_WITHOUT_SOURCE')).toBe(true);
   });
+
+  it('Honest Migration default: maps Avaya date natively to GetCurrentDateTimeUtc(), omits getParticipantData for unproven Sys_Feiertagliste_NRW, flags POTENTIAL_BRANCH_FALLTHROUGH without inventing disconnect, and warns on parallel holiday logic', () => {
+    const mainMod = makeModule(
+      'Main_Holiday_Flow',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    GIVE RAN Begruessung
+  ELSE
+    GIVE RAN Geschlossen
+    DISCONNECT
+  END IF
+  IF date = Sys_Feiertagliste_NRW THEN
+    EXECUTE Feiertag
+  END IF
+  EXECUTE Callflow_1
+  EXECUTE Nacht
+  QUEUE TO SKILLSET Support_DE
+`
+    );
+
+    const ws = buildScriptWorkspace([mainMod]);
+    const strictRes = translateAvayaWorkspaceToGenesys(ws);
+    const script = strictRes.scripts[0];
+
+    expect(strictRes.compatibilityStubMode).toBe(false);
+    expect(script).toBeDefined();
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.yamlValidation.errors).toHaveLength(0);
+
+    // 1. Differentiated provenance: `date` -> native GetCurrentDateTimeUtc(), NO Flow.date, NO getParticipantData!
+    expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_Feiertagliste_NRW');
+    expect(script.archyYaml).not.toContain('Flow.date');
+    expect(script.archyYaml).not.toContain('getParticipantData:');
+    expect(script.archyYaml).toContain('OFFENE MIGRATIONSFRAGE: Quelle fuer "Flow.Sys_Feiertagliste_NRW"');
+    expect(
+      script.flowIR.findings.some(
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_Feiertagliste_NRW'
+      )
+    ).toBe(true);
+    expect(
+      script.flowIR.findings.some(
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName?.toLowerCase() === 'date'
+      )
+    ).toBe(false);
+
+    // 2. Evidence-based terminality: Feiertag is unloaded -> NO invented disconnect in Feiertag task or yes branch,
+    //    fallthrough stays intact and emits POTENTIAL_BRANCH_FALLTHROUGH!
+    const feiertagTask = script.migrationGraph.tasks.find((t) => t.refId === 'Feiertag');
+    expect(feiertagTask).toBeDefined();
+    expect(feiertagTask!.steps.some((s) => s.kind === 'disconnect')).toBe(false);
+    expect(script.flowIR.findings.some((f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH')).toBe(true);
+    expect(script.warnings.some((w) => w.code === 'POTENTIAL_BRANCH_FALLTHROUGH')).toBe(true);
+    expect(script.archyYaml).toContain('Kein disconnect erfunden');
+
+    // 3. Parallel holiday logic: BOTH evaluateScheduleGroup.holiday AND explicit holiday decision preserved + DUPLICATE_HOLIDAY_LOGIC warning
+    expect(script.archyYaml).toContain('evaluateScheduleGroup:');
+    expect(script.archyYaml).toContain('holiday:');
+    expect(script.archyYaml).toContain('Sys_Feiertagliste_NRW');
+    expect(script.flowIR.findings.some((f) => f.code === 'DUPLICATE_HOLIDAY_LOGIC')).toBe(true);
+    expect(script.warnings.some((w) => w.code === 'DUPLICATE_HOLIDAY_LOGIC')).toBe(true);
+    expect(script.archyYaml).toContain('Moegliche doppelte Feiertagslogik');
+
+    // 4. Opt-in Compatibility / Stub Mode synthesizes getParticipantData ONLY for unproven external var (still NOT for native date!)
+    const stubRes = translateAvayaWorkspaceToGenesys(ws, { compatibilityStubMode: true });
+    const stubScript = stubRes.scripts[0];
+    expect(stubRes.compatibilityStubMode).toBe(true);
+    expect(stubScript.yamlValidation.isValid).toBe(true);
+    expect(stubScript.archyYaml).toContain('getParticipantData:');
+    expect(stubScript.archyYaml).toContain('Get Participant Data Sys_Feiertagliste_NRW');
+    expect(stubScript.archyYaml).not.toContain('Get Participant Data date');
+    expect(stubScript.archyYaml).toContain('KOMPATIBILITAETS-STUB (OPT-IN)');
+  });
+
+  it('Evidence-based terminality: loaded Feiertag.s ending in DISCONNECT is recognized as provably terminal without false POTENTIAL_BRANCH_FALLTHROUGH', () => {
+    const mainMod = makeModule(
+      'Main_With_Terminal_Feiertag',
+      `
+SECTION Start
+  IF date = Sys_Feiertagliste_NRW THEN
+    EXECUTE Feiertag
+  END IF
+  QUEUE TO SKILLSET Support_DE
+`
+    );
+    const feiertagMod = makeModule(
+      'Feiertag',
+      `
+SECTION Start
+  GIVE RAN Feiertag_Ansage
+  DISCONNECT
+`
+    );
+
+    const ws = buildScriptWorkspace([mainMod, feiertagMod]);
+    const res = translateAvayaWorkspaceToGenesys(ws);
+    const mainScript = res.scripts.find((s) => s.cleanName === 'Main_With_Terminal_Feiertag')!;
+
+    expect(mainScript).toBeDefined();
+    expect(mainScript.yamlValidation.isValid).toBe(true);
+    // Hydrated Feiertag task contains the real proven DISCONNECT from Feiertag.s
+    const feiertagTask = mainScript.migrationGraph.tasks.find((t) => t.refId === 'Feiertag');
+    expect(feiertagTask).toBeDefined();
+    expect(feiertagTask!.steps.some((s) => s.kind === 'disconnect')).toBe(true);
+    // Because terminality is proven from loaded Avaya source, NO false fallthrough finding!
+    expect(
+      mainScript.flowIR.findings.some((f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH')
+    ).toBe(false);
+    expect(mainScript.warnings.some((w) => w.code === 'POTENTIAL_BRANCH_FALLTHROUGH')).toBe(false);
+  });
 });
+
 
 
 

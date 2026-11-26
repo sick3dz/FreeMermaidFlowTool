@@ -167,7 +167,9 @@ export type FlowIRFindingCode =
   | 'TERMINAL_HAS_OUTGOING'
   | 'UNREACHABLE_NODE'
   | 'VARIABLE_UNDECLARED'
-  | 'MISSING_SUBFLOW_SOURCE';
+  | 'MISSING_SUBFLOW_SOURCE'
+  | 'POTENTIAL_BRANCH_FALLTHROUGH'
+  | 'DUPLICATE_HOLIDAY_LOGIC';
 
 export interface FlowIRFinding {
   severity: FlowIRFindingSeverity;
@@ -248,6 +250,18 @@ const SYSTEM_IDENTIFIERS = new Set<string>([
   'Call.UserToUserInformation',
   'Call.CalledAddressOriginal',
   'Call.Language',
+  'Flow.StartDateTimeUtc',
+  'StartDateTimeUtc',
+  'GetCurrentDateTimeUtc',
+  'DayOfWeek',
+  'Hour',
+  'Minute',
+  'Day',
+  'Month',
+  'Year',
+  'DateTime',
+  'MakeDateTime',
+  'ToString',
   'true',
   'false',
   'and',
@@ -267,7 +281,7 @@ const SYSTEM_IDENTIFIERS = new Set<string>([
  */
 export function stripScopesFromExpr(expr: string): string {
   if (!expr) return '';
-  return expr.replace(/\b(?:Flow|Task)\.([A-Za-z_][A-Za-z0-9_]*)\b/g, '$1');
+  return expr.replace(/\b(?:Flow|Task)\.(?!StartDateTimeUtc\b)([A-Za-z_][A-Za-z0-9_]*)\b/g, '$1');
 }
 
 /**
@@ -277,8 +291,10 @@ export function extractReferencedVarNamesFromExpr(expr: string): string[] {
   if (!expr) return [];
   // Strip quoted string literals first
   const withoutStrings = expr.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g, ' ');
-  // Remove system Call.* dotted chains
-  const withoutSystem = withoutStrings.replace(/\bCall\.[A-Za-z0-9_.]+\b/g, ' ');
+  // Remove system Call.* and Flow.StartDateTimeUtc dotted chains
+  const withoutSystem = withoutStrings
+    .replace(/\bCall\.[A-Za-z0-9_.]+\b/g, ' ')
+    .replace(/\bFlow\.StartDateTimeUtc\b/g, ' ');
   // Remove function call names (Identifier followed by "(")
   const withoutFn = withoutSystem.replace(/\b[A-Za-z_][A-Za-z0-9_]*\s*(?=\()/g, ' ');
   const found = new Set<string>();
@@ -544,13 +560,17 @@ export function buildFlowIRFromMigrationGraph(
         lineEnd: Math.max(1, step.lineNumber || 1),
       };
 
-      // Surface any provenance gaps recorded during Level-1 graph building
-      if (step.provenanceFinding) {
+      // Surface any provenance & semantic audit findings recorded during Level-1/Level-2 graph building
+      const stepFindings = [
+        ...(step.provenanceFinding ? [step.provenanceFinding] : []),
+        ...(step.additionalFindings || []),
+      ];
+      for (const sf of stepFindings) {
         preFindings.push({
-          severity: step.provenanceFinding.severity,
-          code: step.provenanceFinding.code,
-          message: step.provenanceFinding.message,
-          variableName: step.provenanceFinding.variableName,
+          severity: sf.severity,
+          code: sf.code,
+          message: sf.message,
+          variableName: sf.variableName,
           sourceTrace: trace,
         });
       }
@@ -1053,12 +1073,16 @@ export function buildFlowIRFromMigrationGraph(
 
   const collectSubscriptProvenanceFindings = (list: MigrationStep[], sectionLabel: string) => {
     for (const st of list) {
-      if (st.provenanceFinding) {
+      const subFindings = [
+        ...(st.provenanceFinding ? [st.provenanceFinding] : []),
+        ...(st.additionalFindings || []),
+      ];
+      for (const sf of subFindings) {
         preFindings.push({
-          severity: st.provenanceFinding.severity,
-          code: st.provenanceFinding.code,
-          message: st.provenanceFinding.message,
-          variableName: st.provenanceFinding.variableName,
+          severity: sf.severity,
+          code: sf.code,
+          message: sf.message,
+          variableName: sf.variableName,
           sourceTrace: {
             script: scriptName,
             section: st.sectionHint || sectionLabel,
@@ -1190,8 +1214,14 @@ export function buildFlowIRFromMigrationGraph(
   // Run hard validateIR(ir) and merge preFindings cleanly (deduplicated)
   const validation = validateIR(ir);
   const seenKey = new Set<string>();
+  const seenVarBeforeSet = new Set<string>();
   const combined: FlowIRFinding[] = [];
   for (const f of [...preFindings, ...validation.findings]) {
+    if (f.code === 'VAR_USED_BEFORE_SET' && f.variableName) {
+      const varKey = `${f.variableName.toLowerCase()}:${f.sourceTrace?.lineStart || 0}`;
+      if (seenVarBeforeSet.has(varKey)) continue;
+      seenVarBeforeSet.add(varKey);
+    }
     const key = `${f.code}:${f.nodeId || ''}:${f.variableName || ''}:${f.message}`;
     if (seenKey.has(key)) continue;
     seenKey.add(key);
