@@ -2323,6 +2323,251 @@ SECTION Unused_Section
     expect(script.avayaView.kurzfazit).toContain('Open Review Signals');
     expect(script.avayaView.annahmenUndOffenePunkte.some((l) => l.includes('WAIT_SOURCE_ONLY_HINT'))).toBe(true);
   });
+
+  it('v1.6.5 Guarded Fallback: preserves Strict Honest Mode verbatim when resolvedTargetConfig is omitted or disabled', () => {
+    const genericFlow = makeModule(
+      'generic_service_flow',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    EXECUTE Special_Event_Handling
+  ELSE
+    GIVE RAN Closed_Message
+    DISCONNECT
+  END IF
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Subflow
+  END IF
+  EXECUTE Core_Routing
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    const ws = buildScriptWorkspace([genericFlow]);
+    const defaultRes = translateAvayaWorkspaceToGenesys(ws);
+    const disabledRes = translateAvayaWorkspaceToGenesys(ws, {
+      resolvedTargetConfig: { enabled: false, holidayLookupTarget: 'dataAction' },
+    });
+
+    for (const res of [defaultRes, disabledRes]) {
+      expect(res.schemaVersion).toBe('1.6.5');
+      expect(res.resolvedTargetMode).toBe(false);
+      const script = res.scripts[0];
+      expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
+      expect(script.archyYaml).not.toContain('IsExternalHolidayToday');
+      expect(script.archyYaml).not.toContain('Lookup_External_Holiday_By_Date');
+      expect(
+        script.flowIR.findings.some(
+          (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_HolidayList_Region'
+        )
+      ).toBe(true);
+      expect(
+        script.flowIR.findings.some((f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW')
+      ).toBe(true);
+      expect(
+        script.flowIR.findings.some((f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH')
+      ).toBe(true);
+      expect(script.flowIR.findings.some((f) => f.code === 'HOLIDAY_LOOKUP_RESOLVED')).toBe(false);
+    }
+  });
+
+  it('v1.6.5 Resolved-Target Mode (Data Action default): renders Data Action -> boolean IsExternalHolidayToday -> terminal holiday prompt + disconnect, prunes superseded var & unloaded Holiday_Subflow, and keeps parallel holiday consolidation review', () => {
+    const genericFlow = makeModule(
+      'generic_service_flow',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    EXECUTE Special_Event_Handling
+  ELSE
+    GIVE RAN Closed_Message
+    DISCONNECT
+  END IF
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Subflow
+  END IF
+  EXECUTE Core_Routing
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    const res = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([genericFlow]), {
+      resolvedTargetConfig: { enabled: true },
+    });
+    const script = res.scripts[0];
+
+    expect(res.schemaVersion).toBe('1.6.5');
+    expect(res.resolvedTargetMode).toBe(true);
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.yamlValidation.errors).toHaveLength(0);
+    expect(script.irValidation.isValid).toBe(true);
+    expect(script.irValidation.commentParityOk).toBe(true);
+
+    // Data Action lookup + boolean decision + terminal playAudio & disconnect
+    expect(script.archyYaml).toContain('- callDataAction:');
+    expect(script.archyYaml).toContain('category: "External_Holiday_Integration"');
+    expect(script.archyYaml).toContain('dataAction: "Lookup_External_Holiday_By_Date"');
+    expect(script.archyYaml).toContain('name: "currentDate"');
+    expect(script.archyYaml).toContain('SubString(ToString(GetCurrentDateTimeUtc()), 0, 10)');
+    expect(script.archyYaml).toContain('name: "holidayListKey"');
+    expect(script.archyYaml).toContain('variable: Flow.IsExternalHolidayToday');
+    expect(script.archyYaml).toContain('exp: "Flow.IsExternalHolidayToday == true"');
+    expect(script.archyYaml).not.toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
+
+    // Superseded Sys_HolidayList_Region pruned from flow variables; IsExternalHolidayToday declared boolean
+    const boolVar = script.flowIR.variables.find((v) => v.name === 'IsExternalHolidayToday');
+    expect(boolVar).toBeDefined();
+    expect(boolVar?.type).toBe('boolean');
+    expect(boolVar?.provenance).toBe('resolved_external_lookup');
+    expect(script.flowIR.variables.some((v) => v.name === 'Sys_HolidayList_Region')).toBe(false);
+
+    // Unloaded Holiday_Subflow replaced by terminal playAudio + disconnect and pruned from tasks
+    expect(script.archyYaml).not.toContain('refId: Holiday_Subflow');
+    expect(script.migrationGraph.diagnostics.replacedHolidaySubflows).toContain('Holiday_Subflow');
+    const resolvedDisconnect = script.flowIR.nodes.find(
+      (n) => n.kind === 'disconnect' && n.terminalityEvidence === 'resolved_business_policy'
+    );
+    expect(resolvedDisconnect).toBeDefined();
+
+    // Interim warnings retired for resolved pattern; HOLIDAY_LOOKUP_RESOLVED INFO + DUPLICATE_HOLIDAY_LOGIC consolidation guidance active
+    expect(
+      script.flowIR.findings.some(
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_HolidayList_Region'
+      )
+    ).toBe(false);
+    expect(
+      script.flowIR.findings.some((f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW')
+    ).toBe(false);
+    expect(
+      script.flowIR.findings.some((f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH')
+    ).toBe(false);
+
+    const resolvedFinding = script.flowIR.findings.find(
+      (f) => f.code === 'HOLIDAY_LOOKUP_RESOLVED'
+    );
+    expect(resolvedFinding).toBeDefined();
+    expect(resolvedFinding?.severity).toBe('INFO');
+    expect(resolvedFinding?.warningClass).toBe('informational_cleanup');
+    expect(resolvedFinding?.requiresBusinessReview).toBe(false);
+
+    // Parallel schedule-group holiday + resolved external holiday DB both preserved & differentiated
+    const dupFinding = script.flowIR.findings.find((f) => f.code === 'DUPLICATE_HOLIDAY_LOGIC');
+    expect(dupFinding).toBeDefined();
+    expect(dupFinding?.warningClass).toBe('semantic_review');
+    expect(dupFinding?.message).toContain('Single Source of Truth');
+    expect(script.archyYaml).toContain('CONSOLIDATION REVIEW:');
+
+    // Mermaid reflects resolved lookup, External Holiday DB / Consolidation Review badges, and zero fallthrough edge
+    expect(script.genesysMermaid).toContain('Data Action: External Holiday DB');
+    expect(script.genesysMermaid).toContain('[External Holiday DB / Consolidation Review]');
+    expect(script.genesysMermaid).not.toContain('Fallthrough (unproven terminality)');
+    expect(script.genesysMermaid).not.toContain('Call Task: Holiday_Subflow');
+
+    // Dual-renderer parity: renderArchyYamlFromFlowIR must also produce schema-valid Archy YAML
+    const irYaml = renderArchyYamlFromFlowIR(script.flowIR);
+    const irYamlVal = validateArchyYaml(irYaml);
+    expect(irYamlVal.isValid).toBe(true);
+    expect(irYamlVal.errors).toHaveLength(0);
+    expect(irYaml).toContain('- callDataAction:');
+    expect(irYaml).toContain('Flow.IsExternalHolidayToday == true');
+  });
+
+  it('v1.6.5 Resolved-Target Mode (Data Table configured): renders callDataTableLookup with boolean found/notFound branches and valid dual-renderer parity', () => {
+    const flowMod = makeModule(
+      'regional_holiday_datatable_flow',
+      `
+SECTION Start
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Subflow
+  END IF
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    const res = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([flowMod]), {
+      resolvedTargetConfig: {
+        enabled: true,
+        holidayLookupTarget: 'dataTable',
+        defaultHolidayDataTableName: 'Regional_Holiday_Calendar',
+      },
+    });
+    const script = res.scripts[0];
+
+    expect(res.resolvedTargetMode).toBe(true);
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.yamlValidation.errors).toHaveLength(0);
+    expect(script.irValidation.isValid).toBe(true);
+    expect(script.irValidation.commentParityOk).toBe(true);
+    expect(script.flowIR.meta.holidayLookupTarget).toBe('dataTable');
+
+    expect(script.archyYaml).toContain('- callDataTableLookup:');
+    expect(script.archyYaml).toContain('name: "Regional_Holiday_Calendar"');
+    expect(script.archyYaml).toContain('lit: true');
+    expect(script.archyYaml).toContain('lit: false');
+    expect(script.archyYaml).toContain('exp: "Flow.IsExternalHolidayToday == true"');
+    expect(script.archyYaml).not.toContain('- callDataAction:');
+    expect(script.flowIR.findings.some((f) => f.code === 'DUPLICATE_HOLIDAY_LOGIC')).toBe(false);
+    expect(script.flowIR.findings.some((f) => f.code === 'HOLIDAY_LOOKUP_RESOLVED')).toBe(true);
+
+    const irYaml = renderArchyYamlFromFlowIR(script.flowIR);
+    const irYamlVal = validateArchyYaml(irYaml);
+    expect(irYamlVal.isValid).toBe(true);
+    expect(irYamlVal.errors).toHaveLength(0);
+    expect(irYaml).toContain('- callDataTableLookup:');
+    expect(irYaml).toContain('- boolean:');
+  });
+
+  it('v1.6.5 Per-Variable Mapping Override: resolves ONLY mapped holiday variable while keeping unproven non-holiday variables in Strict Honest Mode', () => {
+    const mixedMod = makeModule(
+      'mixed_strict_and_mapped_flow',
+      `
+SECTION Start
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Subflow
+  END IF
+  IF Unproven_VipFlag = "1" THEN
+    QUEUE TO SKILLSET VIP_QUEUE
+  END IF
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    const res = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([mixedMod]), {
+      resolvedTargetConfig: {
+        enabled: false,
+        variableMappings: {
+          Sys_HolidayList_Region: {
+            enabled: true,
+            lookupTarget: 'dataAction',
+            actionName: 'Lookup_Regional_Holiday_DB',
+          },
+        },
+      },
+    });
+    const script = res.scripts[0];
+
+    expect(res.resolvedTargetMode).toBe(true);
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.irValidation.isValid).toBe(true);
+    expect(script.irValidation.commentParityOk).toBe(true);
+
+    // Mapped holiday variable resolved via Data Action -> boolean flag
+    expect(script.archyYaml).toContain('dataAction: "Lookup_Regional_Holiday_DB"');
+    expect(script.archyYaml).toContain('Flow.IsExternalHolidayToday == true');
+    expect(
+      script.flowIR.findings.some(
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_HolidayList_Region'
+      )
+    ).toBe(false);
+    expect(script.flowIR.findings.some((f) => f.code === 'HOLIDAY_LOOKUP_RESOLVED')).toBe(true);
+
+    // Unproven non-holiday variable stays strictly honest (no invented getParticipantData / lookup)
+    expect(script.archyYaml).not.toContain('getParticipantData:');
+    expect(
+      script.flowIR.findings.some(
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Unproven_VipFlag'
+      )
+    ).toBe(true);
+  });
 });
 
 

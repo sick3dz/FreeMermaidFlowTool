@@ -145,7 +145,8 @@ export interface MigrationStep {
   dataActionCategory?:
     | 'Oracle_Integration'
     | 'FlixCheck_API'
-    | 'Genesys_Cloud_Data_Actions';
+    | 'Genesys_Cloud_Data_Actions'
+    | 'External_Holiday_Integration';
   dataActionInputs?: MigrationDataActionInput[];
   dataActionOutputs?: MigrationDataActionOutput[];
   successSteps?: MigrationStep[];
@@ -202,13 +203,81 @@ export interface MigrationStep {
     branch: 'yes' | 'no' | 'open' | 'closed' | 'holiday' | 'default' | 'case';
     waitIds: string[];
   }>;
+  /** Optionale Evidenzquelle fuer Terminalitaet (inkl. bestaetigter Ziel-Policy). */
+  terminalityEvidence?:
+    | 'proven_source'
+    | 'explicit_command'
+    | 'unproven_external'
+    | 'resolved_business_policy'
+    | 'non_terminal';
+  /** Metadaten, wenn ein externer Feiertagslisten-Vergleich ueber den Guarded Resolved-Target-Pfad aufgeloest wurde. */
+  resolvedHolidayMetadata?: {
+    originalVariable: string;
+    booleanVarName: string;
+    lookupTarget: HolidayLookupTargetKind;
+    targetName: string;
+    replacedSubflow?: string;
+  };
+}
+
+export type HolidayLookupTargetKind = 'dataAction' | 'dataTable';
+
+export interface ResolvedHolidayMapping {
+  variableName?: string;
+  /** Standard = true; auf false setzen, um eine Variable trotz globalem Modus im Strict Honest Mode zu belassen. */
+  enabled?: boolean;
+  lookupTarget?: HolidayLookupTargetKind;
+  actionName?: string;
+  actionCategory?:
+    | 'External_Holiday_Integration'
+    | 'Oracle_Integration'
+    | 'FlixCheck_API'
+    | 'Genesys_Cloud_Data_Actions';
+  dataTableName?: string;
+  booleanVarName?: string;
+  dateExpression?: string;
+  holidayPromptSlug?: string;
+  holidayTtsText?: string;
+}
+
+export interface ResolvedTargetConfig {
+  /** Guarded Aktivierung: Standard = false (Strict Honest Mode bleibt Fallback). */
+  enabled?: boolean;
+  /** Konfigurierbares Ziel fuer externe Feiertagslisten (Standard = 'dataAction'). */
+  holidayLookupTarget?: HolidayLookupTargetKind;
+  defaultHolidayActionName?: string;
+  defaultHolidayActionCategory?:
+    | 'External_Holiday_Integration'
+    | 'Oracle_Integration'
+    | 'FlixCheck_API'
+    | 'Genesys_Cloud_Data_Actions';
+  defaultHolidayDataTableName?: string;
+  defaultBooleanVarName?: string;
+  defaultDateExpression?: string;
+  /** Optionale Per-Variable-Mapping-Overrides (wirken gezielt auch ohne globalen Schalter). */
+  variableMappings?: Record<string, ResolvedHolidayMapping>;
+}
+
+export interface ResolvedHolidayLookupRecord {
+  variableName: string;
+  booleanVarName: string;
+  lookupTarget: HolidayLookupTargetKind;
+  targetName: string;
+  lineNumber: number;
+  section: string;
+  originalExpression: string;
+  replacedSubflow?: string;
 }
 
 export interface StepMigrationAnnotation {
   findingCode: StepProvenanceFinding['code'];
-  prefix: 'OFFENE MIGRATIONSFRAGE' | 'KOMPATIBILITAETS-STUB (OPT-IN)';
+  prefix:
+    | 'OFFENE MIGRATIONSFRAGE'
+    | 'KOMPATIBILITAETS-STUB (OPT-IN)'
+    | 'RESOLVED TARGET (v1.6.5)'
+    | 'CONSOLIDATION REVIEW';
   lines: string[];
-  mode: 'strict' | 'stub';
+  mode: 'strict' | 'stub' | 'resolved';
 }
 
 export interface StepExpressionReview {
@@ -229,6 +298,7 @@ export interface StepProvenanceFinding {
     | 'DATE_COMPARISON_SEMANTIC_REVIEW'
     | 'WAIT_UNMAPPED_ACTIVE_PATH'
     | 'WAIT_SOURCE_ONLY_HINT'
+    | 'HOLIDAY_LOOKUP_RESOLVED'
     | 'UNRESOLVED_TASK_REF'
     | 'UNREACHABLE_TASK_PRUNED';
   message: string;
@@ -313,6 +383,10 @@ export interface MigrationGraphDiagnostics {
   synthesizedSourceCount: number;
   normalizedTargets: NormalizedTransferTarget[];
   compatibilityStubMode?: boolean;
+  resolvedTargetMode?: boolean;
+  holidayLookupTarget?: HolidayLookupTargetKind;
+  resolvedHolidayLookups?: ResolvedHolidayLookupRecord[];
+  replacedHolidaySubflows?: string[];
   prunedUnreachableTasks?: PrunedUnreachableTaskRecord[];
   sourceWaitStatements?: SourceWaitStatementRecord[];
   waitSourceOnlyHints?: WaitSourceOnlyHintRecord[];
@@ -342,6 +416,12 @@ export interface BuildMigrationGraphContext {
    * sondern transparent als offene Migrationsfrage mit Kommentar & Finding markiert.
    */
   compatibilityStubMode?: boolean;
+  /**
+   * Guarded Resolved-Target-Konfiguration (v1.6.5, Standard = deaktiviert -> Strict Honest Fallback).
+   * Aktiviert Lookup-to-Boolean-Feiertagsmodellierung nur bei erkannten Feiertags-DB-Mustern
+   * und expliziter Freigabe (global oder per Variable-Mapping).
+   */
+  resolvedTargetConfig?: ResolvedTargetConfig;
 }
 
 export interface BuildMigrationGraphResult {
@@ -1230,11 +1310,64 @@ function isEndWhereLine(trimmed: string): boolean {
 /**
  * Builds the Level-1 Neutral Migration Control-Flow Graph for a single Avaya script.
  */
+export function isRecognizedHolidayDbVarName(varName: string): boolean {
+  const clean = (varName || '').replace(/^(?:Flow|Task)\./i, '').trim();
+  if (!clean) return false;
+  return (
+    /(?:holiday|feiertag|sonderfeiertag)/i.test(clean) &&
+    /(?:list|liste|table|tabelle|region|db|kalend|calendar|sys_)/i.test(clean)
+  );
+}
+
+export function matchResolvedHolidayMapping(
+  varName: string,
+  config?: ResolvedTargetConfig
+): ResolvedHolidayMapping | null {
+  if (!config) return null;
+  const clean = (varName || '').replace(/^(?:Flow|Task)\./i, '').trim();
+  if (!clean) return null;
+  const lower = clean.toLowerCase();
+
+  if (config.variableMappings) {
+    for (const [k, mapping] of Object.entries(config.variableMappings)) {
+      const kClean = k.replace(/^(?:Flow|Task)\./i, '').trim().toLowerCase();
+      const mClean = (mapping?.variableName || k)
+        .replace(/^(?:Flow|Task)\./i, '')
+        .trim()
+        .toLowerCase();
+      if (kClean === lower || mClean === lower) {
+        if (mapping?.enabled === false) {
+          return null;
+        }
+        return {
+          ...mapping,
+          variableName: mapping.variableName || clean,
+          lookupTarget: mapping.lookupTarget || config.holidayLookupTarget || 'dataAction',
+        };
+      }
+    }
+  }
+
+  if (config.enabled && isRecognizedHolidayDbVarName(clean)) {
+    return {
+      variableName: clean,
+      lookupTarget: config.holidayLookupTarget || 'dataAction',
+      actionName: config.defaultHolidayActionName,
+      actionCategory: config.defaultHolidayActionCategory,
+      dataTableName: config.defaultHolidayDataTableName,
+      booleanVarName: config.defaultBooleanVarName,
+      dateExpression: config.defaultDateExpression,
+    };
+  }
+
+  return null;
+}
+
 export function buildMigrationFlowGraph(
   node: ParsedScriptNode,
   mod: ScriptModule | undefined,
   ctx: BuildMigrationGraphContext,
-  schemaVersion = '1.6.1'
+  schemaVersion = '1.6.5'
 ): BuildMigrationGraphResult {
   const rawText = mod?.rawText || '';
   const strippedLines = rawText ? stripOclCommentsPreservingLines(rawText) : [];
@@ -3812,6 +3945,11 @@ export function buildMigrationFlowGraph(
   };
 
   const compatibilityStubMode = Boolean(ctx.compatibilityStubMode);
+  const resolvedTargetConfig = ctx.resolvedTargetConfig;
+  const resolvedHolidayLookups: ResolvedHolidayLookupRecord[] = [];
+  const replacedHolidaySubflows: string[] = [];
+  const supersededHolidayVars = new Set<string>();
+  const internalSectionRefIds = new Set<string>(tasks.map((t) => t.refId));
 
   const appendComment = (target: MigrationStep, line: string) => {
     const clean = line.trim();
@@ -3831,7 +3969,7 @@ export function buildMigrationFlowGraph(
     findingCode: StepProvenanceFinding['code'],
     prefix: StepMigrationAnnotation['prefix'],
     lines: string[],
-    mode: 'strict' | 'stub'
+    mode: 'strict' | 'stub' | 'resolved'
   ) => {
     const cleaned = lines.map((l) => l.trim()).filter(Boolean);
     if (cleaned.length === 0) return;
@@ -3895,6 +4033,339 @@ export function buildMigrationFlowGraph(
 
       // Check unread variables in decision / switch BEFORE pushing the step
       if (copy.kind === 'decision' && copy.expression && !copy.isEmergencyCheck) {
+        // v1.6.5 Guarded Resolved-Target Path: upgrade recognized external holiday-DB comparisons
+        // (e.g. GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region) into lookup -> boolean decision + terminal holiday branch.
+        if (
+          resolvedTargetConfig &&
+          /\b(?:GetCurrentDateTimeUtc|DayOfWeek)\s*\(/.test(copy.expression) &&
+          /(?:==|!=)/.test(copy.expression)
+        ) {
+          const initialRefs = extractScopedVarsFromExpr(copy.expression);
+          const matchedHoliday = initialRefs
+            .map((r) => ({ ref: r, mapping: matchResolvedHolidayMapping(r.name, resolvedTargetConfig) }))
+            .find((x) => x.mapping !== null);
+
+          if (matchedHoliday && matchedHoliday.mapping) {
+            const { ref: holRef, mapping } = matchedHoliday;
+            const lookupTarget: HolidayLookupTargetKind =
+              mapping.lookupTarget || resolvedTargetConfig.holidayLookupTarget || 'dataAction';
+            const boolVarName = toCleanGraphSlug(
+              mapping.booleanVarName ||
+                resolvedTargetConfig.defaultBooleanVarName ||
+                'IsExternalHolidayToday',
+              'IsExternalHolidayToday'
+            );
+            const boolVarDecl = registry.ensureFlowVar(boolVarName, 'boolean', false);
+            const dateExpr =
+              mapping.dateExpression ||
+              resolvedTargetConfig.defaultDateExpression ||
+              'SubString(ToString(GetCurrentDateTimeUtc()), 0, 10)';
+            const originalExpr = copy.expression;
+
+            // Detect whether this specific holiday comparison uses != or ==
+            const escapedRef = holRef.refName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const lhsTemporalRe = new RegExp(
+              `(?:GetCurrentDateTimeUtc|DayOfWeek)\\s*\\([^)]*\\)\\s*(==|!=)\\s*${escapedRef}`,
+              'i'
+            );
+            const rhsTemporalRe = new RegExp(
+              `${escapedRef}\\s*(==|!=)\\s*(?:GetCurrentDateTimeUtc|DayOfWeek)\\s*\\([^)]*\\)`,
+              'i'
+            );
+            const lhsMatch = originalExpr.match(lhsTemporalRe);
+            const rhsMatch = originalExpr.match(rhsTemporalRe);
+            const cmpOp = lhsMatch?.[1] || rhsMatch?.[1] || '==';
+            const isNegated = cmpOp === '!=';
+            const replacementBoolExpr = isNegated
+              ? `${boolVarDecl.refName} == false`
+              : `${boolVarDecl.refName} == true`;
+
+            let targetName = '';
+            let lookupStep: MigrationStep;
+            if (lookupTarget === 'dataTable') {
+              targetName = toCleanGraphSlug(
+                mapping.dataTableName ||
+                  resolvedTargetConfig.defaultHolidayDataTableName ||
+                  `${holRef.name}_Table`,
+                'External_Holiday_Table'
+              );
+              lookupStep = {
+                id: nextStepId('dt'),
+                kind: 'callDataTableLookup',
+                lineNumber: copy.lineNumber,
+                avayaCommand: 'RESOLVED_HOLIDAY_DB_LOOKUP',
+                label: `Data Table Lookup: ${targetName} (${holRef.name})`,
+                target: targetName,
+                targetSlug: targetName,
+                dataTableKey: dateExpr,
+                sectionHint: copy.sectionHint,
+                dataActionOutputs: [
+                  {
+                    field: 'isHoliday',
+                    targetVarName: boolVarDecl.name,
+                    targetVarRef: boolVarDecl.refName,
+                    dataType: 'boolean',
+                  },
+                ],
+                foundSteps: [
+                  {
+                    id: nextStepId('upd'),
+                    kind: 'updateData',
+                    lineNumber: copy.lineNumber,
+                    avayaCommand: 'SET_HOLIDAY_FLAG_TRUE',
+                    label: `Set ${boolVarDecl.refName} true (Holiday Found)`,
+                    variableName: boolVarDecl.name,
+                    variableRef: boolVarDecl.refName,
+                    variableDataType: 'boolean',
+                    literalValue: true,
+                    sectionHint: copy.sectionHint,
+                    isTerminal: false,
+                  },
+                ],
+                notFoundSteps: [
+                  {
+                    id: nextStepId('upd'),
+                    kind: 'updateData',
+                    lineNumber: copy.lineNumber,
+                    avayaCommand: 'SET_HOLIDAY_FLAG_FALSE',
+                    label: `Set ${boolVarDecl.refName} false (No Holiday)`,
+                    variableName: boolVarDecl.name,
+                    variableRef: boolVarDecl.refName,
+                    variableDataType: 'boolean',
+                    literalValue: false,
+                    sectionHint: copy.sectionHint,
+                    isTerminal: false,
+                  },
+                ],
+                isTerminal: false,
+              };
+            } else {
+              targetName = toCleanGraphSlug(
+                mapping.actionName ||
+                  resolvedTargetConfig.defaultHolidayActionName ||
+                  'Lookup_External_Holiday_By_Date',
+                'Lookup_External_Holiday_By_Date'
+              );
+              const category =
+                mapping.actionCategory ||
+                resolvedTargetConfig.defaultHolidayActionCategory ||
+                'External_Holiday_Integration';
+              lookupStep = {
+                id: nextStepId('da'),
+                kind: 'callDataAction',
+                lineNumber: copy.lineNumber,
+                avayaCommand: 'RESOLVED_HOLIDAY_DB_LOOKUP',
+                label: `Lookup External Holiday (${holRef.name})`,
+                target: targetName,
+                targetSlug: targetName,
+                dataActionCategory: category,
+                sectionHint: copy.sectionHint,
+                dataActionInputs: [
+                  { name: 'currentDate', expr: dateExpr },
+                  { name: 'holidayListKey', expr: `"${holRef.name}"` },
+                ],
+                dataActionOutputs: [
+                  {
+                    field: 'isHoliday',
+                    targetVarName: boolVarDecl.name,
+                    targetVarRef: boolVarDecl.refName,
+                    dataType: 'boolean',
+                  },
+                ],
+                successSteps: [],
+                failureSteps: [
+                  {
+                    id: nextStepId('upd'),
+                    kind: 'updateData',
+                    lineNumber: copy.lineNumber,
+                    avayaCommand: 'HOLIDAY_LOOKUP_FAIL_OPEN',
+                    label: `Fallback ${boolVarDecl.refName} false (Failure)`,
+                    variableName: boolVarDecl.name,
+                    variableRef: boolVarDecl.refName,
+                    variableDataType: 'boolean',
+                    literalValue: false,
+                    sectionHint: copy.sectionHint,
+                    isTerminal: false,
+                  },
+                ],
+                timeoutSteps: [
+                  {
+                    id: nextStepId('upd'),
+                    kind: 'updateData',
+                    lineNumber: copy.lineNumber,
+                    avayaCommand: 'HOLIDAY_LOOKUP_TIMEOUT_OPEN',
+                    label: `Fallback ${boolVarDecl.refName} false (Timeout)`,
+                    variableName: boolVarDecl.name,
+                    variableRef: boolVarDecl.refName,
+                    variableDataType: 'boolean',
+                    literalValue: false,
+                    sectionHint: copy.sectionHint,
+                    isTerminal: false,
+                  },
+                ],
+                isTerminal: false,
+              };
+            }
+
+            // Terminal target behavior on positive holiday branch (recommended service-hotline end-state)
+            const targetBranchKey: 'yesSteps' | 'noSteps' = isNegated ? 'noSteps' : 'yesSteps';
+            const rawHolidayBranch = copy[targetBranchKey] ? [...copy[targetBranchKey]!] : [];
+            const isUnloadedSubflowStep = (s: MigrationStep): boolean => {
+              if (s.avayaCommand === 'UNLOADED_SUBFLOW_MODULE' || s.isBrokenTarget) return true;
+              if (s.kind === 'callTask' && s.targetTaskRefId) {
+                if (internalSectionRefIds.has(s.targetTaskRefId)) return false;
+                const key = canonicalScriptMatchKey(s.target || s.targetTaskRefId);
+                return !ctx.knownKeyLookup.has(key);
+              }
+              return false;
+            };
+
+            let replacedSubflow: string | undefined;
+            const promptSlug = toCleanGraphSlug(
+              mapping.holidayPromptSlug || 'External_Holiday',
+              'External_Holiday'
+            );
+            const promptTts =
+              mapping.holidayTtsText ||
+              'Heute ist ein regionaler Feiertag. Bitte rufen Sie uns am naechsten Werktag wieder an.';
+
+            const makeTerminalHolidaySteps = (legacySubflow?: string): MigrationStep[] => {
+              const audioStep: MigrationStep = {
+                id: nextStepId('aud'),
+                kind: 'playAudio',
+                lineNumber: copy.lineNumber,
+                avayaCommand: 'RESOLVED_HOLIDAY_PROMPT',
+                label: `Play Audio: Prompt.${promptSlug}`,
+                target: promptSlug,
+                targetSlug: promptSlug,
+                ttsText: promptTts,
+                sectionHint: copy.sectionHint,
+                yamlComment: legacySubflow
+                  ? `RESOLVED TARGET (v1.6.5): Empfohlener terminaler Feiertagsabschluss (ersetzt ungeladenes Legacy-Subskript "${legacySubflow}").`
+                  : 'RESOLVED TARGET (v1.6.5): Empfohlener terminaler Feiertagsabschluss (Ansage + Disconnect).',
+                isTerminal: false,
+              };
+              const discStep: MigrationStep = {
+                id: nextStepId('disc'),
+                kind: 'disconnect',
+                lineNumber: copy.lineNumber,
+                avayaCommand: 'RESOLVED_HOLIDAY_DISCONNECT',
+                label: 'Disconnect (External Holiday)',
+                target: 'External_Holiday',
+                sectionHint: copy.sectionHint,
+                terminalityEvidence: 'resolved_business_policy',
+                isTerminal: true,
+              };
+              return [audioStep, discStep];
+            };
+
+            if (!isStepListTerminal(rawHolidayBranch)) {
+              const unloadedIdx = rawHolidayBranch.findIndex(isUnloadedSubflowStep);
+              if (unloadedIdx >= 0) {
+                const unloadedStep = rawHolidayBranch[unloadedIdx];
+                replacedSubflow =
+                  unloadedStep.target || unloadedStep.targetTaskRefId || unloadedStep.targetSlug;
+                const prefixSteps = rawHolidayBranch.slice(0, unloadedIdx);
+                copy[targetBranchKey] = [
+                  ...prefixSteps,
+                  ...makeTerminalHolidaySteps(replacedSubflow),
+                ];
+              } else if (rawHolidayBranch.length === 0) {
+                copy[targetBranchKey] = makeTerminalHolidaySteps();
+              } else {
+                const hasAudio = rawHolidayBranch.some((s) => s.kind === 'playAudio');
+                if (hasAudio) {
+                  copy[targetBranchKey] = [
+                    ...rawHolidayBranch,
+                    {
+                      id: nextStepId('disc'),
+                      kind: 'disconnect',
+                      lineNumber: copy.lineNumber,
+                      avayaCommand: 'RESOLVED_HOLIDAY_DISCONNECT',
+                      label: 'Disconnect (External Holiday)',
+                      target: 'External_Holiday',
+                      sectionHint: copy.sectionHint,
+                      terminalityEvidence: 'resolved_business_policy',
+                      yamlComment:
+                        'RESOLVED TARGET (v1.6.5): Empfohlener terminaler Feiertagsabschluss (Disconnect).',
+                      isTerminal: true,
+                    },
+                  ];
+                } else {
+                  copy[targetBranchKey] = [...rawHolidayBranch, ...makeTerminalHolidaySteps()];
+                }
+              }
+            }
+
+            const resolvedSummary =
+              `Externes Feiertags-DB-Mapping (v1.6.5) fuer "${holRef.name}" aufgeloest: ${
+                lookupTarget === 'dataTable' ? `Data Table "${targetName}"` : `Data Action "${targetName}"`
+              } -> ${boolVarDecl.refName} (boolean), terminaler Feiertagszweig${
+                replacedSubflow ? ` (ersetzt ungeladenes Legacy-Subskript "${replacedSubflow}")` : ''
+              }.`;
+
+            appendComment(
+              lookupStep,
+              `RESOLVED TARGET (v1.6.5): External holiday database lookup ("${holRef.name}") mapped to ${boolVarDecl.refName} via ${
+                lookupTarget === 'dataTable' ? `Data Table "${targetName}"` : `Data Action "${targetName}"`
+              }.`
+            );
+            appendAnnotation(
+              lookupStep,
+              'HOLIDAY_LOOKUP_RESOLVED',
+              'RESOLVED TARGET (v1.6.5)',
+              [
+                `External holiday source "${holRef.name}" resolved via ${
+                  lookupTarget === 'dataTable' ? `Data Table "${targetName}"` : `Data Action "${targetName}"`
+                } -> ${boolVarDecl.refName}.`,
+              ],
+              'resolved'
+            );
+            appendFinding(lookupStep, {
+              severity: 'INFO',
+              code: 'HOLIDAY_LOOKUP_RESOLVED',
+              variableName: boolVarDecl.name,
+              message: resolvedSummary,
+            });
+
+            out.push(lookupStep);
+            markWritten(boolVarDecl.name);
+            supersededHolidayVars.add(holRef.name.toLowerCase());
+
+            if (lhsMatch) {
+              copy.expression = originalExpr.replace(lhsTemporalRe, replacementBoolExpr);
+            } else if (rhsMatch) {
+              copy.expression = originalExpr.replace(rhsTemporalRe, replacementBoolExpr);
+            } else {
+              copy.expression = replacementBoolExpr;
+            }
+            copy.label = 'Check External Holiday Today';
+            copy.conditionLabel = 'External Holiday Today';
+            copy.expressionReview = undefined;
+            copy.resolvedHolidayMetadata = {
+              originalVariable: holRef.name,
+              booleanVarName: boolVarDecl.name,
+              lookupTarget,
+              targetName,
+              ...(replacedSubflow ? { replacedSubflow } : {}),
+            };
+
+            resolvedHolidayLookups.push({
+              variableName: holRef.name,
+              booleanVarName: boolVarDecl.name,
+              lookupTarget,
+              targetName,
+              lineNumber: copy.lineNumber,
+              section: copy.sectionHint || hostTask.originalTarget || hostTask.refId,
+              originalExpression: originalExpr,
+              ...(replacedSubflow ? { replacedSubflow } : {}),
+            });
+            if (replacedSubflow && !replacedHolidaySubflows.includes(replacedSubflow)) {
+              replacedHolidaySubflows.push(replacedSubflow);
+            }
+          }
+        }
+
         const refs = extractScopedVarsFromExpr(copy.expression);
         for (const r of refs) {
           const lower = r.name.toLowerCase();
@@ -4245,6 +4716,65 @@ export function buildMigrationFlowGraph(
     t.steps = ensureProvenanceOnList(t.steps, preWrittenFlowVars, t);
   }
 
+  // Cleanup superseded holiday list variables (e.g. Sys_HolidayList_Region) if no longer referenced anywhere,
+  // and drop replaced unloaded holiday subflows from localSubscriptRefsMap if no surviving step calls them.
+  if (supersededHolidayVars.size > 0 || replacedHolidaySubflows.length > 0) {
+    const referencedVarNames = new Set<string>();
+    const calledTaskRefIds = new Set<string>();
+    const scanStepRefs = (list: MigrationStep[]) => {
+      for (const st of list) {
+        if ((st.kind === 'callTask' || st.kind === 'jumpToReusableTask') && st.targetTaskRefId) {
+          calledTaskRefIds.add(st.targetTaskRefId);
+        }
+        const exprs: string[] = [];
+        if (st.expression) exprs.push(st.expression);
+        if (st.expressionValue) exprs.push(st.expressionValue);
+        if (st.variableRef) exprs.push(st.variableRef);
+        if (st.dataTableKey) exprs.push(st.dataTableKey);
+        if (st.dataActionInputs) {
+          st.dataActionInputs.forEach((inp) => {
+            if (inp.expr) exprs.push(inp.expr);
+          });
+        }
+        for (const ex of exprs) {
+          for (const vr of extractScopedVarsFromExpr(ex)) {
+            referencedVarNames.add(vr.name.toLowerCase());
+          }
+        }
+        if (st.variableName) referencedVarNames.add(st.variableName.toLowerCase());
+        if (st.inputVarName) referencedVarNames.add(st.inputVarName.toLowerCase());
+        if (st.dataActionOutputs) {
+          st.dataActionOutputs.forEach((o) => referencedVarNames.add(o.targetVarName.toLowerCase()));
+        }
+        if (st.yesSteps) scanStepRefs(st.yesSteps);
+        if (st.noSteps) scanStepRefs(st.noSteps);
+        if (st.openSteps) scanStepRefs(st.openSteps);
+        if (st.closedSteps) scanStepRefs(st.closedSteps);
+        if (st.holidaySteps) scanStepRefs(st.holidaySteps);
+        if (st.successSteps) scanStepRefs(st.successSteps);
+        if (st.failureSteps) scanStepRefs(st.failureSteps);
+        if (st.timeoutSteps) scanStepRefs(st.timeoutSteps);
+        if (st.foundSteps) scanStepRefs(st.foundSteps);
+        if (st.notFoundSteps) scanStepRefs(st.notFoundSteps);
+        if (st.bodySteps) scanStepRefs(st.bodySteps);
+        if (st.defaultSteps) scanStepRefs(st.defaultSteps);
+        if (st.cases) st.cases.forEach((c) => scanStepRefs(c.steps));
+      }
+    };
+    tasks.forEach((t) => scanStepRefs(t.steps));
+
+    for (const supVar of supersededHolidayVars) {
+      if (!referencedVarNames.has(supVar)) {
+        registry.flowVars.delete(supVar);
+      }
+    }
+    for (const [k, refEntry] of Array.from(localSubscriptRefsMap.entries())) {
+      if (!calledTaskRefIds.has(refEntry.refId)) {
+        localSubscriptRefsMap.delete(k);
+      }
+    }
+  }
+
   // Ensure Fallback_Error_Task exists if provenance pass synthesized a Data Action referencing it
   if (needsFallbackErrorTask && !tasks.some((t) => t.refId === 'Fallback_Error_Task')) {
     tasks.push({
@@ -4336,6 +4866,11 @@ export function buildMigrationFlowGraph(
       synthesizedSourceCount,
       normalizedTargets,
       compatibilityStubMode,
+      resolvedTargetMode:
+        Boolean(resolvedTargetConfig?.enabled) || resolvedHolidayLookups.length > 0,
+      holidayLookupTarget: resolvedTargetConfig?.holidayLookupTarget || 'dataAction',
+      resolvedHolidayLookups,
+      replacedHolidaySubflows,
       prunedUnreachableTasks,
       sourceWaitStatements,
     },

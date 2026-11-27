@@ -6,12 +6,14 @@ import {
   CheckCircle2,
   Code2,
   Copy,
+  Database,
   Download,
   FileCode2,
   GitBranch,
   Layers,
   Pencil,
   RotateCcw,
+  SlidersHorizontal,
   X,
   XCircle,
 } from 'lucide-react';
@@ -22,8 +24,11 @@ import {
   GenesysReadinessLevel,
   GenesysScriptTranslation,
   GenesysWorkspaceTranslation,
+  HolidayLookupTargetKind,
+  ResolvedTargetConfig,
   classifyFlowIRFinding,
   exportAllArchyYamlsZipBlob,
+  isRecognizedHolidayDbVarName,
   normalizeWarningClass,
   validateArchyYaml,
 } from '../utils/genesysMigrationAnalyzer';
@@ -35,6 +40,8 @@ interface GenesysMigrationBarProps {
   onSelectDetailScript?: (scriptNumber: string) => void;
   compatibilityStubMode?: boolean;
   onToggleCompatibilityStubMode?: () => void;
+  resolvedTargetConfig?: ResolvedTargetConfig;
+  onChangeResolvedTargetConfig?: (next: ResolvedTargetConfig) => void;
 }
 
 interface ScopedValidationIssue extends ArchyYamlValidationIssue {
@@ -106,16 +113,122 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
   onSelectDetailScript,
   compatibilityStubMode = false,
   onToggleCompatibilityStubMode,
+  resolvedTargetConfig,
+  onChangeResolvedTargetConfig,
 }) => {
   const [showYamlPreview, setShowYamlPreview] = useState(false);
   const [previewMode, setPreviewMode] = useState<'genesys' | 'avaya'>('genesys');
   const [showWarnings, setShowWarnings] = useState(false);
   const [showValidationPanel, setShowValidationPanel] = useState(false);
   const [showHintsAndCleanup, setShowHintsAndCleanup] = useState(false);
+  const [showHolidayMappings, setShowHolidayMappings] = useState(false);
   const [isEditingYaml, setIsEditingYaml] = useState(false);
   const [customYamlText, setCustomYamlText] = useState('');
   const [copiedYaml, setCopiedYaml] = useState(false);
   const [isExportingZip, setIsExportingZip] = useState(false);
+
+  const effectiveResolvedConfig: ResolvedTargetConfig = useMemo(
+    () => ({
+      enabled: Boolean(resolvedTargetConfig?.enabled),
+      holidayLookupTarget: resolvedTargetConfig?.holidayLookupTarget || 'dataAction',
+      variableMappings: resolvedTargetConfig?.variableMappings || {},
+    }),
+    [resolvedTargetConfig]
+  );
+
+  const activeMappingCount = useMemo(
+    () =>
+      Object.values(effectiveResolvedConfig.variableMappings || {}).filter(
+        (m) => m && m.enabled !== false
+      ).length,
+    [effectiveResolvedConfig.variableMappings]
+  );
+
+  const detectedHolidayVariables = useMemo(() => {
+    const byLower = new Map<
+      string,
+      {
+        name: string;
+        resolvedRecord?: {
+          lookupTarget: HolidayLookupTargetKind;
+          lookupActionOrTable: string;
+          booleanVarName: string;
+          replacedSubflow?: string;
+        };
+      }
+    >();
+    const scriptsToScan =
+      !isMasterView && activeScript ? [activeScript] : translation.scripts;
+    for (const s of scriptsToScan) {
+      for (const v of s.flowIR?.variables || []) {
+        if (isRecognizedHolidayDbVarName(v.name)) {
+          const k = v.name.toLowerCase();
+          if (!byLower.has(k)) byLower.set(k, { name: v.name });
+        }
+      }
+      for (const rec of s.migrationGraph?.diagnostics?.resolvedHolidayLookups || []) {
+        const k = rec.variableName.toLowerCase();
+        byLower.set(k, {
+          name: rec.variableName,
+          resolvedRecord: {
+            lookupTarget: rec.lookupTarget,
+            lookupActionOrTable: rec.targetName,
+            booleanVarName: rec.booleanVarName,
+            replacedSubflow: rec.replacedSubflow,
+          },
+        });
+      }
+    }
+    for (const mappedName of Object.keys(effectiveResolvedConfig.variableMappings || {})) {
+      const k = mappedName.toLowerCase();
+      if (!byLower.has(k)) byLower.set(k, { name: mappedName });
+    }
+    return Array.from(byLower.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [isMasterView, activeScript, translation.scripts, effectiveResolvedConfig.variableMappings]);
+
+  const handleToggleResolvedTargetMode = () => {
+    if (!onChangeResolvedTargetConfig) return;
+    onChangeResolvedTargetConfig({
+      ...effectiveResolvedConfig,
+      enabled: !effectiveResolvedConfig.enabled,
+    });
+  };
+
+  const handleChangeHolidayLookupTarget = (target: HolidayLookupTargetKind) => {
+    if (!onChangeResolvedTargetConfig) return;
+    onChangeResolvedTargetConfig({
+      ...effectiveResolvedConfig,
+      holidayLookupTarget: target,
+    });
+  };
+
+  const handleSetVariableMappingMode = (
+    varName: string,
+    mode: 'inherit' | 'dataAction' | 'dataTable' | 'disabled'
+  ) => {
+    if (!onChangeResolvedTargetConfig) return;
+    const nextMappings = { ...(effectiveResolvedConfig.variableMappings || {}) };
+    // Remove case-insensitive duplicates cleanly
+    for (const existingKey of Object.keys(nextMappings)) {
+      if (existingKey.toLowerCase() === varName.toLowerCase()) {
+        delete nextMappings[existingKey];
+      }
+    }
+    if (mode === 'dataAction' || mode === 'dataTable') {
+      nextMappings[varName] = {
+        enabled: true,
+        lookupTarget: mode,
+      };
+    } else if (mode === 'disabled') {
+      nextMappings[varName] = {
+        enabled: false,
+      };
+    }
+    onChangeResolvedTargetConfig({
+      ...effectiveResolvedConfig,
+      variableMappings: nextMappings,
+    });
+  };
 
   const effectiveScript: GenesysScriptTranslation | null = useMemo(() => {
     if (activeScript) return activeScript;
@@ -490,6 +603,82 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
               <span>{compatibilityStubMode ? 'Stub-Modus (Opt-In)' : 'Ehrliche Migration'}</span>
             </button>
           )}
+
+          {!compatibilityStubMode && onChangeResolvedTargetConfig && (
+            <>
+              <button
+                type="button"
+                onClick={handleToggleResolvedTargetMode}
+                title={
+                  effectiveResolvedConfig.enabled
+                    ? 'Resolved Target (v1.6.5) aktiv: Erkannte externe Feiertags-DB-Variablen werden als Lookup + Boolean-Decision (Flow.IsExternalHolidayToday) mit terminalem Feiertagszweig gerendert. Alle anderen Variablen bleiben im Strict Honest Mode.'
+                    : 'Strict Honest Fallback aktiv. Klicken, um den geschützten Resolved-Target-Modus (v1.6.5) für erkannte externe Feiertags-DB-Muster zu aktivieren.'
+                }
+                className={`px-2 py-0.5 rounded border text-[11px] font-medium flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
+                  effectiveResolvedConfig.enabled
+                    ? 'bg-cyan-500/20 border-cyan-400/65 text-cyan-100 hover:bg-cyan-500/30'
+                    : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800 hover:text-slate-100'
+                }`}
+              >
+                <Database className="w-3 h-3 text-cyan-400 shrink-0" />
+                <span>
+                  {effectiveResolvedConfig.enabled
+                    ? 'Resolved Target (Holiday DB)'
+                    : 'Holiday DB: Strict'}
+                </span>
+              </button>
+
+              {(effectiveResolvedConfig.enabled || activeMappingCount > 0) && (
+                <div
+                  className="inline-flex rounded border border-slate-700 bg-slate-900 p-0.5"
+                  role="group"
+                  aria-label="Holiday DB Lookup Target"
+                >
+                  <button
+                    type="button"
+                    onClick={() => handleChangeHolidayLookupTarget('dataAction')}
+                    className={`px-1.5 py-0.25 rounded text-[10.5px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                      effectiveResolvedConfig.holidayLookupTarget !== 'dataTable'
+                        ? 'bg-cyan-600/35 text-cyan-100'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Data Action
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleChangeHolidayLookupTarget('dataTable')}
+                    className={`px-1.5 py-0.25 rounded text-[10.5px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                      effectiveResolvedConfig.holidayLookupTarget === 'dataTable'
+                        ? 'bg-cyan-600/35 text-cyan-100'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Data Table
+                  </button>
+                </div>
+              )}
+
+              {detectedHolidayVariables.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowHolidayMappings((v) => !v)}
+                  className={`px-2 py-0.5 rounded border text-[11px] font-medium flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
+                    showHolidayMappings || activeMappingCount > 0
+                      ? 'bg-slate-800 border-cyan-500/50 text-cyan-200'
+                      : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800'
+                  }`}
+                  title="Per-Variable Holiday DB Mapping-Overrides konfigurieren"
+                >
+                  <SlidersHorizontal className="w-3 h-3 text-cyan-400 shrink-0" />
+                  <span>
+                    Holiday Mappings
+                    {activeMappingCount > 0 ? ` (${activeMappingCount})` : ''}
+                  </span>
+                </button>
+              )}
+            </>
+          )}
         </div>
 
         {/* Right: Archy YAML / flowIR Preview & Downloads (Export remains always enabled) */}
@@ -558,6 +747,96 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Expandable Per-Variable Holiday DB Mappings Panel (v1.6.5) */}
+      {!compatibilityStubMode &&
+        onChangeResolvedTargetConfig &&
+        showHolidayMappings &&
+        detectedHolidayVariables.length > 0 && (
+          <div className="px-3 py-2 border-t border-slate-800 bg-slate-900/95 space-y-1.5">
+            <div className="flex items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-wide text-cyan-300">
+              <span>
+                External Holiday DB Mappings (v1.6.5) ·{' '}
+                {effectiveResolvedConfig.enabled
+                  ? `Global aktiv (${
+                      effectiveResolvedConfig.holidayLookupTarget === 'dataTable'
+                        ? 'Data Table'
+                        : 'Data Action'
+                    })`
+                  : 'Strict Honest Default — Einzel-Overrides optional'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowHolidayMappings(false)}
+                className="text-slate-400 hover:text-slate-200 cursor-pointer"
+                aria-label="Holiday Mappings schließen"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="space-y-1">
+              {detectedHolidayVariables.map((item) => {
+                const mappingEntry = Object.entries(
+                  effectiveResolvedConfig.variableMappings || {}
+                ).find(([k]) => k.toLowerCase() === item.name.toLowerCase())?.[1];
+                const currentMode: 'inherit' | 'dataAction' | 'dataTable' | 'disabled' =
+                  mappingEntry === undefined
+                    ? 'inherit'
+                    : mappingEntry.enabled === false
+                    ? 'disabled'
+                    : mappingEntry.lookupTarget || 'dataAction';
+                return (
+                  <div
+                    key={item.name}
+                    className="flex flex-wrap items-center justify-between gap-2 text-[11px] bg-slate-950/70 border border-slate-800 rounded px-2.5 py-1.5"
+                  >
+                    <div className="min-w-0 flex flex-wrap items-center gap-2">
+                      <span className="font-mono font-semibold text-slate-100">{item.name}</span>
+                      {item.resolvedRecord ? (
+                        <span className="text-[10.5px] text-cyan-200 font-mono">
+                          {item.resolvedRecord.lookupTarget === 'dataTable'
+                            ? 'Data Table'
+                            : 'Data Action'}{' '}
+                          ({item.resolvedRecord.lookupActionOrTable}) → Flow.
+                          {item.resolvedRecord.booleanVarName} · terminal
+                        </span>
+                      ) : (
+                        <span className="text-[10.5px] text-slate-400">
+                          Strict Honest Review (Interim-Vergleich aktiv)
+                        </span>
+                      )}
+                    </div>
+                    <div className="inline-flex rounded border border-slate-700 bg-slate-900 p-0.5 shrink-0">
+                      {(
+                        [
+                          ['inherit', 'Standard'],
+                          ['dataAction', 'Data Action'],
+                          ['dataTable', 'Data Table'],
+                          ...(effectiveResolvedConfig.enabled
+                            ? ([['disabled', 'Strict']] as const)
+                            : []),
+                        ] as const
+                      ).map(([modeVal, label]) => (
+                        <button
+                          key={modeVal}
+                          type="button"
+                          onClick={() => handleSetVariableMappingMode(item.name, modeVal)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                            currentMode === modeVal
+                              ? 'bg-cyan-600/35 text-cyan-100'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
       {/* Expandable Archy YAML + flowIR v1.1 Validation Panel */}
       {showValidationPanel && (
@@ -677,11 +956,19 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                 className={`text-[10.5px] rounded border px-2.5 py-1.5 ${
                   compatibilityStubMode
                     ? 'border-amber-500/40 bg-amber-950/30 text-amber-100'
+                    : translation.resolvedTargetMode
+                    ? 'border-cyan-500/40 bg-cyan-950/30 text-cyan-100'
                     : 'border-cyan-500/30 bg-cyan-950/20 text-cyan-100'
                 }`}
               >
                 {compatibilityStubMode
                   ? 'Compatibility Stub Mode (Opt-In): Synthetische Stubs fuellen fehlende Variablen temporaererweise, waehrend Semantic-Review-Risiken, Fallthroughs und fehlende Subflows sichtbar bleiben.'
+                  : translation.resolvedTargetMode
+                  ? `Resolved Target Mode (v1.6.5 · ${
+                      effectiveResolvedConfig.holidayLookupTarget === 'dataTable'
+                        ? 'Data Table'
+                        : 'Data Action'
+                    }): Erkannte externe Feiertags-DB-Variablen werden ueber Lookup + Boolean-Flag (Flow.IsExternalHolidayToday) mit terminalem Feiertagszweig gerendert. Alle anderen unbelegten Variablen bleiben im Strict Honest Mode.`
                   : 'Strict Honest Mode (Default): Offene Review-Signale sind bewusste Migrationsnachweise (# OFFENE MIGRATIONSFRAGE), keine Konverter-Defekte.'}
               </div>
 
@@ -966,17 +1253,25 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             </div>
           </div>
 
-          {/* Mode Caution Banner: Strict Honest Default vs. Opt-In Compatibility Stub Mode */}
+          {/* Mode Caution Banner: Strict Honest Default vs. Resolved Target (v1.6.5) vs. Opt-In Compatibility Stub Mode */}
           <div
             className={`rounded border px-2.5 py-1.5 text-[11px] flex items-center justify-between gap-2 ${
               compatibilityStubMode
                 ? 'border-amber-500/45 bg-amber-950/35 text-amber-100'
+                : translation.resolvedTargetMode
+                ? 'border-cyan-500/45 bg-cyan-950/30 text-cyan-100'
                 : 'border-emerald-500/35 bg-emerald-950/25 text-emerald-100'
             }`}
           >
             <span>
               {compatibilityStubMode
                 ? 'Kompatibilitäts-/Stub-Modus (Opt-In) aktiv — synthetische getParticipantData-/Lookup-Stubs sind mit # KOMPATIBILITAETS-STUB (OPT-IN) markiert und dienen nur als optionale Review-Hilfe.'
+                : translation.resolvedTargetMode
+                ? `Resolved Target (v1.6.5 · Holiday DB via ${
+                    effectiveResolvedConfig.holidayLookupTarget === 'dataTable'
+                      ? 'Data Table'
+                      : 'Data Action'
+                  }) — erkannte externe Feiertagslisten werden als Lookup + Boolean-Entscheidung (Flow.IsExternalHolidayToday) mit terminalem Feiertagszweig gerendert; alle anderen Variablen bleiben im Strict Honest Mode.`
                 : 'Ehrliche Migration (Strict Default) — keine erfundenen Datenquellen, Lookups oder Disconnects; offene Punkte sind mit # OFFENE MIGRATIONSFRAGE markiert.'}
             </span>
           </div>

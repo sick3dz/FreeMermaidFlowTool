@@ -36,6 +36,7 @@ export type FlowIRVariableProvenance =
   | 'avaya_assigned'
   | 'avaya_literal'
   | 'system_context'
+  | 'resolved_external_lookup'
   | 'unproven'
   | 'stub_synthesized';
 
@@ -110,14 +111,19 @@ export interface FlowIRErrorHandling {
 export type FlowIRTerminalityEvidence =
   | 'proven_source'
   | 'explicit_command'
+  | 'resolved_business_policy'
   | 'unproven_external'
   | 'non_terminal';
 
 export interface FlowIRMigrationAnnotation {
   findingCode: FlowIRFindingCode;
-  prefix: 'OFFENE MIGRATIONSFRAGE' | 'KOMPATIBILITAETS-STUB (OPT-IN)';
+  prefix:
+    | 'OFFENE MIGRATIONSFRAGE'
+    | 'KOMPATIBILITAETS-STUB (OPT-IN)'
+    | 'RESOLVED TARGET (v1.6.5)'
+    | 'CONSOLIDATION REVIEW';
   lines: string[];
-  mode: 'strict' | 'stub';
+  mode: 'strict' | 'stub' | 'resolved';
 }
 
 export interface FlowIRExpressionReview {
@@ -232,6 +238,7 @@ export type FlowIRFindingCode =
   | 'MISSING_SUBFLOW_SOURCE'
   | 'POTENTIAL_BRANCH_FALLTHROUGH'
   | 'DUPLICATE_HOLIDAY_LOGIC'
+  | 'HOLIDAY_LOOKUP_RESOLVED'
   | 'DATE_COMPARISON_SEMANTIC_REVIEW'
   | 'WAIT_UNMAPPED_ACTIVE_PATH'
   | 'WAIT_SOURCE_ONLY_HINT'
@@ -267,6 +274,8 @@ export interface FlowIR {
     language: string;
     version: '1.1';
     compatibilityStubMode?: boolean;
+    resolvedTargetMode?: boolean;
+    holidayLookupTarget?: 'dataAction' | 'dataTable';
     prunedUnreachableTasks?: FlowIRPrunedTaskInfo[];
   };
   variables: FlowIRVariable[];
@@ -453,6 +462,7 @@ const ANNOTATION_ORDER: Partial<Record<FlowIRFindingCode, number>> = {
   DATE_COMPARISON_SEMANTIC_REVIEW: 4,
   POTENTIAL_BRANCH_FALLTHROUGH: 5,
   WAIT_UNMAPPED_ACTIVE_PATH: 6,
+  HOLIDAY_LOOKUP_RESOLVED: 7,
 };
 
 export function classifyFlowIRFinding(code: FlowIRFindingCode): {
@@ -483,6 +493,12 @@ export function classifyFlowIRFinding(code: FlowIRFindingCode): {
         category: 'holiday_logic',
         warningClass: 'semantic_review',
         requiresBusinessReview: true,
+      };
+    case 'HOLIDAY_LOOKUP_RESOLVED':
+      return {
+        category: 'holiday_logic',
+        warningClass: 'informational_cleanup',
+        requiresBusinessReview: false,
       };
     case 'DATE_COMPARISON_SEMANTIC_REVIEW':
       return {
@@ -576,7 +592,7 @@ export function formatOrderedMigrationAnnotations(
         if (!t) return;
         if (
           idx === 0 &&
-          !/^(?:OFFENE MIGRATIONSFRAGE|KOMPATIBILITAETS-STUB \(OPT-IN\)|HINWEIS)\s*:/i.test(t)
+          !/^(?:OFFENE MIGRATIONSFRAGE|KOMPATIBILITAETS-STUB \(OPT-IN\)|RESOLVED TARGET \(v1\.6\.5\)|CONSOLIDATION REVIEW|HINWEIS)\s*:/i.test(t)
         ) {
           pushLine(`${ann.prefix}: ${t}`);
         } else {
@@ -624,7 +640,12 @@ export function verifyFlowIRCommentParity(ir: FlowIR): {
     const hasAnn = (node.migrationAnnotations || []).some((a) => a.findingCode === f.code);
     const hasLegacyComment =
       Boolean(node.migrationComments && node.migrationComments.length > 0) ||
-      Boolean(node.migrationNote && /OFFENE MIGRATIONSFRAGE|KOMPATIBILITAETS-STUB/i.test(node.migrationNote));
+      Boolean(
+        node.migrationNote &&
+          /OFFENE MIGRATIONSFRAGE|KOMPATIBILITAETS-STUB|CONSOLIDATION REVIEW|RESOLVED TARGET/i.test(
+            node.migrationNote
+          )
+      );
     if (!hasAnn && !hasLegacyComment) {
       missingNodeFindings.push({ nodeId: f.nodeId, code: f.code });
     }
@@ -644,6 +665,8 @@ export function buildFlowIRFromMigrationGraph(
   options?: {
     missingSubflows?: string[];
     compatibilityStubMode?: boolean;
+    resolvedTargetMode?: boolean;
+    holidayLookupTarget?: 'dataAction' | 'dataTable';
     prunedUnreachableTasks?: FlowIRPrunedTaskInfo[];
   }
 ): FlowIR {
@@ -652,6 +675,10 @@ export function buildFlowIRFromMigrationGraph(
   const varByLower = new Map<string, FlowIRVariable>();
   const compatibilityStubMode =
     options?.compatibilityStubMode ?? Boolean(graph.diagnostics.compatibilityStubMode);
+  const resolvedTargetMode =
+    options?.resolvedTargetMode ?? Boolean(graph.diagnostics.resolvedTargetMode);
+  const holidayLookupTarget =
+    options?.holidayLookupTarget ?? graph.diagnostics.holidayLookupTarget;
   const prunedUnreachableTasks: FlowIRPrunedTaskInfo[] =
     options?.prunedUnreachableTasks || graph.diagnostics.prunedUnreachableTasks || [];
   const missingSubflowsSet = new Set(
@@ -944,6 +971,9 @@ export function buildFlowIRFromMigrationGraph(
             parameters: {
               ...(step.isEmergencyCheck ? { isEmergencyCheck: true } : {}),
               ...(step.isFallbackFlag ? { isFallbackFlag: true } : {}),
+              ...(step.resolvedHolidayMetadata
+                ? { resolvedHolidayMetadata: { ...step.resolvedHolidayMetadata } }
+                : {}),
             },
             sourceTrace: trace,
             condition: {
@@ -1150,6 +1180,12 @@ export function buildFlowIRFromMigrationGraph(
           const outputs: FlowIROutputBinding[] = (step.dataActionOutputs || []).map((om) => {
             const cleanTarget = om.targetVarName.replace(/^(?:Flow|Task)\./i, '');
             markVarUsed(cleanTarget, id);
+            if (step.avayaCommand === 'RESOLVED_HOLIDAY_DB_LOOKUP') {
+              const tv = varByLower.get(cleanTarget.toLowerCase());
+              if (tv && tv.provenance !== 'system_context') {
+                tv.provenance = 'resolved_external_lookup';
+              }
+            }
             return {
               name: om.field,
               targetVariable: cleanTarget,
@@ -1157,7 +1193,9 @@ export function buildFlowIRFromMigrationGraph(
           });
 
           const integrationType: FlowIRIntegrationSpec['type'] =
-            isTable || step.dataActionCategory === 'Oracle_Integration'
+            isTable ||
+            step.dataActionCategory === 'Oracle_Integration' ||
+            step.dataActionCategory === 'External_Holiday_Integration'
               ? 'dbLookup'
               : step.dataActionCategory === 'FlixCheck_API'
               ? 'webservice'
@@ -1331,6 +1369,7 @@ export function buildFlowIRFromMigrationGraph(
             actionType: 'disconnect',
             name: step.label || 'Disconnect Call',
             terminal: true,
+            terminalityEvidence: step.terminalityEvidence || 'explicit_command',
             parameters: {
               reason: step.target || (step.avayaCommand === 'GIVE BUSY' ? 'busy' : 'normal'),
             },
@@ -1386,10 +1425,19 @@ export function buildFlowIRFromMigrationGraph(
           if (step.kind === 'updateData' && unscopedVar) {
             const tv = varByLower.get(unscopedVar.toLowerCase());
             if (tv && tv.provenance !== 'system_context') {
-              tv.provenance =
-                step.avayaCommand === 'SET_LOOKUP_MATCH' || step.avayaCommand === 'SET_LOOKUP_NOMATCH'
-                  ? 'stub_synthesized'
-                  : 'avaya_assigned';
+              if (
+                step.avayaCommand === 'SET_HOLIDAY_FLAG_TRUE' ||
+                step.avayaCommand === 'SET_HOLIDAY_FLAG_FALSE' ||
+                step.avayaCommand === 'HOLIDAY_LOOKUP_FAIL_OPEN' ||
+                step.avayaCommand === 'HOLIDAY_LOOKUP_TIMEOUT_OPEN'
+              ) {
+                tv.provenance = 'resolved_external_lookup';
+              } else if (tv.provenance !== 'resolved_external_lookup') {
+                tv.provenance =
+                  step.avayaCommand === 'SET_LOOKUP_MATCH' || step.avayaCommand === 'SET_LOOKUP_NOMATCH'
+                    ? 'stub_synthesized'
+                    : 'avaya_assigned';
+              }
             }
           } else if (step.kind === 'getParticipantData' && unscopedVar) {
             const tv = varByLower.get(unscopedVar.toLowerCase());
@@ -1610,6 +1658,8 @@ export function buildFlowIRFromMigrationGraph(
       language: 'de-de',
       version: '1.1',
       compatibilityStubMode,
+      ...(resolvedTargetMode ? { resolvedTargetMode: true } : {}),
+      ...(resolvedTargetMode && holidayLookupTarget ? { holidayLookupTarget } : {}),
       ...(prunedUnreachableTasks.length > 0 ? { prunedUnreachableTasks } : {}),
     },
     variables,
@@ -2209,10 +2259,25 @@ export function validateIR(ir: FlowIR): FlowIRValidationResult {
       if (n.kind !== 'decision') continue;
       const condText = `${n.condition?.expr || ''} ${n.condition?.sourceExpr || ''} ${n.name}`;
       if (HOLIDAY_SIGNAL_RE.test(condText)) {
+        const resolvedMeta = n.parameters?.resolvedHolidayMetadata as
+          | {
+              originalVariable?: string;
+              booleanVarName?: string;
+              lookupTarget?: 'dataAction' | 'dataTable';
+              targetName?: string;
+            }
+          | undefined;
+        const msg = resolvedMeta
+          ? `Parallele Feiertagsquellen (Zeile ${n.sourceTrace?.lineStart || 1}): Neben evaluateScheduleGroup.holiday (Basis-Feiertage der Schedule Group) prüft Decision "${n.name}" die externe Feiertags-DB via ${
+              resolvedMeta.lookupTarget === 'dataTable' ? 'Data Table' : 'Data Action'
+            } "${resolvedMeta.targetName || 'External_Holiday'}" -> Flow.${
+              resolvedMeta.booleanVarName || 'IsExternalHolidayToday'
+            } (Quelle: ${resolvedMeta.originalVariable || 'HolidayDB'}). Beide Pfade bewusst getrennt belassen — Konsolidierung auf eine Single Source of Truth empfohlen, sofern identische fachliche Feiertagskalender gemeint sind; bei regionalen/speziellen Sondertagen klar differenziert beibehalten.`
+          : `Mögliche doppelte Feiertagslogik (Zeile ${n.sourceTrace?.lineStart || 1}): Neben evaluateScheduleGroup.holiday existiert Decision "${n.name}" (${n.condition?.expr || ''}). Beide Pfade getrennt beibehalten und fachlich klären.`;
         findings.push({
           severity: 'WARN',
           code: 'DUPLICATE_HOLIDAY_LOGIC',
-          message: `Mögliche doppelte Feiertagslogik (Zeile ${n.sourceTrace?.lineStart || 1}): Neben evaluateScheduleGroup.holiday existiert Decision "${n.name}" (${n.condition?.expr || ''}). Beide Pfade getrennt beibehalten und fachlich klären.`,
+          message: msg,
           nodeId: n.id,
           sourceTrace: n.sourceTrace,
         });
@@ -2263,6 +2328,10 @@ export function renderAvayaView(ir: FlowIR): RenderedModeReport {
   const allFindings = ir.findings.length > 0 ? ir.findings : validation.findings;
   const modeLabel = ir.meta.compatibilityStubMode
     ? 'Kompatibilitäts-/Stub-Modus (Opt-In)'
+    : ir.meta.resolvedTargetMode
+    ? `Resolved Target (Holiday DB · ${
+        ir.meta.holidayLookupTarget === 'dataTable' ? 'Data Table' : 'Data Action'
+      })`
     : 'Ehrliche Migration (Strict Default)';
 
   const avayaOpenReviewItems = allFindings.filter((f) => {
@@ -2300,6 +2369,12 @@ export function renderAvayaView(ir: FlowIR): RenderedModeReport {
   lines.push(`    language: "${escYaml(ir.meta.language)}"`);
   lines.push(`    version: "${ir.meta.version}"`);
   lines.push(`    compatibilityStubMode: ${ir.meta.compatibilityStubMode ? 'true' : 'false'}`);
+  if (ir.meta.resolvedTargetMode) {
+    lines.push('    resolvedTargetMode: true');
+    if (ir.meta.holidayLookupTarget) {
+      lines.push(`    holidayLookupTarget: "${ir.meta.holidayLookupTarget}"`);
+    }
+  }
   if (ir.meta.prunedUnreachableTasks && ir.meta.prunedUnreachableTasks.length > 0) {
     lines.push('    prunedUnreachableTasks:');
     for (const pt of ir.meta.prunedUnreachableTasks) {
@@ -2812,18 +2887,36 @@ export function renderArchyYamlFromFlowIR(ir: FlowIR): string {
         } else {
           const vName = String(node.parameters?.targetVariable || 'avayaOriginScript');
           const scopedVar = applyGenesysScopesToExpr(vName, ir.variables);
+          const cleanVName = vName.replace(/^(?:Flow|Task)\./i, '').toLowerCase();
+          const varDecl = ir.variables.find((v) => v.name.toLowerCase() === cleanVName);
+          const litVal = node.parameters?.literalValue;
+          const stmtType: 'boolean' | 'integer' | 'string' =
+            varDecl?.type === 'boolean' || typeof litVal === 'boolean'
+              ? 'boolean'
+              : varDecl?.type === 'integer' || typeof litVal === 'number'
+              ? 'integer'
+              : 'string';
           lines.push(`${li}- updateData:`);
           lines.push(`${p}name: "${uniqName(node.name)}"`);
           lines.push(`${p}statements:`);
-          lines.push(`${p}  - string:`);
+          lines.push(`${p}  - ${stmtType}:`);
           lines.push(`${p}      variable: ${scopedVar}`);
           lines.push(`${p}      value:`);
           if (typeof node.parameters?.expr === 'string') {
             lines.push(
               `${p}        exp: "${escYaml(applyGenesysScopesToExpr(node.parameters.expr, ir.variables))}"`
             );
+          } else if (stmtType === 'boolean') {
+            const boolLit =
+              typeof litVal === 'boolean'
+                ? litVal
+                : String(litVal ?? 'false').toLowerCase() === 'true';
+            lines.push(`${p}        lit: ${boolLit ? 'true' : 'false'}`);
+          } else if (stmtType === 'integer') {
+            const numLit = Number(litVal ?? 0);
+            lines.push(`${p}        lit: ${Number.isFinite(numLit) ? numLit : 0}`);
           } else {
-            lines.push(`${p}        lit: "${escYaml(String(node.parameters?.literalValue ?? ''))}"`);
+            lines.push(`${p}        lit: "${escYaml(String(litVal ?? ''))}"`);
           }
         }
         break;
@@ -2874,6 +2967,10 @@ export function renderGenesysView(ir: FlowIR, preRenderedArchyYaml?: string): Re
   const yaml = preRenderedArchyYaml || renderArchyYamlFromFlowIR(ir);
   const modeLabel = ir.meta.compatibilityStubMode
     ? 'Kompatibilitäts-/Stub-Modus (Opt-In)'
+    : ir.meta.resolvedTargetMode
+    ? `Resolved Target (Holiday DB · ${
+        ir.meta.holidayLookupTarget === 'dataTable' ? 'Data Table' : 'Data Action'
+      })`
     : 'Ehrliche Migration (Strict Default)';
 
   const openReviewItems = allFindings.filter((f) => {

@@ -23,18 +23,24 @@ import {
 } from './auditCallflows';
 import {
   BuildMigrationGraphResult,
+  HolidayLookupTargetKind,
   MigrationFlowGraph,
   MigrationGraphWarning,
   MigrationStep,
   MigrationTaskGraph,
   MigrationVariableDataType,
   MigrationVariableDecl,
+  ResolvedHolidayLookupRecord,
+  ResolvedHolidayMapping,
+  ResolvedTargetConfig,
   StepExpressionReview,
   StepMigrationAnnotation,
   StepProvenanceFinding,
   buildMigrationFlowGraph,
   flattenMigrationSteps,
+  isRecognizedHolidayDbVarName,
   isStepListTerminal,
+  matchResolvedHolidayMapping,
   toCleanGraphSlug,
 } from './genesysMigrationGraph';
 import {
@@ -60,15 +66,23 @@ import {
 } from './genesysFlowIR';
 
 export type {
+  HolidayLookupTargetKind,
   MigrationFlowGraph,
   MigrationStep,
   MigrationTaskGraph,
   MigrationVariableDataType,
   MigrationVariableDecl,
   NormalizedTransferTarget,
+  ResolvedHolidayLookupRecord,
+  ResolvedHolidayMapping,
+  ResolvedTargetConfig,
   StepExpressionReview,
   StepMigrationAnnotation,
 } from './genesysMigrationGraph';
+export {
+  isRecognizedHolidayDbVarName,
+  matchResolvedHolidayMapping,
+};
 export type {
   FlowIR,
   FlowIRDocument,
@@ -172,7 +186,8 @@ export interface GenesysMappedAction {
   dataActionCategory?:
     | 'Oracle_Integration'
     | 'FlixCheck_API'
-    | 'Genesys_Cloud_Data_Actions';
+    | 'Genesys_Cloud_Data_Actions'
+    | 'External_Holiday_Integration';
   skills?: string[];
   isMultiSkillset?: boolean;
   isBackwardGoto?: boolean;
@@ -267,6 +282,9 @@ export interface GenesysWorkspaceTranslation {
   privacyMode: '100%-in-memory-metadata-only';
   /** false = Ehrliche Migration (Standard), true = Optionaler Kompatibilitäts-/Stub-Modus. */
   compatibilityStubMode: boolean;
+  /** true = Guarded Resolved-Target-Modus (v1.6.5) global oder per Variablen-Mapping aktiviert. */
+  resolvedTargetMode: boolean;
+  resolvedTargetConfig?: ResolvedTargetConfig;
   overallReadiness: GenesysReadinessLevel;
   summary: {
     totalScripts: number;
@@ -508,6 +526,8 @@ function emitArchyStepList(
             ? 'FlixCheck'
             : category === 'Genesys_Cloud_Data_Actions'
             ? 'QueueObs'
+            : category === 'External_Holiday_Integration'
+            ? 'ExternalHoliday'
             : 'Oracle';
         const actName = uniqueName(`${prefixLabel} ${targetSlug}`);
 
@@ -2248,6 +2268,9 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
         } else if (step.dataActionCategory === 'Genesys_Cloud_Data_Actions') {
           lines.push(`  ${nodeId}["Data Action: Queue Observations (${targetClean})"]`);
           classBuckets.gcPriority.push(nodeId);
+        } else if (step.dataActionCategory === 'External_Holiday_Integration') {
+          lines.push(`  ${nodeId}["Data Action: External Holiday DB (${targetClean})"]`);
+          classBuckets.gcDataTable.push(nodeId);
         } else {
           lines.push(`  ${nodeId}["Data Action: Oracle (${targetClean})"]`);
           classBuckets.gcOracle.push(nodeId);
@@ -2275,8 +2298,11 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
         break;
       case 'decision': {
         const badges: string[] = [];
+        if (step.resolvedHolidayMetadata) badges.push('External Holiday DB');
         if (stepHasFindingCode(step, 'VAR_USED_BEFORE_SET')) badges.push('Unproven Var');
-        if (stepHasFindingCode(step, 'DUPLICATE_HOLIDAY_LOGIC')) badges.push('Duplicate Holiday');
+        if (stepHasFindingCode(step, 'DUPLICATE_HOLIDAY_LOGIC')) {
+          badges.push(step.resolvedHolidayMetadata ? 'Consolidation Review' : 'Duplicate Holiday');
+        }
         if (stepHasFindingCode(step, 'DATE_COMPARISON_SEMANTIC_REVIEW')) badges.push('Date Review');
         const badgeSuffix = badges.length > 0 ? ` [${badges.join(' / ')}]` : '';
         if (step.isEmergencyCheck) {
@@ -3708,7 +3734,7 @@ function appendStepAnnotation(
   findingCode: StepProvenanceFinding['code'],
   prefix: StepMigrationAnnotation['prefix'],
   lines: string[],
-  mode: 'strict' | 'stub'
+  mode: 'strict' | 'stub' | 'resolved'
 ): void {
   const cleaned = lines.map((l) => l.trim()).filter(Boolean);
   if (cleaned.length === 0) return;
@@ -4040,26 +4066,52 @@ function auditParallelHolidayLogic(
   for (const dec of explicitHolidayDecisions) {
     const condSummary = dec.expression || dec.conditionLabel || dec.label;
     const lineNum = dec.lineNumber || 1;
-    const dupComment = `OFFENE MIGRATIONSFRAGE: Moegliche doppelte Feiertagslogik — neben evaluateScheduleGroup.holiday ("${scheduleGroupName}") existiert diese zusaetzliche explizite Feiertagspruefung (${condSummary}). Beide Pfade wurden unveraendert beibehalten; bitte fachlich klaeren, ob Standard-Feiertage (Schedule Group) und Sonder-Feiertagsliste bewusst getrennt sind oder zusammengefasst werden koennen.`;
-    appendStepYamlComment(dec, dupComment);
-    appendStepAnnotation(
-      dec,
-      'DUPLICATE_HOLIDAY_LOGIC',
-      'OFFENE MIGRATIONSFRAGE',
-      [dupComment],
-      graph.diagnostics.compatibilityStubMode ? 'stub' : 'strict'
-    );
-    appendStepFinding(dec, {
-      severity: 'WARN',
-      code: 'DUPLICATE_HOLIDAY_LOGIC',
-      message: `Mögliche doppelte Feiertagslogik (Zeile ${lineNum}): Neben evaluateScheduleGroup.holiday ("${scheduleGroupName}") existiert eine zusätzliche explizite Feiertagsprüfung (${condSummary}). Beide Pfade wurden getrennt beibehalten — offene fachliche Klärung.`,
-    });
-    warnings.push({
-      code: 'DUPLICATE_HOLIDAY_LOGIC',
-      severity: 'warning',
-      lineNumber: lineNum,
-      message: `Zeile ${lineNum}: Mögliche doppelte Feiertagslogik — evaluateScheduleGroup.holiday ("${scheduleGroupName}") und explizite Prüfung (${condSummary}) bestehen parallel. Beide wurden beibehalten; bitte fachlich klären.`,
-    });
+    const resolvedMeta = dec.resolvedHolidayMetadata;
+    if (resolvedMeta) {
+      const targetKindLabel =
+        resolvedMeta.lookupTarget === 'dataTable' ? 'Data Table' : 'Data Action';
+      const dupComment = `CONSOLIDATION REVIEW: Parallele Feiertagsquellen — evaluateScheduleGroup.holiday ("${scheduleGroupName}") deckt Basis-Feiertage der Schedule Group ab, waehrend dieser aufgeloeste Pfad die externe Feiertags-DB (${resolvedMeta.originalVariable} via ${targetKindLabel} "${resolvedMeta.targetName}" -> Flow.${resolvedMeta.booleanVarName}) prueft. Beide Pfade wurden differenziert beibehalten; Konsolidierung auf eine Single Source of Truth empfohlen, sofern identische Feiertagskalender gelten.`;
+      appendStepYamlComment(dec, dupComment);
+      appendStepAnnotation(
+        dec,
+        'DUPLICATE_HOLIDAY_LOGIC',
+        'CONSOLIDATION REVIEW',
+        [dupComment],
+        'resolved'
+      );
+      appendStepFinding(dec, {
+        severity: 'WARN',
+        code: 'DUPLICATE_HOLIDAY_LOGIC',
+        message: `Parallele Feiertagsquellen (Zeile ${lineNum}): evaluateScheduleGroup.holiday ("${scheduleGroupName}", Basis-Feiertage) und aufgelöster externer Feiertags-DB-Lookup (${resolvedMeta.originalVariable} via ${targetKindLabel} "${resolvedMeta.targetName}" -> Flow.${resolvedMeta.booleanVarName}) bestehen parallel. Beide differenziert beibehalten — Konsolidierung auf eine Single Source of Truth empfohlen, falls derselbe Fachkalender gepflegt wird.`,
+      });
+      warnings.push({
+        code: 'DUPLICATE_HOLIDAY_LOGIC',
+        severity: 'warning',
+        lineNumber: lineNum,
+        message: `Zeile ${lineNum}: Parallele Feiertagsquellen — evaluateScheduleGroup.holiday ("${scheduleGroupName}") und externer Feiertags-DB-Lookup (${resolvedMeta.originalVariable} -> Flow.${resolvedMeta.booleanVarName}) bestehen parallel. Beide wurden differenziert beibehalten; Konsolidierung empfohlen, sofern derselbe Feiertagskalender gemeint ist.`,
+      });
+    } else {
+      const dupComment = `OFFENE MIGRATIONSFRAGE: Moegliche doppelte Feiertagslogik — neben evaluateScheduleGroup.holiday ("${scheduleGroupName}") existiert diese zusaetzliche explizite Feiertagspruefung (${condSummary}). Beide Pfade wurden unveraendert beibehalten; bitte fachlich klaeren, ob Standard-Feiertage (Schedule Group) und Sonder-Feiertagsliste bewusst getrennt sind oder zusammengefasst werden koennen.`;
+      appendStepYamlComment(dec, dupComment);
+      appendStepAnnotation(
+        dec,
+        'DUPLICATE_HOLIDAY_LOGIC',
+        'OFFENE MIGRATIONSFRAGE',
+        [dupComment],
+        graph.diagnostics.compatibilityStubMode ? 'stub' : 'strict'
+      );
+      appendStepFinding(dec, {
+        severity: 'WARN',
+        code: 'DUPLICATE_HOLIDAY_LOGIC',
+        message: `Mögliche doppelte Feiertagslogik (Zeile ${lineNum}): Neben evaluateScheduleGroup.holiday ("${scheduleGroupName}") existiert eine zusätzliche explizite Feiertagsprüfung (${condSummary}). Beide Pfade wurden getrennt beibehalten — offene fachliche Klärung.`,
+      });
+      warnings.push({
+        code: 'DUPLICATE_HOLIDAY_LOGIC',
+        severity: 'warning',
+        lineNumber: lineNum,
+        message: `Zeile ${lineNum}: Mögliche doppelte Feiertagslogik — evaluateScheduleGroup.holiday ("${scheduleGroupName}") und explizite Prüfung (${condSummary}) bestehen parallel. Beide wurden beibehalten; bitte fachlich klären.`,
+      });
+    }
   }
 }
 
@@ -4385,6 +4437,8 @@ function finalizeScriptTranslation(
   const flowIR = buildFlowIRFromMigrationGraph(graph, {
     missingSubflows,
     compatibilityStubMode: graph.diagnostics.compatibilityStubMode,
+    resolvedTargetMode: graph.diagnostics.resolvedTargetMode,
+    holidayLookupTarget: graph.diagnostics.holidayLookupTarget,
     prunedUnreachableTasks: graph.diagnostics.prunedUnreachableTasks,
   });
   const irValidation = validateIR(flowIR);
@@ -4467,9 +4521,18 @@ export function translateAvayaWorkspaceToGenesys(
     generatedAt?: string;
     /** Optionaler Kompatibilitäts-/Stub-Modus (Opt-In, Standard = false = Ehrliche Migration). */
     compatibilityStubMode?: boolean;
+    /** Guarded Resolved-Target-Konfiguration (v1.6.5) für externe Feiertags-DB-Lookups. */
+    resolvedTargetConfig?: ResolvedTargetConfig;
   }
 ): GenesysWorkspaceTranslation {
   const compatibilityStubMode = Boolean(options?.compatibilityStubMode);
+  const resolvedTargetConfig = options?.resolvedTargetConfig;
+  const resolvedTargetMode = Boolean(
+    !compatibilityStubMode &&
+      resolvedTargetConfig &&
+      (resolvedTargetConfig.enabled ||
+        Object.values(resolvedTargetConfig.variableMappings || {}).some((m) => m && m.enabled !== false))
+  );
   const workspace: ScriptWorkspace = isScriptWorkspace(input)
     ? input
     : buildScriptWorkspace(input);
@@ -4530,8 +4593,9 @@ export function translateAvayaWorkspaceToGenesys(
         incomingCallCountByKey,
         brokenTargetKeysForScript: brokenByScriptKey.get(node.scriptKey) || new Set<string>(),
         compatibilityStubMode,
+        resolvedTargetConfig,
       },
-      '1.6.1'
+      '1.6.5'
     );
     builtByKey.set(node.scriptKey, { node, built });
     allGraphsByKey.set(node.scriptKey, built.graph);
@@ -4571,10 +4635,12 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.6.1',
+    schemaVersion: '1.6.5',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     compatibilityStubMode,
+    resolvedTargetMode,
+    ...(resolvedTargetConfig ? { resolvedTargetConfig } : {}),
     overallReadiness,
     summary: {
       totalScripts: scripts.length,

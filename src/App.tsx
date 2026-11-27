@@ -198,6 +198,7 @@ import { GenesysMigrationBar } from './components/GenesysMigrationBar';
 import {
   GenesysScriptTranslation,
   GenesysWorkspaceTranslation,
+  ResolvedTargetConfig,
   translateAvayaWorkspaceToGenesys,
 } from './utils/genesysMigrationAnalyzer';
 import {
@@ -468,6 +469,12 @@ function OfflineStudioApp() {
   );
   const [platformViewMode, setPlatformViewMode] = useState<'avaya' | 'genesys'>('avaya');
   const [genesysCompatibilityStubMode, setGenesysCompatibilityStubMode] = useState<boolean>(false);
+  const [genesysResolvedTargetConfig, setGenesysResolvedTargetConfig] =
+    useState<ResolvedTargetConfig>({
+      enabled: false,
+      holidayLookupTarget: 'dataAction',
+      variableMappings: {},
+    });
   const isMasterCompact =
     masterDensityMode === 'compact' ||
     (masterDensityMode === 'auto' && scriptWorkspace.modules.length >= 16);
@@ -824,8 +831,14 @@ function OfflineStudioApp() {
     if (platformViewMode !== 'genesys') return null;
     return translateAvayaWorkspaceToGenesys(scriptWorkspace, {
       compatibilityStubMode: genesysCompatibilityStubMode,
+      resolvedTargetConfig: genesysResolvedTargetConfig,
     });
-  }, [platformViewMode, scriptWorkspace, genesysCompatibilityStubMode]);
+  }, [
+    platformViewMode,
+    scriptWorkspace,
+    genesysCompatibilityStubMode,
+    genesysResolvedTargetConfig,
+  ]);
 
   const activeGenesysScript = useMemo<GenesysScriptTranslation | null>(() => {
     if (!genesysTranslation || callflowViewLevel.level !== 'detail') return null;
@@ -6710,6 +6723,8 @@ function OfflineStudioApp() {
               onToggleCompatibilityStubMode={() =>
                 setGenesysCompatibilityStubMode((prev) => !prev)
               }
+              resolvedTargetConfig={genesysResolvedTargetConfig}
+              onChangeResolvedTargetConfig={setGenesysResolvedTargetConfig}
             />
           )}
 
