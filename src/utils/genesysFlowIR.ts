@@ -32,6 +32,13 @@ export type FlowIRVariableScope = 'flow' | 'task';
 export type FlowIRVariableCategory = 'flow' | 'task' | 'participant' | 'metadata';
 export type FlowIRVariableType = 'string' | 'integer' | 'boolean';
 
+export type FlowIRVariableProvenance =
+  | 'avaya_assigned'
+  | 'avaya_literal'
+  | 'system_context'
+  | 'unproven'
+  | 'stub_synthesized';
+
 export interface FlowIRVariable {
   id: string;
   /** Strikt scope-freier Rohname (ohne "Flow." / "Task."). */
@@ -45,6 +52,10 @@ export interface FlowIRVariable {
     origin: 'avaya' | 'derived' | 'system';
     originalName: string;
   };
+  /** v1.1-Herkunftsklassifizierung fuer ehrliche Migration ohne erfundene Quellen. */
+  provenance?: FlowIRVariableProvenance;
+  /** Optionaler Hinweis, wenn ein Task-Name zugunsten einer vorhandenen Flow-Variable vereinheitlicht wurde. */
+  compatibilityScopeAlias?: string;
   sourceTrace: FlowIRSourceTrace;
   derivedFrom?: string;
   usedByNodes: string[];
@@ -96,6 +107,12 @@ export interface FlowIRErrorHandling {
   onTimeout?: string;
 }
 
+export type FlowIRTerminalityEvidence =
+  | 'proven_source'
+  | 'explicit_command'
+  | 'unproven_external'
+  | 'non_terminal';
+
 export interface FlowIRNode {
   id: string;
   kind: FlowIRNodeKind;
@@ -103,6 +120,8 @@ export interface FlowIRNode {
   name: string;
   /** Explizites v1.1-Flag: Validator und Renderer müssen Terminalität nicht erraten. */
   terminal: boolean;
+  /** Evidenzquelle fuer Terminalitaet (kein erratener Disconnect). */
+  terminalityEvidence?: FlowIRTerminalityEvidence;
   parameters: Record<string, unknown>;
   /** v1.1-Herkunftsnachweis je Node (Skript, Abschnitt, Zeilenbereich). */
   sourceTrace: FlowIRSourceTrace;
@@ -124,6 +143,8 @@ export interface FlowIRNode {
   resolvedTargetType?: FlowIRTransferTargetType;
   /** Optionaler Hinweis für offene Migrationsfragen. */
   migrationNote?: string;
+  /** Mehrzeilige # OFFENE MIGRATIONSFRAGE Kommentare synchron zu findings. */
+  migrationComments?: string[];
 }
 
 export type FlowIRTransitionType =
@@ -169,7 +190,10 @@ export type FlowIRFindingCode =
   | 'VARIABLE_UNDECLARED'
   | 'MISSING_SUBFLOW_SOURCE'
   | 'POTENTIAL_BRANCH_FALLTHROUGH'
-  | 'DUPLICATE_HOLIDAY_LOGIC';
+  | 'DUPLICATE_HOLIDAY_LOGIC'
+  | 'UNRESOLVED_TASK_REF'
+  | 'DUPLICATE_VARIABLE_SCOPE'
+  | 'UNREACHABLE_TASK_PRUNED';
 
 export interface FlowIRFinding {
   severity: FlowIRFindingSeverity;
@@ -178,6 +202,12 @@ export interface FlowIRFinding {
   nodeId?: string;
   variableName?: string;
   sourceTrace?: FlowIRSourceTrace;
+}
+
+export interface FlowIRPrunedTaskInfo {
+  refId: string;
+  originalTarget: string;
+  reason: string;
 }
 
 export interface FlowIR {
@@ -189,6 +219,8 @@ export interface FlowIR {
     entryNodeId: string;
     language: string;
     version: '1.1';
+    compatibilityStubMode?: boolean;
+    prunedUnreachableTasks?: FlowIRPrunedTaskInfo[];
   };
   variables: FlowIRVariable[];
   nodes: FlowIRNode[];
@@ -372,11 +404,31 @@ function escYaml(raw: string): string {
 
 export function buildFlowIRFromMigrationGraph(
   graph: MigrationFlowGraph,
-  options?: { missingSubflows?: string[] }
+  options?: {
+    missingSubflows?: string[];
+    compatibilityStubMode?: boolean;
+    prunedUnreachableTasks?: FlowIRPrunedTaskInfo[];
+  }
 ): FlowIR {
   const scriptName = graph.fileName || `${graph.cleanName}.s`;
   const variables: FlowIRVariable[] = [];
   const varByLower = new Map<string, FlowIRVariable>();
+  const compatibilityStubMode =
+    options?.compatibilityStubMode ?? Boolean(graph.diagnostics.compatibilityStubMode);
+  const prunedUnreachableTasks: FlowIRPrunedTaskInfo[] =
+    options?.prunedUnreachableTasks || graph.diagnostics.prunedUnreachableTasks || [];
+  const missingSubflowsSet = new Set(
+    (options?.missingSubflows || []).map((s) => s.toLowerCase())
+  );
+
+  const splitStepComments = (raw?: string): string[] | undefined => {
+    if (!raw) return undefined;
+    const arr = raw
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return arr.length > 0 ? arr : undefined;
+  };
 
   const registerVar = (
     name: string,
@@ -396,8 +448,17 @@ export function buildFlowIRFromMigrationGraph(
     const existing = varByLower.get(key);
     if (existing) {
       if (derivedFrom && !existing.derivedFrom) existing.derivedFrom = derivedFrom;
+      if (scope === 'task' && existing.scope === 'flow' && !existing.compatibilityScopeAlias) {
+        existing.compatibilityScopeAlias = `Task.${cleanName}`;
+      }
       return existing;
     }
+    const defaultProvenance: FlowIRVariableProvenance =
+      origin === 'system' || category === 'metadata'
+        ? 'system_context'
+        : type === 'string' && typeof initialValue === 'string' && initialValue.trim().length > 0
+        ? 'avaya_literal'
+        : 'unproven';
     const v: FlowIRVariable = {
       id: `v_${cleanSlug(cleanName, 'var').toLowerCase()}`,
       name: cleanName,
@@ -410,6 +471,7 @@ export function buildFlowIRFromMigrationGraph(
         origin,
         originalName: originalName || cleanName,
       },
+      provenance: defaultProvenance,
       sourceTrace: {
         script: scriptName,
         ...(section ? { section } : {}),
@@ -613,6 +675,7 @@ export function buildFlowIRFromMigrationGraph(
             kind: 'decision',
             name: step.label || `Check ${step.conditionLabel || 'Condition'}`,
             terminal: false,
+            terminalityEvidence: 'non_terminal',
             parameters: {
               ...(step.isEmergencyCheck ? { isEmergencyCheck: true } : {}),
               ...(step.isFallbackFlag ? { isFallbackFlag: true } : {}),
@@ -623,6 +686,9 @@ export function buildFlowIRFromMigrationGraph(
               ...(step.rawCondition ? { sourceExpr: step.rawCondition } : {}),
             },
             ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...(splitStepComments(step.yamlComment)
+              ? { migrationComments: splitStepComments(step.yamlComment) }
+              : {}),
           });
           linkFromPending(id);
 
@@ -897,17 +963,37 @@ export function buildFlowIRFromMigrationGraph(
           const targetName = step.targetTaskRefId || step.targetSlug || step.target || 'SubTask';
           subflowsSet.add(targetName);
           const id = nextNodeId('sub', targetName);
+          const isUnloaded =
+            missingSubflowsSet.has(targetName.toLowerCase()) ||
+            missingSubflowsSet.has((step.target || '').toLowerCase());
+          const targetTaskObj = taskMap.get(targetName);
+          const hasDeclaredTarget = Boolean(targetTaskObj);
+          const isProvablyTerm = Boolean(
+            targetTaskObj &&
+              !isUnloaded &&
+              targetTaskObj.steps.length > 0 &&
+              targetTaskObj.steps[targetTaskObj.steps.length - 1]?.isTerminal
+          );
           nodes.push({
             id,
             kind: 'invokeSubflow',
             name: targetName,
             terminal: false,
+            terminalityEvidence: isUnloaded
+              ? 'unproven_external'
+              : isProvablyTerm
+              ? 'proven_source'
+              : 'non_terminal',
             parameters: {
               target: targetName,
               originalTarget: step.target || targetName,
+              ...(step.targetTaskRefId && !hasDeclaredTarget ? { unresolvedTaskRef: true } : {}),
             },
             sourceTrace: trace,
             ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...(splitStepComments(step.yamlComment)
+              ? { migrationComments: splitStepComments(step.yamlComment) }
+              : {}),
           });
           linkFromPending(id);
           pendingExits = [{ nodeId: id, type: 'unconditional' }];
@@ -923,12 +1009,16 @@ export function buildFlowIRFromMigrationGraph(
             kind: 'invokeCommonModule',
             name: modName,
             terminal: false,
+            terminalityEvidence: 'unproven_external',
             parameters: {
               moduleName: modName,
               originalTarget: step.target || modName,
             },
             sourceTrace: trace,
             ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...(splitStepComments(step.yamlComment)
+              ? { migrationComments: splitStepComments(step.yamlComment) }
+              : {}),
           });
           linkFromPending(id);
           pendingExits = [{ nodeId: id, type: 'unconditional' }];
@@ -1027,12 +1117,29 @@ export function buildFlowIRFromMigrationGraph(
               ? 'playAudio'
               : step.kind;
 
+          if (step.kind === 'updateData' && unscopedVar) {
+            const tv = varByLower.get(unscopedVar.toLowerCase());
+            if (tv && tv.provenance !== 'system_context') {
+              tv.provenance =
+                step.avayaCommand === 'SET_LOOKUP_MATCH' || step.avayaCommand === 'SET_LOOKUP_NOMATCH'
+                  ? 'stub_synthesized'
+                  : 'avaya_assigned';
+            }
+          } else if (step.kind === 'getParticipantData' && unscopedVar) {
+            const tv = varByLower.get(unscopedVar.toLowerCase());
+            if (tv && tv.provenance === 'unproven') {
+              tv.provenance =
+                step.avayaCommand === 'DATA_PROVENANCE_READ' ? 'stub_synthesized' : 'avaya_assigned';
+            }
+          }
+
           nodes.push({
             id,
             kind: 'action',
             actionType,
             name: step.label || step.kind,
             terminal: Boolean(step.isTerminal),
+            terminalityEvidence: step.isTerminal ? 'explicit_command' : 'non_terminal',
             parameters: {
               ...(unscopedVar ? { targetVariable: unscopedVar } : {}),
               ...(unscopedExpr !== undefined ? { expr: unscopedExpr } : {}),
@@ -1052,6 +1159,9 @@ export function buildFlowIRFromMigrationGraph(
               : {}),
             sourceTrace: trace,
             ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...(splitStepComments(step.yamlComment)
+              ? { migrationComments: splitStepComments(step.yamlComment) }
+              : {}),
           });
           linkFromPending(id);
           if (step.isTerminal) {
@@ -1183,6 +1293,16 @@ export function buildFlowIRFromMigrationGraph(
     });
   }
 
+  // Pruned unreachable task audit trail (removed from productive Genesys YAML, documented in report/IR)
+  for (const pruned of prunedUnreachableTasks) {
+    preFindings.push({
+      severity: 'INFO',
+      code: 'UNREACHABLE_TASK_PRUNED',
+      message: `Unerreichbarer Task "${pruned.refId}" (Quelle: "${pruned.originalTarget}") wurde durch Reachability-GC aus dem produktiven Genesys-YAML entfernt.`,
+      sourceTrace: { script: scriptName, section: pruned.originalTarget, lineStart: 1, lineEnd: 1 },
+    });
+  }
+
   const ir: FlowIR = {
     meta: {
       flowId: graph.cleanName,
@@ -1192,6 +1312,8 @@ export function buildFlowIRFromMigrationGraph(
       entryNodeId,
       language: 'de-de',
       version: '1.1',
+      compatibilityStubMode,
+      ...(prunedUnreachableTasks.length > 0 ? { prunedUnreachableTasks } : {}),
     },
     variables,
     nodes,
@@ -1215,12 +1337,18 @@ export function buildFlowIRFromMigrationGraph(
   const validation = validateIR(ir);
   const seenKey = new Set<string>();
   const seenVarBeforeSet = new Set<string>();
+  const seenDupHoliday = new Set<string>();
   const combined: FlowIRFinding[] = [];
   for (const f of [...preFindings, ...validation.findings]) {
     if (f.code === 'VAR_USED_BEFORE_SET' && f.variableName) {
       const varKey = `${f.variableName.toLowerCase()}:${f.sourceTrace?.lineStart || 0}`;
       if (seenVarBeforeSet.has(varKey)) continue;
       seenVarBeforeSet.add(varKey);
+    }
+    if (f.code === 'DUPLICATE_HOLIDAY_LOGIC') {
+      const holKey = `${f.sourceTrace?.lineStart || 0}`;
+      if (seenDupHoliday.has(holKey)) continue;
+      seenDupHoliday.add(holKey);
     }
     const key = `${f.code}:${f.nodeId || ''}:${f.variableName || ''}:${f.message}`;
     if (seenKey.has(key)) continue;
@@ -1243,8 +1371,30 @@ export function validateIR(ir: FlowIR): FlowIRValidationResult {
   const nodeMap = new Map<string, FlowIRNode>();
   const varMap = new Map<string, FlowIRVariable>();
 
+  const flowVarNames = new Set<string>();
+  const taskVarNames = new Set<string>();
   for (const v of ir.variables || []) {
-    varMap.set(v.name.toLowerCase(), v);
+    const lower = v.name.toLowerCase();
+    varMap.set(lower, v);
+    if (v.scope === 'flow') {
+      flowVarNames.add(lower);
+    } else if (v.scope === 'task') {
+      taskVarNames.add(lower);
+    }
+  }
+
+  // Scope uniqueness invariant: detect shadow declarations across Flow and Task scopes
+  for (const tVarName of taskVarNames) {
+    if (flowVarNames.has(tVarName)) {
+      const vObj = varMap.get(tVarName);
+      findings.push({
+        severity: 'WARN',
+        code: 'DUPLICATE_VARIABLE_SCOPE',
+        variableName: vObj?.name || tVarName,
+        message: `Variable "${vObj?.name || tVarName}" ist sowohl im Flow- als auch im Task-Scope modelliert — direkte Flow.*-Wiederverwendung ohne Task-Kopie bevorzugen.`,
+        sourceTrace: vObj?.sourceTrace,
+      });
+    }
   }
 
   // 1. Entry Node Check (exact 1 entry node)
@@ -1669,6 +1819,34 @@ export function validateIR(ir: FlowIR): FlowIRValidationResult {
       }
     }
 
+    // Rule: invokeSubflow unresolved task reference check
+    if (node.kind === 'invokeSubflow' && node.parameters?.unresolvedTaskRef === true) {
+      findings.push({
+        severity: 'ERROR',
+        code: 'UNRESOLVED_TASK_REF',
+        message: `Subflow-Aufruf "${node.name}" verweist auf eine fehlende Task-refId.`,
+        nodeId: node.id,
+        sourceTrace: node.sourceTrace,
+      });
+    }
+
+    // Rule: VAR_USED_BEFORE_SET in action expressions & dataAction inputs
+    if (node.kind === 'action' && typeof node.parameters?.expr === 'string') {
+      for (const vName of extractReferencedVarNamesFromExpr(node.parameters.expr)) {
+        const lower = vName.toLowerCase();
+        if (varMap.has(lower) && !writtenSet.has(lower)) {
+          findings.push({
+            severity: 'WARN',
+            code: 'VAR_USED_BEFORE_SET',
+            message: `Variable "${vName}" wird in Aktion "${node.name}" gelesen, aber vorher im Pfad nicht gesetzt.`,
+            nodeId: node.id,
+            variableName: vName,
+            sourceTrace: node.sourceTrace,
+          });
+        }
+      }
+    }
+
     // Rule: Transfer resolvedTargetType check
     if (node.kind === 'transfer') {
       if (!node.resolvedTargetType || node.resolvedTargetType === 'unresolved') {
@@ -1678,6 +1856,31 @@ export function validateIR(ir: FlowIR): FlowIRValidationResult {
           message: `Transfer "${node.name}" hat keinen eindeutig auflösbaren Zieltyp (resolvedTargetType="${node.resolvedTargetType || 'unresolved'}").`,
           nodeId: node.id,
           sourceTrace: node.sourceTrace,
+        });
+      }
+    }
+  }
+
+  // Rule: Parallel Holiday Logic check at FlowIR v1.1 level
+  const HOLIDAY_SIGNAL_RE = /(?:feiertag|holiday|sonderfeiertag|feiertags?liste)/i;
+  const hasScheduleHoliday = (ir.nodes || []).some(
+    (n) =>
+      n.kind === 'scheduleCheck' &&
+      (outgoing.get(n.id) || []).some(
+        (tr) => tr.type === 'holiday' && nodeMap.get(tr.to)?.kind !== 'terminal'
+      )
+  );
+  if (hasScheduleHoliday) {
+    for (const n of ir.nodes || []) {
+      if (n.kind !== 'decision') continue;
+      const condText = `${n.condition?.expr || ''} ${n.condition?.sourceExpr || ''} ${n.name}`;
+      if (HOLIDAY_SIGNAL_RE.test(condText)) {
+        findings.push({
+          severity: 'WARN',
+          code: 'DUPLICATE_HOLIDAY_LOGIC',
+          message: `Mögliche doppelte Feiertagslogik (Zeile ${n.sourceTrace?.lineStart || 1}): Neben evaluateScheduleGroup.holiday existiert Decision "${n.name}" (${n.condition?.expr || ''}). Beide Pfade getrennt beibehalten und fachlich klären.`,
+          nodeId: n.id,
+          sourceTrace: n.sourceTrace,
         });
       }
     }
@@ -1735,6 +1938,15 @@ export function renderAvayaView(ir: FlowIR): RenderedModeReport {
   lines.push(`    entryNodeId: "${escYaml(ir.meta.entryNodeId)}"`);
   lines.push(`    language: "${escYaml(ir.meta.language)}"`);
   lines.push(`    version: "${ir.meta.version}"`);
+  lines.push(`    compatibilityStubMode: ${ir.meta.compatibilityStubMode ? 'true' : 'false'}`);
+  if (ir.meta.prunedUnreachableTasks && ir.meta.prunedUnreachableTasks.length > 0) {
+    lines.push('    prunedUnreachableTasks:');
+    for (const pt of ir.meta.prunedUnreachableTasks) {
+      lines.push(`      - refId: "${escYaml(pt.refId)}"`);
+      lines.push(`        originalTarget: "${escYaml(pt.originalTarget)}"`);
+      lines.push(`        reason: "${escYaml(pt.reason)}"`);
+    }
+  }
   lines.push('');
 
   lines.push('  variables:');
@@ -1977,8 +2189,17 @@ export function renderArchyYamlFromFlowIR(ir: FlowIR): string {
       return;
     }
 
-    if (node.migrationNote) {
-      lines.push(`${li}# ${node.migrationNote.replace(/\r?\n/g, ' ')}`);
+    const commentList =
+      node.migrationComments && node.migrationComments.length > 0
+        ? node.migrationComments
+        : node.migrationNote
+        ? node.migrationNote
+            .split(/\r?\n/)
+            .map((c) => c.trim())
+            .filter(Boolean)
+        : [];
+    for (const cl of commentList) {
+      lines.push(`${li}# ${cl}`);
     }
 
     switch (node.kind) {
@@ -2280,7 +2501,7 @@ export function renderArchyYamlFromFlowIR(ir: FlowIR): string {
     lines.push(`        name: ${subTask}`);
     lines.push(`        refId: ${subTask}`);
     lines.push('        actions:');
-    lines.push(`          # OFFENE MIGRATIONSFRAGE: Subflow "${subTask}" ist separat zu pruefen oder als Common Module einzubinden.`);
+    lines.push(`          # OFFENE MIGRATIONSFRAGE: Legacy source for this module is not loaded.`);
     lines.push('          - callCommonModule:');
     lines.push(`              name: "${uniqName(`Invoke ${subTask}`)}"`);
     lines.push('              commonModule:');

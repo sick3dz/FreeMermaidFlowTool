@@ -924,7 +924,7 @@ SECTION CHECK_RESPONSE
     ).toBe(true);
   });
 
-  it('unloaded domain subtasks (blacklist_vip, Check_Response, Custom_Helper) emit zero checkResult stubs and zero diagnosis-only branches', () => {
+  it('unloaded domain subtasks (blacklist_vip, Check_Response, Custom_Helper) emit zero checkResult/DataTable stubs in strict default mode and gate stubs behind compatibilityStubMode', () => {
     const callerMod = makeModule(
       'Main_Subflow_Caller',
       `
@@ -943,7 +943,8 @@ SECTION Entry
     expect(script.yamlValidation.isValid).toBe(true);
     expect(script.yamlValidation.errors).toHaveLength(0);
     expect(script.archyYaml).not.toContain('checkResult');
-    expect(script.archyYaml).toContain('callDataTableLookup:');
+    expect(script.archyYaml).not.toContain('callDataTableLookup:');
+    expect(script.archyYaml).not.toContain('disconnect:');
     expect(script.archyYaml).toContain('callCommonModule:');
     expect(script.archyYaml).toContain('OFFENE MIGRATIONSFRAGE:');
     expect(
@@ -955,6 +956,12 @@ SECTION Entry
     expect(
       script.flowIR.findings.filter((f) => f.code === 'MISSING_SUBFLOW_SOURCE').length
     ).toBeGreaterThanOrEqual(3);
+
+    const stubRes = translateAvayaWorkspaceToGenesys(ws, { compatibilityStubMode: true });
+    const stubScript = stubRes.scripts[0];
+    expect(stubScript.yamlValidation.isValid).toBe(true);
+    expect(stubScript.archyYaml).toContain('callDataTableLookup:');
+    expect(stubScript.archyYaml).toContain('KOMPATIBILITAETS-STUB (OPT-IN)');
   });
 
   it('keeps reused sections (>= 2 callers) as Reusable Tasks while inlining single-use sections', () => {
@@ -1346,7 +1353,7 @@ SECTION Start
     expect(Array.isArray(parsed.flowIR.findings)).toBe(true);
   });
 
-  it('L_CL_TOD pattern: transitively inlines chained sections with 0 UNRESOLVED_TASK_REF, uses Flow.HDX_Resp_cv directly in CHECK_RESPONSE without Task/getParticipantData, invents no Data Action, and prunes uncalled BESETZT/GET_SCHALTER subtasks', () => {
+  it('L_CL_TOD pattern: transitively inlines chained sections with 0 UNRESOLVED_TASK_REF, uses Flow.HDX_Resp_cv directly without Task/getParticipantData, omits fabricated DataTable in strict default, and documents pruned uncalled BESETZT/GET_SCHALTER tasks', () => {
     const lClTodMod = makeModule(
       'L_CL_TOD',
       `
@@ -1384,10 +1391,12 @@ SECTION UNUSED_SCHALTER
     expect(script.archyYaml).not.toContain('Section_STEP_CHECK');
     expect(script.archyYaml).not.toContain('Section_CHECK_RESPONSE');
 
-    // 2. Uncalled subtasks BESETZT & GET_SCHALTER automatically removed
+    // 2. Uncalled subtasks BESETZT & GET_SCHALTER removed from productive YAML & documented in FlowIR
     expect(script.archyYaml).not.toContain('refId: BESETZT');
     expect(script.archyYaml).not.toContain('refId: GET_SCHALTER');
     expect(script.localReusableTasks.map((t) => t.refId)).toEqual(['BLACKLIST_VIP', 'CHECK_RESPONSE']);
+    expect((script.flowIR.meta.prunedUnreachableTasks || []).length).toBeGreaterThanOrEqual(2);
+    expect(script.flowIR.findings.some((f) => f.code === 'UNREACHABLE_TASK_PRUNED')).toBe(true);
 
     // 3. CHECK_RESPONSE directly evaluates Flow.HDX_Resp_cv (NO Task.HDX_Resp_cv, NO getParticipantData, NO invented callDataAction!)
     expect(script.archyYaml).toContain('refId: CHECK_RESPONSE');
@@ -1399,12 +1408,19 @@ SECTION UNUSED_SCHALTER
       'OFFENE MIGRATIONSFRAGE: Flow.HDX_Resp_cv muss aus vorgeschaltetem Modul, Lookup oder externer Integration befuellt werden.'
     );
 
-    // 4. BLACKLIST_VIP keeps clean Data Table lookup + Flow.MCF_Blacklist_flag_cv
+    // 4. Strict honest default delegates unloaded BLACKLIST_VIP cleanly without fabricating BLACKLIST_VIP_Table
     expect(script.archyYaml).toContain('refId: BLACKLIST_VIP');
-    expect(script.archyYaml).toContain('BLACKLIST_VIP_Table');
-    expect(script.archyYaml).toContain('variable: Flow.MCF_Blacklist_flag_cv');
+    expect(script.archyYaml).not.toContain('BLACKLIST_VIP_Table');
+    expect(script.archyYaml).not.toContain('Flow.MCF_Blacklist_flag_cv');
 
-    // 5. flowIR records transparent SWITCH_WITHOUT_SOURCE finding
+    // 5. Opt-in compatibilityStubMode enables Blacklist Data Table Lookup stub explicitly
+    const stubRes = translateAvayaWorkspaceToGenesys(ws, { compatibilityStubMode: true });
+    const stubScript = stubRes.scripts[0];
+    expect(stubScript.archyYaml).toContain('BLACKLIST_VIP_Table');
+    expect(stubScript.archyYaml).toContain('variable: Flow.MCF_Blacklist_flag_cv');
+    expect(stubScript.archyYaml).toContain('KOMPATIBILITAETS-STUB (OPT-IN)');
+
+    // 6. flowIR records transparent SWITCH_WITHOUT_SOURCE finding
     expect(script.flowIR.findings.some((f) => f.code === 'SWITCH_WITHOUT_SOURCE')).toBe(true);
   });
 
@@ -1516,6 +1532,203 @@ SECTION Start
       mainScript.flowIR.findings.some((f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH')
     ).toBe(false);
     expect(mainScript.warnings.some((w) => w.code === 'POTENTIAL_BRANCH_FALLTHROUGH')).toBe(false);
+  });
+
+  it('Evidence-based terminality: loaded non-terminal Feiertag.s (audio only, no DISCONNECT) keeps fallthrough and emits POTENTIAL_BRANCH_FALLTHROUGH', () => {
+    const mainMod = makeModule(
+      'Main_With_NonTerminal_Feiertag',
+      `
+SECTION Start
+  IF date = Sys_Feiertagliste_NRW THEN
+    EXECUTE Feiertag
+  END IF
+  QUEUE TO SKILLSET Support_DE
+`
+    );
+    const feiertagMod = makeModule(
+      'Feiertag',
+      `
+SECTION Start
+  GIVE RAN Feiertag_Ansage
+`
+    );
+
+    const ws = buildScriptWorkspace([mainMod, feiertagMod]);
+    const res = translateAvayaWorkspaceToGenesys(ws);
+    const mainScript = res.scripts.find((s) => s.cleanName === 'Main_With_NonTerminal_Feiertag')!;
+
+    expect(mainScript).toBeDefined();
+    expect(mainScript.yamlValidation.isValid).toBe(true);
+    const feiertagTask = mainScript.migrationGraph.tasks.find((t) => t.refId === 'Feiertag');
+    expect(feiertagTask).toBeDefined();
+    expect(feiertagTask!.steps.some((s) => s.kind === 'disconnect')).toBe(false);
+    expect(
+      mainScript.flowIR.findings.some((f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH')
+    ).toBe(true);
+    expect(mainScript.warnings.some((w) => w.code === 'POTENTIAL_BRANCH_FALLTHROUGH')).toBe(true);
+    expect(mainScript.archyYaml).toContain('OFFENE MIGRATIONSFRAGE:');
+    expect(mainScript.archyYaml).toContain('Kein disconnect erfunden');
+  });
+
+  it('sample_holiday_flow pattern: keeps schedule holiday + Sys_HolidayList_Region decision separate, omits getParticipantData, syncs multi-line comments between generateArchyYaml and renderArchyYamlFromFlowIR', () => {
+    const sampleHolidayMod = makeModule(
+      'sample_holiday_flow',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    GIVE RAN Begruessung
+  ELSE
+    GIVE RAN Geschlossen
+    DISCONNECT
+  END IF
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Subflow
+  END IF
+  EXECUTE Night_Check
+  QUEUE TO SKILLSET Support_DE
+`
+    );
+
+    const ws = buildScriptWorkspace([sampleHolidayMod]);
+    const res = translateAvayaWorkspaceToGenesys(ws);
+    const script = res.scripts[0];
+
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
+    expect(script.archyYaml).not.toContain('getParticipantData:');
+    expect(script.archyYaml).toContain('evaluateScheduleGroup:');
+    expect(script.archyYaml).toContain('holiday:');
+    expect(script.flowIR.findings.some((f) => f.code === 'VAR_USED_BEFORE_SET')).toBe(true);
+    expect(script.flowIR.findings.some((f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH')).toBe(true);
+    expect(script.flowIR.findings.some((f) => f.code === 'DUPLICATE_HOLIDAY_LOGIC')).toBe(true);
+
+    // Direct FlowIR Archy renderer parity: keeps multi-line # OFFENE MIGRATIONSFRAGE comments and passes validateArchyYaml
+    const directIrYaml = renderArchyYamlFromFlowIR(script.flowIR);
+    expect(directIrYaml).toContain('# OFFENE MIGRATIONSFRAGE:');
+    expect(directIrYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
+    expect(directIrYaml).not.toContain('getParticipantData:');
+    const directVal = validateArchyYaml(directIrYaml);
+    expect(directVal.isValid).toBe(true);
+    expect(directVal.errors).toHaveLength(0);
+  });
+
+  it('validateIR and validateArchyYaml detect DUPLICATE_VARIABLE_SCOPE, UNRESOLVED_TASK_REF, and DUPLICATE_HOLIDAY_LOGIC', () => {
+    const irWithHardenedErrors: FlowIR = {
+      meta: {
+        flowId: 'Hardened_Check_Flow',
+        sourceSystem: 'Avaya',
+        targetSystem: 'Genesys',
+        sourceScript: 'Hardened_Check_Flow.s',
+        entryNodeId: 'n_start',
+        language: 'de-de',
+        version: '1.1',
+      },
+      variables: [
+        {
+          id: 'v_flow_hdx',
+          name: 'HDX_Resp_cv',
+          scope: 'flow',
+          category: 'flow',
+          type: 'string',
+          initialValue: '',
+          source: { origin: 'avaya', originalName: 'HDX_Resp_cv' },
+          sourceTrace: { script: 'Hardened_Check_Flow.s', lineStart: 1, lineEnd: 1 },
+          usedByNodes: [],
+        },
+        {
+          id: 'v_task_hdx',
+          name: 'HDX_Resp_cv',
+          scope: 'task',
+          category: 'task',
+          owner: 'CHECK_RESPONSE',
+          type: 'string',
+          initialValue: '',
+          source: { origin: 'avaya', originalName: 'HDX_Resp_cv' },
+          sourceTrace: { script: 'Hardened_Check_Flow.s', lineStart: 2, lineEnd: 2 },
+          usedByNodes: [],
+        },
+      ],
+      nodes: [
+        {
+          id: 'n_start',
+          kind: 'entry',
+          name: 'Start',
+          terminal: false,
+          parameters: {},
+          sourceTrace: { script: 'Hardened_Check_Flow.s', lineStart: 1, lineEnd: 1 },
+        },
+        {
+          id: 'n_sched',
+          kind: 'scheduleCheck',
+          name: 'Schedule Check',
+          terminal: false,
+          parameters: { target: 'Main_Schedule_Group' },
+          sourceTrace: { script: 'Hardened_Check_Flow.s', lineStart: 3, lineEnd: 3 },
+        },
+        {
+          id: 'n_dec_hol',
+          kind: 'decision',
+          name: 'Holiday List Check',
+          terminal: false,
+          parameters: {},
+          condition: { expr: 'GetCurrentDateTimeUtc() == Sys_Feiertagliste_NRW' },
+          sourceTrace: { script: 'Hardened_Check_Flow.s', lineStart: 5, lineEnd: 5 },
+        },
+        {
+          id: 'n_broken_call',
+          kind: 'invokeSubflow',
+          name: 'Call Missing Task',
+          terminal: false,
+          parameters: { target: 'Missing_Task', targetTaskRefId: 'Missing_Task', unresolvedTaskRef: true },
+          sourceTrace: { script: 'Hardened_Check_Flow.s', lineStart: 6, lineEnd: 6 },
+        },
+      ],
+      transitions: [
+        { from: 'n_start', to: 'n_sched', type: 'unconditional' },
+        { from: 'n_sched', to: 'n_dec_hol', type: 'holiday' },
+        { from: 'n_dec_hol', to: 'n_broken_call', type: 'whenTrue' },
+        { from: 'n_dec_hol', to: 'n_broken_call', type: 'whenFalse' },
+      ],
+      dependencies: { subflows: [], commonModules: [], dataActions: [] },
+      findings: [],
+      renderingHints: {
+        genesys: { preferReusableTasks: true, preferDecisionNodes: true, avoidGotoStyleSections: true },
+      },
+    };
+
+    const irRes = validateIR(irWithHardenedErrors);
+    const irCodes = new Set(irRes.findings.map((f) => f.code));
+    expect(irCodes.has('DUPLICATE_VARIABLE_SCOPE')).toBe(true);
+    expect(irCodes.has('UNRESOLVED_TASK_REF')).toBe(true);
+    expect(irCodes.has('DUPLICATE_HOLIDAY_LOGIC')).toBe(true);
+
+    const dupScopeYaml = [
+      'inboundCall:',
+      '  name: Dup_Scope_Flow',
+      '  defaultLanguage: de-de',
+      '  startUpRef: "/inboundCall/tasks/task[Main_Task]"',
+      '  variables:',
+      '    - stringVariable:',
+      '        name: HDX_Resp_cv',
+      '        initialValue:',
+      '          lit: ""',
+      '  tasks:',
+      '    - task:',
+      '        name: Main_Task',
+      '        refId: Main_Task',
+      '        variables:',
+      '          - stringVariable:',
+      '              name: HDX_Resp_cv',
+      '              initialValue:',
+      '                lit: ""',
+      '        actions:',
+      '          - disconnect:',
+      '              name: "End Call"',
+    ].join('\n');
+
+    const yamlRes = validateArchyYaml(dupScopeYaml);
+    expect(yamlRes.isValid).toBe(true);
+    expect(yamlRes.warnings.some((w) => w.code === 'DUPLICATE_VARIABLE_SCOPE')).toBe(true);
   });
 });
 

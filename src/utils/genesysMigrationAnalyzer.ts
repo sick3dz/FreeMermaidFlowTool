@@ -1469,6 +1469,7 @@ export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResul
 
   // Helper to validate a `variables:` block (either at Flow level or Task level)
   let variableCount = 0;
+  const flowDeclaredVarNames = new Map<string, { rawName: string; lineNumber: number }>();
   const validateVariablesBlock = (
     varEntry: ParsedYamlLine,
     scopeContext: 'flow' | 'task'
@@ -1551,6 +1552,28 @@ export function validateArchyYaml(yamlContent: string): ArchyYamlValidationResul
             field: rawDeclName,
             message: `Zeile ${vNameProp.lineNumber}: Ungültiger Variablenname "${rawDeclName}" (nur Buchstaben, Ziffern und Unterstriche erlaubt).`,
             suggestion: 'Nutze einen gültigen Bezeichner wie "customerNumber".',
+          });
+        } else if (scopeContext === 'flow') {
+          if (!flowDeclaredVarNames.has(dupKey)) {
+            flowDeclaredVarNames.set(dupKey, {
+              rawName: rawDeclName,
+              lineNumber: vNameProp.lineNumber,
+            });
+          }
+        } else if (
+          scopeContext === 'task' &&
+          flowDeclaredVarNames.has(dupKey) &&
+          dupKey !== 'collecteddigits' &&
+          !/^(?:loopidx_|retrycount_)/.test(dupKey)
+        ) {
+          const flowDecl = flowDeclaredVarNames.get(dupKey)!;
+          warnings.push({
+            lineNumber: vNameProp.lineNumber,
+            code: 'DUPLICATE_VARIABLE_SCOPE',
+            severity: 'warning',
+            field: rawDeclName,
+            message: `Zeile ${vNameProp.lineNumber}: Variable "${rawDeclName}" ist bereits auf Flow-Ebene (Zeile ${flowDecl.lineNumber}) deklariert und sollte nicht als Task-Kopie dupliziert werden.`,
+            suggestion: `Nutze direkt "Flow.${flowDecl.rawName}" statt "Task.${rawDeclName}".`,
           });
         }
       }
@@ -2729,7 +2752,8 @@ function cloneStepsWithRefRemap(
 function buildDomainAwareFallbackSubtask(
   ref: { name: string; refId: string; originalTarget: string },
   hasFallbackTask: boolean,
-  callerFlowVars: MigrationVariableDecl[] = []
+  callerFlowVars: MigrationVariableDecl[] = [],
+  compatibilityStubMode = false
 ): MigrationTaskGraph {
   const lower = ref.originalTarget.toLowerCase();
 
@@ -2749,6 +2773,9 @@ function buildDomainAwareFallbackSubtask(
       name: ref.name,
       kind: 'subscript',
       originalTarget: ref.originalTarget,
+      yamlComment: compatibilityStubMode
+        ? `KOMPATIBILITAETS-STUB (OPT-IN): Baustein "${ref.originalTarget}" ohne .s-Quelldatei als Eingabe-Stub modelliert.`
+        : `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" hat keine geladene .s-Quelldatei — kein disconnect erfunden.`,
       taskVariables: [mobileVar],
       steps: [
         {
@@ -2819,7 +2846,8 @@ function buildDomainAwareFallbackSubtask(
                   isTerminal: true,
                 },
               ]
-            : [
+            : compatibilityStubMode
+            ? [
                 {
                   id: `sub_${ref.refId}_disc`,
                   kind: 'disconnect',
@@ -2827,7 +2855,21 @@ function buildDomainAwareFallbackSubtask(
                   avayaCommand: 'DISCONNECT',
                   label: `Disconnect (${ref.name} Input Failure)`,
                   target: `${ref.name}_Failure`,
+                  yamlComment: `KOMPATIBILITAETS-STUB (OPT-IN): Synthetisches disconnect bei Eingabefehler fuer "${ref.originalTarget}".`,
                   isTerminal: true,
+                },
+              ]
+            : [
+                {
+                  id: `sub_${ref.refId}_fail_cm`,
+                  kind: 'callCommonModule',
+                  lineNumber: 0,
+                  avayaCommand: 'UNLOADED_SUBFLOW_MODULE',
+                  label: `Common Module: ${ref.refId}_Failure_Module`,
+                  target: `${ref.originalTarget}_Failure`,
+                  targetSlug: `${ref.refId}_Failure_Module`,
+                  yamlComment: `OFFENE MIGRATIONSFRAGE: Fehlerabschluss fuer "${ref.originalTarget}" klaeren (kein disconnect erfunden).`,
+                  isTerminal: false,
                 },
               ],
           isTerminal: false,
@@ -2852,6 +2894,9 @@ function buildDomainAwareFallbackSubtask(
       name: ref.name,
       kind: 'subscript',
       originalTarget: ref.originalTarget,
+      yamlComment: compatibilityStubMode
+        ? `KOMPATIBILITAETS-STUB (OPT-IN): Menue-Baustein "${ref.originalTarget}" ohne .s-Quelldatei als Stub modelliert.`
+        : `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" hat keine geladene .s-Quelldatei — kein disconnect erfunden.`,
       taskVariables: [selVar],
       steps: [
         {
@@ -2915,32 +2960,74 @@ function buildDomainAwareFallbackSubtask(
               isTerminal: false,
             },
           ],
-          failureSteps: [
-            {
-              id: `sub_${ref.refId}_fail`,
-              kind: 'disconnect',
-              lineNumber: 0,
-              avayaCommand: 'MENU_TIMEOUT',
-              label: `Disconnect (${ref.name} Timeout)`,
-              target: `${ref.name}_Timeout`,
-              isTerminal: true,
-            },
-          ],
+          failureSteps: compatibilityStubMode
+            ? [
+                {
+                  id: `sub_${ref.refId}_fail`,
+                  kind: 'disconnect',
+                  lineNumber: 0,
+                  avayaCommand: 'MENU_TIMEOUT',
+                  label: `Disconnect (${ref.name} Timeout)`,
+                  target: `${ref.name}_Timeout`,
+                  yamlComment: `KOMPATIBILITAETS-STUB (OPT-IN): Synthetisches disconnect bei Menue-Timeout fuer "${ref.originalTarget}".`,
+                  isTerminal: true,
+                },
+              ]
+            : [
+                {
+                  id: `sub_${ref.refId}_fail_cm`,
+                  kind: 'callCommonModule',
+                  lineNumber: 0,
+                  avayaCommand: 'UNLOADED_SUBFLOW_MODULE',
+                  label: `Common Module: ${ref.refId}_Timeout_Module`,
+                  target: `${ref.originalTarget}_Timeout`,
+                  targetSlug: `${ref.refId}_Timeout_Module`,
+                  yamlComment: `OFFENE MIGRATIONSFRAGE: Timeout-Abschluss fuer "${ref.originalTarget}" klaeren (kein disconnect erfunden).`,
+                  isTerminal: false,
+                },
+              ],
           isTerminal: false,
         },
       ],
     };
   }
 
-  // Blacklist / VIP unloaded block (e.g. blacklist_vip) — real Data Table Lookup instead of dummy checkResult!
+  // Blacklist / VIP unloaded block (e.g. blacklist_vip):
+  // - Strict honest default: NO invented Data Table Lookup or disconnect; delegate to Common Module with # OFFENE MIGRATIONSFRAGE
+  // - Opt-in compatibilityStubMode = true: Data Table Lookup stub explicitly marked KOMPATIBILITAETS-STUB (OPT-IN)
   if (/blacklist|vip/i.test(lower)) {
+    if (!compatibilityStubMode) {
+      const modSlug = toArchySlug(ref.originalTarget, ref.refId);
+      return {
+        refId: ref.refId,
+        name: ref.name,
+        kind: 'subscript',
+        originalTarget: ref.originalTarget,
+        yamlComment: `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" hat keine geladene .s-Quelldatei — kein Data Table Lookup und kein disconnect erfunden; delegiert an Common Module "${modSlug}".`,
+        taskVariables: [],
+        steps: [
+          {
+            id: `sub_${ref.refId}_cm`,
+            kind: 'callCommonModule',
+            lineNumber: 0,
+            avayaCommand: 'UNLOADED_SUBFLOW_MODULE',
+            label: `Common Module: ${modSlug}`,
+            target: ref.originalTarget,
+            targetSlug: modSlug,
+            yamlComment: `OFFENE MIGRATIONSFRAGE: Inhalt von "${ref.originalTarget}.s" im Workspace ergaenzen oder als Genesys Common Module "${modSlug}" implementieren.`,
+            isTerminal: false,
+          },
+        ],
+      };
+    }
+
     const tableName = `${toArchySlug(ref.originalTarget, 'Blacklist')}_Table`;
     return {
       refId: ref.refId,
       name: ref.name,
       kind: 'subscript',
       originalTarget: ref.originalTarget,
-      yamlComment: `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" ohne .s-Quelldatei — als Data Table Lookup (${tableName}) mit klarem Sperr-/Ruecksprungpfad modelliert.`,
+      yamlComment: `KOMPATIBILITAETS-STUB (OPT-IN): Baustein "${ref.originalTarget}" ohne .s-Quelldatei als Data Table Lookup (${tableName}) modelliert.`,
       taskVariables: [],
       steps: [
         {
@@ -2960,7 +3047,7 @@ function buildDomainAwareFallbackSubtask(
               dataType: 'string',
             },
           ],
-          yamlComment: `OFFENE MIGRATIONSFRAGE: Tabellenname "${tableName}" und Rueckgabespalte fuer "${ref.originalTarget}" in Genesys pruefen.`,
+          yamlComment: `KOMPATIBILITAETS-STUB (OPT-IN): Tabellenname "${tableName}" und Rueckgabespalte fuer "${ref.originalTarget}" in Genesys pruefen.`,
           foundSteps: [
             {
               id: `sub_${ref.refId}_flag1`,
@@ -3023,14 +3110,27 @@ function buildDomainAwareFallbackSubtask(
           targetTaskRefId: 'Fallback_Error_Task',
           isTerminal: true,
         }
-      : {
+      : compatibilityStubMode
+      ? {
           id: `sub_${ref.refId}_disc`,
           kind: 'disconnect',
           lineNumber: 0,
           avayaCommand: 'RESPONSE_DISCONNECT',
           label: `Disconnect (${ref.name}_Error)`,
           target: `${ref.name}_Error`,
+          yamlComment: `KOMPATIBILITAETS-STUB (OPT-IN): Synthetisches disconnect bei FAILED-Response in "${ref.originalTarget}".`,
           isTerminal: true,
+        }
+      : {
+          id: `sub_${ref.refId}_err_cm`,
+          kind: 'callCommonModule',
+          lineNumber: 0,
+          avayaCommand: 'UNLOADED_SUBFLOW_MODULE',
+          label: `Common Module: ${ref.refId}_Error_Module`,
+          target: `${ref.originalTarget}_Error`,
+          targetSlug: `${ref.refId}_Error_Module`,
+          yamlComment: `OFFENE MIGRATIONSFRAGE: Fehlerpfad bei FAILED-Response in "${ref.originalTarget}" klaeren (kein disconnect erfunden).`,
+          isTerminal: false,
         };
 
     const defaultFallbackStep: MigrationStep = hasFallbackTask
@@ -3039,14 +3139,27 @@ function buildDomainAwareFallbackSubtask(
           id: `sub_${ref.refId}_def_err`,
           label: `Fallback (${ref.name}_Default)`,
         }
-      : {
+      : compatibilityStubMode
+      ? {
           id: `sub_${ref.refId}_def_disc`,
           kind: 'disconnect',
           lineNumber: 0,
           avayaCommand: 'RESPONSE_DEFAULT_DISCONNECT',
           label: `Disconnect (${ref.name}_Default)`,
           target: `${ref.name}_Default`,
+          yamlComment: `KOMPATIBILITAETS-STUB (OPT-IN): Synthetisches disconnect im Default-Pfad von "${ref.originalTarget}".`,
           isTerminal: true,
+        }
+      : {
+          id: `sub_${ref.refId}_def_cm`,
+          kind: 'callCommonModule',
+          lineNumber: 0,
+          avayaCommand: 'UNLOADED_SUBFLOW_MODULE',
+          label: `Common Module: ${ref.refId}_Default_Module`,
+          target: `${ref.originalTarget}_Default`,
+          targetSlug: `${ref.refId}_Default_Module`,
+          yamlComment: `OFFENE MIGRATIONSFRAGE: Default-Verhalten von "${ref.originalTarget}" klaeren (kein disconnect erfunden).`,
+          isTerminal: false,
         };
 
     return {
@@ -3139,7 +3252,8 @@ function buildDomainAwareFallbackSubtask(
 function hydrateLocalSubscriptTasks(
   callerGraph: MigrationFlowGraph,
   localSubscriptRefs: Array<{ name: string; refId: string; originalTarget: string; targetKey: string }>,
-  allGraphsByKey: Map<string, MigrationFlowGraph>
+  allGraphsByKey: Map<string, MigrationFlowGraph>,
+  compatibilityStubMode = false
 ): string[] {
   const missingSubflows: string[] = [];
   const existingTaskIds = new Set(callerGraph.tasks.map((t) => t.refId));
@@ -3303,10 +3417,12 @@ function hydrateLocalSubscriptTasks(
       const fallbackSubtask = buildDomainAwareFallbackSubtask(
         ref,
         ensureFallback,
-        callerGraph.flowVariables
+        callerGraph.flowVariables,
+        compatibilityStubMode
       );
-      // Ensure Flow.MCF_Blacklist_flag_cv is declared on flow if a Blacklist subtask writes it
+      // Ensure Flow.MCF_Blacklist_flag_cv is declared ONLY when compatibilityStubMode synthesized its Blacklist Data Table Lookup
       if (
+        compatibilityStubMode &&
         /blacklist|vip/i.test(ref.originalTarget) &&
         !existingFlowVarKeys.has('mcf_blacklist_flag_cv')
       ) {
@@ -3399,17 +3515,32 @@ function hydrateLocalSubscriptTasks(
           });
           continue;
         }
-        // Unresolvable dangling ref: drop it cleanly if non-terminal, or omit if already preceded by a call/action
+        // Unresolvable dangling ref: never invent disconnect in strict default mode
         if (out.length === 0) {
-          out.push({
-            id: `${st.id}_safe_disc`,
-            kind: 'disconnect',
-            lineNumber: st.lineNumber,
-            avayaCommand: 'UNRESOLVED_REF_CLEANUP',
-            label: `Disconnect (${st.target || 'Unresolved'})`,
-            yamlComment: `OFFENE MIGRATIONSFRAGE: Urspruenglicher Sprung auf "${st.targetTaskRefId}" hatte kein gueltiges Ziel und wurde bereinigt.`,
-            isTerminal: true,
-          });
+          if (compatibilityStubMode) {
+            out.push({
+              id: `${st.id}_safe_disc`,
+              kind: 'disconnect',
+              lineNumber: st.lineNumber,
+              avayaCommand: 'UNRESOLVED_REF_CLEANUP',
+              label: `Disconnect (${st.target || 'Unresolved'})`,
+              yamlComment: `KOMPATIBILITAETS-STUB (OPT-IN): Urspruenglicher Sprung auf "${st.targetTaskRefId}" hatte kein gueltiges Ziel und wurde bereinigt.`,
+              isTerminal: true,
+            });
+          } else {
+            const modSlug = toArchySlug(st.target || st.targetTaskRefId, 'Unresolved_Module');
+            out.push({
+              id: `${st.id}_safe_cm`,
+              kind: 'callCommonModule',
+              lineNumber: st.lineNumber,
+              avayaCommand: 'UNLOADED_SUBFLOW_MODULE',
+              label: `Common Module: ${modSlug}`,
+              target: st.target || st.targetTaskRefId,
+              targetSlug: modSlug,
+              yamlComment: `OFFENE MIGRATIONSFRAGE: Urspruenglicher Sprung auf "${st.targetTaskRefId}" hatte kein gueltiges lokales Ziel — als Common Module "${modSlug}" erhalten (kein disconnect erfunden).`,
+              isTerminal: false,
+            });
+          }
         }
         continue;
       }
@@ -3440,12 +3571,27 @@ function hydrateLocalSubscriptTasks(
 
   // Final Reachable-Task GC (BFS from entryTaskRefId): removes any uncalled BESETZT / GET_SCHALTER / orphan Section / unused Fallback_Error_Task
   const finalReachable = computeReachableTaskRefs();
+  callerGraph.diagnostics.prunedUnreachableTasks =
+    callerGraph.diagnostics.prunedUnreachableTasks || [];
+  const recordedPruned = new Set(
+    callerGraph.diagnostics.prunedUnreachableTasks.map((p) => p.refId)
+  );
+  const prunedInOrder: Array<{ refId: string; originalTarget: string; reason: string }> = [];
   for (let i = callerGraph.tasks.length - 1; i >= 0; i -= 1) {
     const t = callerGraph.tasks[i];
     if (t.refId !== callerGraph.entryTaskRefId && !finalReachable.has(t.refId)) {
+      if (!recordedPruned.has(t.refId)) {
+        recordedPruned.add(t.refId);
+        prunedInOrder.unshift({
+          refId: t.refId,
+          originalTarget: t.originalTarget || t.name || t.refId,
+          reason: 'Nicht von Main_Task aus erreichbar nach Hydration und Dead-Path-Bereinigung',
+        });
+      }
       callerGraph.tasks.splice(i, 1);
     }
   }
+  callerGraph.diagnostics.prunedUnreachableTasks.push(...prunedInOrder);
 
   callerGraph.flowVariables.sort((a, b) => a.name.localeCompare(b.name));
   return missingSubflows;
@@ -3562,8 +3708,12 @@ function auditBranchFallthroughsAndTerminality(
       return true;
     }
     if (
-      task.steps.length === 1 &&
-      task.steps[0].avayaCommand === 'UNLOADED_SUBFLOW_MODULE'
+      task.steps.some(
+        (s) =>
+          s.avayaCommand === 'UNLOADED_SUBFLOW_MODULE' ||
+          s.avayaCommand === 'CHECK_RESPONSE_SWITCH' ||
+          s.avayaCommand === 'SUBTASK_BLACKLIST_LOOKUP'
+      )
     ) {
       return true;
     }
@@ -3929,7 +4079,11 @@ function finalizeScriptTranslation(
   }
 
   // Build canonical FlowIR v1.1 (Single Source of Truth) + validateIR(ir)
-  const flowIR = buildFlowIRFromMigrationGraph(graph, { missingSubflows });
+  const flowIR = buildFlowIRFromMigrationGraph(graph, {
+    missingSubflows,
+    compatibilityStubMode: graph.diagnostics.compatibilityStubMode,
+    prunedUnreachableTasks: graph.diagnostics.prunedUnreachableTasks,
+  });
   const irValidation = validateIR(flowIR);
 
   const partial: GenesysScriptTranslation = {
@@ -4089,7 +4243,8 @@ export function translateAvayaWorkspaceToGenesys(
     const missingSubflows = hydrateLocalSubscriptTasks(
       built.graph,
       built.localSubscriptRefs,
-      allGraphsByKey
+      allGraphsByKey,
+      compatibilityStubMode
     );
     auditBranchFallthroughsAndTerminality(built.graph, missingSubflows, built.warnings);
     auditParallelHolidayLogic(built.graph, built.warnings);

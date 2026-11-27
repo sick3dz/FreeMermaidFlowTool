@@ -486,6 +486,9 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                       {effectiveScript.metrics.prunedDeadPathCount > 0
                         ? ` · ${effectiveScript.metrics.prunedDeadPathCount} Dead Paths bereinigt`
                         : ''}
+                      {(effectiveScript.migrationGraph.diagnostics.prunedUnreachableTasks?.length || 0) > 0
+                        ? ` · ${effectiveScript.migrationGraph.diagnostics.prunedUnreachableTasks!.length} unerreichbare Tasks bereinigt`
+                        : ''}
                     </>
                   )}
                 </span>
