@@ -195,6 +195,13 @@ export interface MigrationStep {
   expressionReview?: StepExpressionReview;
   /** Verknüpfung zur erfassten Avaya-WAIT-Quellzeile für Post-Pruning Pass-2-Klassifikation. */
   sourceWaitId?: string;
+  /** Pfad-Anker für nicht als eigener Delay-Schritt gerenderte WAIT-Befehle am überlebenden Zweigschritt. */
+  anchoredWaitIds?: string[];
+  /** Zweig-Anker für WAIT-Befehle in Zweigen ohne eigene gerenderte Kindschritte (z. B. reines WAIT $VAR im IF-Zweig). */
+  branchAnchoredWaitIds?: Array<{
+    branch: 'yes' | 'no' | 'open' | 'closed' | 'holiday' | 'default' | 'case';
+    waitIds: string[];
+  }>;
 }
 
 export interface StepMigrationAnnotation {
@@ -1227,7 +1234,7 @@ export function buildMigrationFlowGraph(
   node: ParsedScriptNode,
   mod: ScriptModule | undefined,
   ctx: BuildMigrationGraphContext,
-  schemaVersion = '1.6.0'
+  schemaVersion = '1.6.1'
 ): BuildMigrationGraphResult {
   const rawText = mod?.rawText || '';
   const strippedLines = rawText ? stripOclCommentsPreservingLines(rawText) : [];
@@ -2396,17 +2403,41 @@ export function buildMigrationFlowGraph(
     return prep;
   };
 
+  const attachWaitAnchorsToStep = (step: MigrationStep | undefined, waitIds: string[]) => {
+    if (!step || waitIds.length === 0) return;
+    const existing = new Set(step.anchoredWaitIds || []);
+    for (const id of waitIds) existing.add(id);
+    step.anchoredWaitIds = Array.from(existing);
+  };
+
+  const attachBranchWaitAnchors = (
+    step: MigrationStep | undefined,
+    branch: 'yes' | 'no' | 'open' | 'closed' | 'holiday' | 'default' | 'case',
+    waitIds: string[]
+  ) => {
+    if (!step || waitIds.length === 0) return;
+    step.branchAnchoredWaitIds = step.branchAnchoredWaitIds || [];
+    step.branchAnchoredWaitIds.push({ branch, waitIds: [...waitIds] });
+  };
+
   /**
    * Parses a slice of OCL lines recursively into structured branching MigrationSteps.
    */
   const parseBlockLines = (
     blockLines: SourceLine[],
     taskVars: Map<string, MigrationVariableDecl>,
-    activeDigitsVarRef: { name: string }
+    activeDigitsVarRef: { name: string },
+    unattachedWaitOut?: string[]
   ): MigrationStep[] => {
     const steps: MigrationStep[] = [];
+    const pendingWaitAnchorIds: string[] = [];
     let idx = 0;
     let blockHasTerminated = false;
+
+    const flushPendingWaitAnchorsOnto = (targetStep: MigrationStep | undefined) => {
+      if (!targetStep || pendingWaitAnchorIds.length === 0) return;
+      attachWaitAnchorsToStep(targetStep, pendingWaitAnchorIds.splice(0, pendingWaitAnchorIds.length));
+    };
 
     while (idx < blockLines.length) {
       const { lineNumber, text } = blockLines[idx];
@@ -2458,8 +2489,21 @@ export function buildMigrationFlowGraph(
         // Schedule / Holiday block -> real evaluateScheduleGroup with populated open/closed/holiday!
         if (SCHEDULE_COND_RE.test(firstBranch.condition)) {
           const sgName = `${toCleanGraphSlug(node.scriptNumber || 'Default')}_ScheduleGroup`;
-          const thenSteps = parseBlockLines(firstBranch.lines, taskVars, activeDigitsVarRef);
-          const rawElseSteps = parseBlockLines(elseLines, taskVars, activeDigitsVarRef);
+          const thenUnattachedWaitIds: string[] = [];
+          const elseUnattachedWaitIds: string[] = [];
+          const contUnattachedWaitIds: string[] = [];
+          const thenSteps = parseBlockLines(
+            firstBranch.lines,
+            taskVars,
+            activeDigitsVarRef,
+            thenUnattachedWaitIds
+          );
+          const rawElseSteps = parseBlockLines(
+            elseLines,
+            taskVars,
+            activeDigitsVarRef,
+            elseUnattachedWaitIds
+          );
 
           const isHolidayCheck =
             HOLIDAY_ONLY_COND_RE.test(firstBranch.condition) &&
@@ -2468,12 +2512,18 @@ export function buildMigrationFlowGraph(
           // Check if the immediately preceding step is already an evaluateScheduleGroup and this is a sibling IF HOLIDAY
           const prevStep = steps[steps.length - 1];
           if (isHolidayCheck && prevStep && prevStep.kind === 'evaluateScheduleGroup') {
+            flushPendingWaitAnchorsOnto(prevStep);
             prevStep.holidaySteps =
               thenSteps.length > 0
                 ? thenSteps
                 : makeClosedDisconnectSteps(firstBranch.lineNumber, 'Feiertag');
+            if (thenUnattachedWaitIds.length > 0) {
+              attachBranchWaitAnchors(prevStep, 'holiday', thenUnattachedWaitIds);
+            }
             if (rawElseSteps.length > 0 && (prevStep.openSteps || []).length === 0) {
               prevStep.openSteps = rawElseSteps;
+            } else if (elseUnattachedWaitIds.length > 0) {
+              attachBranchWaitAnchors(prevStep, 'open', elseUnattachedWaitIds);
             }
             continue;
           }
@@ -2488,7 +2538,12 @@ export function buildMigrationFlowGraph(
               HOLIDAY_ONLY_COND_RE.test(nextIfCond) &&
               !/\b(?:DAY\s+OF\s+WEEK|TIME\s+OF\s+DAY)\b/i.test(nextIfCond);
             if (!isNextHoliday && (isHolidayCheck || rawElseSteps.length === 0)) {
-              continuationSteps = parseBlockLines(blockLines.slice(idx), taskVars, activeDigitsVarRef);
+              continuationSteps = parseBlockLines(
+                blockLines.slice(idx),
+                taskVars,
+                activeDigitsVarRef,
+                contUnattachedWaitIds
+              );
               idx = blockLines.length;
             }
           }
@@ -2531,7 +2586,7 @@ export function buildMigrationFlowGraph(
                   },
                 ];
 
-          steps.push(...prep, {
+          const sgStep: MigrationStep = {
             id: nextStepId('sg'),
             kind: 'evaluateScheduleGroup',
             lineNumber: firstBranch.lineNumber,
@@ -2543,7 +2598,24 @@ export function buildMigrationFlowGraph(
             closedSteps,
             holidaySteps,
             isTerminal: false,
-          });
+          };
+          if (isHolidayCheck) {
+            attachBranchWaitAnchors(sgStep, 'holiday', thenUnattachedWaitIds);
+            attachBranchWaitAnchors(
+              sgStep,
+              'open',
+              rawElseSteps.length > 0 ? elseUnattachedWaitIds : contUnattachedWaitIds
+            );
+          } else {
+            attachBranchWaitAnchors(sgStep, 'open', thenUnattachedWaitIds);
+            attachBranchWaitAnchors(
+              sgStep,
+              'closed',
+              rawElseSteps.length > 0 ? elseUnattachedWaitIds : contUnattachedWaitIds
+            );
+          }
+          flushPendingWaitAnchorsOnto(prep[0] || sgStep);
+          steps.push(...prep, sgStep);
           continue;
         }
 
@@ -2572,13 +2644,19 @@ export function buildMigrationFlowGraph(
           if (compiled.isFallbackFlag) fallbackExpressionCount += 1;
           else realExpressionCount += 1;
 
-          const yesSteps = parseBlockLines(br.lines, taskVars, activeDigitsVarRef);
+          const yesUnattachedWaitIds: string[] = [];
+          const yesSteps = parseBlockLines(
+            br.lines,
+            taskVars,
+            activeDigitsVarRef,
+            yesUnattachedWaitIds
+          );
           const noSteps =
             branchIdx + 1 < branches.length
               ? [buildNestedDecision(branchIdx + 1, finalNoSteps)]
               : finalNoSteps;
 
-          return {
+          const dec: MigrationStep = {
             id: nextStepId('dec'),
             kind: 'decision',
             lineNumber: br.lineNumber,
@@ -2595,14 +2673,35 @@ export function buildMigrationFlowGraph(
             noSteps,
             isTerminal: false,
           };
+          if (yesUnattachedWaitIds.length > 0) {
+            attachBranchWaitAnchors(dec, 'yes', yesUnattachedWaitIds);
+          }
+          return dec;
         };
 
-        let explicitNoSteps = parseBlockLines(elseLines, taskVars, activeDigitsVarRef);
+        const elseUnattachedWaitIds: string[] = [];
+        let explicitNoSteps = parseBlockLines(
+          elseLines,
+          taskVars,
+          activeDigitsVarRef,
+          elseUnattachedWaitIds
+        );
 
         // Exclusive Guard / Blacklist / Terminal-YES Branching:
         // If YES terminates OR is a blacklist/busy/error guard without ELSE, terminate YES cleanly
         // and move ALL remaining continuation lines exclusively into the NO branch so YES never falls through!
         const provisionalDecision = buildNestedDecision(0, explicitNoSteps);
+        if (elseUnattachedWaitIds.length > 0) {
+          let leafCursor = provisionalDecision;
+          while (
+            leafCursor.noSteps &&
+            leafCursor.noSteps.length === 1 &&
+            leafCursor.noSteps[0].kind === 'decision'
+          ) {
+            leafCursor = leafCursor.noSteps[0];
+          }
+          attachBranchWaitAnchors(leafCursor, 'no', elseUnattachedWaitIds);
+        }
         const isGuardCond = isGuardOrBlacklistCondition(firstBranch.condition);
         if (
           isGuardCond &&
@@ -2626,7 +2725,13 @@ export function buildMigrationFlowGraph(
           idx < blockLines.length &&
           (isStepListTerminal(provisionalDecision.yesSteps || []) || isGuardCond)
         ) {
-          explicitNoSteps = parseBlockLines(blockLines.slice(idx), taskVars, activeDigitsVarRef);
+          const contNoUnattached: string[] = [];
+          explicitNoSteps = parseBlockLines(
+            blockLines.slice(idx),
+            taskVars,
+            activeDigitsVarRef,
+            contNoUnattached
+          );
           idx = blockLines.length;
           let cursor = provisionalDecision;
           while (
@@ -2638,7 +2743,12 @@ export function buildMigrationFlowGraph(
             cursor = cursor.noSteps[0];
           }
           cursor.noSteps = explicitNoSteps;
+          if (contNoUnattached.length > 0) {
+            attachBranchWaitAnchors(cursor, 'no', contNoUnattached);
+          }
         }
+
+        flushPendingWaitAnchorsOnto(prep[0] || provisionalDecision);
 
         // If prep ended with a callDataAction (e.g. Queue Observations), nest the decision inside its successSteps!
         if (prep.length > 0 && prep[prep.length - 1].kind === 'callDataAction') {
@@ -2704,12 +2814,24 @@ export function buildMigrationFlowGraph(
             ? registry.ensureFlowVar(whereExprRaw, 'string', '', isCallVarIdentifier(whereExprRaw))
             : registry.ensureTaskVar(taskVars, whereExprRaw, 'string', '');
 
-        const cases = caseBlocks.map((cb) => ({
-          value: cb.value,
-          label: `Value_${toCleanGraphSlug(cb.value, 'Case')}`,
-          steps: parseBlockLines(cb.lines, taskVars, activeDigitsVarRef),
-        }));
-        const defaultSteps = parseBlockLines(defaultLines, taskVars, activeDigitsVarRef);
+        const caseWaitAnchors: string[] = [];
+        const cases = caseBlocks.map((cb) => {
+          const cu: string[] = [];
+          const cSteps = parseBlockLines(cb.lines, taskVars, activeDigitsVarRef, cu);
+          if (cu.length > 0) caseWaitAnchors.push(...cu);
+          return {
+            value: cb.value,
+            label: `Value_${toCleanGraphSlug(cb.value, 'Case')}`,
+            steps: cSteps,
+          };
+        });
+        const defaultUnattachedWaitIds: string[] = [];
+        const defaultSteps = parseBlockLines(
+          defaultLines,
+          taskVars,
+          activeDigitsVarRef,
+          defaultUnattachedWaitIds
+        );
 
         const switchStep: MigrationStep = {
           id: nextStepId('sw'),
@@ -2728,6 +2850,11 @@ export function buildMigrationFlowGraph(
               : [makeFallbackJumpStep(lineNumber, `Switch Default ${whereVarDecl.name}`)],
           isTerminal: false,
         };
+        if (caseWaitAnchors.length > 0) attachBranchWaitAnchors(switchStep, 'case', caseWaitAnchors);
+        if (defaultUnattachedWaitIds.length > 0) {
+          attachBranchWaitAnchors(switchStep, 'default', defaultUnattachedWaitIds);
+        }
+        flushPendingWaitAnchorsOnto(switchStep);
 
         // If the immediately preceding step is collectInput collecting this variable, wire Switch into collectInput.successSteps!
         const prevStep = steps[steps.length - 1];
@@ -2755,11 +2882,44 @@ export function buildMigrationFlowGraph(
         const elseIfClauses = clauses.filter((c) => c.kind === 'else-if-then');
         const elseClause = clauses.find((c) => c.kind === 'else');
 
-        const parseInlineActionList = (actionStr?: string): MigrationStep[] => {
+        const parseInlineActionList = (
+          actionStr?: string,
+          unattachedOut?: string[]
+        ): MigrationStep[] => {
           if (!actionStr) return [];
           const out: MigrationStep[] = [];
+          const inlinePendingWaitIds: string[] = [];
+          let inlineTerminated = false;
           for (const s of splitOclStatementsOutsideQuotes(actionStr)) {
-            out.push(...translateSingleStatement(s, lineNumber, taskVars, activeDigitsVarRef));
+            const wasTerminated = inlineTerminated || isStepListTerminal(out);
+            const waitCountBefore = sourceWaitStatements.length;
+            const translated = translateSingleStatement(s, lineNumber, taskVars, activeDigitsVarRef);
+            if (sourceWaitStatements.length > waitCountBefore) {
+              for (let wi = waitCountBefore; wi < sourceWaitStatements.length; wi += 1) {
+                if (wasTerminated) {
+                  sourceWaitStatements[wi].prunedInLocalBlock = true;
+                } else if (sourceWaitStatements[wi].status === 'unmapped_syntax') {
+                  inlinePendingWaitIds.push(sourceWaitStatements[wi].id);
+                }
+              }
+            }
+            if (!wasTerminated && translated.length > 0) {
+              if (inlinePendingWaitIds.length > 0) {
+                attachWaitAnchorsToStep(
+                  translated[0],
+                  inlinePendingWaitIds.splice(0, inlinePendingWaitIds.length)
+                );
+              }
+              out.push(...translated);
+              if (isStepListTerminal(out)) inlineTerminated = true;
+            }
+          }
+          if (inlinePendingWaitIds.length > 0) {
+            if (out.length > 0) {
+              attachWaitAnchorsToStep(out[out.length - 1], inlinePendingWaitIds);
+            } else if (unattachedOut) {
+              unattachedOut.push(...inlinePendingWaitIds);
+            }
           }
           return out;
         };
@@ -2767,15 +2927,17 @@ export function buildMigrationFlowGraph(
         if (ifClause) {
           const cond = (ifClause.condition || '').trim();
           const prep = emitConditionPrerequisites(cond, lineNumber, taskVars);
-          const thenSteps = parseInlineActionList(ifClause.action);
+          const thenInlineUnattached: string[] = [];
+          const thenSteps = parseInlineActionList(ifClause.action, thenInlineUnattached);
 
           if (SCHEDULE_COND_RE.test(cond)) {
             const sgName = `${toCleanGraphSlug(node.scriptNumber || 'Default')}_ScheduleGroup`;
-            const elseSteps = parseInlineActionList(elseClause?.action);
+            const elseInlineUnattached: string[] = [];
+            const elseSteps = parseInlineActionList(elseClause?.action, elseInlineUnattached);
             const isHol =
               HOLIDAY_ONLY_COND_RE.test(cond) &&
               !/\b(?:DAY\s+OF\s+WEEK|TIME\s+OF\s+DAY)\b/i.test(cond);
-            steps.push(...prep, {
+            const sgStep: MigrationStep = {
               id: nextStepId('sg'),
               kind: 'evaluateScheduleGroup',
               lineNumber,
@@ -2797,7 +2959,16 @@ export function buildMigrationFlowGraph(
                 ? thenSteps
                 : makeClosedDisconnectSteps(lineNumber, 'Feiertag'),
               isTerminal: false,
-            });
+            };
+            if (isHol) {
+              attachBranchWaitAnchors(sgStep, 'holiday', thenInlineUnattached);
+              attachBranchWaitAnchors(sgStep, 'open', elseInlineUnattached);
+            } else {
+              attachBranchWaitAnchors(sgStep, 'open', thenInlineUnattached);
+              attachBranchWaitAnchors(sgStep, 'closed', elseInlineUnattached);
+            }
+            flushPendingWaitAnchorsOnto(prep[0] || sgStep);
+            steps.push(...prep, sgStep);
             continue;
           }
 
@@ -2820,7 +2991,11 @@ export function buildMigrationFlowGraph(
           if (compiled.isFallbackFlag) fallbackExpressionCount += 1;
           else realExpressionCount += 1;
 
-          let noSteps: MigrationStep[] = parseInlineActionList(elseClause?.action);
+          const elseInlineUnattached: string[] = [];
+          let noSteps: MigrationStep[] = parseInlineActionList(
+            elseClause?.action,
+            elseInlineUnattached
+          );
           for (let ei = elseIfClauses.length - 1; ei >= 0; ei -= 1) {
             const eic = elseIfClauses[ei];
             const eicCond = (eic.condition || '').trim();
@@ -2830,22 +3005,26 @@ export function buildMigrationFlowGraph(
               taskVars,
               activeDigitsVarRef.name
             );
-            noSteps = [
-              {
-                id: nextStepId('dec'),
-                kind: 'decision',
-                lineNumber,
-                avayaCommand: 'ELSE IF ... THEN',
-                label: `Check ${eicCond.slice(0, 48)}`,
-                conditionLabel: eicCond.slice(0, 48),
-                rawCondition: eicCond,
-                expression: eicCompiled.expression,
-                isFallbackFlag: eicCompiled.isFallbackFlag,
-                yesSteps: parseInlineActionList(eic.action),
-                noSteps,
-                isTerminal: false,
-              },
-            ];
+            const eicUnattached: string[] = [];
+            const eicDec: MigrationStep = {
+              id: nextStepId('dec'),
+              kind: 'decision',
+              lineNumber,
+              avayaCommand: 'ELSE IF ... THEN',
+              label: `Check ${eicCond.slice(0, 48)}`,
+              conditionLabel: eicCond.slice(0, 48),
+              rawCondition: eicCond,
+              expression: eicCompiled.expression,
+              isFallbackFlag: eicCompiled.isFallbackFlag,
+              yesSteps: parseInlineActionList(eic.action, eicUnattached),
+              noSteps,
+              isTerminal: false,
+            };
+            if (eicUnattached.length > 0) attachBranchWaitAnchors(eicDec, 'yes', eicUnattached);
+            if (ei === elseIfClauses.length - 1 && elseInlineUnattached.length > 0) {
+              attachBranchWaitAnchors(eicDec, 'no', elseInlineUnattached.splice(0));
+            }
+            noSteps = [eicDec];
           }
 
           // If there is no ELSE and remaining lines follow in this block, wire continuation into NO
@@ -2864,6 +3043,7 @@ export function buildMigrationFlowGraph(
               isTerminal: true,
             });
           }
+          const contInlineNoUnattached: string[] = [];
           if (noSteps.length === 0 && idx < blockLines.length) {
             const yesEnds = isStepListTerminal(thenSteps);
             const isDigitsBranch =
@@ -2871,7 +3051,12 @@ export function buildMigrationFlowGraph(
               steps[steps.length - 1].kind === 'collectInput' &&
               (steps[steps.length - 1].successSteps || []).length === 0;
             if (yesEnds || isDigitsBranch || isGuardInline) {
-              noSteps = parseBlockLines(blockLines.slice(idx), taskVars, activeDigitsVarRef);
+              noSteps = parseBlockLines(
+                blockLines.slice(idx),
+                taskVars,
+                activeDigitsVarRef,
+                contInlineNoUnattached
+              );
               idx = blockLines.length;
             }
           }
@@ -2891,6 +3076,16 @@ export function buildMigrationFlowGraph(
             noSteps,
             isTerminal: false,
           };
+          if (thenInlineUnattached.length > 0) {
+            attachBranchWaitAnchors(decisionStep, 'yes', thenInlineUnattached);
+          }
+          if (elseInlineUnattached.length > 0) {
+            attachBranchWaitAnchors(decisionStep, 'no', elseInlineUnattached);
+          }
+          if (contInlineNoUnattached.length > 0) {
+            attachBranchWaitAnchors(decisionStep, 'no', contInlineNoUnattached);
+          }
+          flushPendingWaitAnchorsOnto(prep[0] || decisionStep);
 
           // Attach to preceding collectInput or callDataAction successSteps if immediately following
           const prevStep = steps[steps.length - 1];
@@ -2913,16 +3108,25 @@ export function buildMigrationFlowGraph(
 
       // D. Plain statement(s) on this line
       idx += 1;
-      const wasTerminatedBeforeStmt = blockHasTerminated || isStepListTerminal(steps);
       for (const stmt of splitOclStatementsOutsideQuotes(text)) {
+        const wasTerminatedBeforeStmt = blockHasTerminated || isStepListTerminal(steps);
         const waitCountBefore = sourceWaitStatements.length;
         const translated = translateSingleStatement(stmt, lineNumber, taskVars, activeDigitsVarRef);
-        if (wasTerminatedBeforeStmt && sourceWaitStatements.length > waitCountBefore) {
+        if (sourceWaitStatements.length > waitCountBefore) {
           for (let wi = waitCountBefore; wi < sourceWaitStatements.length; wi += 1) {
-            sourceWaitStatements[wi].prunedInLocalBlock = true;
+            if (wasTerminatedBeforeStmt) {
+              sourceWaitStatements[wi].prunedInLocalBlock = true;
+            } else if (sourceWaitStatements[wi].status === 'unmapped_syntax') {
+              pendingWaitAnchorIds.push(sourceWaitStatements[wi].id);
+            }
           }
         }
+        if (wasTerminatedBeforeStmt) {
+          steps.push(...translated);
+          continue;
+        }
         for (const step of translated) {
+          flushPendingWaitAnchorsOnto(step);
           // Wire immediate follow-up steps after callDataAction / collectInput into successSteps when appropriate
           const prevStep = steps[steps.length - 1];
           if (
@@ -2939,8 +3143,18 @@ export function buildMigrationFlowGraph(
             prevStep.successSteps = [step];
             // If this step isn't terminal, consume the rest of the current block into successSteps!
             if (!step.isTerminal && idx < blockLines.length) {
-              const rest = parseBlockLines(blockLines.slice(idx), taskVars, activeDigitsVarRef);
+              const restUnattached: string[] = [];
+              const rest = parseBlockLines(
+                blockLines.slice(idx),
+                taskVars,
+                activeDigitsVarRef,
+                restUnattached
+              );
               prevStep.successSteps.push(...rest);
+              if (restUnattached.length > 0) {
+                const lastSucc = prevStep.successSteps[prevStep.successSteps.length - 1];
+                attachWaitAnchorsToStep(lastSucc, restUnattached);
+              }
               idx = blockLines.length;
             }
           } else if (
@@ -2951,8 +3165,18 @@ export function buildMigrationFlowGraph(
           ) {
             prevStep.successSteps = [step];
             if (!step.isTerminal && idx < blockLines.length) {
-              const rest = parseBlockLines(blockLines.slice(idx), taskVars, activeDigitsVarRef);
+              const restUnattached: string[] = [];
+              const rest = parseBlockLines(
+                blockLines.slice(idx),
+                taskVars,
+                activeDigitsVarRef,
+                restUnattached
+              );
               prevStep.successSteps.push(...rest);
+              if (restUnattached.length > 0) {
+                const lastSucc = prevStep.successSteps[prevStep.successSteps.length - 1];
+                attachWaitAnchorsToStep(lastSucc, restUnattached);
+              }
               idx = blockLines.length;
             }
           } else {
@@ -2965,6 +3189,14 @@ export function buildMigrationFlowGraph(
       }
       if (isStepListTerminal(steps)) {
         blockHasTerminated = true;
+      }
+    }
+
+    if (pendingWaitAnchorIds.length > 0) {
+      if (steps.length > 0) {
+        attachWaitAnchorsToStep(steps[steps.length - 1], pendingWaitAnchorIds);
+      } else if (unattachedWaitOut) {
+        unattachedWaitOut.push(...pendingWaitAnchorIds);
       }
     }
 
@@ -2981,7 +3213,13 @@ export function buildMigrationFlowGraph(
     const taskVars = new Map<string, MigrationVariableDecl>();
     const activeDigitsVarRef = { name: 'collectedDigits' };
 
-    let steps = parseBlockLines(sec.lines, taskVars, activeDigitsVarRef);
+    const topLevelUnattachedWaits: string[] = [];
+    let steps = parseBlockLines(
+      sec.lines,
+      taskVars,
+      activeDigitsVarRef,
+      topLevelUnattachedWaits
+    );
 
     // Supplement from AuditNode edges & ScriptRules for Visio / shorthand scripts with empty raw OCL
     if (sIdx === 0 && steps.length === 0 && rawSections.length === 1) {
@@ -3250,7 +3488,7 @@ export function buildMigrationFlowGraph(
 
     // Ensure every task has at least one valid step
     if (steps.length === 0) {
-      steps.push({
+      const endStep: MigrationStep = {
         id: nextStepId('disc'),
         kind: 'disconnect',
         lineNumber: sec.startLine,
@@ -3258,7 +3496,13 @@ export function buildMigrationFlowGraph(
         label: `Disconnect (${sec.rawName})`,
         sectionHint: sec.rawName,
         isTerminal: true,
-      });
+      };
+      if (topLevelUnattachedWaits.length > 0) {
+        attachWaitAnchorsToStep(endStep, topLevelUnattachedWaits);
+      }
+      steps.push(endStep);
+    } else if (topLevelUnattachedWaits.length > 0) {
+      attachWaitAnchorsToStep(steps[steps.length - 1], topLevelUnattachedWaits);
     }
 
     tasks.push({

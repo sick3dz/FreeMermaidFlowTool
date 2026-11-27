@@ -1225,7 +1225,7 @@ export function runCallflowAudit(
   const oracleCallCount = externalIntegrations.filter((i) => i.system === 'Oracle').length;
 
   return {
-    schemaVersion: '1.6.0',
+    schemaVersion: '1.6.1',
     generatedAt: options?.generatedAt || new Date().toISOString(),
     privacyMode: '100%-in-memory-metadata-only',
     summary: {

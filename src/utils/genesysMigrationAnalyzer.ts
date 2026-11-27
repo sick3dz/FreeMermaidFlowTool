@@ -51,6 +51,7 @@ import {
   buildFlowIRFromMigrationGraph,
   classifyFlowIRFinding,
   formatOrderedMigrationAnnotations,
+  normalizeWarningClass,
   renderArchyYamlFromFlowIR,
   renderAvayaView,
   renderGenesysView,
@@ -91,6 +92,7 @@ export {
   buildFlowIRFromMigrationGraph,
   classifyFlowIRFinding,
   formatOrderedMigrationAnnotations,
+  normalizeWarningClass,
   renderArchyYamlFromFlowIR,
   renderAvayaView,
   renderGenesysView,
@@ -4063,9 +4065,11 @@ function auditParallelHolidayLogic(
 
 /**
  * Post-Pruning Two-Phase WAIT Audit (Pass 2):
- * Evaluates raw WAIT statements captured in Pass 1 against the finalized, reachable graph.
- * - Surviving active-path WAITs -> WAIT_UNMAPPED_ACTIVE_PATH (WARN + # OFFENE MIGRATIONSFRAGE annotation)
- * - Pruned / dead-path / unreachable WAITs -> WAIT_SOURCE_ONLY_HINT (INFO, source_only_hint; zero delay nodes)
+ * Evaluates raw WAIT statements captured in Pass 1 against the finalized, reachable Genesys target graph.
+ * - Active iff the WAIT's exact source path still exists in the reachable graph (whether or not a delay node was rendered)
+ *   -> WAIT_UNMAPPED_ACTIVE_PATH (WARN + # OFFENE MIGRATIONSFRAGE annotation)
+ * - Pruned / dead-path / unreachable WAITs
+ *   -> WAIT_SOURCE_ONLY_HINT (INFO, warningClass: source_hint; zero delay nodes, zero YAML warning comments)
  */
 function auditWaitStatements(
   graph: MigrationFlowGraph,
@@ -4075,44 +4079,81 @@ function auditWaitStatements(
   if (capturedWaits.length === 0) return;
 
   const survivingBySourceWaitId = new Map<string, MigrationStep[]>();
-  const survivingSections = new Set<string>();
-  const firstStepBySection = new Map<string, MigrationStep>();
+  const survivingAnchoredByWaitId = new Map<string, MigrationStep[]>();
 
-  const collectSurviving = (list: MigrationStep[], fallbackSection: string) => {
+  const registerAnchoredStep = (
+    map: Map<string, MigrationStep[]>,
+    waitId: string,
+    step: MigrationStep
+  ) => {
+    const arr = map.get(waitId) || [];
+    if (!arr.includes(step)) arr.push(step);
+    map.set(waitId, arr);
+  };
+
+  const collectSurviving = (list: MigrationStep[], referencedTaskRefs: Set<string>) => {
     for (const st of list) {
-      const secName = st.sectionHint || fallbackSection;
-      if (secName) {
-        survivingSections.add(secName);
-        if (!firstStepBySection.has(secName)) {
-          firstStepBySection.set(secName, st);
-        }
+      if ((st.kind === 'jumpToReusableTask' || st.kind === 'callTask') && st.targetTaskRefId) {
+        referencedTaskRefs.add(st.targetTaskRefId);
       }
       if (st.sourceWaitId) {
-        const arr = survivingBySourceWaitId.get(st.sourceWaitId) || [];
-        arr.push(st);
-        survivingBySourceWaitId.set(st.sourceWaitId, arr);
+        registerAnchoredStep(survivingBySourceWaitId, st.sourceWaitId, st);
       }
-      if (st.yesSteps) collectSurviving(st.yesSteps, secName);
-      if (st.noSteps) collectSurviving(st.noSteps, secName);
-      if (st.openSteps) collectSurviving(st.openSteps, secName);
-      if (st.closedSteps) collectSurviving(st.closedSteps, secName);
-      if (st.holidaySteps) collectSurviving(st.holidaySteps, secName);
-      if (st.successSteps) collectSurviving(st.successSteps, secName);
-      if (st.failureSteps) collectSurviving(st.failureSteps, secName);
-      if (st.timeoutSteps) collectSurviving(st.timeoutSteps, secName);
-      if (st.foundSteps) collectSurviving(st.foundSteps, secName);
-      if (st.notFoundSteps) collectSurviving(st.notFoundSteps, secName);
-      if (st.bodySteps) collectSurviving(st.bodySteps, secName);
-      if (st.defaultSteps) collectSurviving(st.defaultSteps, secName);
-      if (st.cases) st.cases.forEach((c) => collectSurviving(c.steps, secName));
+      if (st.anchoredWaitIds && st.anchoredWaitIds.length > 0) {
+        for (const wid of st.anchoredWaitIds) {
+          registerAnchoredStep(survivingAnchoredByWaitId, wid, st);
+        }
+      }
+      if (st.branchAnchoredWaitIds && st.branchAnchoredWaitIds.length > 0) {
+        for (const b of st.branchAnchoredWaitIds) {
+          for (const wid of b.waitIds) {
+            registerAnchoredStep(survivingAnchoredByWaitId, wid, st);
+          }
+        }
+      }
+      if (st.yesSteps) collectSurviving(st.yesSteps, referencedTaskRefs);
+      if (st.noSteps) collectSurviving(st.noSteps, referencedTaskRefs);
+      if (st.openSteps) collectSurviving(st.openSteps, referencedTaskRefs);
+      if (st.closedSteps) collectSurviving(st.closedSteps, referencedTaskRefs);
+      if (st.holidaySteps) collectSurviving(st.holidaySteps, referencedTaskRefs);
+      if (st.successSteps) collectSurviving(st.successSteps, referencedTaskRefs);
+      if (st.failureSteps) collectSurviving(st.failureSteps, referencedTaskRefs);
+      if (st.timeoutSteps) collectSurviving(st.timeoutSteps, referencedTaskRefs);
+      if (st.foundSteps) collectSurviving(st.foundSteps, referencedTaskRefs);
+      if (st.notFoundSteps) collectSurviving(st.notFoundSteps, referencedTaskRefs);
+      if (st.bodySteps) collectSurviving(st.bodySteps, referencedTaskRefs);
+      if (st.defaultSteps) collectSurviving(st.defaultSteps, referencedTaskRefs);
+      if (st.cases) st.cases.forEach((c) => collectSurviving(c.steps, referencedTaskRefs));
+      if (st.isTerminal) break;
     }
   };
 
-  for (const task of graph.tasks) {
-    if (task.kind === 'fallback') continue;
-    const taskSec = task.originalTarget || task.refId;
-    if (taskSec) survivingSections.add(taskSec);
-    collectSurviving(task.steps, taskSec);
+  // BFS from entryTaskRefId across finalized surviving tasks (skipping fallback tasks)
+  const taskByRef = new Map<string, MigrationTaskGraph>(
+    graph.tasks.map((t) => [t.refId, t])
+  );
+  const visitedTaskRefs = new Set<string>();
+  const taskQueue: string[] = [];
+  if (graph.entryTaskRefId && taskByRef.has(graph.entryTaskRefId)) {
+    visitedTaskRefs.add(graph.entryTaskRefId);
+    taskQueue.push(graph.entryTaskRefId);
+  } else if (graph.tasks[0]) {
+    visitedTaskRefs.add(graph.tasks[0].refId);
+    taskQueue.push(graph.tasks[0].refId);
+  }
+
+  while (taskQueue.length > 0) {
+    const refId = taskQueue.shift()!;
+    const task = taskByRef.get(refId);
+    if (!task || task.kind === 'fallback') continue;
+    const outs = new Set<string>();
+    collectSurviving(task.steps, outs);
+    for (const nextRef of outs) {
+      if (!visitedTaskRefs.has(nextRef) && taskByRef.has(nextRef)) {
+        visitedTaskRefs.add(nextRef);
+        taskQueue.push(nextRef);
+      }
+    }
   }
 
   graph.diagnostics.waitSourceOnlyHints = [];
@@ -4153,17 +4194,17 @@ function auditWaitStatements(
           lineNumber: rec.lineNumber,
           section: rec.section,
           rawCommand: rec.rawCommand,
-          message: `Quell-Hinweis (Zeile ${rec.lineNumber}, Section "${rec.section}"): "${rec.rawCommand}" liegt nur in einem verworfenen oder unerreichbaren Avaya-Pfad und wurde nicht als aktiver Genesys-Delay uebernommen.`,
+          message: `Quell-Hinweis (Zeile ${rec.lineNumber}, Section "${rec.section}"): "${rec.rawCommand}" liegt nicht auf einem aktiven Genesys-Zielpfad (verworfen oder unerreichbar; als source_hint eingestuft, kein Delay-Knoten erzeugt).`,
         });
       }
     } else {
-      // unmapped_syntax WAIT
-      const isActive = !rec.prunedInLocalBlock && survivingSections.has(rec.section);
-      if (isActive) {
+      // unmapped_syntax WAIT: active iff its exact enclosing branch/path survives in the reachable target graph
+      const anchoredSteps = !rec.prunedInLocalBlock
+        ? survivingAnchoredByWaitId.get(rec.id) || []
+        : [];
+      if (anchoredSteps.length > 0) {
         const msg = `Unvollstaendig abbildbares WAIT (${rec.rawCommand}, Zeile ${rec.lineNumber}) auf aktivem Pfad (Section "${rec.section}"): Kein synthetisches delay erfunden — Warte-/Hold-Semantik im In-Queue Call Flow klaeren.`;
-        const attachStep =
-          firstStepBySection.get(rec.section) || graph.tasks[0]?.steps[0];
-        if (attachStep) {
+        for (const attachStep of anchoredSteps) {
           appendStepYamlComment(attachStep, `OFFENE MIGRATIONSFRAGE: ${msg}`);
           appendStepAnnotation(
             attachStep,
@@ -4179,14 +4220,6 @@ function auditWaitStatements(
             code: 'WAIT_UNMAPPED_ACTIVE_PATH',
             message: msg,
           });
-        } else {
-          graph.diagnostics.activeWaitFindings.push({
-            id: rec.id,
-            lineNumber: rec.lineNumber,
-            section: rec.section,
-            rawCommand: rec.rawCommand,
-            message: msg,
-          });
         }
         warnings.push({
           code: 'WAIT_UNMAPPED_ACTIVE_PATH',
@@ -4200,7 +4233,7 @@ function auditWaitStatements(
           lineNumber: rec.lineNumber,
           section: rec.section,
           rawCommand: rec.rawCommand,
-          message: `Quell-Hinweis (Zeile ${rec.lineNumber}, Section "${rec.section}"): "${rec.rawCommand}" liegt nur in nicht aktiv gerendertem Avaya-Quellcode (verworfen/unerreichbar); kein delay-Knoten generiert.`,
+          message: `Quell-Hinweis (Zeile ${rec.lineNumber}, Section "${rec.section}"): "${rec.rawCommand}" liegt nicht auf einem aktiven Genesys-Zielpfad (verworfen oder unerreichbar; als source_hint eingestuft, kein delay-Knoten generiert).`,
         });
       }
     }
@@ -4498,7 +4531,7 @@ export function translateAvayaWorkspaceToGenesys(
         brokenTargetKeysForScript: brokenByScriptKey.get(node.scriptKey) || new Set<string>(),
         compatibilityStubMode,
       },
-      '1.6.0'
+      '1.6.1'
     );
     builtByKey.set(node.scriptKey, { node, built });
     allGraphsByKey.set(node.scriptKey, built.graph);
@@ -4538,7 +4571,7 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.6.0',
+    schemaVersion: '1.6.1',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     compatibilityStubMode,

@@ -11,6 +11,7 @@ import {
   FlowIR,
   classifyFlowIRFinding,
   exportAllArchyYamlsZipBlob,
+  normalizeWarningClass,
   renderArchyYamlFromFlowIR,
   renderAvayaView,
   renderGenesysView,
@@ -2137,7 +2138,7 @@ SECTION Start
     expect(activeWaitIr?.category).toBe('wait_hint');
     expect(activeScript.irValidation.commentParityOk).toBe(true);
 
-    // Dead-path WAIT (after DISCONNECT) + unreachable orphan section WAIT -> source_only_hint only!
+    // Dead-path WAIT (after DISCONNECT) + unreachable orphan section WAIT -> source_hint only (no YAML comments)!
     const deadWaitMod = makeModule(
       'Pruned_Wait_Flow',
       `
@@ -2154,6 +2155,7 @@ SECTION Legacy_Orphan_Section
     const deadScript = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([deadWaitMod])).scripts[0];
     expect(deadScript.yamlValidation.isValid).toBe(true);
     expect(deadScript.archyYaml).not.toContain('delay:');
+    expect(deadScript.archyYaml).not.toContain('WAIT');
     expect(deadScript.warnings.some((w) => w.code === 'WAIT_UNMAPPED_ACTIVE_PATH')).toBe(false);
     expect(deadScript.warnings.some((w) => w.code === 'IN_QUEUE_FLOW_REQUIRED')).toBe(false);
 
@@ -2163,7 +2165,7 @@ SECTION Legacy_Orphan_Section
     expect(sourceOnlyHints.length).toBe(2);
     for (const sh of sourceOnlyHints) {
       expect(sh.severity).toBe('INFO');
-      expect(sh.warningClass).toBe('source_only_hint');
+      expect(sh.warningClass).toBe('source_hint');
       expect(sh.category).toBe('wait_hint');
       expect(sh.requiresBusinessReview).toBe(false);
     }
@@ -2184,6 +2186,63 @@ SECTION Start
     expect(unmappedActiveScript.archyYaml).not.toContain('delay:');
     expect(
       unmappedActiveScript.flowIR.findings.some((f) => f.code === 'WAIT_UNMAPPED_ACTIVE_PATH')
+    ).toBe(true);
+
+    // Dead unmapped WAIT inside a terminated sub-branch of an otherwise ACTIVE surviving section -> source_hint (not active!)
+    const deadSubBranchMod = makeModule(
+      'Dead_SubBranch_Wait_Flow',
+      `
+ASSIGN "1" TO gv_flag
+SECTION Start
+  IF gv_flag = "1" THEN
+    DISCONNECT
+    WAIT LV_DeadMultiBranchWait
+  ELSE
+    IF gv_flag = "2" THEN DISCONNECT; WAIT LV_DeadInlineWait
+    QUEUE TO SKILLSET SERVICE_QUEUE
+  END IF
+`
+    );
+    const deadSubBranchScript = translateAvayaWorkspaceToGenesys(
+      buildScriptWorkspace([deadSubBranchMod])
+    ).scripts[0];
+    expect(deadSubBranchScript.archyYaml).not.toContain('delay:');
+    expect(deadSubBranchScript.archyYaml).not.toContain('OFFENE MIGRATIONSFRAGE');
+    expect(
+      deadSubBranchScript.warnings.some((w) => w.code === 'WAIT_UNMAPPED_ACTIVE_PATH')
+    ).toBe(false);
+    const deadBranchHints = deadSubBranchScript.flowIR.findings.filter(
+      (f) => f.code === 'WAIT_SOURCE_ONLY_HINT'
+    );
+    expect(deadBranchHints.length).toBe(2);
+    expect(deadBranchHints.every((f) => f.warningClass === 'source_hint')).toBe(true);
+    expect(
+      deadSubBranchScript.genesysView.annahmenUndOffenePunkte.some((l) =>
+        l.includes('WAIT_SOURCE_ONLY_HINT · source_hint')
+      )
+    ).toBe(true);
+
+    // Active unmapped WAIT inside an empty branch (no delay node rendered, yet branch survives in reachable Genesys graph) -> WAIT_UNMAPPED_ACTIVE_PATH
+    const activeEmptyBranchMod = makeModule(
+      'Active_Empty_Branch_Wait_Flow',
+      `
+ASSIGN "1" TO gv_flag
+SECTION Start
+  IF gv_flag = "1" THEN
+    WAIT LV_HoldBranchWait
+  ELSE
+    QUEUE TO SKILLSET SERVICE_QUEUE
+  END IF
+`
+    );
+    const activeEmptyBranchScript = translateAvayaWorkspaceToGenesys(
+      buildScriptWorkspace([activeEmptyBranchMod])
+    ).scripts[0];
+    expect(activeEmptyBranchScript.archyYaml).not.toContain('delay:');
+    expect(
+      activeEmptyBranchScript.flowIR.findings.some(
+        (f) => f.code === 'WAIT_UNMAPPED_ACTIVE_PATH' && f.warningClass === 'actionable_migration'
+      )
     ).toBe(true);
   });
 
@@ -2236,7 +2295,8 @@ SECTION Start
       'semantic_review'
     );
     expect(classifyFlowIRFinding('DUPLICATE_HOLIDAY_LOGIC').warningClass).toBe('semantic_review');
-    expect(classifyFlowIRFinding('WAIT_SOURCE_ONLY_HINT').warningClass).toBe('source_only_hint');
+    expect(classifyFlowIRFinding('WAIT_SOURCE_ONLY_HINT').warningClass).toBe('source_hint');
+    expect(normalizeWarningClass('source_only_hint')).toBe('source_hint');
     expect(classifyFlowIRFinding('UNREACHABLE_TASK_PRUNED').warningClass).toBe(
       'informational_cleanup'
     );

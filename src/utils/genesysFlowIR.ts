@@ -191,8 +191,14 @@ export type FlowIRFindingSeverity = 'INFO' | 'WARN' | 'ERROR';
 export type FlowIRWarningClass =
   | 'actionable_migration'
   | 'semantic_review'
+  | 'source_hint'
   | 'source_only_hint'
   | 'informational_cleanup';
+
+export function normalizeWarningClass(cls?: FlowIRWarningClass): FlowIRWarningClass {
+  if (cls === 'source_only_hint') return 'source_hint';
+  return cls || 'actionable_migration';
+}
 
 export type FlowIRFindingCategory =
   | 'provenance'
@@ -493,7 +499,7 @@ export function classifyFlowIRFinding(code: FlowIRFindingCode): {
     case 'WAIT_SOURCE_ONLY_HINT':
       return {
         category: 'wait_hint',
-        warningClass: 'source_only_hint',
+        warningClass: 'source_hint',
         requiresBusinessReview: false,
       };
     case 'UNREACHABLE_TASK_PRUNED':
@@ -1015,6 +1021,7 @@ export function buildFlowIRFromMigrationGraph(
 
         case 'evaluateScheduleGroup': {
           const id = nextNodeId('sched', step.targetSlug || step.target);
+          pushStepFindings(id);
           nodes.push({
             id,
             kind: 'scheduleCheck',
@@ -1024,7 +1031,7 @@ export function buildFlowIRFromMigrationGraph(
               scheduleGroup: step.targetSlug || step.target || 'Default_ScheduleGroup',
             },
             sourceTrace: trace,
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...buildCommentFields(),
           });
           linkFromPending(id);
 
@@ -1059,6 +1066,7 @@ export function buildFlowIRFromMigrationGraph(
           const id = nextNodeId('input', step.inputVarName || step.target);
           const targetVar = (step.inputVarName || 'collectedDigits').replace(/^(?:Flow|Task)\./i, '');
           markVarUsed(targetVar, id);
+          pushStepFindings(id);
 
           const retryVarName = `retryCount_${cleanSlug(targetVar, 'input')}`;
           registerVar(
@@ -1093,7 +1101,7 @@ export function buildFlowIRFromMigrationGraph(
             },
             outputs: [{ name: 'collectedDigits', targetVariable: targetVar }],
             sourceTrace: trace,
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...buildCommentFields(),
           });
           linkFromPending(id);
 
@@ -1126,6 +1134,7 @@ export function buildFlowIRFromMigrationGraph(
           const actionSlug = step.targetSlug || cleanSlug(step.target || 'DataAction', 'DataAction');
           dataActionsSet.add(actionSlug);
           const id = nextNodeId('da', actionSlug);
+          pushStepFindings(id);
 
           const inputs: FlowIRInputBinding[] = isTable
             ? [{ name: 'lookupKey', expr: stripScopesFromExpr(step.dataTableKey || 'Call.Dnis') }]
@@ -1173,7 +1182,7 @@ export function buildFlowIRFromMigrationGraph(
             inputs,
             outputs,
             errorHandling: {},
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...buildCommentFields(),
           };
           nodes.push(daNode);
           linkFromPending(id);
@@ -1282,6 +1291,7 @@ export function buildFlowIRFromMigrationGraph(
         case 'transferToNumber':
         case 'transferToVoicemail': {
           const id = nextNodeId('xfer', step.targetSlug || step.target);
+          pushStepFindings(id);
           const resolvedType: FlowIRTransferTargetType =
             step.resolvedTargetType ||
             (step.kind === 'transferToNumber'
@@ -1305,7 +1315,7 @@ export function buildFlowIRFromMigrationGraph(
               ...(step.normalizationNote ? { normalizationNote: step.normalizationNote } : {}),
             },
             sourceTrace: trace,
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...buildCommentFields(),
           });
           linkFromPending(id);
           connectToTerminalEnd(id);
@@ -1314,6 +1324,7 @@ export function buildFlowIRFromMigrationGraph(
 
         case 'disconnect': {
           const id = nextNodeId('disc', step.target || 'disconnect');
+          pushStepFindings(id);
           nodes.push({
             id,
             kind: 'disconnect',
@@ -1324,7 +1335,7 @@ export function buildFlowIRFromMigrationGraph(
               reason: step.target || (step.avayaCommand === 'GIVE BUSY' ? 'busy' : 'normal'),
             },
             sourceTrace: trace,
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...buildCommentFields(),
           });
           linkFromPending(id);
           connectToTerminalEnd(id);
@@ -1333,6 +1344,7 @@ export function buildFlowIRFromMigrationGraph(
 
         case 'loop': {
           const id = nextNodeId('loop', step.targetSlug || step.target);
+          pushStepFindings(id);
           if (step.currentIndexVarName) markVarUsed(step.currentIndexVarName, id);
           nodes.push({
             id,
@@ -1346,7 +1358,7 @@ export function buildFlowIRFromMigrationGraph(
               isBackwardGoto: Boolean(step.isBackwardGoto),
             },
             sourceTrace: trace,
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...buildCommentFields(),
           });
           linkFromPending(id);
           pendingExits = [{ nodeId: id, type: 'unconditional' }];
@@ -1554,12 +1566,12 @@ export function buildFlowIRFromMigrationGraph(
     });
   }
 
-  // Pass-2 WAIT classification diagnostics: source-only WAIT hints & any standalone unmapped active WAIT findings
+  // Pass-2 WAIT classification diagnostics: source_hint WAITs & any standalone unmapped active WAIT findings
   for (const wh of graph.diagnostics.waitSourceOnlyHints || []) {
     preFindings.push({
       severity: 'INFO',
       code: 'WAIT_SOURCE_ONLY_HINT',
-      warningClass: 'source_only_hint',
+      warningClass: 'source_hint',
       category: 'wait_hint',
       requiresBusinessReview: false,
       message: wh.message,
@@ -1647,7 +1659,7 @@ export function buildFlowIRFromMigrationGraph(
     const meta = classifyFlowIRFinding(f.code);
     combined.push({
       ...f,
-      warningClass: f.warningClass || meta.warningClass,
+      warningClass: normalizeWarningClass(f.warningClass || meta.warningClass),
       category: f.category || meta.category,
       requiresBusinessReview: f.requiresBusinessReview ?? meta.requiresBusinessReview,
     });
@@ -2212,7 +2224,7 @@ export function validateIR(ir: FlowIR): FlowIRValidationResult {
     const meta = classifyFlowIRFinding(f.code);
     return {
       ...f,
-      warningClass: f.warningClass || meta.warningClass,
+      warningClass: normalizeWarningClass(f.warningClass || meta.warningClass),
       category: f.category || meta.category,
       requiresBusinessReview: f.requiresBusinessReview ?? meta.requiresBusinessReview,
     };
@@ -2254,12 +2266,12 @@ export function renderAvayaView(ir: FlowIR): RenderedModeReport {
     : 'Ehrliche Migration (Strict Default)';
 
   const avayaOpenReviewItems = allFindings.filter((f) => {
-    const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
+    const cls = normalizeWarningClass(f.warningClass || classifyFlowIRFinding(f.code).warningClass);
     return cls === 'actionable_migration' || cls === 'semantic_review';
   });
   const avayaHintCleanupItems = allFindings.filter((f) => {
-    const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
-    return cls === 'source_only_hint' || cls === 'informational_cleanup';
+    const cls = normalizeWarningClass(f.warningClass || classifyFlowIRFinding(f.code).warningClass);
+    return cls === 'source_hint' || cls === 'informational_cleanup';
   });
 
   const kurzfazit = `Normalisiertes Avaya-Mapping (${modeLabel}) für "${ir.meta.sourceScript}" (${ir.nodes.length} IR-Knoten, ${ir.transitions.length} Transitionen, ${ir.variables.length} scope-freie Variablen, ${avayaOpenReviewItems.length} Open Review Signals, ${avayaHintCleanupItems.length} Hints/Cleanup).`;
@@ -2267,7 +2279,9 @@ export function renderAvayaView(ir: FlowIR): RenderedModeReport {
   const annahmenUndOffenePunkte: string[] =
     allFindings.length > 0
       ? allFindings.map((f) => {
-          const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
+          const cls = normalizeWarningClass(
+            f.warningClass || classifyFlowIRFinding(f.code).warningClass
+          );
           const traceStr = f.sourceTrace
             ? ` [${f.sourceTrace.script}${f.sourceTrace.section ? ` · ${f.sourceTrace.section}` : ''} · Z.${f.sourceTrace.lineStart}]`
             : '';
@@ -2863,19 +2877,21 @@ export function renderGenesysView(ir: FlowIR, preRenderedArchyYaml?: string): Re
     : 'Ehrliche Migration (Strict Default)';
 
   const openReviewItems = allFindings.filter((f) => {
-    const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
+    const cls = normalizeWarningClass(f.warningClass || classifyFlowIRFinding(f.code).warningClass);
     return cls === 'actionable_migration' || cls === 'semantic_review';
   });
   const sourceAndCleanupItems = allFindings.filter((f) => {
-    const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
-    return cls === 'source_only_hint' || cls === 'informational_cleanup';
+    const cls = normalizeWarningClass(f.warningClass || classifyFlowIRFinding(f.code).warningClass);
+    return cls === 'source_hint' || cls === 'informational_cleanup';
   });
   const kurzfazit = `Genesys Cloud Architect Zielstruktur (${modeLabel}) für "${ir.meta.flowId}" (${validation.stats.decisionCount} Decisions, ${validation.stats.switchCount} Switches, ${validation.stats.integrationCount} Integrationen, ${validation.errorCount} IR-Fehler, ${openReviewItems.length} Open Review Signals, ${sourceAndCleanupItems.length} Hints/Cleanup).`;
 
   const annahmenUndOffenePunkte: string[] =
     allFindings.length > 0
       ? allFindings.map((f) => {
-          const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
+          const cls = normalizeWarningClass(
+            f.warningClass || classifyFlowIRFinding(f.code).warningClass
+          );
           const traceStr = f.sourceTrace
             ? ` [${f.sourceTrace.script}${f.sourceTrace.section ? ` · ${f.sourceTrace.section}` : ''} · Z.${f.sourceTrace.lineStart}]`
             : '';
@@ -2885,7 +2901,7 @@ export function renderGenesysView(ir: FlowIR, preRenderedArchyYaml?: string): Re
 
   const migrationshinweise: string[] = [
     `Migrationsmodus: ${modeLabel}.`,
-    `Review-Triage: ${openReviewItems.length} Open Review Signal(s) (actionable_migration / semantic_review) getrennt von ${sourceAndCleanupItems.length} Hint-/Cleanup-Meldung(en) (source_only_hint / informational_cleanup).`,
+    `Review-Triage: ${openReviewItems.length} Open Review Signal(s) (actionable_migration / semantic_review) getrennt von ${sourceAndCleanupItems.length} Hint-/Cleanup-Meldung(en) (source_hint / informational_cleanup).`,
     'Variablen-Scopes: Alle Variablen sind in der IR scope-frei gehalten und erst im Genesys-YAML als Flow.* bzw. Task.* gerendert.',
     'Kontrollfluss: Avaya-Sections und GOTO-Sprünge wurden graphbasiert in echte Architect-Verzweigungen aufgelöst; geschützte Besetzt-/Fehler-Pfade sind nur bedingt erreichbar.',
   ];

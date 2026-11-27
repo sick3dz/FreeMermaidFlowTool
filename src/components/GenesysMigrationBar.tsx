@@ -24,6 +24,7 @@ import {
   GenesysWorkspaceTranslation,
   classifyFlowIRFinding,
   exportAllArchyYamlsZipBlob,
+  normalizeWarningClass,
   validateArchyYaml,
 } from '../utils/genesysMigrationAnalyzer';
 
@@ -71,7 +72,7 @@ const FINDING_CATEGORY_LABELS: Record<FlowIRFindingCategory, string> = {
   holiday_logic: 'Holiday Logic',
   terminality: 'Terminality',
   subflow: 'Unloaded Subflows',
-  wait_hint: 'WAIT / Source Hints',
+  wait_hint: 'WAIT & Source Hints',
   reference: 'References',
   scope: 'Scope',
   reachability: 'Reachability',
@@ -81,7 +82,8 @@ const FINDING_CATEGORY_LABELS: Record<FlowIRFindingCategory, string> = {
 const WARNING_CLASS_LABELS: Record<FlowIRWarningClass, string> = {
   actionable_migration: 'Actionable',
   semantic_review: 'Semantic Review',
-  source_only_hint: 'Source-Only Hint',
+  source_hint: 'Source Hint',
+  source_only_hint: 'Source Hint',
   informational_cleanup: 'Cleanup',
 };
 
@@ -174,7 +176,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
       const fallbackMeta = classifyFlowIRFinding(f.code);
       return {
         ...f,
-        warningClass: f.warningClass || fallbackMeta.warningClass,
+        warningClass: normalizeWarningClass(f.warningClass || fallbackMeta.warningClass),
         category: f.category || fallbackMeta.category,
         requiresBusinessReview: f.requiresBusinessReview ?? fallbackMeta.requiresBusinessReview,
       };
@@ -192,7 +194,10 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
   const secondaryHintFindings = useMemo(
     () =>
       displayedIrFindings.filter(
-        (f) => f.warningClass === 'source_only_hint' || f.warningClass === 'informational_cleanup'
+        (f) =>
+          f.warningClass === 'source_hint' ||
+          f.warningClass === 'source_only_hint' ||
+          f.warningClass === 'informational_cleanup'
       ),
     [displayedIrFindings]
   );
