@@ -31,6 +31,11 @@ import {
   buildOpeningHoursExportBundleFromRows,
   getEmbeddedOpeningHoursExportRuntimeJs,
 } from './openingHoursExporter';
+import {
+  getEmbeddedInventoryAndGenesysZipRuntimeJs,
+  WorkspaceInventoryBundle,
+} from './inventoryExporter';
+import { AuditReport } from './auditCallflows';
 
 const RESERVED_KEYWORDS = new Set([
   'flowchart',
@@ -3715,6 +3720,96 @@ export interface InteractiveCallflowHtmlNodeDetail {
   explanation?: DualAudienceNodeExplanation;
 }
 
+export type GenesysProfileKey =
+  | 'strict-dataAction'
+  | 'strict-dataTable'
+  | 'strict-review'
+  | 'placeholder';
+
+export interface InteractiveCallflowHtmlGenesysFinding {
+  code: string;
+  severity: 'error' | 'warning' | 'info';
+  category: string;
+  warningClass: string;
+  message: string;
+  nodeId?: string;
+  suggestion?: string;
+  fileName?: string;
+  scriptNumber?: string;
+  cleanName?: string;
+}
+
+export interface InteractiveCallflowHtmlGenesysModeReport {
+  mode: 'avaya' | 'genesys';
+  modeLabel: string;
+  summary: string[];
+  assumptionsAndOpenPoints: string[];
+  migrationHints: string[];
+  renderedCode: string;
+}
+
+export interface InteractiveCallflowHtmlGenesysHolidayMapping {
+  variableName: string;
+  lookupTarget?: 'dataAction' | 'dataTable';
+  lookupActionOrTable?: string;
+  booleanVarName?: string;
+  replacedSubflow?: string;
+}
+
+export interface InteractiveCallflowHtmlGenesysVariant {
+  svgKey?: string;
+  readiness?: 'LOW' | 'MEDIUM' | 'HIGH';
+  readinessReasons?: string[];
+  warnings?: Array<{
+    code: string;
+    severity: 'warning' | 'blocker' | 'info' | 'error';
+    message: string;
+    lineNumber?: number;
+  }>;
+  archyYaml?: string;
+  archyFilename?: string;
+  yamlValidation?: InteractiveCallflowHtmlView['genesysYamlValidation'];
+  flowIR?: unknown;
+  flowIRFilename?: string;
+  irFindings?: InteractiveCallflowHtmlGenesysFinding[];
+  avayaReport?: InteractiveCallflowHtmlGenesysModeReport;
+  genesysReport?: InteractiveCallflowHtmlGenesysModeReport;
+  holidayMappings?: InteractiveCallflowHtmlGenesysHolidayMapping[];
+}
+
+export interface InteractiveCallflowHtmlGenesysProfileSummary {
+  profileKey: GenesysProfileKey;
+  modeLabel: string;
+  generatedAt: string;
+  overallReadiness: 'LOW' | 'MEDIUM' | 'HIGH';
+  compatibilityStubMode: boolean;
+  resolvedTargetEnabled: boolean;
+  holidayLookupTarget: 'dataAction' | 'dataTable';
+  summary: {
+    totalScripts: number;
+    lowCount: number;
+    mediumCount: number;
+    highCount: number;
+    commonModuleCount: number;
+    yamlValidScriptCount: number;
+    yamlErrorCount: number;
+    totalIrFindings: number;
+  };
+  masterGenesysMermaid?: string;
+  scripts: Array<{
+    cleanName: string;
+    scriptNumber: string;
+    fileName: string;
+    archyFilename: string;
+    archyYaml: string;
+    flowIR?: unknown;
+    readiness: 'LOW' | 'MEDIUM' | 'HIGH';
+    readinessReasons: string[];
+    yamlValid: boolean;
+    yamlErrorCount: number;
+  }>;
+}
+
 export interface InteractiveCallflowHtmlView {
   key: string;
   label: string;
@@ -3756,6 +3851,7 @@ export interface InteractiveCallflowHtmlView {
       fileName?: string;
     }>;
   };
+  genesysVariants?: Partial<Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysVariant>>;
 }
 
 export interface InteractiveCallflowHtmlAnalysisPayload {
@@ -3763,6 +3859,9 @@ export interface InteractiveCallflowHtmlAnalysisPayload {
   healthFindings: CallflowHealthFinding[];
   scheduleRows: CallflowScheduleSummaryRow[];
   openingHoursBundle?: OpeningHoursExportBundle;
+  inventoryBundle?: WorkspaceInventoryBundle;
+  auditReport?: AuditReport;
+  auditMermaid?: string;
   registry: CallflowResourceRegistry;
   routingMatrixRows: CallflowRoutingMatrixRow[];
   masterScriptNumber?: string;
@@ -3785,8 +3884,10 @@ function escapeHtmlText(str: string): string {
  * - Switchable Compact / Detailed Master Overview alongside all Detail Script views
  * - Dark/Light surface toggle with automatic SVG node/edge/cluster contrast adaptation
  * - Structured Double-Click Element Info Box (Übersicht, Zeiten & Regeln, Skript-Sprung)
- * - Dedicated Opening Hours Overview window (Zeitprofile + Detail-Tabelle, Markdown copy, CSV export)
- * - Full Callflow filters & Read-Only Analysis Suite
+ * - Dedicated Opening Hours & Asset-Inventar Overview windows (Excel .xlsx, CSV, JSON, Markdown)
+ * - Full Genesys Cloud Architect Migration Mode (Quelltreu (Strikt) vs. Platzhalter-Modus,
+ *   Holiday-DB Data Action/Data Table/Strict Review, flowIR v1.1 Dual-Mode, ZIP-Paket)
+ * - Full Callflow filters & Read-Only Analysis Suite incl. Graph-Audit
  */
 export function generateInteractiveCallflowHtml(
   diagramTitle: string,
@@ -3804,6 +3905,9 @@ export function generateInteractiveCallflowHtml(
     globalSearchIndex?: GlobalSearchEntry[] | null;
     includeOriginalScripts?: boolean;
     rawScriptsByNumber?: Record<string, string>;
+    initialGenesysProfile?: GenesysProfileKey;
+    genesysSvgPool?: Record<string, { svg: string; graph?: CallflowGraph }>;
+    genesysProfiles?: Partial<Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysProfileSummary>>;
   }
 ): string {
   const effectiveViews: InteractiveCallflowHtmlView[] =
@@ -3832,6 +3936,8 @@ export function generateInteractiveCallflowHtml(
   const initialPathColorMode: PathColorMode = options?.initialPathColorMode || 'semantic';
   const initialHiddenNodeTypes: SmartColorNodeType[] = options?.initialHiddenNodeTypes || [];
   const initialIsolateSubgraph = Boolean(options?.initialIsolateSubgraph);
+  const initialGenesysProfile: GenesysProfileKey =
+    options?.initialGenesysProfile || 'strict-dataAction';
 
   const mainView =
     effectiveViews.find(
@@ -3849,6 +3955,24 @@ export function generateInteractiveCallflowHtml(
   const sanitizedRawScriptsByNumber = hasOriginalScriptsEnabled
     ? options?.rawScriptsByNumber || {}
     : null;
+
+  const serializedGenesysSvgPool: Record<
+    string,
+    { svg: string; graph: { nodes: CallflowNode[]; edges: CallflowEdge[] } | null }
+  > = {};
+  if (options?.genesysSvgPool) {
+    for (const [poolKey, entry] of Object.entries(options.genesysSvgPool)) {
+      serializedGenesysSvgPool[poolKey] = {
+        svg: entry.svg,
+        graph: entry.graph
+          ? {
+              nodes: Array.from(entry.graph.nodes.values()),
+              edges: entry.graph.edges,
+            }
+          : null,
+      };
+    }
+  }
 
   const serializedViews = effectiveViews.map((v) => {
     let serializedNodeDetails: Record<string, InteractiveCallflowHtmlNodeDetail> | null = null;
@@ -3888,10 +4012,13 @@ export function generateInteractiveCallflowHtml(
       genesysArchyYaml: v.genesysArchyYaml || null,
       genesysArchyFilename: v.genesysArchyFilename || null,
       genesysYamlValidation: v.genesysYamlValidation || null,
+      genesysVariants: v.genesysVariants || null,
     };
   });
 
-  const hasGenesysViews = effectiveViews.some((v) => Boolean(v.genesysSvg));
+  const hasGenesysViews = effectiveViews.some((v) =>
+    Boolean(v.genesysSvg || (v.genesysVariants && Object.keys(v.genesysVariants).length > 0))
+  );
 
   const drillTargetsByNodeId: Record<string, { viewKey: string; scriptRef: string }> = {};
   const viewKeyByScriptNumber: Record<string, string> = {};
@@ -3946,6 +4073,9 @@ export function generateInteractiveCallflowHtml(
     includeOriginalScripts: hasOriginalScriptsEnabled,
     rawScriptsByNumber: sanitizedRawScriptsByNumber,
     hasGenesysViews,
+    initialGenesysProfile,
+    genesysSvgPool: serializedGenesysSvgPool,
+    genesysProfiles: options?.genesysProfiles || null,
   }).replace(/<\/script>/gi, '<\\/script>');
 
   const hasMultiViews = effectiveViews.length > 1;
@@ -4153,16 +4283,141 @@ export function generateInteractiveCallflowHtml(
       border-color: var(--err-border);
       color: var(--err-text);
     }
+    .seg-btn.strict-active {
+      background: #059669;
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .seg-btn.placeholder-active {
+      background: #d97706;
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .seg-btn.cyan-active {
+      background: #0891b2;
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .genesys-holiday-btn {
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 6px;
+      border: 1px solid rgba(6, 182, 212, 0.5);
+      background: rgba(6, 182, 212, 0.14);
+      color: #67e8f9;
+      white-space: nowrap;
+    }
+    html.light .genesys-holiday-btn {
+      color: #0e7490;
+      background: rgba(6, 182, 212, 0.12);
+    }
+    .genesys-holiday-btn.strict-review {
+      border-color: var(--border-strong);
+      background: var(--bg-card);
+      color: var(--text-muted);
+    }
     .genesys-drawer {
       display: none;
       border-top: 1px solid var(--border);
       background: var(--bg-card);
       padding: 10px 14px;
-      max-height: 240px;
+      max-height: 320px;
       overflow-y: auto;
     }
     .genesys-drawer.open {
       display: block;
+    }
+    .genesys-banner {
+      font-size: 11px;
+      line-height: 1.45;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      margin-bottom: 8px;
+    }
+    .genesys-banner.amber {
+      background: var(--warn-bg);
+      border-color: var(--warn-border);
+      color: var(--warn-text);
+    }
+    .genesys-banner.cyan {
+      background: rgba(6, 182, 212, 0.12);
+      border-color: rgba(6, 182, 212, 0.45);
+      color: #67e8f9;
+    }
+    html.light .genesys-banner.cyan {
+      color: #155e75;
+    }
+    .genesys-banner.ok {
+      background: var(--ok-bg);
+      border-color: var(--ok-border);
+      color: var(--ok-text);
+    }
+    .genesys-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin: 8px 0;
+    }
+    @media (max-width: 900px) {
+      .genesys-summary-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .genesys-summary-col {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 9px;
+      font-size: 11px;
+      color: var(--text-main);
+    }
+    .genesys-summary-col h4 {
+      margin: 0 0 5px;
+      font-size: 10.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+    }
+    .genesys-summary-col ul {
+      margin: 0;
+      padding-left: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .genesys-finding-group {
+      margin-top: 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .genesys-finding-group-head {
+      padding: 5px 9px;
+      background: var(--bg-input);
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .genesys-finding-row {
+      padding: 6px 9px;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--text-main);
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .genesys-finding-row:last-child {
+      border-bottom: none;
     }
     .genesys-yaml-pre {
       margin: 6px 0 0;
@@ -4176,8 +4431,79 @@ export function generateInteractiveCallflowHtml(
       line-height: 1.5;
       white-space: pre;
       overflow: auto;
-      max-height: 185px;
+      max-height: 220px;
       user-select: text;
+    }
+    .inv-status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10.5px;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    .inv-status-active { background: var(--ok-bg); border-color: var(--ok-border); color: var(--ok-text); }
+    .inv-status-missing { background: var(--err-bg); border-color: var(--err-border); color: var(--err-text); }
+    .inv-status-warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-text); }
+    .inv-status-muted { background: var(--bg-input); border-color: var(--border); color: var(--text-muted); }
+    .inv-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11.5px;
+    }
+    .inv-table th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      background: var(--bg-header);
+      color: var(--text-muted);
+      font-size: 10.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      text-align: left;
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--border-strong);
+      white-space: nowrap;
+    }
+    .inv-table td {
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-main);
+      vertical-align: top;
+    }
+    .inv-table tr.inv-row-main:hover td {
+      background: var(--bg-input);
+    }
+    .inv-detail-cell {
+      background: var(--bg-seg);
+      padding: 10px 14px !important;
+    }
+    .audit-kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .audit-kpi-box {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 8px;
+    }
+    .audit-kpi-val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .audit-kpi-lbl {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: 1px;
     }
     input[type="text"], select, button {
       background: var(--bg-input);
@@ -5578,6 +5904,7 @@ export function generateInteractiveCallflowHtml(
           <button type="button" class="seg-btn" data-density="detailed">Voll-Detail</button>
         </div>
         <button type="button" id="btn-open-schedules" title="Extra Fenster: Übersicht aller Öffnungszeiten, Zeitprofile &amp; SondZeit-Pläne öffnen" style="padding:3px 9px;font-size:11px;font-weight:600;border-radius:6px;border:1px solid var(--amber-border);background:var(--amber-bg);color:var(--amber-text);cursor:pointer;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;flex-shrink:0;">Öffnungszeiten <span id="btn-open-schedules-count" style="font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;"></span></button>
+        <button type="button" id="btn-open-inventory" title="Asset-Inventar (Prompts, Skillsets, Rufnummern, Variablen, DB/APIs, Subflows, Zeiten &amp; Auffälligkeiten) inkl. Excel-, CSV- &amp; JSON-Export" style="padding:3px 9px;font-size:11px;font-weight:600;border-radius:6px;border:1px solid var(--ok-border);background:var(--ok-bg);color:var(--ok-text);cursor:pointer;display:none;align-items:center;gap:5px;white-space:nowrap;flex-shrink:0;">Inventar <span id="btn-open-inventory-count" style="font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;"></span></button>
         <button type="button" id="btn-global-search" title="Globale Suche über alle Skripte, DNIS, Queues &amp; Ansagen (Strg+K)" style="white-space:nowrap;">Suche <span style="opacity:0.65;font-family:ui-monospace,monospace;font-size:10px;">Strg+K</span></button>
         <button id="btn-master-back" style="display:none;" title="Zurück zur Master-Gesamtkarte (Ebene 1)">← Master-Karte</button>
         <button id="btn-welcome-home" style="display:none;" title="Zurück zur leeren Willkommensseite (Ansicht schließen)">Startseite</button>
@@ -5626,19 +5953,42 @@ export function generateInteractiveCallflowHtml(
             <button type="button" id="btn-genesys-yaml-status" style="display:none;padding:3px 8px;font-size:11px;font-weight:600;"></button>
             <span id="genesys-readiness-reasons" style="font-size:11px;color:var(--text-muted);"></span>
             <button type="button" id="btn-genesys-warnings" style="display:none;padding:3px 8px;font-size:11px;" class="amber"></button>
+            <div class="seg-group" id="genesys-mode-group" style="display:none;" title="Quelltreu (Strikt): keine synthetischen Platzhalter. Platzhalter-Modus: Opt-In Kompatibilitäts-Stubs.">
+              <button type="button" class="seg-btn" data-gmode="strict">Quelltreu (Strikt)</button>
+              <button type="button" class="seg-btn" data-gmode="placeholder">Platzhalter-Modus</button>
+            </div>
+            <div id="genesys-holiday-controls" style="display:none;align-items:center;gap:6px;flex-wrap:wrap;">
+              <button type="button" id="btn-genesys-holiday-toggle" class="genesys-holiday-btn" title="Umschalten zwischen Holiday DB: Guarded Standard und Strict Holiday Review">Holiday DB: Guarded Standard</button>
+              <div class="seg-group" id="genesys-holiday-target-group" title="Genesys Ziel-Mechanismus für externe Feiertags-DB">
+                <button type="button" class="seg-btn" data-htarget="dataAction">Data Action</button>
+                <button type="button" class="seg-btn" data-htarget="dataTable">Data Table</button>
+              </div>
+              <button type="button" id="btn-genesys-holiday-mappings" style="display:none;padding:3px 8px;font-size:11px;font-weight:600;" title="Erkannte Feiertags-Variablen &amp; Ziel-Mappings anzeigen">Holiday Mappings</button>
+            </div>
           </div>
           <div class="genesys-subbar-right">
-            <button type="button" id="btn-genesys-yaml-toggle" style="display:none;padding:4px 9px;font-size:11px;font-weight:600;">Archy YAML</button>
+            <button type="button" id="btn-genesys-yaml-toggle" style="display:none;padding:4px 9px;font-size:11px;font-weight:600;">Archy YAML / IR</button>
             <button type="button" id="btn-genesys-yaml-download" style="display:none;padding:4px 9px;font-size:11px;font-weight:600;background:#ea580c;border-color:#f97316;color:#fff;">Download .yaml</button>
+            <button type="button" id="btn-genesys-flowir-download" style="display:none;padding:4px 9px;font-size:11px;font-weight:600;" title="Kanonisches FlowIR v1.1 als JSON herunterladen">flowIR (.json)</button>
+            <button type="button" id="btn-genesys-zip-download" style="display:none;padding:4px 9px;font-size:11px;font-weight:600;background:#059669;border-color:#10b981;color:#fff;" title="Alle Archy-YAMLs, flowIR-Graphen, README &amp; Übersicht für den aktuellen Modus als ZIP-Paket laden">Alle YAML (.zip)</button>
           </div>
         </div>
+        <div id="genesys-holiday-drawer" class="genesys-drawer"></div>
         <div id="genesys-validation-drawer" class="genesys-drawer"></div>
         <div id="genesys-warnings-drawer" class="genesys-drawer"></div>
         <div id="genesys-yaml-drawer" class="genesys-drawer">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-            <span id="genesys-yaml-filename" style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--text-main);font-weight:600;"></span>
-            <button type="button" id="btn-genesys-yaml-copy" style="padding:3px 9px;font-size:11px;">YAML kopieren</button>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <div class="seg-group" id="genesys-preview-mode-group">
+                <button type="button" class="seg-btn genesys-active" data-pmode="genesys">Genesys (Archy YAML)</button>
+                <button type="button" class="seg-btn" data-pmode="avaya">Avaya Mapping (flowIR v1.1)</button>
+              </div>
+              <span id="genesys-yaml-filename" style="font-family:ui-monospace,monospace;font-size:11.5px;color:var(--text-main);font-weight:600;"></span>
+            </div>
+            <button type="button" id="btn-genesys-yaml-copy" style="padding:3px 9px;font-size:11px;">Kopieren</button>
           </div>
+          <div id="genesys-mode-banner"></div>
+          <div id="genesys-mode-report" class="genesys-summary-grid" style="display:none;"></div>
           <pre id="genesys-yaml-code" class="genesys-yaml-pre"></pre>
         </div>
       </div>
@@ -5751,6 +6101,7 @@ export function generateInteractiveCallflowHtml(
           <button class="an-subtab" data-subtab="schedules">Zeiten</button>
           <button class="an-subtab" data-subtab="inventory">Inventar</button>
           <button class="an-subtab" data-subtab="matrix">Matrix</button>
+          <button class="an-subtab" data-subtab="audit">Audit</button>
         </div>
         <div id="an-body" style="display:flex;flex-direction:column;gap:9px;"></div>
       </div>
@@ -5848,6 +6199,43 @@ export function generateInteractiveCallflowHtml(
     </div>
   </div>
 
+  <!-- Asset-Inventar Modal (8 Domänen + Excel 9-Blatt, CSV, JSON) -->
+  <div id="inventory-modal-overlay" class="modal-backdrop">
+    <div class="modal-shell" style="max-width:1240px;">
+      <div class="modal-header">
+        <div>
+          <h2 style="margin:0;font-size:15px;color:var(--text-main);">Asset-Inventar &amp; Migrations-Katalog</h2>
+          <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;font-variant-numeric:tabular-nums;" id="inv-modal-subtitle">Alle Prompts, Skillsets, Rufnummern, Variablen, DB/APIs, Subflows, Zeitpläne &amp; Auffälligkeiten</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+          <div class="seg-group" id="modal-inv-view-group">
+            <button type="button" class="seg-btn active" data-iview="summary">Zusammenfassung</button>
+            <button type="button" class="seg-btn" data-iview="occurrences">Einzelfunde</button>
+          </div>
+          <button type="button" id="btn-close-inventory-modal" style="background:transparent;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:4px 8px;" title="Schließen (Esc)">✕</button>
+        </div>
+      </div>
+      <div style="padding:10px 18px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;gap:8px;background:var(--bg-input);flex-shrink:0;">
+        <input type="text" id="modal-inv-search" placeholder="Prompt, WAV, Skillset, DNIS, Variable, HDX/API, Skript suchen..." style="flex:1;min-width:200px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-main);padding:6px 10px;border-radius:6px;font-size:11.5px;font-family:inherit;outline:none;" />
+        <div class="seg-group" id="modal-inv-status-group">
+          <button type="button" class="seg-btn active" data-istatus="all">Alle</button>
+          <button type="button" class="seg-btn" data-istatus="issues">Nur Auffälligkeiten</button>
+        </div>
+        <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--text-muted);cursor:pointer;white-space:nowrap;">
+          <input type="checkbox" id="chk-inv-export-filtered" />
+          <span>Nur gefilterte exportieren</span>
+        </label>
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap;">
+          <button type="button" id="btn-inv-csv" style="padding:6px 10px;background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-strong);border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">CSV</button>
+          <button type="button" id="btn-inv-json" style="padding:6px 10px;background:var(--bg-card);color:var(--text-main);border:1px solid var(--border-strong);border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;">JSON</button>
+          <button type="button" id="btn-inv-xlsx" style="padding:6px 12px;background:#059669;color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;white-space:nowrap;" title="Formatiertes 9-Blatt Excel-Workbook (.xlsx) herunterladen">Excel (.xlsx)</button>
+        </div>
+      </div>
+      <div id="modal-inv-cats" style="padding:8px 18px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;align-items:center;gap:6px;background:var(--bg-header);flex-shrink:0;"></div>
+      <div id="modal-inv-body" class="modal-body" style="padding:0;"></div>
+    </div>
+  </div>
+
   <!-- Global Search Modal (Strg+K) -->
   <div id="global-search-modal-overlay" class="modal-backdrop">
     <div class="modal-shell" style="max-width:700px;max-height:78vh;">
@@ -5870,18 +6258,57 @@ export function generateInteractiveCallflowHtml(
     const viewsByKey = new Map(PAYLOAD.views.map(v => [v.key, v]));
     let isDarkSurface = PAYLOAD.initialSurface !== 'light';
     let activePlatformMode = 'avaya';
+    let activeGenesysProfile = PAYLOAD.initialGenesysProfile || 'strict-dataAction';
+    let lastStrictHolidayProfile = activeGenesysProfile !== 'placeholder' ? activeGenesysProfile : 'strict-dataAction';
+    let activeGenesysPreviewTab = 'genesys';
+    let showGenesysHintsAndCleanup = false;
     let activeViewKey = PAYLOAD.initialViewKey;
+
+    function getActiveGenesysVariant(viewObj) {
+      if (!viewObj) return null;
+      if (viewObj.genesysVariants) {
+        if (viewObj.genesysVariants[activeGenesysProfile]) {
+          return viewObj.genesysVariants[activeGenesysProfile];
+        }
+        const keys = Object.keys(viewObj.genesysVariants);
+        if (keys.length > 0) return viewObj.genesysVariants[keys[0]];
+      }
+      if (viewObj.genesysSvg) {
+        return {
+          readiness: viewObj.genesysReadiness,
+          readinessReasons: viewObj.genesysReadinessReasons || [],
+          warnings: viewObj.genesysWarnings || [],
+          archyYaml: viewObj.genesysArchyYaml || '',
+          archyFilename: viewObj.genesysArchyFilename || '',
+          yamlValidation: viewObj.genesysYamlValidation || null,
+        };
+      }
+      return null;
+    }
+
     function getViewCacheKey(viewKey) {
-      return activePlatformMode === 'genesys' ? 'genesys::' + viewKey : viewKey;
+      return activePlatformMode === 'genesys' ? ('genesys::' + activeGenesysProfile + '::' + viewKey) : viewKey;
     }
     function getViewActiveGraph(viewObj) {
       if (!viewObj) return { nodes: [], edges: [] };
-      if (activePlatformMode === 'genesys' && viewObj.genesysGraph) return viewObj.genesysGraph;
+      if (activePlatformMode === 'genesys') {
+        const variant = getActiveGenesysVariant(viewObj);
+        if (variant && variant.svgKey && PAYLOAD.genesysSvgPool && PAYLOAD.genesysSvgPool[variant.svgKey] && PAYLOAD.genesysSvgPool[variant.svgKey].graph) {
+          return PAYLOAD.genesysSvgPool[variant.svgKey].graph;
+        }
+        if (viewObj.genesysGraph) return viewObj.genesysGraph;
+      }
       return viewObj.graph || { nodes: [], edges: [] };
     }
     function getViewActiveSvg(viewObj) {
       if (!viewObj) return '';
-      if (activePlatformMode === 'genesys' && viewObj.genesysSvg) return viewObj.genesysSvg;
+      if (activePlatformMode === 'genesys') {
+        const variant = getActiveGenesysVariant(viewObj);
+        if (variant && variant.svgKey && PAYLOAD.genesysSvgPool && PAYLOAD.genesysSvgPool[variant.svgKey] && PAYLOAD.genesysSvgPool[variant.svgKey].svg) {
+          return PAYLOAD.genesysSvgPool[variant.svgKey].svg;
+        }
+        if (viewObj.genesysSvg) return viewObj.genesysSvg;
+      }
       return viewObj.svg || '';
     }
     let GRAPH = getViewActiveGraph(viewsByKey.get(activeViewKey));
@@ -5921,6 +6348,9 @@ export function generateInteractiveCallflowHtml(
     let anInvCategory = 'skillsets';
     let anInvSearch = '';
     let anMatrixSearch = '';
+    let anAuditTab = 'broken';
+    let anAuditSearch = '';
+    let anAuditShowMermaid = false;
 
     let activeNodeId = '';
     let activeEdge = null; // { from, to, label }
@@ -6054,6 +6484,7 @@ export function generateInteractiveCallflowHtml(
     }
 
 ${getEmbeddedOpeningHoursExportRuntimeJs()}
+${getEmbeddedInventoryAndGenesysZipRuntimeJs()}
 
     function switchAsideTab(tabId) {
       activeAsideTab = tabId;
@@ -6498,6 +6929,7 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
         : (PAYLOAD.defaultTargetViewKey || (rawViews[0] && rawViews[0].key) || '');
       const hasMainBtn = Boolean(PAYLOAD.mainViewKey && viewsByKey.has(PAYLOAD.mainViewKey));
       const hasSchedBtn = Boolean(PAYLOAD.analysis && Array.isArray(PAYLOAD.analysis.scheduleRows) && PAYLOAD.analysis.scheduleRows.length > 0);
+      const hasInvBtn = Boolean(PAYLOAD.analysis && PAYLOAD.analysis.inventoryBundle);
 
       const subtitleText = summary.scriptCount > 0
         ? summary.scriptCount + ' Skripte geladen · Das Hauptscript wird für maximale Geschwindigkeit erst bei Klick geladen.'
@@ -6532,6 +6964,7 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
         '<div class="welcome-footer">' +
           '<button type="button" id="welcome-btn-search">Suche (Strg+K)</button>' +
           (hasSchedBtn ? '<button type="button" id="welcome-btn-sched" class="amber">Öffnungszeiten</button>' : '') +
+          (hasInvBtn ? '<button type="button" id="welcome-btn-inv" style="border-color:var(--ok-border);background:var(--ok-bg);color:var(--ok-text);font-weight:600;">Asset-Inventar</button>' : '') +
         '</div>' +
       '</div>';
 
@@ -6552,6 +6985,10 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       const btnSched = document.getElementById('welcome-btn-sched');
       if (btnSched) {
         btnSched.addEventListener('click', () => openSchedulesModal(''));
+      }
+      const btnInv = document.getElementById('welcome-btn-inv');
+      if (btnInv) {
+        btnInv.addEventListener('click', () => openInventoryModal());
       }
 
       const listEl = document.getElementById('welcome-script-list');
@@ -7025,87 +7462,294 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
     const btnGenesysYamlStatus = document.getElementById('btn-genesys-yaml-status');
     const genesysReadinessReasons = document.getElementById('genesys-readiness-reasons');
     const btnGenesysWarnings = document.getElementById('btn-genesys-warnings');
+    const genesysModeGroup = document.getElementById('genesys-mode-group');
+    const genesysHolidayControls = document.getElementById('genesys-holiday-controls');
+    const btnGenesysHolidayToggle = document.getElementById('btn-genesys-holiday-toggle');
+    const genesysHolidayTargetGroup = document.getElementById('genesys-holiday-target-group');
+    const btnGenesysHolidayMappings = document.getElementById('btn-genesys-holiday-mappings');
     const btnGenesysYamlToggle = document.getElementById('btn-genesys-yaml-toggle');
     const btnGenesysYamlDownload = document.getElementById('btn-genesys-yaml-download');
+    const btnGenesysFlowIrDownload = document.getElementById('btn-genesys-flowir-download');
+    const btnGenesysZipDownload = document.getElementById('btn-genesys-zip-download');
+    const genesysHolidayDrawer = document.getElementById('genesys-holiday-drawer');
     const genesysValidationDrawer = document.getElementById('genesys-validation-drawer');
     const genesysWarningsDrawer = document.getElementById('genesys-warnings-drawer');
     const genesysYamlDrawer = document.getElementById('genesys-yaml-drawer');
+    const genesysPreviewModeGroup = document.getElementById('genesys-preview-mode-group');
     const genesysYamlFilename = document.getElementById('genesys-yaml-filename');
+    const genesysModeBanner = document.getElementById('genesys-mode-banner');
+    const genesysModeReport = document.getElementById('genesys-mode-report');
     const genesysYamlCode = document.getElementById('genesys-yaml-code');
     const btnGenesysYamlCopy = document.getElementById('btn-genesys-yaml-copy');
+
+    const GENESYS_FINDING_CAT_ORDER = [
+      'provenance', 'expression_review', 'holiday_logic', 'terminality',
+      'subflow', 'wait_hint', 'reference', 'scope', 'reachability', 'cleanup'
+    ];
+    const GENESYS_FINDING_CAT_LABELS = {
+      provenance: 'Provenance',
+      expression_review: 'Expression Review',
+      holiday_logic: 'Holiday Logic',
+      terminality: 'Terminality',
+      subflow: 'Unloaded Subflows',
+      wait_hint: 'WAIT & Source Hints',
+      reference: 'References',
+      scope: 'Scope',
+      reachability: 'Reachability',
+      cleanup: 'Cleanup / Info',
+    };
+    const GENESYS_WARN_CLASS_LABELS = {
+      actionable_migration: 'Actionable',
+      semantic_review: 'Semantic Review',
+      source_hint: 'Source Hint',
+      source_only_hint: 'Source Hint',
+      informational_cleanup: 'Cleanup',
+    };
+
+    function getActiveGenesysProfileSummary() {
+      if (!PAYLOAD.genesysProfiles) return null;
+      return PAYLOAD.genesysProfiles[activeGenesysProfile] || null;
+    }
+
+    function buildGenesysModeBannerHtml() {
+      if (activeGenesysProfile === 'placeholder') {
+        return '<div class="genesys-banner amber"><strong>Platzhalter-Modus (Opt-In):</strong> Für offene Abhängigkeiten (z.&nbsp;B. externe Feiertags-DB oder ungeladene Subskripte) werden synthetische Kompatibilitäts-Platzhalter erzeugt. Vor produktivem Import im Zielsystem verifizieren.</div>';
+      }
+      if (activeGenesysProfile === 'strict-review') {
+        return '<div class="genesys-banner ok"><strong>Quelltreu (Strikt) · Strict Holiday Review:</strong> Keine synthetischen Platzhalter. Alle externen Feiertags-DB-Variablen und offenen Abhängigkeiten werden transparent als Prüf-Befunde markiert.</div>';
+      }
+      const targetName = activeGenesysProfile === 'strict-dataTable' ? 'Data Table' : 'Data Action';
+      return '<div class="genesys-banner cyan"><strong>Quelltreu (Strikt) · Holiday DB: Guarded Standard (' + targetName + '):</strong> Erkannte Feiertags-DB-Variablen werden deterministisch auf eine Genesys ' + targetName + ' gemappt; alle übrigen offenen Stellen bleiben strikt quelltreu.</div>';
+    }
+
+    function renderGenesysFindingGroupsHtml(findings, isMasterContext) {
+      if (!findings || !findings.length) return '';
+      const byCat = new Map();
+      findings.forEach(function (f) {
+        const c = f.category || 'cleanup';
+        if (!byCat.has(c)) byCat.set(c, []);
+        byCat.get(c).push(f);
+      });
+      const orderedCats = GENESYS_FINDING_CAT_ORDER.filter(function (c) { return byCat.has(c); });
+      byCat.forEach(function (_, k) { if (orderedCats.indexOf(k) < 0) orderedCats.push(k); });
+      return orderedCats.map(function (cat) {
+        const list = byCat.get(cat) || [];
+        const label = GENESYS_FINDING_CAT_LABELS[cat] || cat;
+        const rowsHtml = list.map(function (f) {
+          const sevColor = f.severity === 'error' ? 'var(--err-text)' : f.severity === 'warning' ? 'var(--warn-text)' : 'var(--text-muted)';
+          const wLabel = GENESYS_WARN_CLASS_LABELS[f.warningClass] || f.warningClass || '';
+          const scriptTag = (f.fileName || f.scriptNumber)
+            ? '<span style="font-family:ui-monospace,monospace;font-size:10.5px;color:var(--accent-text);margin-right:6px;">' + escapeHtml(f.fileName || f.scriptNumber) + '</span>'
+            : '';
+          const jumpBtn = (isMasterContext && f.scriptNumber && PAYLOAD.viewKeyByScriptNumber && PAYLOAD.viewKeyByScriptNumber[f.scriptNumber])
+            ? '<button type="button" class="btn-genesys-jump" data-jump-script="' + escapeHtml(f.scriptNumber) + '" style="padding:2px 7px;font-size:10.5px;flex-shrink:0;">Flow öffnen →</button>'
+            : '';
+          return '<div class="genesys-finding-row">'
+            + '<div style="min-width:0;flex:1;">'
+              + '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:2px;">'
+                + scriptTag
+                + '<strong style="color:' + sevColor + ';font-family:ui-monospace,monospace;font-size:10.5px;">[' + escapeHtml(f.code || 'IR') + ']</strong>'
+                + (wLabel ? '<span class="an-tag">' + escapeHtml(wLabel) + '</span>' : '')
+              + '</div>'
+              + '<div>' + escapeHtml(f.message || '') + '</div>'
+              + (f.suggestion ? '<div style="font-size:10.5px;color:var(--text-muted);margin-top:2px;">Empfehlung: ' + escapeHtml(f.suggestion) + '</div>' : '')
+            + '</div>'
+            + jumpBtn
+          + '</div>';
+        }).join('');
+        return '<div class="genesys-finding-group">'
+          + '<div class="genesys-finding-group-head"><span>' + escapeHtml(label) + '</span><span class="an-tag">' + list.length + '</span></div>'
+          + rowsHtml
+        + '</div>';
+      }).join('');
+    }
 
     function renderGenesysSubbar() {
       if (!genesysSubbar) return;
       const viewObj = viewsByKey.get(activeViewKey);
-      if (activePlatformMode !== 'genesys' || activeViewKey === 'welcome' || !viewObj || !viewObj.genesysSvg) {
+      const variant = getActiveGenesysVariant(viewObj);
+      const activeSvgStr = getViewActiveSvg(viewObj);
+      if (activePlatformMode !== 'genesys' || activeViewKey === 'welcome' || !viewObj || !variant || !activeSvgStr) {
         genesysSubbar.classList.remove('open');
+        if (genesysHolidayDrawer) genesysHolidayDrawer.classList.remove('open');
         if (genesysValidationDrawer) genesysValidationDrawer.classList.remove('open');
         if (genesysWarningsDrawer) genesysWarningsDrawer.classList.remove('open');
         if (genesysYamlDrawer) genesysYamlDrawer.classList.remove('open');
         return;
       }
       genesysSubbar.classList.add('open');
+
+      const isStrict = activeGenesysProfile !== 'placeholder';
+      const isHolidayEnabled = activeGenesysProfile === 'strict-dataAction' || activeGenesysProfile === 'strict-dataTable';
+      const holidayTarget = activeGenesysProfile === 'strict-dataTable' ? 'dataTable' : 'dataAction';
+      const hasMultiProfiles = Boolean(viewObj.genesysVariants && Object.keys(viewObj.genesysVariants).length > 1);
+      const isMasterCtx = isMasterViewKey(activeViewKey);
+
       if (genesysFlowLabel) {
         genesysFlowLabel.textContent = 'Genesys Cloud: ' + (viewObj.label || 'Flow');
       }
-      const rLevel = viewObj.genesysReadiness || 'LOW';
+      const rLevel = variant.readiness || viewObj.genesysReadiness || 'LOW';
       if (genesysReadinessBadge) {
         genesysReadinessBadge.textContent = 'Readiness: ' + rLevel;
         genesysReadinessBadge.className = 'genesys-pill ' + (rLevel === 'HIGH' ? 'genesys-badge-high' : rLevel === 'MEDIUM' ? 'genesys-badge-medium' : 'genesys-badge-low');
       }
-      const yamlVal = viewObj.genesysYamlValidation || null;
+
+      // Mode Toggle (Quelltreu (Strikt) vs. Platzhalter-Modus)
+      if (genesysModeGroup) {
+        genesysModeGroup.style.display = hasMultiProfiles ? 'inline-flex' : 'none';
+        genesysModeGroup.querySelectorAll('.seg-btn').forEach(function (b) {
+          const gm = b.getAttribute('data-gmode');
+          b.classList.remove('strict-active', 'placeholder-active', 'active');
+          if (gm === 'strict' && isStrict) b.classList.add('strict-active');
+          if (gm === 'placeholder' && !isStrict) b.classList.add('placeholder-active');
+        });
+      }
+
+      // Holiday-DB Controls (only active in Quelltreu (Strikt))
+      const holidayMappings = variant.holidayMappings || [];
+      if (genesysHolidayControls) {
+        genesysHolidayControls.style.display = (hasMultiProfiles && isStrict) ? 'inline-flex' : 'none';
+      }
+      if (btnGenesysHolidayToggle) {
+        btnGenesysHolidayToggle.classList.toggle('strict-review', !isHolidayEnabled);
+        btnGenesysHolidayToggle.textContent = isHolidayEnabled
+          ? 'Holiday DB: Guarded Standard'
+          : 'Strict Holiday Review';
+      }
+      if (genesysHolidayTargetGroup) {
+        genesysHolidayTargetGroup.style.display = isHolidayEnabled ? 'inline-flex' : 'none';
+        genesysHolidayTargetGroup.querySelectorAll('.seg-btn').forEach(function (b) {
+          b.classList.toggle('cyan-active', b.getAttribute('data-htarget') === holidayTarget);
+        });
+      }
+      if (btnGenesysHolidayMappings) {
+        const showMapBtn = hasMultiProfiles && isStrict && holidayMappings.length > 0;
+        btnGenesysHolidayMappings.style.display = showMapBtn ? 'inline-flex' : 'none';
+        btnGenesysHolidayMappings.textContent = 'Holiday Mappings (' + holidayMappings.length + ')';
+        if (!showMapBtn && genesysHolidayDrawer) genesysHolidayDrawer.classList.remove('open');
+      }
+      if (genesysHolidayDrawer) {
+        if (!isStrict || !holidayMappings.length) {
+          genesysHolidayDrawer.innerHTML = '';
+        } else {
+          genesysHolidayDrawer.innerHTML =
+            '<div style="font-size:11.5px;font-weight:600;color:var(--text-main);margin-bottom:6px;">Erkannte Feiertags-DB-Variablen (' + holidayMappings.length + ') · Aktiver Zielmodus: ' + (isHolidayEnabled ? (holidayTarget === 'dataTable' ? 'Data Table' : 'Data Action') : 'Strict Holiday Review (kein Mapping)') + '</div>'
+            + '<table class="inv-table"><thead><tr><th>Avaya-Variable</th><th>Genesys Ziel-Typ</th><th>Action / Data Table</th><th>Boolean-Variable</th><th>Ersetzter Subflow</th></tr></thead><tbody>'
+            + holidayMappings.map(function (m) {
+                const tLabel = m.lookupTarget === 'dataTable' ? 'Data Table' : m.lookupTarget === 'dataAction' ? 'Data Action' : 'Offen (Review)';
+                return '<tr>'
+                  + '<td style="font-family:ui-monospace,monospace;font-weight:600;">' + escapeHtml(m.variableName || '') + '</td>'
+                  + '<td><span class="inv-status-pill ' + (m.lookupTarget ? 'inv-status-active' : 'inv-status-warn') + '">' + escapeHtml(tLabel) + '</span></td>'
+                  + '<td style="font-family:ui-monospace,monospace;">' + escapeHtml(m.lookupActionOrTable || '—') + '</td>'
+                  + '<td style="font-family:ui-monospace,monospace;">' + escapeHtml(m.booleanVarName || '—') + '</td>'
+                  + '<td style="font-family:ui-monospace,monospace;">' + escapeHtml(m.replacedSubflow || '—') + '</td>'
+                + '</tr>';
+              }).join('')
+            + '</tbody></table>';
+        }
+      }
+
+      // YAML Validation + flowIR v1.1 Findings Drawer
+      const yamlVal = variant.yamlValidation || viewObj.genesysYamlValidation || null;
+      const irFindings = variant.irFindings || [];
+      const openReviewFindings = irFindings.filter(function (f) {
+        return f.warningClass === 'actionable_migration' || f.warningClass === 'semantic_review';
+      });
+      const hintsFindings = irFindings.filter(function (f) {
+        return f.warningClass !== 'actionable_migration' && f.warningClass !== 'semantic_review';
+      });
+
       if (btnGenesysYamlStatus) {
-        if (yamlVal) {
+        if (yamlVal || irFindings.length > 0) {
           btnGenesysYamlStatus.style.display = 'inline-flex';
-          const isOk = Boolean(yamlVal.isValid) && (yamlVal.errorCount || 0) === 0;
+          const isOk = !yamlVal || (Boolean(yamlVal.isValid) && (yamlVal.errorCount || 0) === 0);
           btnGenesysYamlStatus.className = isOk ? 'genesys-yaml-valid' : 'genesys-yaml-invalid';
-          if (isOk) {
-            if (yamlVal.totalScriptCount && yamlVal.totalScriptCount > 1) {
-              btnGenesysYamlStatus.textContent = 'YAML valide (' + (yamlVal.validScriptCount || 0) + '/' + yamlVal.totalScriptCount + ')';
-            } else if ((yamlVal.warningCount || 0) > 0) {
-              btnGenesysYamlStatus.textContent = 'YAML valide · ' + yamlVal.warningCount + (yamlVal.warningCount === 1 ? ' Hinweis' : ' Hinweise');
+          const parts = [];
+          if (yamlVal) {
+            if (isOk) {
+              if (yamlVal.totalScriptCount && yamlVal.totalScriptCount > 1) {
+                parts.push('YAML valide (' + (yamlVal.validScriptCount || 0) + '/' + yamlVal.totalScriptCount + ')');
+              } else {
+                parts.push('YAML valide');
+              }
             } else {
-              btnGenesysYamlStatus.textContent = 'YAML valide';
+              parts.push((yamlVal.errorCount || 0) + ' YAML-Fehler');
             }
-          } else {
-            btnGenesysYamlStatus.textContent = (yamlVal.errorCount || 0) + ' YAML-Fehler';
           }
+          if (openReviewFindings.length > 0) {
+            parts.push(openReviewFindings.length + ' Review');
+          }
+          if (hintsFindings.length > 0) {
+            parts.push(hintsFindings.length + ' Hinweise');
+          }
+          btnGenesysYamlStatus.textContent = parts.join(' · ');
         } else {
           btnGenesysYamlStatus.style.display = 'none';
           if (genesysValidationDrawer) genesysValidationDrawer.classList.remove('open');
         }
       }
+
       if (genesysValidationDrawer) {
-        if (!yamlVal) {
+        if (!yamlVal && irFindings.length === 0) {
           genesysValidationDrawer.innerHTML = '';
         } else {
-          const valErrors = yamlVal.errors || [];
-          const valWarns = yamlVal.warnings || [];
+          const valErrors = (yamlVal && yamlVal.errors) || [];
+          const valWarns = (yamlVal && yamlVal.warnings) || [];
+          let html = buildGenesysModeBannerHtml();
           if (valErrors.length === 0 && valWarns.length === 0) {
-            genesysValidationDrawer.innerHTML = '<div style="font-size:11.5px;padding:4px 0;color:var(--ok-text);font-weight:600;">Archy-YAML Vollprüfung bestanden: Schema-Keys, Einrückung, RefIds &amp; Variablen sind valide.</div>';
+            html += '<div style="font-size:11.5px;padding:4px 0 6px;color:var(--ok-text);font-weight:600;">Archy-YAML Vollprüfung bestanden: Schema-Keys, Einrückung, RefIds &amp; Variablen sind valide.</div>';
           } else {
-            const errHtml = valErrors.map(function (e) {
+            html += valErrors.map(function (e) {
               const prefix = (e.fileName ? escapeHtml(e.fileName) + ' · ' : '') + 'Zeile ' + (e.lineNumber || 1) + ' [' + escapeHtml(e.code || 'ERROR') + ']';
               const sugg = e.suggestion ? '<div style="font-size:10.5px;color:var(--text-muted);margin-top:2px;">Empfehlung: ' + escapeHtml(e.suggestion) + '</div>' : '';
-              return '<div style="font-size:11.5px;padding:5px 0;border-bottom:1px solid var(--border);color:var(--text-main);">'
-                + '<strong style="color:var(--err-text);margin-right:6px;">' + prefix + '</strong>'
-                + escapeHtml(e.message || '') + sugg + '</div>';
+              return '<div style="font-size:11.5px;padding:5px 0;border-bottom:1px solid var(--border);color:var(--text-main);"><strong style="color:var(--err-text);margin-right:6px;">' + prefix + '</strong>' + escapeHtml(e.message || '') + sugg + '</div>';
             }).join('');
-            const warnHtml = valWarns.map(function (w) {
+            html += valWarns.map(function (w) {
               const prefix = (w.fileName ? escapeHtml(w.fileName) + ' · ' : '') + 'Zeile ' + (w.lineNumber || 1) + ' [' + escapeHtml(w.code || 'HINWEIS') + ']';
               const sugg = w.suggestion ? '<div style="font-size:10.5px;color:var(--text-muted);margin-top:2px;">Hinweis: ' + escapeHtml(w.suggestion) + '</div>' : '';
-              return '<div style="font-size:11.5px;padding:5px 0;border-bottom:1px solid var(--border);color:var(--text-main);">'
-                + '<strong style="color:var(--warn-text);margin-right:6px;">' + prefix + '</strong>'
-                + escapeHtml(w.message || '') + sugg + '</div>';
+              return '<div style="font-size:11.5px;padding:5px 0;border-bottom:1px solid var(--border);color:var(--text-main);"><strong style="color:var(--warn-text);margin-right:6px;">' + prefix + '</strong>' + escapeHtml(w.message || '') + sugg + '</div>';
             }).join('');
-            genesysValidationDrawer.innerHTML = errHtml + warnHtml;
           }
+
+          if (openReviewFindings.length > 0) {
+            html += '<div style="margin-top:8px;font-size:11px;font-weight:700;color:var(--warn-text);text-transform:uppercase;letter-spacing:0.04em;">Open Review Signals (flowIR v1.1 · ' + openReviewFindings.length + ')</div>';
+            html += renderGenesysFindingGroupsHtml(openReviewFindings, isMasterCtx);
+          } else if (irFindings.length > 0) {
+            html += '<div style="margin-top:6px;font-size:11px;color:var(--ok-text);font-weight:600;">Keine offenen Review-Signale (Actionable / Semantic Review = 0).</div>';
+          }
+
+          if (hintsFindings.length > 0) {
+            html += '<div style="margin-top:8px;">'
+              + '<button type="button" id="btn-toggle-genesys-hints" style="padding:3px 9px;font-size:11px;font-weight:600;">'
+                + (showGenesysHintsAndCleanup ? '▾ ' : '▸ ') + 'Hints / Cleanup (' + hintsFindings.length + ')'
+              + '</button>'
+              + (showGenesysHintsAndCleanup ? renderGenesysFindingGroupsHtml(hintsFindings, isMasterCtx) : '')
+            + '</div>';
+          }
+
+          genesysValidationDrawer.innerHTML = html;
+          const btnHints = genesysValidationDrawer.querySelector('#btn-toggle-genesys-hints');
+          if (btnHints) {
+            btnHints.addEventListener('click', function () {
+              showGenesysHintsAndCleanup = !showGenesysHintsAndCleanup;
+              renderGenesysSubbar();
+            });
+          }
+          genesysValidationDrawer.querySelectorAll('.btn-genesys-jump').forEach(function (jb) {
+            jb.addEventListener('click', function () {
+              const sc = jb.getAttribute('data-jump-script');
+              if (sc && PAYLOAD.viewKeyByScriptNumber && PAYLOAD.viewKeyByScriptNumber[sc]) {
+                switchView(PAYLOAD.viewKeyByScriptNumber[sc]);
+              }
+            });
+          });
         }
       }
+
       if (genesysReadinessReasons) {
-        genesysReadinessReasons.textContent = (viewObj.genesysReadinessReasons || []).join(' · ');
+        genesysReadinessReasons.textContent = (variant.readinessReasons || viewObj.genesysReadinessReasons || []).join(' · ');
       }
-      const warns = viewObj.genesysWarnings || [];
+      const warns = variant.warnings || viewObj.genesysWarnings || [];
       if (btnGenesysWarnings) {
         if (warns.length > 0) {
           btnGenesysWarnings.style.display = 'inline-flex';
@@ -7123,15 +7767,89 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
             + '</div>';
         }).join('');
       }
-      const hasYaml = Boolean(viewObj.genesysArchyYaml);
-      if (btnGenesysYamlToggle) btnGenesysYamlToggle.style.display = hasYaml ? 'inline-flex' : 'none';
+
+      // Dual-Mode Preview (Genesys Archy YAML <-> Avaya Mapping flowIR v1.1) & Downloads
+      const yamlText = variant.archyYaml || viewObj.genesysArchyYaml || '';
+      const yamlFile = variant.archyFilename || viewObj.genesysArchyFilename || 'flow.yaml';
+      const hasYaml = Boolean(yamlText);
+      const hasAvayaReport = Boolean(variant.avayaReport && variant.avayaReport.renderedCode);
+      const hasFlowIr = Boolean(variant.flowIR);
+      const profileSum = getActiveGenesysProfileSummary();
+      const hasZip = Boolean(profileSum && Array.isArray(profileSum.scripts) && profileSum.scripts.length > 0);
+
+      if (!hasAvayaReport && activeGenesysPreviewTab === 'avaya') {
+        activeGenesysPreviewTab = 'genesys';
+      }
+      if (btnGenesysYamlToggle) btnGenesysYamlToggle.style.display = (hasYaml || hasAvayaReport) ? 'inline-flex' : 'none';
       if (btnGenesysYamlDownload) {
         btnGenesysYamlDownload.style.display = hasYaml ? 'inline-flex' : 'none';
-        btnGenesysYamlDownload.textContent = viewObj.genesysArchyFilename || 'flow.yaml';
+        btnGenesysYamlDownload.textContent = yamlFile;
       }
-      if (genesysYamlFilename) genesysYamlFilename.textContent = viewObj.genesysArchyFilename || 'flow.yaml';
-      if (genesysYamlCode) genesysYamlCode.textContent = viewObj.genesysArchyYaml || '';
-      if (!hasYaml && genesysYamlDrawer) genesysYamlDrawer.classList.remove('open');
+      if (btnGenesysFlowIrDownload) {
+        btnGenesysFlowIrDownload.style.display = hasFlowIr ? 'inline-flex' : 'none';
+      }
+      if (btnGenesysZipDownload) {
+        btnGenesysZipDownload.style.display = hasZip ? 'inline-flex' : 'none';
+        if (hasZip) {
+          btnGenesysZipDownload.textContent = 'Alle YAML (' + profileSum.scripts.length + ') .zip';
+        }
+      }
+
+      if (genesysPreviewModeGroup) {
+        genesysPreviewModeGroup.style.display = hasAvayaReport ? 'inline-flex' : 'none';
+        genesysPreviewModeGroup.querySelectorAll('.seg-btn').forEach(function (b) {
+          const pm = b.getAttribute('data-pmode');
+          b.classList.remove('active', 'genesys-active');
+          if (pm === activeGenesysPreviewTab) {
+            b.classList.add(pm === 'genesys' ? 'genesys-active' : 'active');
+          }
+        });
+      }
+
+      const activeReport = activeGenesysPreviewTab === 'avaya' ? variant.avayaReport : variant.genesysReport;
+      if (genesysYamlFilename) {
+        genesysYamlFilename.textContent = activeGenesysPreviewTab === 'avaya'
+          ? (variant.flowIRFilename || yamlFile.replace(/\\.yaml$/i, '.flowir.txt'))
+          : yamlFile;
+      }
+      if (genesysModeBanner) {
+        genesysModeBanner.innerHTML = buildGenesysModeBannerHtml();
+      }
+      if (genesysModeReport) {
+        if (activeReport && (activeReport.summary.length || activeReport.assumptionsAndOpenPoints.length || activeReport.migrationHints.length)) {
+          genesysModeReport.style.display = 'grid';
+          const renderList = function (arr) {
+            if (!arr || !arr.length) return '<div style="color:var(--text-muted);">Keine offenen Einträge.</div>';
+            return '<ul>' + arr.map(function (it) { return '<li>' + escapeHtml(it) + '</li>'; }).join('') + '</ul>';
+          };
+          genesysModeReport.innerHTML =
+            '<div class="genesys-summary-col"><h4>1. Kurzfazit</h4>' + renderList(activeReport.summary) + '</div>'
+            + '<div class="genesys-summary-col"><h4>2. Annahmen / offene Punkte</h4>' + renderList(activeReport.assumptionsAndOpenPoints) + '</div>'
+            + '<div class="genesys-summary-col"><h4>3. Wichtigste Migrationshinweise</h4>' + renderList(activeReport.migrationHints) + '</div>';
+        } else {
+          genesysModeReport.style.display = 'none';
+          genesysModeReport.innerHTML = '';
+        }
+      }
+      if (genesysYamlCode) {
+        genesysYamlCode.textContent = activeGenesysPreviewTab === 'avaya'
+          ? ((variant.avayaReport && variant.avayaReport.renderedCode) || '')
+          : yamlText;
+      }
+      if (!hasYaml && !hasAvayaReport && genesysYamlDrawer) genesysYamlDrawer.classList.remove('open');
+    }
+
+    function setGenesysProfile(nextProfile) {
+      if (!nextProfile || activeGenesysProfile === nextProfile) return;
+      if (nextProfile !== 'placeholder') {
+        lastStrictHolidayProfile = nextProfile;
+      }
+      activeGenesysProfile = nextProfile;
+      if (activePlatformMode === 'genesys' && activeViewKey !== 'welcome') {
+        switchView(activeViewKey);
+      } else {
+        renderGenesysSubbar();
+      }
     }
 
     function setPlatformMode(nextMode) {
@@ -8434,7 +9152,11 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
         const reg = an ? an.registry : null;
         const ctrl = document.createElement('div');
         ctrl.className = 'card';
+        const hasInvBundle = Boolean(an && an.inventoryBundle);
         ctrl.innerHTML =
+          (hasInvBundle
+            ? '<button type="button" id="btn-an-open-full-inventory" style="width:100%;justify-content:center;margin-bottom:8px;background:var(--ok-bg);border-color:var(--ok-border);color:var(--ok-text);font-weight:700;">Asset-Inventar &amp; Excel-Export öffnen (' + ((an.inventoryBundle.summary && an.inventoryBundle.summary.totalItems) || 0) + ' Assets)</button>'
+            : '') +
           '<input type="text" id="an-inv-search" placeholder="Skillset, Ansage, Variable oder Skript suchen..." value="' + esc(anInvSearch) + '" style="width:100%;margin-bottom:7px;" />' +
           (reg
             ? '<div class="filter-chips" id="an-inv-chips">' +
@@ -8447,6 +9169,8 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
               '</div>'
             : '<div class="muted-note">Knoten-Inventar im aktuellen Diagramm (' + GRAPH.nodes.length + ' Knoten)</div>');
         body.appendChild(ctrl);
+        const btnOpenFullInv = ctrl.querySelector('#btn-an-open-full-inventory');
+        if (btnOpenFullInv) btnOpenFullInv.addEventListener('click', () => openInventoryModal());
         ctrl.querySelector('#an-inv-search').addEventListener('input', e => { anInvSearch = e.target.value; renderAnalysisTab(); });
         ctrl.querySelectorAll('#an-inv-chips .chip').forEach(c => c.addEventListener('click', () => { anInvCategory = c.getAttribute('data-c'); renderAnalysisTab(); }));
 
@@ -8625,6 +9349,166 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
             if (row) jumpToScriptOrNode(row.scriptNumber, row.stepName || row.scriptNumber);
           });
         });
+        return;
+      }
+
+      if (activeAnalysisSubtab === 'audit') {
+        const rep = an ? an.auditReport : null;
+        if (!rep) {
+          const empty = document.createElement('div');
+          empty.className = 'card muted-note';
+          empty.textContent = 'Graph-Audit ist für Multi-Skript Callflows verfügbar.';
+          body.appendChild(empty);
+          return;
+        }
+        const sum = rep.summary || {};
+        const ctrl = document.createElement('div');
+        ctrl.className = 'card';
+        ctrl.innerHTML =
+          '<div class="audit-kpi-grid">'
+            + '<div class="audit-kpi-box"><div class="audit-kpi-val">' + (sum.totalScripts || 0) + '</div><div class="audit-kpi-lbl">Skripte · ' + (sum.totalEdges || 0) + ' Kanten</div></div>'
+            + '<div class="audit-kpi-box"><div class="audit-kpi-val" style="color:' + ((sum.brokenLinkCount || 0) > 0 ? 'var(--err-text)' : 'var(--ok-text)') + ';">' + (sum.brokenLinkCount || 0) + '</div><div class="audit-kpi-lbl">Defekte Links</div></div>'
+            + '<div class="audit-kpi-box"><div class="audit-kpi-val" style="color:' + ((sum.orphanScriptCount || 0) > 0 ? 'var(--warn-text)' : 'var(--ok-text)') + ';">' + (sum.orphanScriptCount || 0) + '</div><div class="audit-kpi-lbl">Waisen · ' + (sum.deadEndScriptCount || 0) + ' Sackgassen</div></div>'
+            + '<div class="audit-kpi-box"><div class="audit-kpi-val" style="color:' + ((sum.circularLoopCount || 0) > 0 ? 'var(--err-text)' : 'var(--text-main)') + ';">' + (sum.circularLoopCount || 0) + '</div><div class="audit-kpi-lbl">Loops · ' + (sum.externalIntegrationCount || 0) + ' Externe</div></div>'
+          + '</div>'
+          + '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:7px;">'
+            + '<button type="button" id="btn-audit-dl-json" style="flex:1;justify-content:center;font-size:11px;font-weight:600;">Report .json</button>'
+            + (an.auditMermaid ? '<button type="button" id="btn-audit-dl-mmd" style="flex:1;justify-content:center;font-size:11px;font-weight:600;">Graph .mmd</button>' : '')
+            + (an.auditMermaid ? '<button type="button" id="btn-audit-toggle-mmd" style="font-size:11px;">' + (anAuditShowMermaid ? 'Mermaid aus' : 'Mermaid') + '</button>' : '')
+          + '</div>'
+          + (anAuditShowMermaid && an.auditMermaid ? '<pre class="genesys-yaml-pre" style="max-height:150px;margin:0 0 8px;">' + esc(an.auditMermaid) + '</pre>' : '')
+          + '<input type="text" id="an-audit-search" placeholder="Skript, Ziel, Loop oder System suchen..." value="' + esc(anAuditSearch) + '" style="width:100%;margin-bottom:7px;" />'
+          + '<div class="filter-chips" id="an-audit-chips">'
+            + '<button class="chip' + (anAuditTab === 'broken' ? ' active' : '') + '" data-at="broken">Defekte Links (' + ((rep.brokenLinks && rep.brokenLinks.length) || 0) + ')</button>'
+            + '<button class="chip' + (anAuditTab === 'orphans' ? ' active' : '') + '" data-at="orphans">Waisen (' + ((rep.orphanScripts && rep.orphanScripts.length) || 0) + ')</button>'
+            + '<button class="chip' + (anAuditTab === 'deadends' ? ' active' : '') + '" data-at="deadends">Sackgassen (' + ((rep.deadEndScripts && rep.deadEndScripts.length) || 0) + ')</button>'
+            + '<button class="chip' + (anAuditTab === 'loops' ? ' active' : '') + '" data-at="loops">Loops (' + ((rep.circularLoops && rep.circularLoops.length) || 0) + ')</button>'
+            + '<button class="chip' + (anAuditTab === 'external' ? ' active' : '') + '" data-at="external">Externe (' + ((rep.externalIntegrations && rep.externalIntegrations.length) || 0) + ')</button>'
+          + '</div>';
+        body.appendChild(ctrl);
+
+        ctrl.querySelector('#an-audit-search').addEventListener('input', e => { anAuditSearch = e.target.value; renderAnalysisTab(); });
+        ctrl.querySelectorAll('#an-audit-chips .chip').forEach(c => c.addEventListener('click', () => { anAuditTab = c.getAttribute('data-at'); renderAnalysisTab(); }));
+        const dlJsonBtn = ctrl.querySelector('#btn-audit-dl-json');
+        if (dlJsonBtn) {
+          dlJsonBtn.addEventListener('click', () => {
+            const blob = new Blob([JSON.stringify(rep, null, 2)], { type: 'application/json;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = 'callflow-audit-report.json';
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          });
+        }
+        const dlMmdBtn = ctrl.querySelector('#btn-audit-dl-mmd');
+        if (dlMmdBtn && an.auditMermaid) {
+          dlMmdBtn.addEventListener('click', () => {
+            const blob = new Blob([an.auditMermaid], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = 'callflow-audit-graph.mmd';
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          });
+        }
+        const tglMmdBtn = ctrl.querySelector('#btn-audit-toggle-mmd');
+        if (tglMmdBtn) {
+          tglMmdBtn.addEventListener('click', () => { anAuditShowMermaid = !anAuditShowMermaid; renderAnalysisTab(); });
+        }
+
+        const q = anAuditSearch.trim().toLowerCase();
+        const resolveAuditScriptJump = (rawKeyOrFile) => {
+          const raw = String(rawKeyOrFile || '').trim();
+          if (!raw) return;
+          if (PAYLOAD.viewKeyByScriptNumber && PAYLOAD.viewKeyByScriptNumber[raw]) {
+            jumpToScriptOrNode(raw, raw);
+            return;
+          }
+          const lower = raw.toLowerCase();
+          if (PAYLOAD.viewKeyByScriptNumber && PAYLOAD.viewKeyByScriptNumber[lower]) {
+            jumpToScriptOrNode(lower, raw);
+            return;
+          }
+          const numMatch = raw.match(/(\\d{2,6})/);
+          if (numMatch && PAYLOAD.viewKeyByScriptNumber && PAYLOAD.viewKeyByScriptNumber[numMatch[1]]) {
+            jumpToScriptOrNode(numMatch[1], numMatch[1]);
+            return;
+          }
+          jumpToScriptOrNode(raw, raw);
+        };
+
+        const appendEmptyAudit = (txt) => {
+          const d = document.createElement('div');
+          d.className = 'card muted-note';
+          d.textContent = txt;
+          body.appendChild(d);
+        };
+
+        if (anAuditTab === 'broken') {
+          const list = (rep.brokenLinks || []).filter(b => !q || (b.sourceFileName + ' ' + b.sourceScriptKey + ' ' + b.targetRaw + ' ' + b.command + ' ' + (b.reason || '')).toLowerCase().includes(q));
+          if (!list.length) { appendEmptyAudit('Keine defekten Links für diesen Filter.'); return; }
+          list.slice(0, 120).forEach(b => {
+            const el = document.createElement('div');
+            el.className = 'an-item';
+            el.innerHTML =
+              '<div class="row-between"><span class="an-item-title">' + esc(b.sourceFileName || b.sourceScriptKey) + '</span><span class="an-tag err">Zeile ' + (b.lineNumber || 1) + '</span></div>'
+              + '<div class="an-item-desc">' + esc(b.command + ' → ' + b.targetRaw) + (b.reason ? ' · ' + esc(b.reason) : '') + '</div>'
+              + '<button class="node-chip"><span>Quellskript öffnen</span><span class="badge">Zeigen →</span></button>';
+            el.querySelector('button').onclick = () => resolveAuditScriptJump(b.sourceScriptKey || b.sourceFileName);
+            body.appendChild(el);
+          });
+        } else if (anAuditTab === 'orphans') {
+          const list = (rep.orphanScripts || []).filter(o => !q || (o.scriptNumber + ' ' + o.scriptName + ' ' + o.fileName).toLowerCase().includes(q));
+          if (!list.length) { appendEmptyAudit('Keine verwaisten Skripte (Waisen) gefunden.'); return; }
+          list.slice(0, 120).forEach(o => {
+            const el = document.createElement('div');
+            el.className = 'an-item';
+            el.innerHTML =
+              '<div class="row-between"><span class="an-item-title">' + esc('[' + o.scriptNumber + '] ' + (o.scriptName || o.fileName)) + '</span><span class="an-tag warn">' + (o.outgoingEdgeCount || 0) + ' Ausgänge</span></div>'
+              + '<div class="an-item-desc">Kein eingehender Verweis aus Main oder einem anderen geladenen Skript.</div>'
+              + '<button class="node-chip"><span>Skript im Callflow öffnen</span><span class="badge">Zeigen →</span></button>';
+            el.querySelector('button').onclick = () => resolveAuditScriptJump(o.scriptNumber || o.scriptKey);
+            body.appendChild(el);
+          });
+        } else if (anAuditTab === 'deadends') {
+          const list = (rep.deadEndScripts || []).filter(d => !q || (d.scriptNumber + ' ' + d.scriptName + ' ' + d.note + ' ' + (d.skillsetQueues || []).join(' ')).toLowerCase().includes(q));
+          if (!list.length) { appendEmptyAudit('Keine Sackgassen-Skripte gefunden.'); return; }
+          list.slice(0, 120).forEach(d => {
+            const el = document.createElement('div');
+            el.className = 'an-item';
+            el.innerHTML =
+              '<div class="row-between"><span class="an-item-title">' + esc('[' + d.scriptNumber + '] ' + (d.scriptName || d.fileName)) + '</span><span class="an-tag ' + (d.hasSkillsetQueue ? 'ok' : 'warn') + '">' + (d.hasSkillsetQueue ? 'Mit Queue' : 'Ohne Ende') + '</span></div>'
+              + '<div class="an-item-desc">' + esc(d.note || '') + '</div>'
+              + '<button class="node-chip"><span>Skript öffnen</span><span class="badge">Zeigen →</span></button>';
+            el.querySelector('button').onclick = () => resolveAuditScriptJump(d.scriptNumber || d.scriptKey);
+            body.appendChild(el);
+          });
+        } else if (anAuditTab === 'loops') {
+          const list = (rep.circularLoops || []).filter(l => !q || (l.cycleFileNames.join(' ') + ' ' + l.cycleKeys.join(' ')).toLowerCase().includes(q));
+          if (!list.length) { appendEmptyAudit('Keine zirkulären Schleifen (Loops) erkannt.'); return; }
+          list.slice(0, 100).forEach(l => {
+            const el = document.createElement('div');
+            el.className = 'an-item';
+            const chain = (l.cycleFileNames && l.cycleFileNames.length ? l.cycleFileNames : l.cycleKeys).join(' → ');
+            el.innerHTML =
+              '<div class="row-between"><span class="an-item-title">Zyklus (' + (l.length || l.cycleKeys.length) + ' Stationen)</span><span class="an-tag err">Loop</span></div>'
+              + '<div class="an-item-desc">' + esc(chain) + '</div>'
+              + '<button class="node-chip"><span>Einstieg des Loops öffnen</span><span class="badge">Zeigen →</span></button>';
+            el.querySelector('button').onclick = () => resolveAuditScriptJump(l.cycleKeys[0]);
+            body.appendChild(el);
+          });
+        } else {
+          const list = (rep.externalIntegrations || []).filter(ex => !q || (ex.system + ' ' + ex.sourceFileName + ' ' + ex.targetRaw + ' ' + ex.category).toLowerCase().includes(q));
+          if (!list.length) { appendEmptyAudit('Keine externen Integrationen (FlixCheck / Oracle) gefunden.'); return; }
+          list.slice(0, 120).forEach(ex => {
+            const el = document.createElement('div');
+            el.className = 'an-item';
+            el.innerHTML =
+              '<div class="row-between"><span class="an-item-title">' + esc(ex.system + ' · ' + ex.targetRaw) + '</span><span class="an-tag">' + esc(ex.category || ex.command) + '</span></div>'
+              + '<div class="an-item-desc">' + esc(ex.sourceFileName) + ' · Zeile ' + (ex.lineNumber || 1) + ' (' + esc(ex.command) + ')</div>'
+              + '<button class="node-chip"><span>Aufrufendes Skript öffnen</span><span class="badge">Zeigen →</span></button>';
+            el.querySelector('button').onclick = () => resolveAuditScriptJump(ex.sourceScriptKey || ex.sourceFileName);
+            body.appendChild(el);
+          });
+        }
       }
     }
 
@@ -9796,6 +10680,279 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       });
     }
 
+    // =========================================================================
+    // ASSET-INVENTAR MODAL (8 DOMÄNEN + EXCEL 9-BLATT, CSV, JSON)
+    // =========================================================================
+    const btnOpenInventory = document.getElementById('btn-open-inventory');
+    const btnOpenInventoryCount = document.getElementById('btn-open-inventory-count');
+    const inventoryOverlay = document.getElementById('inventory-modal-overlay');
+    const btnCloseInventoryModal = document.getElementById('btn-close-inventory-modal');
+    const invModalSubtitle = document.getElementById('inv-modal-subtitle');
+    const modalInvSearch = document.getElementById('modal-inv-search');
+    const modalInvCats = document.getElementById('modal-inv-cats');
+    const modalInvBody = document.getElementById('modal-inv-body');
+    const chkInvExportFiltered = document.getElementById('chk-inv-export-filtered');
+    const btnInvCsv = document.getElementById('btn-inv-csv');
+    const btnInvJson = document.getElementById('btn-inv-json');
+    const btnInvXlsx = document.getElementById('btn-inv-xlsx');
+
+    let invModalCategory = 'all';
+    let invModalStatus = 'all';
+    let invModalView = 'summary';
+    let invModalSearchQuery = '';
+    let invModalExportFiltered = false;
+    let invModalExpandedId = '';
+
+    function getInventoryBundle() {
+      return (PAYLOAD.analysis && PAYLOAD.analysis.inventoryBundle) || null;
+    }
+
+    if (btnOpenInventory && getInventoryBundle()) {
+      const ib = getInventoryBundle();
+      btnOpenInventory.style.display = 'inline-flex';
+      if (btnOpenInventoryCount && ib.summary) {
+        btnOpenInventoryCount.textContent = '(' + (ib.summary.totalItems || 0) + ')';
+      }
+    }
+
+    function invStatusBadgeClass(st) {
+      if (st === 'missing') return 'inv-status-missing';
+      if (st === 'deprecated' || st === 'unused') return 'inv-status-warn';
+      if (st === 'deactivated') return 'inv-status-muted';
+      return 'inv-status-active';
+    }
+
+    function renderInventoryModal() {
+      const fullBundle = getInventoryBundle();
+      if (!fullBundle || !modalInvBody) return;
+      const filtered = invFilterBundle(fullBundle, {
+        category: invModalCategory,
+        status: invModalStatus,
+        searchQuery: invModalSearchQuery,
+      });
+      const sum = fullBundle.summary || {};
+      const fSum = (filtered && filtered.summary) || {};
+      if (invModalSubtitle) {
+        invModalSubtitle.textContent =
+          (fSum.totalItems || 0) + ' / ' + (sum.totalItems || 0) + ' Assets · '
+          + (fSum.totalOccurrences || 0) + ' Fundstellen · '
+          + (sum.totalScripts || 0) + ' Skripte · '
+          + (sum.issueItemCount || 0) + ' Auffälligkeiten';
+      }
+
+      document.querySelectorAll('#modal-inv-view-group .seg-btn').forEach(b => {
+        b.classList.toggle('active', b.getAttribute('data-iview') === invModalView);
+      });
+      document.querySelectorAll('#modal-inv-status-group .seg-btn').forEach(b => {
+        b.classList.toggle('active', b.getAttribute('data-istatus') === invModalStatus);
+      });
+
+      if (modalInvCats) {
+        const catMap = {};
+        (fullBundle.categorySummaries || []).forEach(cs => { catMap[cs.category] = cs; });
+        const allChips = [{ id: 'all', label: 'Alle', count: sum.totalItems || 0 }];
+        INV_CAT_ORDER.forEach(c => {
+          const cs = catMap[c];
+          allChips.push({
+            id: c,
+            label: INV_CAT_LABELS[c] || c,
+            count: cs ? cs.itemCount : 0,
+          });
+        });
+        modalInvCats.innerHTML = allChips.map(ch =>
+          '<button type="button" class="chip' + (invModalCategory === ch.id ? ' active' : '') + '" data-icat="' + esc(ch.id) + '">'
+          + esc(ch.label) + ' <span style="font-family:ui-monospace,monospace;opacity:0.8;">' + ch.count + '</span></button>'
+        ).join('');
+        modalInvCats.querySelectorAll('.chip').forEach(ch => {
+          ch.addEventListener('click', () => {
+            invModalCategory = ch.getAttribute('data-icat') || 'all';
+            invModalExpandedId = '';
+            renderInventoryModal();
+          });
+        });
+      }
+
+      if (!filtered) {
+        modalInvBody.innerHTML = '<div style="padding:28px;text-align:center;color:var(--text-muted);">Kein Inventar verfügbar.</div>';
+        return;
+      }
+
+      if (invModalView === 'summary') {
+        const items = filtered.items || [];
+        if (!items.length) {
+          modalInvBody.innerHTML = '<div style="padding:28px;text-align:center;color:var(--text-muted);">Keine Inventar-Einträge für diesen Filter gefunden.</div>';
+          return;
+        }
+        const occByItem = new Map();
+        (filtered.occurrences || []).forEach(o => {
+          if (!occByItem.has(o.itemId)) occByItem.set(o.itemId, []);
+          occByItem.get(o.itemId).push(o);
+        });
+        const shown = items.slice(0, 400);
+        let rowsHtml = '';
+        shown.forEach(item => {
+          const isExp = invModalExpandedId === item.id;
+          const itemOccs = occByItem.get(item.id) || [];
+          rowsHtml +=
+            '<tr class="inv-row-main" data-itemid="' + esc(item.id) + '" style="cursor:pointer;">'
+              + '<td style="white-space:nowrap;font-weight:600;color:var(--text-muted);">' + (isExp ? '▾ ' : '▸ ') + esc(item.categoryLabel) + '</td>'
+              + '<td style="white-space:nowrap;">' + esc(item.subTypeLabel) + '</td>'
+              + '<td style="font-family:ui-monospace,monospace;font-weight:600;">' + esc(item.name) + '</td>'
+              + '<td><span class="inv-status-pill ' + invStatusBadgeClass(item.status) + '">' + esc(item.statusLabel) + '</span></td>'
+              + '<td style="font-family:ui-monospace,monospace;text-align:right;font-variant-numeric:tabular-nums;">' + (item.occurrenceCount || 0) + '</td>'
+              + '<td style="font-family:ui-monospace,monospace;text-align:right;font-variant-numeric:tabular-nums;">' + (item.scriptCount || 0) + '</td>'
+              + '<td style="max-width:260px;color:var(--text-muted);">' + esc(item.scriptsSummary || '—') + '</td>'
+              + '<td style="max-width:280px;color:var(--text-muted);">' + esc(item.details || '—') + '</td>'
+            + '</tr>';
+          if (isExp) {
+            rowsHtml +=
+              '<tr><td colspan="8" class="inv-detail-cell">'
+                + '<div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--text-main);">Fundstellen (' + itemOccs.length + '):</div>'
+                + (itemOccs.length
+                  ? '<div style="display:flex;flex-direction:column;gap:4px;">'
+                    + itemOccs.slice(0, 30).map(o =>
+                        '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 8px;border:1px solid var(--border);border-radius:5px;background:var(--bg-card);font-size:11px;">'
+                          + '<div style="min-width:0;flex:1;">'
+                            + '<strong>[' + esc(o.scriptNumber) + '] ' + esc(o.scriptName || '') + '</strong>'
+                            + (o.sectionName ? ' · <span style="color:var(--text-muted);">' + esc(o.sectionName) + '</span>' : '')
+                            + (o.lineNumber ? ' · Zeile ' + o.lineNumber : '')
+                            + (o.contextSnippet ? '<div style="font-family:ui-monospace,monospace;font-size:10.5px;color:var(--text-muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(o.contextSnippet) + '</div>' : '')
+                          + '</div>'
+                          + '<button type="button" class="btn-inv-jump" data-jscript="' + esc(o.scriptNumber) + '" data-jname="' + esc(item.name) + '" style="padding:2px 8px;font-size:10.5px;">Skript öffnen →</button>'
+                        + '</div>'
+                      ).join('')
+                    + '</div>'
+                  : '<div style="font-size:11px;color:var(--text-muted);">Keine einzelnen Fundstellen erfasst.</div>')
+              + '</td></tr>';
+          }
+        });
+        modalInvBody.innerHTML =
+          '<table class="inv-table"><thead><tr><th>Kategorie</th><th>Typ</th><th>Name / Ziel</th><th>Status</th><th style="text-align:right;">Funde</th><th style="text-align:right;">Skripte</th><th>Verwendet in</th><th>Details</th></tr></thead><tbody>'
+          + rowsHtml + '</tbody></table>'
+          + (items.length > shown.length ? '<div style="padding:8px 14px;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border);">Zeige ' + shown.length + ' von ' + items.length + ' Einträgen (Export enthält alle).</div>' : '');
+
+        modalInvBody.querySelectorAll('tr.inv-row-main').forEach(tr => {
+          tr.addEventListener('click', () => {
+            const id = tr.getAttribute('data-itemid') || '';
+            invModalExpandedId = invModalExpandedId === id ? '' : id;
+            renderInventoryModal();
+          });
+        });
+        modalInvBody.querySelectorAll('.btn-inv-jump').forEach(jb => {
+          jb.addEventListener('click', e => {
+            e.stopPropagation();
+            const sc = jb.getAttribute('data-jscript');
+            const nm = jb.getAttribute('data-jname');
+            closeInventoryModal();
+            if (sc) jumpToScriptOrNode(sc, nm || sc);
+          });
+        });
+      } else {
+        const occs = filtered.occurrences || [];
+        if (!occs.length) {
+          modalInvBody.innerHTML = '<div style="padding:28px;text-align:center;color:var(--text-muted);">Keine Einzelfunde für diesen Filter gefunden.</div>';
+          return;
+        }
+        const shown = occs.slice(0, 450);
+        modalInvBody.innerHTML =
+          '<table class="inv-table"><thead><tr><th>Kategorie</th><th>Element</th><th>Status</th><th>Skript</th><th>Section / Zeile</th><th>Befehl / Auszug</th><th></th></tr></thead><tbody>'
+          + shown.map(o =>
+              '<tr class="inv-row-main">'
+                + '<td style="white-space:nowrap;color:var(--text-muted);">' + esc(o.categoryLabel) + '</td>'
+                + '<td style="font-family:ui-monospace,monospace;font-weight:600;">' + esc(o.itemName) + '</td>'
+                + '<td><span class="inv-status-pill ' + invStatusBadgeClass(o.status) + '">' + esc(o.statusLabel) + '</span></td>'
+                + '<td style="white-space:nowrap;"><strong>' + esc(o.scriptNumber) + '</strong> ' + esc(o.scriptName || '') + '</td>'
+                + '<td style="white-space:nowrap;color:var(--text-muted);">' + esc((o.sectionName || '—') + (o.lineNumber ? ' · Z.' + o.lineNumber : '')) + '</td>'
+                + '<td style="font-family:ui-monospace,monospace;font-size:10.5px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(o.contextSnippet || o.command || '') + '">' + esc(o.contextSnippet || o.command || '—') + '</td>'
+                + '<td><button type="button" class="btn-inv-jump" data-jscript="' + esc(o.scriptNumber) + '" data-jname="' + esc(o.itemName) + '" style="padding:2px 7px;font-size:10.5px;">→</button></td>'
+              + '</tr>'
+            ).join('')
+          + '</tbody></table>'
+          + (occs.length > shown.length ? '<div style="padding:8px 14px;font-size:11px;color:var(--text-muted);border-top:1px solid var(--border);">Zeige ' + shown.length + ' von ' + occs.length + ' Einzelfunden (Export enthält alle).</div>' : '');
+
+        modalInvBody.querySelectorAll('.btn-inv-jump').forEach(jb => {
+          jb.addEventListener('click', () => {
+            const sc = jb.getAttribute('data-jscript');
+            const nm = jb.getAttribute('data-jname');
+            closeInventoryModal();
+            if (sc) jumpToScriptOrNode(sc, nm || sc);
+          });
+        });
+      }
+    }
+
+    function openInventoryModal() {
+      if (!inventoryOverlay || !getInventoryBundle()) return;
+      inventoryOverlay.style.display = 'flex';
+      renderInventoryModal();
+      if (modalInvSearch) setTimeout(() => modalInvSearch.focus(), 30);
+    }
+
+    function closeInventoryModal() {
+      if (inventoryOverlay) inventoryOverlay.style.display = 'none';
+    }
+
+    function getInventoryExportBundle() {
+      const fullBundle = getInventoryBundle();
+      if (!fullBundle) return null;
+      if (!invModalExportFiltered) return fullBundle;
+      return invFilterBundle(fullBundle, {
+        category: invModalCategory,
+        status: invModalStatus,
+        searchQuery: invModalSearchQuery,
+      });
+    }
+
+    if (btnOpenInventory) btnOpenInventory.addEventListener('click', openInventoryModal);
+    if (btnCloseInventoryModal) btnCloseInventoryModal.addEventListener('click', closeInventoryModal);
+    if (inventoryOverlay) {
+      inventoryOverlay.addEventListener('click', e => {
+        if (e.target === inventoryOverlay) closeInventoryModal();
+      });
+    }
+    document.querySelectorAll('#modal-inv-view-group .seg-btn').forEach(b => {
+      b.addEventListener('click', () => {
+        invModalView = b.getAttribute('data-iview') || 'summary';
+        renderInventoryModal();
+      });
+    });
+    document.querySelectorAll('#modal-inv-status-group .seg-btn').forEach(b => {
+      b.addEventListener('click', () => {
+        invModalStatus = b.getAttribute('data-istatus') || 'all';
+        invModalExpandedId = '';
+        renderInventoryModal();
+      });
+    });
+    if (modalInvSearch) {
+      modalInvSearch.addEventListener('input', () => {
+        invModalSearchQuery = modalInvSearch.value || '';
+        renderInventoryModal();
+      });
+    }
+    if (chkInvExportFiltered) {
+      chkInvExportFiltered.addEventListener('change', () => {
+        invModalExportFiltered = Boolean(chkInvExportFiltered.checked);
+      });
+    }
+    if (btnInvXlsx) {
+      btnInvXlsx.addEventListener('click', () => {
+        const b = getInventoryExportBundle();
+        if (b) downloadInventoryXlsxFromBundle(b, 'Callflow-Inventar.xlsx');
+      });
+    }
+    if (btnInvCsv) {
+      btnInvCsv.addEventListener('click', () => {
+        const b = getInventoryExportBundle();
+        if (b) downloadInventoryCsvFromBundle(b, invModalView === 'occurrences' ? 'occurrences' : 'summary', 'Callflow-Inventar.csv');
+      });
+    }
+    if (btnInvJson) {
+      btnInvJson.addEventListener('click', () => {
+        const b = getInventoryExportBundle();
+        if (b) downloadInventoryJsonFromBundle(b, 'Callflow-Inventar.json');
+      });
+    }
+
     const nodeInfoOverlay = document.getElementById('node-info-modal-overlay');
     const btnNodeInfoBack = document.getElementById('btn-node-info-back');
     const btnCloseNodeInfo = document.getElementById('btn-close-node-info');
@@ -9912,6 +11069,40 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       });
     });
 
+    if (genesysModeGroup) {
+      genesysModeGroup.querySelectorAll('.seg-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const gm = btn.getAttribute('data-gmode');
+          if (gm === 'placeholder') {
+            setGenesysProfile('placeholder');
+          } else {
+            setGenesysProfile(lastStrictHolidayProfile || 'strict-dataAction');
+          }
+        });
+      });
+    }
+    if (btnGenesysHolidayToggle) {
+      btnGenesysHolidayToggle.addEventListener('click', function () {
+        if (activeGenesysProfile === 'strict-review') {
+          setGenesysProfile('strict-dataAction');
+        } else {
+          setGenesysProfile('strict-review');
+        }
+      });
+    }
+    if (genesysHolidayTargetGroup) {
+      genesysHolidayTargetGroup.querySelectorAll('.seg-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          const target = btn.getAttribute('data-htarget');
+          setGenesysProfile(target === 'dataTable' ? 'strict-dataTable' : 'strict-dataAction');
+        });
+      });
+    }
+    if (btnGenesysHolidayMappings && genesysHolidayDrawer) {
+      btnGenesysHolidayMappings.addEventListener('click', function () {
+        genesysHolidayDrawer.classList.toggle('open');
+      });
+    }
     if (btnGenesysYamlStatus && genesysValidationDrawer) {
       btnGenesysYamlStatus.addEventListener('click', function () {
         genesysValidationDrawer.classList.toggle('open');
@@ -9927,30 +11118,73 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
         genesysYamlDrawer.classList.toggle('open');
       });
     }
+    if (genesysPreviewModeGroup) {
+      genesysPreviewModeGroup.querySelectorAll('.seg-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          activeGenesysPreviewTab = btn.getAttribute('data-pmode') === 'avaya' ? 'avaya' : 'genesys';
+          renderGenesysSubbar();
+        });
+      });
+    }
     if (btnGenesysYamlDownload) {
       btnGenesysYamlDownload.addEventListener('click', function () {
         const v = viewsByKey.get(activeViewKey);
-        if (!v || !v.genesysArchyYaml) return;
-        const blob = new Blob([v.genesysArchyYaml], { type: 'application/x-yaml;charset=utf-8' });
+        const variant = getActiveGenesysVariant(v);
+        const yamlContent = (variant && variant.archyYaml) || (v && v.genesysArchyYaml) || '';
+        const yamlName = (variant && variant.archyFilename) || (v && v.genesysArchyFilename) || 'genesys-flow.yaml';
+        if (!yamlContent) return;
+        const blob = new Blob([yamlContent], { type: 'application/x-yaml;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = v.genesysArchyFilename || 'genesys-flow.yaml';
+        a.download = yamlName;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      });
+    }
+    if (btnGenesysFlowIrDownload) {
+      btnGenesysFlowIrDownload.addEventListener('click', function () {
+        const v = viewsByKey.get(activeViewKey);
+        const variant = getActiveGenesysVariant(v);
+        if (!variant || !variant.flowIR) return;
+        const fname = variant.flowIRFilename || 'flowIR.json';
+        const blob = new Blob([JSON.stringify(variant.flowIR, null, 2)], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fname.endsWith('.json') ? fname : (fname + '.json');
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      });
+    }
+    if (btnGenesysZipDownload) {
+      btnGenesysZipDownload.addEventListener('click', function () {
+        const prof = getActiveGenesysProfileSummary();
+        if (!prof) return;
+        downloadGenesysAllYamlsZipFromProfile(prof, 'genesys-archy-flows-' + activeGenesysProfile + '.zip');
       });
     }
     if (btnGenesysYamlCopy) {
       btnGenesysYamlCopy.addEventListener('click', function () {
-        const v = viewsByKey.get(activeViewKey);
-        if (!v || !v.genesysArchyYaml) return;
+        const textToCopy = genesysYamlCode ? (genesysYamlCode.textContent || '') : '';
+        if (!textToCopy) return;
+        const markDone = function () {
+          btnGenesysYamlCopy.textContent = 'Kopiert!';
+          setTimeout(function () { btnGenesysYamlCopy.textContent = 'Kopieren'; }, 1800);
+        };
         if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(v.genesysArchyYaml).then(function () {
-            btnGenesysYamlCopy.textContent = 'Kopiert!';
-            setTimeout(function () { btnGenesysYamlCopy.textContent = 'YAML kopieren'; }, 1800);
-          }).catch(function () {});
+          navigator.clipboard.writeText(textToCopy).then(markDone).catch(function () {});
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = textToCopy;
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand('copy'); markDone(); } catch {}
+          document.body.removeChild(ta);
         }
       });
     }
@@ -10481,8 +11715,9 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       const isGsearchOpen = Boolean(gsearchOverlay && gsearchOverlay.classList.contains('open'));
       const isNodeInfoOpen = Boolean(nodeInfoOverlay && nodeInfoOverlay.style.display === 'flex');
       const isSchedulesOpen = Boolean(schedulesOverlay && schedulesOverlay.style.display === 'flex');
+      const isInventoryOpen = Boolean(inventoryOverlay && inventoryOverlay.style.display === 'flex');
       const isScriptDropdownOpen = Boolean(scriptDropdownPopover && scriptDropdownPopover.style.display === 'flex');
-      const anyModalOpen = isGsearchOpen || isNodeInfoOpen || isSchedulesOpen;
+      const anyModalOpen = isGsearchOpen || isNodeInfoOpen || isSchedulesOpen || isInventoryOpen;
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
@@ -10493,6 +11728,7 @@ ${getEmbeddedOpeningHoursExportRuntimeJs()}
       if (e.key === 'Escape') {
         if (isGsearchOpen) { e.preventDefault(); closeGlobalSearchModal(); return; }
         if (isNodeInfoOpen) { e.preventDefault(); closeNodeInfoModal(); return; }
+        if (isInventoryOpen) { e.preventDefault(); closeInventoryModal(); return; }
         if (isSchedulesOpen) { e.preventDefault(); schedulesOverlay.style.display = 'none'; return; }
         if (isScriptDropdownOpen) { e.preventDefault(); scriptDropdownPopover.style.display = 'none'; return; }
         if (diagramLegendOpen) { e.preventDefault(); setDiagramLegendOpen(false); return; }

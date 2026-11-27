@@ -586,22 +586,40 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
           )}
 
           {onToggleCompatibilityStubMode && (
-            <button
-              type="button"
-              onClick={onToggleCompatibilityStubMode}
-              title={
-                compatibilityStubMode
-                  ? 'Kompatibilitäts-/Stub-Modus aktiv: Unbelegte Variablen werden testweise per getParticipantData/Lookup ergänzt. Klicken für strikte ehrliche Migration.'
-                  : 'Ehrliche Migration (Standard): Keine erfundenen getParticipantData- oder Lookup-Annahmen; fehlende Quellen werden als offene Migrationsfrage markiert. Klicken für optionalen Stub-Modus.'
-              }
-              className={`px-2 py-0.5 rounded border text-[11px] font-medium flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
-                compatibilityStubMode
-                  ? 'bg-amber-500/25 border-amber-400/70 text-amber-100 hover:bg-amber-500/35'
-                  : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800 hover:text-slate-100'
-              }`}
+            <div
+              className="inline-flex rounded border border-slate-700 bg-slate-900 p-0.5"
+              role="group"
+              aria-label="Genesys Migrations-Modus"
             >
-              <span>{compatibilityStubMode ? 'Stub-Modus (Opt-In)' : 'Ehrliche Migration'}</span>
-            </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (compatibilityStubMode) onToggleCompatibilityStubMode();
+                }}
+                title="Quelltreu (Strikt): Exakte 1:1-Übersetzung ohne erfundene getParticipantData- oder Lookup-Platzhalter; fehlende Quellen werden transparent als offene Migrationsfrage markiert."
+                className={`px-2 py-0.5 rounded text-[10.5px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  !compatibilityStubMode
+                    ? 'bg-emerald-600/35 text-emerald-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Quelltreu (Strikt)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!compatibilityStubMode) onToggleCompatibilityStubMode();
+                }}
+                title="Platzhalter-Modus (Opt-In): Ergänzt fehlende Variablen und Subflows automatisch mit synthetischen getParticipantData-/Lookup-Platzhaltern für schnelle Import-Entwürfe."
+                className={`px-2 py-0.5 rounded text-[10.5px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  compatibilityStubMode
+                    ? 'bg-amber-500/30 text-amber-100'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Platzhalter-Modus
+              </button>
+            </div>
           )}
 
           {!compatibilityStubMode && onChangeResolvedTargetConfig && (
@@ -611,7 +629,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                 onClick={handleToggleResolvedTargetMode}
                 title={
                   effectiveResolvedConfig.enabled
-                    ? 'Holiday DB: Guarded Standard aktiv — erkannte externe Feiertags-DB-Muster mit zeitbezogener Prüfung werden via Data Action (Holiday_Service / CheckHolidayByDate) oder Data Table auf Flow.IsExternalHolidayToday (boolean, fail-open false bei failure/timeout) mit terminalem Feiertagszweig gerendert. Alle nicht-holiday Variablen bleiben im Strict Holiday Review / Honest Mode.'
+                    ? 'Holiday DB: Guarded Standard aktiv — erkannte externe Feiertags-DB-Muster mit zeitbezogener Prüfung werden via Data Action (Holiday_Service / CheckHolidayByDate) oder Data Table auf Flow.IsExternalHolidayToday (boolean, fail-open false bei failure/timeout) mit terminalem Feiertagszweig gerendert. Alle anderen Variablen bleiben im Modus Quelltreu (Strikt).'
                     : 'Strict Holiday Review aktiv — zeigt den unveränderten Legacy-Vergleich inkl. Review-Hinweisen. Klicken, um Holiday DB: Guarded Standard zu aktivieren.'
                 }
                 className={`px-2 py-0.5 rounded border text-[11px] font-medium flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
@@ -962,14 +980,14 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                 }`}
               >
                 {compatibilityStubMode
-                  ? 'Compatibility Stub Mode (Opt-In): Synthetische Stubs fuellen fehlende Variablen temporaererweise, waehrend Semantic-Review-Risiken, Fallthroughs und fehlende Subflows sichtbar bleiben.'
+                  ? 'Platzhalter-Modus (Opt-In): Synthetische Platzhalter füllen fehlende Variablen temporär auf, während Semantic-Review-Risiken, Fallthroughs und fehlende Subflows sichtbar bleiben.'
                   : translation.resolvedTargetMode
-                  ? `Holiday DB: Guarded Standard (${
+                  ? `Quelltreu (Strikt) · Holiday DB: Guarded Standard (${
                       effectiveResolvedConfig.holidayLookupTarget === 'dataTable'
                         ? 'Data Table'
                         : 'Data Action'
-                    }): Erkannte externe Feiertags-DB-Quellen mit zeitbezogener Pruefung werden ueber Lookup + kanonisches Boolean (Flow.IsExternalHolidayToday, Fail-Open false bei failure/timeout) mit terminalem Feiertagszweig gerendert. Alle anderen unbelegten Variablen bleiben unveraendert im Review-Modus.`
-                  : 'Strict Holiday Review: Offene Review-Signale sind bewusste Migrationsnachweise (# OFFENE MIGRATIONSFRAGE), keine Konverter-Defekte.'}
+                    }): Erkannte externe Feiertags-DB-Quellen mit zeitbezogener Prüfung werden über Lookup + kanonisches Boolean (Flow.IsExternalHolidayToday, Fail-Open false bei failure/timeout) mit terminalem Feiertagszweig gerendert. Alle anderen unbelegten Variablen bleiben unverändert im Review-Modus.`
+                  : 'Quelltreu (Strikt) · Strict Holiday Review: Offene Review-Signale sind bewusste Migrationsnachweise (# OFFENE MIGRATIONSFRAGE), keine Konverter-Defekte.'}
               </div>
 
               {groupedPrimaryFindings.length > 0 && (
@@ -1265,14 +1283,14 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
           >
             <span>
               {compatibilityStubMode
-                ? 'Kompatibilitäts-/Stub-Modus (Opt-In) aktiv — synthetische getParticipantData-/Lookup-Stubs sind mit # KOMPATIBILITAETS-STUB (OPT-IN) markiert und dienen nur als optionale Review-Hilfe.'
+                ? 'Platzhalter-Modus (Opt-In) aktiv — synthetische getParticipantData-/Lookup-Platzhalter sind im YAML mit # KOMPATIBILITAETS-STUB (OPT-IN) markiert und dienen nur als optionale Review-Hilfe.'
                 : translation.resolvedTargetMode
-                ? `Holiday DB: Guarded Standard (${
+                ? `Quelltreu (Strikt) · Holiday DB: Guarded Standard (${
                     effectiveResolvedConfig.holidayLookupTarget === 'dataTable'
                       ? 'Data Table'
                       : 'Data Action'
                   }) — erkannte externe Feiertags-DB-Quellen mit zeitbezogener Prüfung werden als Lookup (Holiday_Service / CheckHolidayByDate) + kanonisches Boolean (Flow.IsExternalHolidayToday, Fail-Open false bei failure/timeout) mit terminalem Feiertagszweig gerendert; alle nicht-holiday Variablen bleiben im Review-Modus.`
-                : 'Strict Holiday Review — keine erfundenen Datenquellen, Lookups oder Disconnects; offene Punkte sind mit # OFFENE MIGRATIONSFRAGE markiert.'}
+                : 'Quelltreu (Strikt) · Strict Holiday Review — keine erfundenen Datenquellen, Lookups oder Disconnects; offene Punkte sind mit # OFFENE MIGRATIONSFRAGE markiert.'}
             </span>
           </div>
 

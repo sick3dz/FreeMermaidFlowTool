@@ -43,9 +43,9 @@ function walkBinaryImageFiles(dirPath: string, results: string[] = []): string[]
   return results;
 }
 
-describe('offlineAuditEngine — IT Audit, § 23 MarkenG, Brand Hygiene & Repository Privacy (v1.7.1)', () => {
-  it('exposes version 1.7.1, script-analysis proofs 08–10, canonical Holiday DB terminology, and complete § 23 MarkenG notices including Genesys Cloud', () => {
-    expect(AUDIT_APP_VERSION).toBe('1.7.1');
+describe('offlineAuditEngine — IT Audit, § 23 MarkenG, Brand Hygiene & Repository Privacy (v1.7.5)', () => {
+  it('exposes version 1.7.5, script-analysis proofs 08–10, canonical Holiday DB terminology, and complete § 23 MarkenG notices including Genesys Cloud', () => {
+    expect(AUDIT_APP_VERSION).toBe('1.7.5');
 
     const proofNumbers = CODE_INSPECT_AUDIT_PROOFS.map((p) => p.numberLabel);
     expect(proofNumbers).toEqual(['01', '02', '03', '04', '05', '06', '07', '08', '09', '10']);
@@ -75,7 +75,7 @@ describe('offlineAuditEngine — IT Audit, § 23 MarkenG, Brand Hygiene & Reposi
       expect(text).toContain('Oracle Corporation');
       expect(text).toContain('FlixCheck');
       expect(text).toContain('§ 23 MarkenG');
-      expect(text).toContain('1.7.1');
+      expect(text).toContain('1.7.5');
     }
 
     expect(LEGAL_AVAYA_CARDS[0].title).toContain('Genesys Cloud');

@@ -97,8 +97,13 @@ import {
   disconnectEdgeInMermaidCode,
   findNearestMagneticPort,
   generateInteractiveCallflowHtml,
+  GenesysProfileKey,
   hitTestLiveSvgNodeAtClientPoint,
   InteractiveCallflowHtmlAnalysisPayload,
+  InteractiveCallflowHtmlGenesysFinding,
+  InteractiveCallflowHtmlGenesysHolidayMapping,
+  InteractiveCallflowHtmlGenesysProfileSummary,
+  InteractiveCallflowHtmlGenesysVariant,
   InteractiveCallflowHtmlNodeDetail,
   InteractiveCallflowHtmlView,
   LiveSvgDomIndex,
@@ -196,11 +201,18 @@ import { LocalHtmlBuilderLanding } from './components/LocalHtmlBuilderLanding';
 import OnlineProjectLanding from './components/OnlineProjectLanding';
 import { GenesysMigrationBar } from './components/GenesysMigrationBar';
 import {
+  classifyFlowIRFinding,
   GenesysScriptTranslation,
   GenesysWorkspaceTranslation,
+  isRecognizedHolidayDbVarName,
+  normalizeWarningClass,
   ResolvedTargetConfig,
   translateAvayaWorkspaceToGenesys,
 } from './utils/genesysMigrationAnalyzer';
+import {
+  createAuditExportPayloads,
+  runCallflowAudit,
+} from './utils/auditCallflows';
 import {
   getInitialOfflineShellView,
   isRunningAsOfflineSingleFile,
@@ -4650,6 +4662,19 @@ function OfflineStudioApp() {
         await yieldMicroTick();
         if (signal.aborted) return { html: null, aborted: true };
 
+        const inventoryBundle = buildWorkspaceInventory(scriptWorkspace, {
+          diagramTitle: diagramTitle || undefined,
+        });
+        await yieldMicroTick();
+        if (signal.aborted) return { html: null, aborted: true };
+
+        const exportAuditReport = runCallflowAudit(scriptWorkspace);
+        const exportAuditPayloads = createAuditExportPayloads(exportAuditReport, {
+          maxHubScripts: 20,
+        });
+        await yieldMicroTick();
+        if (signal.aborted) return { html: null, aborted: true };
+
         const inspectContext = createWorkspaceInspectContext(
           scriptWorkspace,
           healthFindings,
@@ -4660,6 +4685,9 @@ function OfflineStudioApp() {
           openIssues: scriptWorkspace.issues || [],
           healthFindings,
           scheduleRows,
+          inventoryBundle,
+          auditReport: exportAuditReport,
+          auditMermaid: exportAuditPayloads.mermaidContent,
           registry,
           routingMatrixRows,
           masterScriptNumber: scriptWorkspace.masterScriptNumber,
@@ -4752,49 +4780,179 @@ function OfflineStudioApp() {
           exportScriptLabelMap[canonicalScriptMatchKey(mod.scriptNumber)] = mod.scriptName;
         });
 
-        const exportGenesysTranslation = translateAvayaWorkspaceToGenesys(scriptWorkspace);
-        const primaryGenesysEntryScript =
-          exportGenesysTranslation.scripts.find((s) => s.isEntryPoint) ||
-          exportGenesysTranslation.scripts[0] ||
-          null;
-        const workspaceGenesysWarnings = exportGenesysTranslation.scripts.flatMap((s) =>
-          s.warnings.map((w) => ({
-            code: w.code,
-            severity: w.severity,
-            message: `${s.fileName}: ${w.message}`,
-            lineNumber: w.lineNumber,
-          }))
-        );
-        const workspaceGenesysYamlErrors = exportGenesysTranslation.scripts.flatMap((s) =>
-          s.yamlValidation.errors.map((e) => ({
-            lineNumber: e.lineNumber,
-            code: e.code,
-            message: e.message,
-            suggestion: e.suggestion,
-            fileName: s.archyFilename,
-          }))
-        );
-        const workspaceGenesysYamlWarnings = exportGenesysTranslation.scripts.flatMap((s) =>
-          s.yamlValidation.warnings.map((w) => ({
-            lineNumber: w.lineNumber,
-            code: w.code,
-            message: w.message,
-            suggestion: w.suggestion,
-            fileName: s.archyFilename,
-          }))
-        );
-        const workspaceGenesysYamlValidation: InteractiveCallflowHtmlView['genesysYamlValidation'] =
+        const initialGenesysProfile: GenesysProfileKey = genesysCompatibilityStubMode
+          ? 'placeholder'
+          : !genesysResolvedTargetConfig.enabled
+          ? 'strict-review'
+          : genesysResolvedTargetConfig.holidayLookupTarget === 'dataTable'
+          ? 'strict-dataTable'
+          : 'strict-dataAction';
+
+        const profileConfigs: Array<{
+          key: GenesysProfileKey;
+          modeLabel: string;
+          compatibilityStubMode: boolean;
+          resolvedTargetConfig: ResolvedTargetConfig;
+        }> = [
           {
-            isValid: workspaceGenesysYamlErrors.length === 0,
-            errorCount: workspaceGenesysYamlErrors.length,
-            warningCount: workspaceGenesysYamlWarnings.length,
-            validScriptCount: exportGenesysTranslation.summary.yamlValidScriptCount,
-            totalScriptCount: exportGenesysTranslation.summary.totalScripts,
-            errors: workspaceGenesysYamlErrors,
-            warnings: workspaceGenesysYamlWarnings,
+            key: 'strict-dataAction',
+            modeLabel: 'Quelltreu (Strikt) · Holiday DB (Data Action)',
+            compatibilityStubMode: false,
+            resolvedTargetConfig: {
+              ...(initialGenesysProfile === 'strict-dataAction' ? genesysResolvedTargetConfig : {}),
+              enabled: true,
+              holidayLookupTarget: 'dataAction',
+            },
+          },
+          {
+            key: 'strict-dataTable',
+            modeLabel: 'Quelltreu (Strikt) · Holiday DB (Data Table)',
+            compatibilityStubMode: false,
+            resolvedTargetConfig: {
+              ...(initialGenesysProfile === 'strict-dataTable' ? genesysResolvedTargetConfig : {}),
+              enabled: true,
+              holidayLookupTarget: 'dataTable',
+            },
+          },
+          {
+            key: 'strict-review',
+            modeLabel: 'Quelltreu (Strikt) · Strict Holiday Review',
+            compatibilityStubMode: false,
+            resolvedTargetConfig: {
+              ...(initialGenesysProfile === 'strict-review' ? genesysResolvedTargetConfig : {}),
+              enabled: false,
+              holidayLookupTarget: genesysResolvedTargetConfig.holidayLookupTarget || 'dataAction',
+            },
+          },
+          {
+            key: 'placeholder',
+            modeLabel: 'Platzhalter-Modus (Opt-In)',
+            compatibilityStubMode: true,
+            resolvedTargetConfig: { enabled: false },
+          },
+        ];
+
+        setHtmlExportProgress((prev) =>
+          prev
+            ? {
+                ...prev,
+                currentLabel: 'Genesys Migrations-Profile (Quelltreu / Platzhalter / Holiday-DB) werden erzeugt…',
+              }
+            : prev
+        );
+        await yieldFrame();
+        if (signal.aborted) return { html: null, aborted: true };
+
+        const genesysTranslationsByProfile: Record<GenesysProfileKey, GenesysWorkspaceTranslation> =
+          {} as Record<GenesysProfileKey, GenesysWorkspaceTranslation>;
+        const genesysProfilesSummary: Partial<
+          Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysProfileSummary>
+        > = {};
+
+        for (const profCfg of profileConfigs) {
+          if (signal.aborted) return { html: null, aborted: true };
+          const tr = translateAvayaWorkspaceToGenesys(scriptWorkspace, {
+            precomputedAuditReport: exportAuditReport,
+            compatibilityStubMode: profCfg.compatibilityStubMode,
+            resolvedTargetConfig: profCfg.resolvedTargetConfig,
+          });
+          genesysTranslationsByProfile[profCfg.key] = tr;
+          genesysProfilesSummary[profCfg.key] = {
+            profileKey: profCfg.key,
+            modeLabel: profCfg.modeLabel,
+            generatedAt: tr.generatedAt,
+            overallReadiness: tr.overallReadiness,
+            compatibilityStubMode: profCfg.compatibilityStubMode,
+            resolvedTargetEnabled: Boolean(profCfg.resolvedTargetConfig.enabled),
+            holidayLookupTarget: profCfg.resolvedTargetConfig.holidayLookupTarget || 'dataAction',
+            summary: {
+              totalScripts: tr.summary.totalScripts,
+              lowCount: tr.summary.lowCount,
+              mediumCount: tr.summary.mediumCount,
+              highCount: tr.summary.highCount,
+              commonModuleCount: tr.summary.commonModuleCount,
+              yamlValidScriptCount: tr.summary.yamlValidScriptCount,
+              yamlErrorCount: tr.summary.yamlErrorCount,
+              totalIrFindings: tr.summary.totalIrFindings,
+            },
+            masterGenesysMermaid: tr.masterGenesysMermaid,
+            scripts: tr.scripts.map((s) => ({
+              cleanName: s.cleanName,
+              scriptNumber: s.scriptNumber,
+              fileName: s.fileName,
+              archyFilename: s.archyFilename,
+              archyYaml: s.archyYaml,
+              flowIR: s.flowIR,
+              readiness: s.readiness,
+              readinessReasons: s.readinessReasons,
+              yamlValid: s.yamlValidation.isValid,
+              yamlErrorCount: s.yamlValidation.errors.length,
+            })),
           };
-        let cachedMasterGenesysSvg: string | null = null;
-        let cachedMasterGenesysGraph: CallflowGraph | undefined = undefined;
+          await yieldMicroTick();
+        }
+
+        const collectHolidayMappingsForScripts = (
+          scripts: GenesysScriptTranslation[]
+        ): InteractiveCallflowHtmlGenesysHolidayMapping[] => {
+          const byLower = new Map<string, InteractiveCallflowHtmlGenesysHolidayMapping>();
+          for (const s of scripts) {
+            for (const v of s.flowIR?.variables || []) {
+              if (isRecognizedHolidayDbVarName(v.name)) {
+                const k = v.name.toLowerCase();
+                if (!byLower.has(k)) {
+                  byLower.set(k, { variableName: v.name });
+                }
+              }
+            }
+            for (const rec of s.migrationGraph?.diagnostics?.resolvedHolidayLookups || []) {
+              const k = rec.variableName.toLowerCase();
+              byLower.set(k, {
+                variableName: rec.variableName,
+                lookupTarget: rec.lookupTarget,
+                lookupActionOrTable: rec.targetName,
+                booleanVarName: rec.booleanVarName,
+                replacedSubflow: rec.replacedSubflow,
+              });
+            }
+          }
+          return Array.from(byLower.values()).sort((a, b) =>
+            a.variableName.localeCompare(b.variableName)
+          );
+        };
+
+        const collectIrFindingsForScripts = (
+          scripts: GenesysScriptTranslation[],
+          includeFilePrefix: boolean
+        ): InteractiveCallflowHtmlGenesysFinding[] => {
+          const out: InteractiveCallflowHtmlGenesysFinding[] = [];
+          for (const s of scripts) {
+            for (const f of s.irValidation?.findings || []) {
+              const classified = classifyFlowIRFinding(f.code);
+              const normalizedSeverity: 'error' | 'warning' | 'info' =
+                f.severity === 'ERROR'
+                  ? 'error'
+                  : f.severity === 'WARN'
+                  ? 'warning'
+                  : 'info';
+              out.push({
+                code: f.code,
+                severity: normalizedSeverity,
+                category: f.category || classified.category,
+                warningClass: normalizeWarningClass(f.warningClass || classified.warningClass),
+                message: f.message,
+                nodeId: f.nodeId,
+                suggestion: f.variableName ? `Variable: ${f.variableName}` : undefined,
+                fileName: includeFilePrefix ? s.archyFilename : undefined,
+                scriptNumber: s.scriptNumber,
+                cleanName: s.cleanName,
+              });
+            }
+          }
+          return out;
+        };
+
+        const genesysSvgPool: Record<string, { svg: string; graph?: CallflowGraph }> = {};
 
         const renderGenesysMermaidForExport = async (
           gMermaid: string,
@@ -4846,6 +5004,27 @@ function OfflineStudioApp() {
           }
           return { svg: null, graph: gGraph };
         };
+
+        const ensureGenesysSvgPoolKey = async (
+          gMermaid: string,
+          gTitle: string
+        ): Promise<string | undefined> => {
+          const trimmedG = (gMermaid || '').trim();
+          if (!trimmedG) return undefined;
+          const poolKey = 'g_' + computeFastCacheHash(trimmedG);
+          if (genesysSvgPool[poolKey]) return poolKey;
+          const rendered = await renderGenesysMermaidForExport(trimmedG, gTitle);
+          if (signal.aborted || !rendered.svg) return undefined;
+          genesysSvgPool[poolKey] = {
+            svg: rendered.svg,
+            graph: rendered.graph,
+          };
+          return poolKey;
+        };
+
+        const cachedMasterGenesysVariants: Partial<
+          Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysVariant>
+        > = {};
 
         const views: InteractiveCallflowHtmlView[] = [];
         for (let idx = 0; idx < viewSpecs.length; idx++) {
@@ -5169,65 +5348,135 @@ function OfflineStudioApp() {
               // Keep rendered SVG even if optional node detail precomputation hits an unexpected edge case
             }
 
-            // Render deterministic Genesys Cloud target diagram + metadata for direct Avaya <-> Genesys toggling in Callflow.html
-            let genesysSvg: string | undefined;
-            let genesysGraph: CallflowGraph | undefined;
-            let genesysReadiness: 'LOW' | 'MEDIUM' | 'HIGH' | undefined;
-            let genesysReadinessReasons: string[] | undefined;
-            let genesysWarnings: InteractiveCallflowHtmlView['genesysWarnings'];
-            let genesysArchyYaml: string | undefined;
-            let genesysArchyFilename: string | undefined;
-            let genesysYamlValidation: InteractiveCallflowHtmlView['genesysYamlValidation'];
+            // Render deduplicated Genesys Cloud target variants across all 4 profiles (Quelltreu/Holiday-DB/Platzhalter)
+            let genesysVariants:
+              | Partial<Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysVariant>>
+              | undefined;
 
             try {
               if (spec.key === 'master' || spec.key === 'master:detailed') {
-                if (!cachedMasterGenesysSvg && exportGenesysTranslation.masterGenesysMermaid) {
-                  const rendered = await renderGenesysMermaidForExport(
-                    exportGenesysTranslation.masterGenesysMermaid,
-                    'Genesys Cloud Ziel-Architektur'
-                  );
-                  if (signal.aborted) return { html: null, aborted: true };
-                  cachedMasterGenesysSvg = rendered.svg;
-                  cachedMasterGenesysGraph = rendered.graph;
+                if (Object.keys(cachedMasterGenesysVariants).length === 0) {
+                  for (const profCfg of profileConfigs) {
+                    const tr = genesysTranslationsByProfile[profCfg.key];
+                    if (!tr || !tr.masterGenesysMermaid) continue;
+                    const svgKey = await ensureGenesysSvgPoolKey(
+                      tr.masterGenesysMermaid,
+                      'Genesys Cloud Ziel-Architektur'
+                    );
+                    if (signal.aborted) return { html: null, aborted: true };
+                    if (!svgKey) continue;
+                    const primaryEntry =
+                      tr.scripts.find((s) => s.isEntryPoint) || tr.scripts[0] || null;
+                    const wsYamlErrors = tr.scripts.flatMap((s) =>
+                      s.yamlValidation.errors.map((e) => ({
+                        lineNumber: e.lineNumber,
+                        code: e.code,
+                        message: e.message,
+                        suggestion: e.suggestion,
+                        fileName: s.archyFilename,
+                      }))
+                    );
+                    const wsYamlWarnings = tr.scripts.flatMap((s) =>
+                      s.yamlValidation.warnings.map((w) => ({
+                        lineNumber: w.lineNumber,
+                        code: w.code,
+                        message: w.message,
+                        suggestion: w.suggestion,
+                        fileName: s.archyFilename,
+                      }))
+                    );
+                    cachedMasterGenesysVariants[profCfg.key] = {
+                      svgKey,
+                      readiness: tr.overallReadiness,
+                      readinessReasons: [
+                        `LOW ${tr.summary.lowCount}`,
+                        `MEDIUM ${tr.summary.mediumCount}`,
+                        `HIGH ${tr.summary.highCount}`,
+                        `Common Modules: ${tr.summary.commonModuleCount}`,
+                      ],
+                      warnings: tr.scripts.flatMap((s) =>
+                        s.warnings.map((w) => ({
+                          code: w.code,
+                          severity: w.severity,
+                          message: `${s.fileName}: ${w.message}`,
+                          lineNumber: w.lineNumber,
+                        }))
+                      ),
+                      archyYaml: primaryEntry?.archyYaml,
+                      archyFilename: primaryEntry?.archyFilename,
+                      yamlValidation: {
+                        isValid: wsYamlErrors.length === 0,
+                        errorCount: wsYamlErrors.length,
+                        warningCount: wsYamlWarnings.length,
+                        validScriptCount: tr.summary.yamlValidScriptCount,
+                        totalScriptCount: tr.summary.totalScripts,
+                        errors: wsYamlErrors,
+                        warnings: wsYamlWarnings,
+                      },
+                      flowIR: primaryEntry?.flowIR,
+                      flowIRFilename: primaryEntry ? `${primaryEntry.cleanName}.flowIR.json` : undefined,
+                      irFindings: collectIrFindingsForScripts(tr.scripts, true),
+                      avayaReport: primaryEntry?.avayaView
+                        ? {
+                            mode: 'avaya',
+                            modeLabel: profCfg.modeLabel,
+                            summary: primaryEntry.avayaView.kurzfazit
+                              ? [primaryEntry.avayaView.kurzfazit]
+                              : [],
+                            assumptionsAndOpenPoints:
+                              primaryEntry.avayaView.annahmenUndOffenePunkte || [],
+                            migrationHints: primaryEntry.avayaView.migrationshinweise || [],
+                            renderedCode: primaryEntry.avayaView.ergebnisText || '',
+                          }
+                        : undefined,
+                      genesysReport: primaryEntry?.genesysView
+                        ? {
+                            mode: 'genesys',
+                            modeLabel: profCfg.modeLabel,
+                            summary: primaryEntry.genesysView.kurzfazit
+                              ? [primaryEntry.genesysView.kurzfazit]
+                              : [],
+                            assumptionsAndOpenPoints:
+                              primaryEntry.genesysView.annahmenUndOffenePunkte || [],
+                            migrationHints: primaryEntry.genesysView.migrationshinweise || [],
+                            renderedCode: primaryEntry.genesysView.ergebnisText || '',
+                          }
+                        : undefined,
+                      holidayMappings: collectHolidayMappingsForScripts(tr.scripts),
+                    };
+                  }
                 }
-                if (cachedMasterGenesysSvg) {
-                  genesysSvg = cachedMasterGenesysSvg;
-                  genesysGraph = cachedMasterGenesysGraph;
-                  genesysReadiness = exportGenesysTranslation.overallReadiness;
-                  genesysReadinessReasons = [
-                    `LOW ${exportGenesysTranslation.summary.lowCount}`,
-                    `MEDIUM ${exportGenesysTranslation.summary.mediumCount}`,
-                    `HIGH ${exportGenesysTranslation.summary.highCount}`,
-                    `Common Modules: ${exportGenesysTranslation.summary.commonModuleCount}`,
-                  ];
-                  genesysWarnings = workspaceGenesysWarnings;
-                  genesysArchyYaml = primaryGenesysEntryScript?.archyYaml;
-                  genesysArchyFilename = primaryGenesysEntryScript?.archyFilename;
-                  genesysYamlValidation = workspaceGenesysYamlValidation;
+                if (Object.keys(cachedMasterGenesysVariants).length > 0) {
+                  genesysVariants = cachedMasterGenesysVariants;
                 }
               } else if (spec.scriptNumber) {
-                const gScript =
-                  exportGenesysTranslation.scriptsByKey[canonicalScriptMatchKey(spec.scriptNumber)];
-                if (gScript) {
-                  const rendered = await renderGenesysMermaidForExport(
+                const canonKey = canonicalScriptMatchKey(spec.scriptNumber);
+                const scriptVariants: Partial<
+                  Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysVariant>
+                > = {};
+                for (const profCfg of profileConfigs) {
+                  const tr = genesysTranslationsByProfile[profCfg.key];
+                  const gScript = tr?.scriptsByKey[canonKey];
+                  if (!gScript) continue;
+                  const svgKey = await ensureGenesysSvgPoolKey(
                     gScript.genesysMermaid,
                     `Genesys Flow: ${gScript.cleanName}`
                   );
                   if (signal.aborted) return { html: null, aborted: true };
-                  if (rendered.svg) {
-                    genesysSvg = rendered.svg;
-                    genesysGraph = rendered.graph;
-                    genesysReadiness = gScript.readiness;
-                    genesysReadinessReasons = gScript.readinessReasons;
-                    genesysWarnings = gScript.warnings.map((w) => ({
+                  if (!svgKey) continue;
+                  scriptVariants[profCfg.key] = {
+                    svgKey,
+                    readiness: gScript.readiness,
+                    readinessReasons: gScript.readinessReasons,
+                    warnings: gScript.warnings.map((w) => ({
                       code: w.code,
                       severity: w.severity,
                       message: w.message,
                       lineNumber: w.lineNumber,
-                    }));
-                    genesysArchyYaml = gScript.archyYaml;
-                    genesysArchyFilename = gScript.archyFilename;
-                    genesysYamlValidation = {
+                    })),
+                    archyYaml: gScript.archyYaml,
+                    archyFilename: gScript.archyFilename,
+                    yamlValidation: {
                       isValid: gScript.yamlValidation.isValid,
                       errorCount: gScript.yamlValidation.errors.length,
                       warningCount: gScript.yamlValidation.warnings.length,
@@ -5247,8 +5496,41 @@ function OfflineStudioApp() {
                         suggestion: w.suggestion,
                         fileName: gScript.archyFilename,
                       })),
-                    };
-                  }
+                    },
+                    flowIR: gScript.flowIR,
+                    flowIRFilename: `${gScript.cleanName}.flowIR.json`,
+                    irFindings: collectIrFindingsForScripts([gScript], false),
+                    avayaReport: gScript.avayaView
+                      ? {
+                          mode: 'avaya',
+                          modeLabel: profCfg.modeLabel,
+                          summary: gScript.avayaView.kurzfazit
+                            ? [gScript.avayaView.kurzfazit]
+                            : [],
+                          assumptionsAndOpenPoints:
+                            gScript.avayaView.annahmenUndOffenePunkte || [],
+                          migrationHints: gScript.avayaView.migrationshinweise || [],
+                          renderedCode: gScript.avayaView.ergebnisText || '',
+                        }
+                      : undefined,
+                    genesysReport: gScript.genesysView
+                      ? {
+                          mode: 'genesys',
+                          modeLabel: profCfg.modeLabel,
+                          summary: gScript.genesysView.kurzfazit
+                            ? [gScript.genesysView.kurzfazit]
+                            : [],
+                          assumptionsAndOpenPoints:
+                            gScript.genesysView.annahmenUndOffenePunkte || [],
+                          migrationHints: gScript.genesysView.migrationshinweise || [],
+                          renderedCode: gScript.genesysView.ergebnisText || '',
+                        }
+                      : undefined,
+                    holidayMappings: collectHolidayMappingsForScripts([gScript]),
+                  };
+                }
+                if (Object.keys(scriptVariants).length > 0) {
+                  genesysVariants = scriptVariants;
                 }
               }
             } catch {
@@ -5263,14 +5545,7 @@ function OfflineStudioApp() {
               svg: finalSvg,
               graph: parsedGraph,
               nodeDetails,
-              genesysSvg,
-              genesysGraph,
-              genesysReadiness,
-              genesysReadinessReasons,
-              genesysWarnings,
-              genesysArchyYaml,
-              genesysArchyFilename,
-              genesysYamlValidation,
+              genesysVariants,
             });
           }
 
@@ -5381,6 +5656,9 @@ function OfflineStudioApp() {
               globalSearchIndex: globalSearchEntries,
               includeOriginalScripts: hasAnyRawScripts,
               rawScriptsByNumber: hasAnyRawScripts ? rawScriptsByNumber : undefined,
+              initialGenesysProfile,
+              genesysSvgPool,
+              genesysProfiles: genesysProfilesSummary,
             }
           ),
           fallbackCount,
@@ -5436,6 +5714,8 @@ function OfflineStudioApp() {
       activeNodeOffsets,
       isMasterCompact,
       globalSearchEntries,
+      genesysCompatibilityStubMode,
+      genesysResolvedTargetConfig,
     ]
   );
 

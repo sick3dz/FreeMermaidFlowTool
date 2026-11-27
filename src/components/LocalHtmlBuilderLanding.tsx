@@ -451,64 +451,64 @@ SCHED_1040_1 -->|Innerhalb Öffnungszeit| QUEUE_S_Service`,
     category: 'analysis',
     categoryLabel: 'Migration & FlowIR',
     title: 'Genesys Cloud Architect Migration (FlowIR v1.1)',
-    versionTag: 'Holiday DB: Guarded Standard · Strict Holiday Review · Archy YAML',
-    pipelineLine: 'Avaya-OCL-Analyse → Kanonische FlowIR v1.1 → Validiertes Genesys Archy-YAML',
-    description:
-      'Übersetzt Avaya-AACC-Callflows vollständig lokal im Browser-RAM in strukturiertes Genesys-Cloud-Archy-YAML inklusive Referenzintegrität, Erreichbarkeits-Prüfung und WAIT-source_hint-Trennung.',
-    capabilities: [
-      'Holiday DB: Guarded Standard: Erkannte externe Feiertags-DB-Muster mit zeitbezogener Prüfung → Data Action (Holiday_Service / CheckHolidayByDate) oder Data Table → Flow.IsExternalHolidayToday (Fail-Open false)',
-      'Strict Holiday Review jederzeit umschaltbar; nicht-holiday Variablen werden niemals automatisch in Lookups umgewandelt',
-      'Zweiphasiges WAIT-Audit (aktiver Pfad vs. source_hint) und integrierter Archy-YAML- & FlowIR-Validator',
-    ],
-    facts: [
-      { label: 'Zwischenformat', value: 'Kanonische FlowIR v1.1 + Validator' },
-      { label: 'Zielformat', value: 'Archy YAML (Genesys Cloud Architect)' },
-      { label: 'Cloud-Traffic', value: '0 Byte (100 % offline im RAM)' },
-    ],
-    codeTitle: 'HOLIDAY DB: GUARDED STANDARD (DATA ACTION / DATA TABLE)',
-    code: `const res = translateAvayaWorkspaceToGenesys(workspace, {
+      versionTag: 'Quelltreu (Strikt) / Platzhalter-Modus · Holiday DB · Archy YAML',
+      pipelineLine: 'Avaya-OCL-Analyse → Kanonische FlowIR v1.1 → Validiertes Genesys Archy-YAML',
+      description:
+        'Übersetzt Avaya-AACC-Callflows vollständig lokal im Browser-RAM in strukturiertes Genesys-Cloud-Archy-YAML inklusive umschaltbarem Quelltreu (Strikt) vs. Platzhalter-Modus, Holiday-DB-Steuerung und WAIT-source_hint-Trennung.',
+      capabilities: [
+        'Quelltreu (Strikt) ↔ Platzhalter-Modus sowie Holiday DB: Guarded Standard (Data Action / Data Table) ↔ Strict Holiday Review direkt im Studio und in Callflow.html umschaltbar',
+        'flowIR v1.1 Dual-Mode-Ansicht, gruppierte Open-Review-Befunde, JSON-Download und Offline-Sammel-ZIP für alle Archy-YAMLs',
+        'Zweiphasiges WAIT-Audit (aktiver Pfad vs. source_hint) und integrierter Archy-YAML- & FlowIR-Validator',
+      ],
+      facts: [
+        { label: 'Zwischenformat', value: 'Kanonische FlowIR v1.1 + Validator' },
+        { label: 'Zielformat', value: 'Archy YAML (Genesys Cloud Architect)' },
+        { label: 'Cloud-Traffic', value: '0 Byte (100 % offline im RAM)' },
+      ],
+      codeTitle: 'QUELLTREU (STRIKT) · HOLIDAY DB: GUARDED STANDARD',
+      code: `const res = translateAvayaWorkspaceToGenesys(workspace, {
   compatibilityStubMode: false,
   resolvedTargetConfig: { enabled: true, holidayLookupTarget: 'dataAction' },
 });`,
-  },
-  {
-    id: 'workspace-inventory',
-    category: 'exports',
-    categoryLabel: 'Offline-Exporte',
-    title: 'Workspace Asset Inventory & 9-Blatt Excel-Export (.xlsx / .csv / .json)',
-    versionTag: 'OpenXML ohne Makros · Secret-Redaction',
-    pipelineLine: 'Multi-Skript-Scanner → 8 Asset-Domänen → .xlsx (9 Blätter), .csv & .json',
-    description:
-      'Inventarisiert sämtliche Prompts/WAVs, Skillsets/Agents, DNIS/CDNs, Variablen, DB-/Hist-/FlixCheck-Aufrufe, Zeitpläne und Anomalien vollständig im RAM.',
-    capabilities: [
-      'Erzeugt makrolose 9-Blatt-OpenXML-Dateien (.xlsx) via JSZip, UTF-8-BOM-CSV und strukturiertes JSON',
-      'Weist unbenutzte Variablen, fehlende Subflows, verwaiste Skripte und deaktivierte Ziele direkt aus',
-      'Maskiert erkannte API-Tokens und Secrets automatisch vor Anzeige und Datei-Export',
-    ],
-    facts: [
-      { label: 'Excel-Export', value: '9-Blatt .xlsx (OpenXML, 0 VBA-Makros)' },
-      { label: 'Domänen', value: 'WAVs · Skillsets · DNIS · Vars · APIs · Zeiten' },
-      { label: 'Datenschutz', value: 'Secret-Redaction & 100 % RAM-Verarbeitung' },
-    ],
-    codeTitle: 'IN-MEMORY ASSET-INVENTAR & MULTI-FORMAT-EXPORT',
-    code: `const bundle = buildWorkspaceInventory(workspace, { diagramTitle });
+    },
+    {
+      id: 'workspace-inventory',
+      category: 'exports',
+      categoryLabel: 'Offline-Exporte',
+      title: 'Workspace Asset Inventory & 9-Blatt Excel-Export (.xlsx / .csv / .json)',
+      versionTag: 'OpenXML ohne Makros · Secret-Redaction',
+      pipelineLine: 'Multi-Skript-Scanner → 8 Asset-Domänen → .xlsx (9 Blätter), .csv & .json',
+      description:
+        'Inventarisiert sämtliche Prompts/WAVs, Skillsets/Agents, DNIS/CDNs, Variablen, DB-/Hist-/FlixCheck-Aufrufe, Zeitpläne und Anomalien vollständig im RAM — im Studio und direkt in Callflow.html.',
+      capabilities: [
+        'Erzeugt makrolose 9-Blatt-OpenXML-Dateien (.xlsx), UTF-8-BOM-CSV und strukturiertes JSON auch direkt offline in Callflow.html',
+        'Weist unbenutzte Variablen, fehlende Subflows, verwaiste Skripte und deaktivierte Ziele direkt aus',
+        'Maskiert erkannte API-Tokens und Secrets automatisch vor Anzeige und Datei-Export',
+      ],
+      facts: [
+        { label: 'Excel-Export', value: '9-Blatt .xlsx (OpenXML, 0 VBA-Makros)' },
+        { label: 'Domänen', value: 'WAVs · Skillsets · DNIS · Vars · APIs · Zeiten' },
+        { label: 'Datenschutz', value: 'Secret-Redaction & 100 % RAM-Verarbeitung' },
+      ],
+      codeTitle: 'IN-MEMORY ASSET-INVENTAR & MULTI-FORMAT-EXPORT',
+      code: `const bundle = buildWorkspaceInventory(workspace, { diagramTitle });
 const xlsxBlob = await exportInventoryXlsxBlob(bundle);
 const csvText = exportInventoryCsv(bundle, { mode: 'occurrences' });`,
-  },
-  {
-    id: 'offline-exports',
-    category: 'exports',
-    categoryLabel: 'Offline-Exporte',
-    title: 'Callflow.html-Viewer, CSV/MD & Self-Replicating Export',
-    versionTag: 'DOM-Quine · SVG/PNG · CSV · Markdown',
-    pipelineLine: 'Pre-Baked SVGs / Active DOM → Standalone Callflow.html oder Studio-Snapshot',
-    description:
-      'Erzeugt sämtliche Dokumentations- und Übergabeformate vollständig lokal im Browser — vom schreibgeschützten Fachbereichs-Viewer bis zur neuen Offline-App-Projektkopie.',
-    capabilities: [
-      'Interaktive Callflow.html (Read-Only): Vor-gerenderte 2-Ebenen-SVGs, Pfad-Tracing, Suche & Öffnungszeiten-CSV',
-      'Offline-App Projekt-Kopie (.html): Speichert den aktuellen Arbeitsstand direkt aus file:// als neue Offline-App',
-      'Vektor-SVG, High-DPI PNG (1x/2x/4x), Routing-Matrix (.csv), Öffnungszeiten (.csv) und Abnahme-Doku (.md)',
-    ],
+    },
+    {
+      id: 'offline-exports',
+      category: 'exports',
+      categoryLabel: 'Offline-Exporte',
+      title: 'Callflow.html-Viewer, CSV/MD & Self-Replicating Export',
+      versionTag: 'DOM-Quine · SVG/PNG · CSV · Markdown',
+      pipelineLine: 'Pre-Baked SVGs / Active DOM → Standalone Callflow.html oder Studio-Snapshot',
+      description:
+        'Erzeugt sämtliche Dokumentations- und Übergabeformate vollständig lokal im Browser — vom interaktiven Callflow.html-Viewer mit voller Studio-Parität bis zur neuen Offline-App-Projektkopie.',
+      capabilities: [
+        'Interaktive Callflow.html: 2-Ebenen-SVGs, Genesys-Modus (Quelltreu/Platzhalter/Holiday-DB/flowIR/ZIP), Asset-Inventar-Modal (.xlsx/.csv/.json), Graph-Audit & Öffnungszeiten',
+        'Offline-App Projekt-Kopie (.html): Speichert den aktuellen Arbeitsstand direkt aus file:// als neue Offline-App',
+        'Vektor-SVG, High-DPI PNG (1x/2x/4x), Routing-Matrix (.csv), Öffnungszeiten (.xlsx/.csv) und Abnahme-Doku (.md)',
+      ],
     facts: [
       { label: 'DOM-Quine', value: 'Erstellt neue Offline-App ohne Server-Zugriff' },
       { label: 'XSS-Schutz', value: 'Escape für </script>, <!-- & Unicode-Umbrüche' },

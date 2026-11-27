@@ -2328,12 +2328,12 @@ export function renderAvayaView(ir: FlowIR): RenderedModeReport {
   const validation = validateIR(ir);
   const allFindings = ir.findings.length > 0 ? ir.findings : validation.findings;
   const modeLabel = ir.meta.compatibilityStubMode
-    ? 'Kompatibilitäts-/Stub-Modus (Opt-In)'
+    ? 'Platzhalter-Modus (Opt-In)'
     : ir.meta.resolvedTargetMode
-    ? `Resolved Target (Holiday DB · ${
+    ? `Quelltreu (Strikt) · Holiday DB (${
         ir.meta.holidayLookupTarget === 'dataTable' ? 'Data Table' : 'Data Action'
       })`
-    : 'Ehrliche Migration (Strict Default)';
+    : 'Quelltreu (Strikt) · Strict Holiday Review';
 
   const avayaOpenReviewItems = allFindings.filter((f) => {
     const cls = normalizeWarningClass(f.warningClass || classifyFlowIRFinding(f.code).warningClass);
@@ -2967,12 +2967,12 @@ export function renderGenesysView(ir: FlowIR, preRenderedArchyYaml?: string): Re
   const allFindings = ir.findings.length > 0 ? ir.findings : validation.findings;
   const yaml = preRenderedArchyYaml || renderArchyYamlFromFlowIR(ir);
   const modeLabel = ir.meta.compatibilityStubMode
-    ? 'Kompatibilitäts-/Stub-Modus (Opt-In)'
+    ? 'Platzhalter-Modus (Opt-In)'
     : ir.meta.resolvedTargetMode
-    ? `Resolved Target (Holiday DB · ${
+    ? `Quelltreu (Strikt) · Holiday DB (${
         ir.meta.holidayLookupTarget === 'dataTable' ? 'Data Table' : 'Data Action'
       })`
-    : 'Ehrliche Migration (Strict Default)';
+    : 'Quelltreu (Strikt) · Strict Holiday Review';
 
   const openReviewItems = allFindings.filter((f) => {
     const cls = normalizeWarningClass(f.warningClass || classifyFlowIRFinding(f.code).warningClass);

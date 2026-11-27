@@ -2574,3 +2574,429 @@ export async function exportInventoryXlsxBlob(
 
 // Re-export sheet blob helper if callers build custom sheets
 export { exportXlsxSheetsBlob, exportXlsxSheetsUint8Array };
+
+/**
+ * Self-contained browser JS runtime embedded into standalone Callflow.html
+ * (reuses ohBuildStoreZip, ohXmlEsc, ohColLetter, ohRenderSheetXml, ohMakeBanner,
+ * OH_S, and OH_XL_STYLES_XML from openingHoursExporter) so the offline HTML viewer
+ * exports the identical 9-sheet Asset Inventory .xlsx, UTF-8-BOM .csv, .json,
+ * and full Genesys Archy YAML .zip packages with 0 bytes network traffic.
+ */
+export function getEmbeddedInventoryAndGenesysZipRuntimeJs(): string {
+  return `
+    const INV_CAT_ORDER = [
+      'prompts_wavs', 'skillsets_queues', 'numbers_dnis_cdn', 'variables',
+      'external_db_hist_api', 'subflows_modules', 'schedules_holidays', 'anomalies_references'
+    ];
+    const INV_CAT_LABELS = {
+      prompts_wavs: 'Prompts & WAVs',
+      skillsets_queues: 'Skillsets & Agents',
+      numbers_dnis_cdn: 'Rufnummern & CDNs',
+      variables: 'Variablen',
+      external_db_hist_api: 'Externe DB & APIs',
+      subflows_modules: 'Subflows & Module',
+      schedules_holidays: 'Zeitpläne & Feiertage',
+      anomalies_references: 'Auffälligkeiten'
+    };
+    const INV_CAT_DESCS = {
+      prompts_wavs: 'Prompts, RAN-IDs, .wav/.vox/.mp3 Audiodateien & Wartemusik',
+      skillsets_queues: 'Skillsets, Network Skillsets, Überlauf-Queues & Agent-Ziele',
+      numbers_dnis_cdn: 'Eingehende DNIS, Skript-CDNs, PSTN & Transfer-Rufnummern',
+      variables: 'Globale, lokale & System-Variablen inkl. Lese-/Schreibzugriffen',
+      external_db_hist_api: 'HDX Host-Calls, DB/SQL/ODBC/Hist-Abfragen, FlixCheck & Oracle APIs',
+      subflows_modules: 'Interne EXECUTE/SUBSCRIPT-Aufrufe, Common Modules & fehlende Ziele',
+      schedules_holidays: 'Dienstzeiten, SondZeit-Profile & Feiertagsregeln',
+      anomalies_references: 'Unbenutzte Variablen/Skripte, deaktivierte Ziele & fehlende Links'
+    };
+
+    function invStatusStyle(st) {
+      if (st === 'missing') return OH_S.DAY_CLOSED;
+      if (st === 'deprecated' || st === 'unused') return OH_S.CAT_SONDZEIT;
+      if (st === 'deactivated') return OH_S.DAY_UNKNOWN;
+      return OH_S.DAY_OPEN;
+    }
+
+    function invFilterBundle(bundle, opts) {
+      if (!bundle) return null;
+      const cat = (opts && opts.category) || 'all';
+      const status = (opts && opts.status) || 'all';
+      const q = String((opts && opts.searchQuery) || '').trim().toLowerCase();
+      const items = (bundle.items || []).filter(function(item) {
+        if (cat !== 'all' && item.category !== cat) return false;
+        if (status === 'issues' && item.status === 'active') return false;
+        if (q) {
+          const hay = [
+            item.name, item.categoryLabel, item.subTypeLabel, item.statusLabel,
+            item.details, item.scriptsSummary, item.endpointPath || ''
+          ].join(' ').toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+      const allowedIds = new Set(items.map(function(i) { return i.id; }));
+      const occurrences = (bundle.occurrences || []).filter(function(occ) {
+        if (!allowedIds.has(occ.itemId)) return false;
+        if (q) {
+          const hay = [
+            occ.itemName, occ.categoryLabel, occ.subTypeLabel, occ.statusLabel,
+            occ.scriptNumber, occ.scriptName, occ.sectionName, occ.command, occ.contextSnippet
+          ].join(' ').toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+      const categorySummaries = INV_CAT_ORDER.map(function(c) {
+        const ci = items.filter(function(i) { return i.category === c; });
+        const co = occurrences.filter(function(o) { return o.category === c; });
+        return {
+          category: c,
+          label: INV_CAT_LABELS[c] || c,
+          itemCount: ci.length,
+          occurrenceCount: co.length,
+          issueCount: ci.filter(function(i) { return i.status !== 'active'; }).length
+        };
+      });
+      return {
+        schemaVersion: bundle.schemaVersion,
+        generatedAt: bundle.generatedAt,
+        diagramTitle: bundle.diagramTitle,
+        scriptCount: bundle.scriptCount,
+        stats: {
+          totalItems: items.length,
+          totalOccurrences: occurrences.length,
+          issuesCount: items.filter(function(i) { return i.status !== 'active'; }).length
+        },
+        categorySummaries: categorySummaries,
+        items: items,
+        occurrences: occurrences
+      };
+    }
+
+    function invBuildDomainSheet(cfg) {
+      const w = [22, 30, 15, 11, 10, 30, 46];
+      const b = ohMakeBanner(w.length, cfg.title, cfg.subtitle);
+      const rows = b.rows.slice();
+      rows.push({
+        height: 24,
+        cells: ['Typ', 'Name / Ziel', 'Status', 'Fundstellen', 'Skripte', 'Verwendet in Skripten', 'Details & Kontext']
+          .map(function(h) { return { value: h, style: OH_S.TABLE_HEADER }; })
+      });
+      if (!cfg.items || !cfg.items.length) {
+        rows.push({
+          height: 24,
+          cells: w.map(function(_, i) { return { value: i === 0 ? cfg.emptyMessage : '', style: OH_S.BODY_EVEN }; })
+        });
+      } else {
+        cfg.items.forEach(function(item, idx) {
+          const odd = idx % 2 === 1;
+          const bs = odd ? OH_S.BODY_ODD : OH_S.BODY_EVEN;
+          rows.push({
+            height: 22,
+            cells: [
+              { value: item.subTypeLabel || '', style: bs },
+              { value: item.name || '', style: odd ? OH_S.SCRIPT_ODD : OH_S.SCRIPT_EVEN },
+              { value: item.statusLabel || '', style: invStatusStyle(item.status) },
+              { value: Number(item.occurrenceCount || 0), style: odd ? OH_S.NUM_ODD : OH_S.NUM_EVEN, type: 'num' },
+              { value: Number(item.scriptCount || 0), style: odd ? OH_S.NUM_ODD : OH_S.NUM_EVEN, type: 'num' },
+              { value: item.scriptsSummary || '', style: bs },
+              { value: item.details || '', style: bs }
+            ]
+          });
+        });
+      }
+      return {
+        name: cfg.sheetName, tabColorHex: cfg.tabColorHex, colWidths: w, rows: rows, merges: b.merges,
+        freezeRows: 4, autoFilterRef: 'A4:' + ohColLetter(w.length - 1) + Math.max(4, rows.length)
+      };
+    }
+
+    function downloadInventoryXlsxFromBundle(bundle, filename) {
+      if (!bundle) return;
+      const st = bundle.stats || { totalItems: 0, totalOccurrences: 0, issuesCount: 0 };
+      const titleSuffix = bundle.diagramTitle ? (' — ' + bundle.diagramTitle) : '';
+      const kpi = 'Export: ' + (bundle.generatedAt || '') + '  |  Version: ' + (bundle.schemaVersion || '1.7.1') +
+        '  |  Skripte: ' + (bundle.scriptCount || 0) + '  |  Elemente: ' + st.totalItems +
+        '  |  Fundstellen: ' + st.totalOccurrences + '  |  Auffälligkeiten: ' + st.issuesCount;
+      const byCat = function(c) { return (bundle.items || []).filter(function(i) { return i.category === c; }); };
+      const sheets = [];
+
+      // 1. Übersicht
+      (function() {
+        const w = [32, 18, 18, 18, 48];
+        const b = ohMakeBanner(w.length, 'Callflow Asset-Inventar Übersicht' + titleSuffix, kpi);
+        const rows = b.rows.slice();
+        rows.push({
+          height: 24,
+          cells: ['Inventar-Kategorie', 'Eindeutige Elemente', 'Fundstellen gesamt', 'Auffälligkeiten', 'Abgedeckte Inhalte']
+            .map(function(h) { return { value: h, style: OH_S.TABLE_HEADER }; })
+        });
+        (bundle.categorySummaries || []).forEach(function(s, idx) {
+          const odd = idx % 2 === 1;
+          const bs = odd ? OH_S.BODY_ODD : OH_S.BODY_EVEN;
+          rows.push({
+            height: 22,
+            cells: [
+              { value: s.label || s.category, style: odd ? OH_S.SCRIPT_ODD : OH_S.SCRIPT_EVEN },
+              { value: Number(s.itemCount || 0), style: odd ? OH_S.NUM_ODD : OH_S.NUM_EVEN, type: 'num' },
+              { value: Number(s.occurrenceCount || 0), style: odd ? OH_S.NUM_ODD : OH_S.NUM_EVEN, type: 'num' },
+              { value: Number(s.issueCount || 0), style: s.issueCount > 0 ? OH_S.CAT_SONDZEIT : (odd ? OH_S.NUM_ODD : OH_S.NUM_EVEN), type: 'num' },
+              { value: INV_CAT_DESCS[s.category] || '', style: bs }
+            ]
+          });
+        });
+        sheets.push({
+          name: 'Übersicht', tabColorHex: '0F172A', colWidths: w, rows: rows, merges: b.merges,
+          freezeRows: 4, autoFilterRef: 'A4:' + ohColLetter(w.length - 1) + Math.max(4, rows.length)
+        });
+      })();
+
+      // 2..4 Domain Sheets
+      sheets.push(invBuildDomainSheet({
+        sheetName: 'Prompts & WAVs', tabColorHex: '0284C7',
+        title: 'Prompts, RAN-IDs & Audio-Dateien (.wav)' + titleSuffix, subtitle: kpi,
+        items: byCat('prompts_wavs'), emptyMessage: 'Keine Prompts, RAN-IDs oder Audio-Dateien erkannt.'
+      }));
+      sheets.push(invBuildDomainSheet({
+        sheetName: 'Skillsets & Agents', tabColorHex: '059669',
+        title: 'Skillsets, Warteschlangen, Überläufe & Agents' + titleSuffix, subtitle: kpi,
+        items: byCat('skillsets_queues'), emptyMessage: 'Keine Skillsets, Queues oder Agent-Ziele erkannt.'
+      }));
+      sheets.push(invBuildDomainSheet({
+        sheetName: 'Rufnummern & CDNs', tabColorHex: '4F46E5',
+        title: 'Rufnummern, DNIS, CDNs & Transfer-Ziele' + titleSuffix, subtitle: kpi,
+        items: byCat('numbers_dnis_cdn'), emptyMessage: 'Keine Rufnummern, DNIS oder CDNs erkannt.'
+      }));
+
+      // 5. Variablen
+      (function() {
+        const vars = byCat('variables');
+        const w = [22, 28, 16, 11, 11, 11, 30, 44];
+        const b = ohMakeBanner(w.length, 'Variablen & System-Kontext (Lese-/Schreibzugriffe)' + titleSuffix, kpi);
+        const rows = b.rows.slice();
+        rows.push({
+          height: 24,
+          cells: ['Typ', 'Variablenname', 'Status', 'Schreiben', 'Lesen', 'Skripte', 'Verwendet in Skripten', 'Initialwerte & Hinweise']
+            .map(function(h) { return { value: h, style: OH_S.TABLE_HEADER }; })
+        });
+        if (!vars.length) {
+          rows.push({
+            height: 24,
+            cells: w.map(function(_, i) { return { value: i === 0 ? 'Keine Variablen oder System-Kontextwerte erkannt.' : '', style: OH_S.BODY_EVEN }; })
+          });
+        } else {
+          vars.forEach(function(v, idx) {
+            const odd = idx % 2 === 1;
+            const bs = odd ? OH_S.BODY_ODD : OH_S.BODY_EVEN;
+            rows.push({
+              height: 22,
+              cells: [
+                { value: v.subTypeLabel || '', style: bs },
+                { value: v.name || '', style: odd ? OH_S.SCRIPT_ODD : OH_S.SCRIPT_EVEN },
+                { value: v.statusLabel || '', style: invStatusStyle(v.status) },
+                { value: Number(v.writeCount || 0), style: odd ? OH_S.NUM_ODD : OH_S.NUM_EVEN, type: 'num' },
+                { value: Number(v.readCount || 0), style: odd ? OH_S.NUM_ODD : OH_S.NUM_EVEN, type: 'num' },
+                { value: Number(v.scriptCount || 0), style: odd ? OH_S.NUM_ODD : OH_S.NUM_EVEN, type: 'num' },
+                { value: v.scriptsSummary || '', style: bs },
+                { value: v.details || '', style: bs }
+              ]
+            });
+          });
+        }
+        sheets.push({
+          name: 'Variablen', tabColorHex: '7C3AED', colWidths: w, rows: rows, merges: b.merges,
+          freezeRows: 4, autoFilterRef: 'A4:' + ohColLetter(w.length - 1) + Math.max(4, rows.length)
+        });
+      })();
+
+      // 6..8 Domain Sheets
+      sheets.push(invBuildDomainSheet({
+        sheetName: 'Externe DB & APIs', tabColorHex: 'D97706',
+        title: 'Externe DB-, History-, HDX- & API-Aufrufe' + titleSuffix, subtitle: kpi,
+        items: byCat('external_db_hist_api'), emptyMessage: 'Keine externen DB-, Hist-, HDX- oder API-Aufrufe erkannt.'
+      }));
+      sheets.push(invBuildDomainSheet({
+        sheetName: 'Subflows & Zeitpläne', tabColorHex: '0D9488',
+        title: 'Subflows, Common Modules, Zeitpläne & Feiertage' + titleSuffix, subtitle: kpi,
+        items: byCat('subflows_modules').concat(byCat('schedules_holidays')),
+        emptyMessage: 'Keine Subflows, Module, Zeitpläne oder Feiertagsregeln erkannt.'
+      }));
+      sheets.push(invBuildDomainSheet({
+        sheetName: 'Auffälligkeiten', tabColorHex: 'DC2626',
+        title: 'Unbenutzte, deaktivierte & fehlende Referenzen' + titleSuffix, subtitle: kpi,
+        items: byCat('anomalies_references'), emptyMessage: 'Keine unbenutzten, deaktivierten oder fehlenden Referenzen erkannt.'
+      }));
+
+      // 9. Fundstellen-Details
+      (function() {
+        const occs = bundle.occurrences || [];
+        const w = [22, 22, 28, 14, 15, 24, 22, 9, 18, 46];
+        const b = ohMakeBanner(
+          w.length,
+          'Fundstellen-Details (Skript · Section · Zeilennummer)' + titleSuffix,
+          occs.length + ' exakte Vorkommen über ' + (bundle.scriptCount || 0) + ' geladene Skripte'
+        );
+        const rows = b.rows.slice();
+        rows.push({
+          height: 24,
+          cells: ['Kategorie', 'Typ', 'Element / Name', 'Status', 'Skript-Nr.', 'Skript-Name', 'Section / Bereich', 'Zeile', 'Befehl', 'Quelltext-Auszug (bereinigt)']
+            .map(function(h) { return { value: h, style: OH_S.TABLE_HEADER }; })
+        });
+        if (!occs.length) {
+          rows.push({
+            height: 24,
+            cells: w.map(function(_, i) { return { value: i === 0 ? 'Keine Fundstellen im aktuellen Workspace vorhanden.' : '', style: OH_S.BODY_EVEN }; })
+          });
+        } else {
+          occs.forEach(function(occ, idx) {
+            const odd = idx % 2 === 1;
+            const bs = odd ? OH_S.BODY_ODD : OH_S.BODY_EVEN;
+            rows.push({
+              height: 21,
+              cells: [
+                { value: occ.categoryLabel || '', style: bs },
+                { value: occ.subTypeLabel || '', style: bs },
+                { value: occ.itemName || '', style: odd ? OH_S.SCRIPT_ODD : OH_S.SCRIPT_EVEN },
+                { value: occ.statusLabel || '', style: invStatusStyle(occ.status) },
+                { value: occ.scriptNumber || '', style: odd ? OH_S.SCRIPT_ODD : OH_S.SCRIPT_EVEN },
+                { value: occ.scriptName || '', style: bs },
+                { value: occ.sectionName || '', style: bs },
+                { value: Number(occ.lineNumber || 0), style: odd ? OH_S.NUM_ODD : OH_S.NUM_EVEN, type: 'num' },
+                { value: occ.command || '', style: bs },
+                { value: occ.contextSnippet || '', style: bs }
+              ]
+            });
+          });
+        }
+        sheets.push({
+          name: 'Fundstellen-Details', tabColorHex: '334155', colWidths: w, rows: rows, merges: b.merges,
+          freezeRows: 4, autoFilterRef: 'A4:' + ohColLetter(w.length - 1) + Math.max(4, rows.length)
+        });
+      })();
+
+      const files = {};
+      files['[Content_Types].xml'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+        '<Default Extension="xml" ContentType="application/xml"/>' +
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+        sheets.map(function(_, i) { return '<Override PartName="/xl/worksheets/sheet' + (i + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'; }).join('') +
+        '</Types>';
+      files['_rels/.rels'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>';
+      files['xl/workbook.xml'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+        sheets.map(function(s, i) { return '<sheet name="' + ohXmlEsc(s.name.slice(0, 31)) + '" sheetId="' + (i + 1) + '" r:id="rId' + (i + 1) + '"/>'; }).join('') +
+        '</sheets></workbook>';
+      files['xl/_rels/workbook.xml.rels'] = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        sheets.map(function(_, i) { return '<Relationship Id="rId' + (i + 1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + (i + 1) + '.xml"/>'; }).join('') +
+        '<Relationship Id="rId' + (sheets.length + 1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>';
+      files['xl/styles.xml'] = OH_XL_STYLES_XML;
+      sheets.forEach(function(s, i) { files['xl/worksheets/sheet' + (i + 1) + '.xml'] = ohRenderSheetXml(s); });
+
+      const zipBytes = ohBuildStoreZip(files);
+      const blob = new Blob([zipBytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'Callflow-Inventar.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+    }
+
+    function downloadInventoryCsvFromBundle(bundle, mode, filename) {
+      if (!bundle) return;
+      const csvCell = function(v) {
+        const s = String(v == null ? '' : v).replace(/\\r?\\n/g, ' ');
+        return (s.includes(';') || s.includes('"')) ? ('"' + s.replace(/"/g, '""') + '"') : s;
+      };
+      const lines = [];
+      if (mode === 'summary') {
+        lines.push(['Kategorie', 'Typ', 'Name / Ziel', 'Status', 'Fundstellen', 'Skripte', 'Verwendet in Skripten', 'Details'].map(csvCell).join(';'));
+        (bundle.items || []).forEach(function(i) {
+          lines.push([i.categoryLabel, i.subTypeLabel, i.name, i.statusLabel, i.occurrenceCount, i.scriptCount, i.scriptsSummary, i.details].map(csvCell).join(';'));
+        });
+      } else {
+        lines.push(['Kategorie', 'Typ', 'Element / Name', 'Status', 'Skript-Nr.', 'Skript-Name', 'Section', 'Zeile', 'Befehl', 'Quelltext-Auszug'].map(csvCell).join(';'));
+        (bundle.occurrences || []).forEach(function(o) {
+          lines.push([o.categoryLabel, o.subTypeLabel, o.itemName, o.statusLabel, o.scriptNumber, o.scriptName, o.sectionName, o.lineNumber, o.command, o.contextSnippet].map(csvCell).join(';'));
+        });
+      }
+      const blob = new Blob(['\\uFEFF' + lines.join('\\r\\n')], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'Callflow-Inventar.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+    }
+
+    function downloadInventoryJsonFromBundle(bundle, filename) {
+      if (!bundle) return;
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'Callflow-Inventar.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+    }
+
+    function downloadGenesysAllYamlsZipFromProfile(profileData, filename) {
+      if (!profileData || !Array.isArray(profileData.scripts) || !profileData.scripts.length) return;
+      const files = {};
+      const usedNames = new Set();
+      profileData.scripts.forEach(function(s) {
+        let baseName = s.cleanName || s.scriptNumber || 'flow';
+        let counter = 2;
+        while (usedNames.has(baseName.toLowerCase())) {
+          baseName = (s.cleanName || 'flow') + '_' + counter;
+          counter += 1;
+        }
+        usedNames.add(baseName.toLowerCase());
+        files['archy-flows/' + baseName + '.yaml'] = s.archyYaml || '';
+        if (s.flowIR) {
+          files['migration-graphs/' + baseName + '.graph.json'] = JSON.stringify({ flowIR: s.flowIR }, null, 2);
+        }
+      });
+      const sum = profileData.summary || {};
+      const readme = [
+        '# Genesys Cloud Architect (Archy YAML) Migrations-Paket',
+        '',
+        '- **Profil:** ' + (profileData.modeLabel || profileData.profileKey || ''),
+        '- **Erzeugt am:** ' + (profileData.generatedAt || ''),
+        '- **Gesamt-Komplexität (Readiness):** ' + (profileData.overallReadiness || 'LOW'),
+        '- **Skripte gesamt:** ' + (sum.totalScripts || profileData.scripts.length) +
+          ' (LOW: ' + (sum.lowCount || 0) + ' · MEDIUM: ' + (sum.mediumCount || 0) + ' · HIGH: ' + (sum.highCount || 0) + ')',
+        '- **Common Module Kandidaten (>= 3 Aufrufe):** ' + (sum.commonModuleCount || 0),
+        '- **Archy-YAML-Validierung:** ' + (sum.yamlValidScriptCount || 0) + '/' + (sum.totalScripts || profileData.scripts.length) +
+          ' valide (' + (sum.yamlErrorCount || 0) + ' Schema-Fehler)',
+        '',
+        '| Avaya Datei | Archy YAML | Migrations-Graph (IR) | Readiness | YAML-Status | Gründe |',
+        '| --- | --- | --- | --- | --- | --- |'
+      ];
+      profileData.scripts.forEach(function(s) {
+        const ySt = s.yamlValid ? 'Valide' : ((s.yamlErrorCount || 0) + ' Fehler');
+        readme.push('| \`' + (s.fileName || '') + '\` | \`archy-flows/' + (s.archyFilename || '') + '\` | \`migration-graphs/' + (s.cleanName || '') + '.graph.json\` | **' + (s.readiness || 'LOW') + '** | ' + ySt + ' | ' + ((s.readinessReasons || []).join('; ')) + ' |');
+      });
+      files['README.md'] = readme.join('\\n');
+      if (profileData.masterGenesysMermaid) {
+        files['genesys-overview.mmd'] = profileData.masterGenesysMermaid;
+      }
+      const zipBytes = ohBuildStoreZip(files);
+      const blob = new Blob([zipBytes], { type: 'application/zip' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'genesys-archy-flows.zip';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+    }
+  `;
+}
+
