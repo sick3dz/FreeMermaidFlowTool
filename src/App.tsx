@@ -183,7 +183,14 @@ import { MultiScriptModal } from './components/MultiScriptModal';
 import { NewCallflowModal } from './components/NewCallflowModal';
 import { NodeInlineEditorModal } from './components/NodeInlineEditorModal';
 import { OpeningHoursModal } from './components/OpeningHoursModal';
+import { InventoryModal } from './components/InventoryModal';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
+import {
+  buildWorkspaceInventory,
+  exportInventoryCsv,
+  exportInventoryJson,
+  exportInventoryXlsxBlob,
+} from './utils/inventoryExporter';
 import { CanvasMinimap } from './components/CanvasMinimap';
 import { LocalHtmlBuilderLanding } from './components/LocalHtmlBuilderLanding';
 import OnlineProjectLanding from './components/OnlineProjectLanding';
@@ -471,6 +478,7 @@ function OfflineStudioApp() {
   const [isNewCallflowModalOpen, setIsNewCallflowModalOpen] = useState<boolean>(false);
   const [isMultiScriptModalOpen, setIsMultiScriptModalOpen] = useState<boolean>(false);
   const [isOpeningHoursModalOpen, setIsOpeningHoursModalOpen] = useState<boolean>(false);
+  const [isInventoryModalOpen, setIsInventoryModalOpen] = useState<boolean>(false);
   const [openingHoursInitialSearch, setOpeningHoursInitialSearch] = useState<string>('');
   const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState<boolean>(false);
   const [showMinimap, setShowMinimap] = useState<boolean>(false);
@@ -2097,6 +2105,7 @@ function OfflineStudioApp() {
         editingNodeSnapshot ||
         isGlobalSearchOpen ||
         isOpeningHoursModalOpen ||
+        isInventoryModalOpen ||
         isNewCallflowModalOpen ||
         isMultiScriptModalOpen
       ) {
@@ -2123,6 +2132,7 @@ function OfflineStudioApp() {
     editingNodeSnapshot,
     isGlobalSearchOpen,
     isOpeningHoursModalOpen,
+    isInventoryModalOpen,
     isNewCallflowModalOpen,
     isMultiScriptModalOpen,
   ]);
@@ -2206,6 +2216,35 @@ function OfflineStudioApp() {
     const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
     triggerLocalDownload(blob, 'Callflow-Dokumentation.md');
   }, [scriptWorkspace]);
+
+  const handleExportInventoryXlsx = useCallback(async () => {
+    if (scriptWorkspace.modules.length === 0) return;
+    const bundle = buildWorkspaceInventory(scriptWorkspace, {
+      diagramTitle: diagramTitle || undefined,
+    });
+    const blob = await exportInventoryXlsxBlob(bundle);
+    triggerLocalDownload(blob, 'Callflow-Inventar.xlsx');
+  }, [scriptWorkspace, diagramTitle]);
+
+  const handleExportInventoryCsv = useCallback(() => {
+    if (scriptWorkspace.modules.length === 0) return;
+    const bundle = buildWorkspaceInventory(scriptWorkspace, {
+      diagramTitle: diagramTitle || undefined,
+    });
+    const csv = exportInventoryCsv(bundle, { mode: 'occurrences' });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    triggerLocalDownload(blob, 'Callflow-Inventar.csv');
+  }, [scriptWorkspace, diagramTitle]);
+
+  const handleExportInventoryJson = useCallback(() => {
+    if (scriptWorkspace.modules.length === 0) return;
+    const bundle = buildWorkspaceInventory(scriptWorkspace, {
+      diagramTitle: diagramTitle || undefined,
+    });
+    const json = exportInventoryJson(bundle);
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    triggerLocalDownload(blob, 'Callflow-Inventar.json');
+  }, [scriptWorkspace, diagramTitle]);
 
   // Cursor-centered Canvas Wheel Zoom (5% up to 2000%) — 60fps direct transform, debounced UI sync
   const handleCanvasWheel = (e: React.WheelEvent<HTMLDivElement>) => {
@@ -6628,6 +6667,16 @@ function OfflineStudioApp() {
 
                 <button
                   type="button"
+                  onClick={() => setIsInventoryModalOpen(true)}
+                  title="Asset-Inventar: Alle Prompts, WAVs, Skillsets, DNIS, Variablen & DB/Hist/API-Aufrufe durchsuchen & exportieren"
+                  className="px-2.5 py-1 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/40 hover:border-indigo-500/60 text-indigo-200 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Layers className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span>Inventar</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setIsGlobalSearchOpen(true)}
                   title="Globale Suche über alle Skripte, DNIS, Queues, Ansagen & Zeiten (Strg+K)"
                   className="px-2.5 py-1 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 rounded-md text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
@@ -7496,20 +7545,33 @@ function OfflineStudioApp() {
                           Suche (Strg+K)
                         </button>
                         {scriptWorkspace.modules.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setOpeningHoursInitialSearch('');
-                              setIsOpeningHoursModalOpen(true);
-                            }}
-                            className={`px-2 py-1 rounded border transition-colors cursor-pointer ${
-                              isDarkCanvas
-                                ? 'bg-slate-950 hover:bg-slate-800 border-slate-800 text-amber-300'
-                                : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-amber-700'
-                            }`}
-                          >
-                            Öffnungszeiten
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setOpeningHoursInitialSearch('');
+                                setIsOpeningHoursModalOpen(true);
+                              }}
+                              className={`px-2 py-1 rounded border transition-colors cursor-pointer ${
+                                isDarkCanvas
+                                  ? 'bg-slate-950 hover:bg-slate-800 border-slate-800 text-amber-300'
+                                  : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-amber-700'
+                              }`}
+                            >
+                              Öffnungszeiten
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setIsInventoryModalOpen(true)}
+                              className={`px-2 py-1 rounded border transition-colors cursor-pointer ${
+                                isDarkCanvas
+                                  ? 'bg-slate-950 hover:bg-slate-800 border-slate-800 text-indigo-300'
+                                  : 'bg-slate-50 hover:bg-slate-100 border-slate-200 text-indigo-700'
+                              }`}
+                            >
+                              Asset-Inventar
+                            </button>
+                          </>
                         )}
                       </div>
                       <button
@@ -8393,6 +8455,20 @@ function OfflineStudioApp() {
         onExportMarkdownDoc={
           scriptWorkspace.modules.length > 0 ? handleExportMarkdownDoc : undefined
         }
+        onExportInventoryXlsx={
+          scriptWorkspace.modules.length > 0 ? handleExportInventoryXlsx : undefined
+        }
+        onExportInventoryCsv={
+          scriptWorkspace.modules.length > 0 ? handleExportInventoryCsv : undefined
+        }
+        onExportInventoryJson={
+          scriptWorkspace.modules.length > 0 ? handleExportInventoryJson : undefined
+        }
+        onOpenInventoryPreview={
+          scriptWorkspace.modules.length > 0
+            ? () => setIsInventoryModalOpen(true)
+            : undefined
+        }
       />
 
       {/* Explicit Original-Skript Inclusion Prompt before Direct Callflow.html Export */}
@@ -8762,6 +8838,16 @@ function OfflineStudioApp() {
         onClose={() => setIsOpeningHoursModalOpen(false)}
         workspace={scriptWorkspace}
         initialSearchQuery={openingHoursInitialSearch}
+        onJumpToScript={(scriptNumber) => {
+          handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber });
+        }}
+      />
+
+      <InventoryModal
+        isOpen={isInventoryModalOpen}
+        onClose={() => setIsInventoryModalOpen(false)}
+        workspace={scriptWorkspace}
+        diagramTitle={diagramTitle || undefined}
         onJumpToScript={(scriptNumber) => {
           handleSwitchCallflowViewLevel({ level: 'detail', scriptNumber });
         }}

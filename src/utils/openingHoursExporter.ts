@@ -926,7 +926,7 @@ function xmlEscape(raw: string | number): string {
     .replace(/'/g, '&apos;');
 }
 
-function excelColLetter(colIndexZeroBased: number): string {
+export function excelColLetter(colIndexZeroBased: number): string {
   let n = colIndexZeroBased + 1;
   let letters = '';
   while (n > 0) {
@@ -937,18 +937,18 @@ function excelColLetter(colIndexZeroBased: number): string {
   return letters;
 }
 
-interface XlsxCellSpec {
+export interface XlsxCellSpec {
   value: string | number;
   style: number;
   type?: 'str' | 'num';
 }
 
-interface XlsxRowSpec {
+export interface XlsxRowSpec {
   cells: XlsxCellSpec[];
   height?: number;
 }
 
-interface XlsxSheetSpec {
+export interface XlsxSheetSpec {
   name: string;
   tabColorHex: string;
   colWidths: number[];
@@ -959,7 +959,7 @@ interface XlsxSheetSpec {
 }
 
 // Style indices matching XL_STYLES_XML below
-const S = {
+export const S = {
   DEFAULT: 0,
   TITLE_BANNER: 1,
   KPI_STRIP: 2,
@@ -981,6 +981,8 @@ const S = {
   NUM_EVEN: 18,
   NUM_ODD: 19,
 } as const;
+
+export const XL_STYLE_INDEX = S;
 
 const XL_STYLES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -1128,7 +1130,7 @@ function renderWorksheetXml(sheet: XlsxSheetSpec): string {
 </worksheet>`;
 }
 
-function makeBannerRows(
+export function makeBannerRows(
   colCount: number,
   title: string,
   subtitle: string
@@ -1149,6 +1151,8 @@ function makeBannerRows(
     merges: [`A1:${lastCol}1`, `A2:${lastCol}2`],
   };
 }
+
+export const makeXlsxBannerRows = makeBannerRows;
 
 /**
  * Builds the complete OOXML file map (`Record<zipPath, xmlString>`) for the formatted
@@ -1510,7 +1514,13 @@ export function buildOpeningHoursXlsxFileMap(
     });
   }
 
-  // Assemble OOXML package files
+  return assembleXlsxPackageFiles(sheets);
+}
+
+/**
+ * Assembles any array of XlsxSheetSpec into a complete OOXML file map (`Record<zipPath, xmlString>`).
+ */
+export function assembleXlsxPackageFiles(sheets: XlsxSheetSpec[]): Record<string, string> {
   const files: Record<string, string> = {};
 
   const sheetOverrides = sheets
@@ -1534,11 +1544,19 @@ ${sheetOverrides}
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
 </Relationships>`;
 
+  const seenSheetNames = new Set<string>();
   const sheetsXml = sheets
-    .map(
-      (s, i) =>
-        `    <sheet name="${xmlEscape(s.name.slice(0, 31))}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`
-    )
+    .map((s, i) => {
+      const base = s.name.replace(/[\\/*?:\[\]]/g, '_').trim().slice(0, 31) || `Sheet${i + 1}`;
+      let unique = base;
+      let suffix = 2;
+      while (seenSheetNames.has(unique.toLowerCase())) {
+        const tag = ` (${suffix++})`;
+        unique = base.slice(0, Math.max(1, 31 - tag.length)) + tag;
+      }
+      seenSheetNames.add(unique.toLowerCase());
+      return `    <sheet name="${xmlEscape(unique)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`;
+    })
     .join('\n');
 
   files['xl/workbook.xml'] = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -1568,6 +1586,28 @@ ${wbRels}
   });
 
   return files;
+}
+
+export async function exportXlsxSheetsUint8Array(sheets: XlsxSheetSpec[]): Promise<Uint8Array> {
+  const fileMap = assembleXlsxPackageFiles(sheets);
+  const zip = new JSZip();
+  for (const [zipPath, content] of Object.entries(fileMap)) {
+    zip.file(zipPath, content);
+  }
+  return zip.generateAsync({
+    type: 'uint8array',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
+}
+
+export async function exportXlsxSheetsBlob(sheets: XlsxSheetSpec[]): Promise<Blob> {
+  const bytes = await exportXlsxSheetsUint8Array(sheets);
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return new Blob([copy], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
 }
 
 /**

@@ -46,6 +46,7 @@ import {
   FlowIRFindingCode,
   FlowIRMigrationAnnotation,
   FlowIRValidationResult,
+  FlowIRWarningClass,
   RenderedModeReport,
   buildFlowIRFromMigrationGraph,
   classifyFlowIRFinding,
@@ -83,6 +84,7 @@ export type {
   FlowIRTransitionType,
   FlowIRValidationResult,
   FlowIRVariable,
+  FlowIRWarningClass,
   RenderedModeReport,
 } from './genesysFlowIR';
 export {
@@ -202,6 +204,8 @@ export interface GenesysScriptWarning {
     | 'POTENTIAL_BRANCH_FALLTHROUGH'
     | 'DUPLICATE_HOLIDAY_LOGIC'
     | 'DATE_COMPARISON_SEMANTIC_REVIEW'
+    | 'WAIT_UNMAPPED_ACTIVE_PATH'
+    | 'WAIT_SOURCE_ONLY_HINT'
     | 'ARCHY_YAML_VALIDATION_ERROR';
   severity: 'warning' | 'blocker';
   message: string;
@@ -2199,17 +2203,26 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
     gcEmergency: [],
     gcDataTable: [],
     gcSysVar: [],
+    gcFallthrough: [],
   };
 
   let nodeSeq = 0;
   const taskEntryNodeByRefId = new Map<string, string>();
   const deferredTaskEdges: Array<{ fromId: string; targetRefId: string; label: string; dashed: boolean }> = [];
 
+  const stepHasFindingCode = (
+    step: MigrationStep,
+    code: StepProvenanceFinding['code']
+  ): boolean =>
+    step.provenanceFinding?.code === code ||
+    Boolean(step.additionalFindings?.some((f) => f.code === code));
+
   const emitNode = (step: MigrationStep): string => {
     nodeSeq += 1;
     const nodeId = toSafeMermaidId('GC_N', `${step.kind}_${nodeSeq}`);
     const targetClean = escapeMermaidLabel(step.target || step.variableName || '');
     const lineHint = step.lineNumber > 0 ? ` · Z.${step.lineNumber}` : '';
+    const hasFallthrough = stepHasFindingCode(step, 'POTENTIAL_BRANCH_FALLTHROUGH');
 
     switch (step.kind) {
       case 'playAudio':
@@ -2239,28 +2252,44 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
         }
         break;
       case 'callCommonModule':
-        lines.push(`  ${nodeId}[["Common Module: ${targetClean}"]]`);
+        lines.push(
+          `  ${nodeId}[["Common Module: ${targetClean}${hasFallthrough ? ' | Unproven Terminality -> Continues' : ''}"]]`
+        );
         if (step.isBrokenTarget) classBuckets.gcBroken.push(nodeId);
+        else if (hasFallthrough) classBuckets.gcFallthrough.push(nodeId);
         else classBuckets.gcCommon.push(nodeId);
         break;
       case 'callTask':
-        lines.push(`  ${nodeId}["Call Task: ${targetClean}"]`);
+        lines.push(
+          `  ${nodeId}["Call Task: ${targetClean}${hasFallthrough ? ' | Unproven Terminality -> Continues' : ''}"]`
+        );
         if (step.isBrokenTarget) classBuckets.gcBroken.push(nodeId);
+        else if (hasFallthrough) classBuckets.gcFallthrough.push(nodeId);
         else classBuckets.gcTask.push(nodeId);
         break;
       case 'jumpToReusableTask':
         lines.push(`  ${nodeId}["Jump to Task: ${escapeMermaidLabel(step.targetTaskRefId || targetClean)}"]`);
         classBuckets.gcTask.push(nodeId);
         break;
-      case 'decision':
+      case 'decision': {
+        const badges: string[] = [];
+        if (stepHasFindingCode(step, 'VAR_USED_BEFORE_SET')) badges.push('Unproven Var');
+        if (stepHasFindingCode(step, 'DUPLICATE_HOLIDAY_LOGIC')) badges.push('Duplicate Holiday');
+        if (stepHasFindingCode(step, 'DATE_COMPARISON_SEMANTIC_REVIEW')) badges.push('Date Review');
+        const badgeSuffix = badges.length > 0 ? ` [${badges.join(' / ')}]` : '';
         if (step.isEmergencyCheck) {
-          lines.push(`  ${nodeId}{"Emergency Check: ${escapeMermaidLabel(step.expression || 'Emergency')}"}`);
+          lines.push(
+            `  ${nodeId}{"Emergency Check: ${escapeMermaidLabel(step.expression || 'Emergency')}${badgeSuffix}"}`
+          );
           classBuckets.gcEmergency.push(nodeId);
         } else {
-          lines.push(`  ${nodeId}{"Decision: ${escapeMermaidLabel(step.expression || step.conditionLabel || 'Check')}"}`);
+          lines.push(
+            `  ${nodeId}{"Decision: ${escapeMermaidLabel(step.expression || step.conditionLabel || 'Check')}${badgeSuffix}"}`
+          );
           classBuckets.gcDecision.push(nodeId);
         }
         break;
+      }
       case 'switch':
         lines.push(`  ${nodeId}{"Switch: ${escapeMermaidLabel(step.variableRef || targetClean || 'Auswahl')}"}`);
         classBuckets.gcDecision.push(nodeId);
@@ -2419,14 +2448,36 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
         break;
       }
 
+      const markFallthroughExits = (
+        branchSteps: MigrationStep[] | undefined,
+        exits: Array<{ id: string; label?: string; dashed?: boolean }>
+      ): Array<{ id: string; label?: string; dashed?: boolean }> => {
+        if (!branchSteps || branchSteps.length === 0 || exits.length === 0) return exits;
+        const last = branchSteps[branchSteps.length - 1];
+        if (stepHasFindingCode(last, 'POTENTIAL_BRANCH_FALLTHROUGH')) {
+          return exits.map((ex) => ({
+            ...ex,
+            dashed: true,
+            label: ex.label || 'Fallthrough (unproven terminality)',
+          }));
+        }
+        return exits;
+      };
+
       if (step.kind === 'decision') {
         const yesExits =
           step.yesSteps && step.yesSteps.length > 0
-            ? renderStepSequence(step.yesSteps, [{ id: nodeId, label: 'Ja' }])
+            ? markFallthroughExits(
+                step.yesSteps,
+                renderStepSequence(step.yesSteps, [{ id: nodeId, label: 'Ja' }])
+              )
             : [{ id: nodeId, label: 'Ja' }];
         const noExits =
           step.noSteps && step.noSteps.length > 0
-            ? renderStepSequence(step.noSteps, [{ id: nodeId, label: 'Nein' }])
+            ? markFallthroughExits(
+                step.noSteps,
+                renderStepSequence(step.noSteps, [{ id: nodeId, label: 'Nein' }])
+              )
             : [{ id: nodeId, label: 'Nein' }];
         currentExits = [...yesExits, ...noExits];
       } else if (step.kind === 'evaluateScheduleGroup') {
@@ -2436,11 +2487,17 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
             : [{ id: nodeId, label: 'Offen' }];
         const closedExits =
           step.closedSteps && step.closedSteps.length > 0
-            ? renderStepSequence(step.closedSteps, [{ id: nodeId, label: 'Geschlossen' }])
+            ? markFallthroughExits(
+                step.closedSteps,
+                renderStepSequence(step.closedSteps, [{ id: nodeId, label: 'Geschlossen' }])
+              )
             : [];
         const holidayExits =
           step.holidaySteps && step.holidaySteps.length > 0
-            ? renderStepSequence(step.holidaySteps, [{ id: nodeId, label: 'Feiertag' }])
+            ? markFallthroughExits(
+                step.holidaySteps,
+                renderStepSequence(step.holidaySteps, [{ id: nodeId, label: 'Feiertag' }])
+              )
             : [];
         currentExits = [...openExits, ...closedExits, ...holidayExits];
       } else if (step.kind === 'collectInput') {
@@ -2472,13 +2529,19 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
         for (const c of step.cases || []) {
           const ce =
             c.steps.length > 0
-              ? renderStepSequence(c.steps, [{ id: nodeId, label: `Wert "${c.value}"` }])
+              ? markFallthroughExits(
+                  c.steps,
+                  renderStepSequence(c.steps, [{ id: nodeId, label: `Wert "${c.value}"` }])
+                )
               : [{ id: nodeId, label: `Wert "${c.value}"` }];
           allExits.push(...ce);
         }
         const de =
           step.defaultSteps && step.defaultSteps.length > 0
-            ? renderStepSequence(step.defaultSteps, [{ id: nodeId, label: 'Default', dashed: true }])
+            ? markFallthroughExits(
+                step.defaultSteps,
+                renderStepSequence(step.defaultSteps, [{ id: nodeId, label: 'Default', dashed: true }])
+              )
             : [{ id: nodeId, label: 'Default', dashed: true }];
         currentExits = [...allExits, ...de];
       } else if (step.kind === 'callDataTableLookup') {
@@ -2702,6 +2765,7 @@ function appendGenesysClassDefs(
   lines.push('  classDef gcEmergency fill:#991b1b,stroke:#fca5a5,stroke-width:2.5px,color:#fef2f2;');
   lines.push('  classDef gcDataTable fill:#1e3a8a,stroke:#93c5fd,stroke-width:2px,color:#eff6ff;');
   lines.push('  classDef gcSysVar fill:#1e293b,stroke:#38bdf8,stroke-width:1.5px,color:#e0f2fe;');
+  lines.push('  classDef gcFallthrough fill:#451a03,stroke:#f59e0b,stroke-width:2px,stroke-dasharray: 5 5,color:#fef3c7;');
 
   for (const [cls, ids] of Object.entries(buckets)) {
     const uniq = Array.from(new Set(ids));
@@ -3997,6 +4061,152 @@ function auditParallelHolidayLogic(
   }
 }
 
+/**
+ * Post-Pruning Two-Phase WAIT Audit (Pass 2):
+ * Evaluates raw WAIT statements captured in Pass 1 against the finalized, reachable graph.
+ * - Surviving active-path WAITs -> WAIT_UNMAPPED_ACTIVE_PATH (WARN + # OFFENE MIGRATIONSFRAGE annotation)
+ * - Pruned / dead-path / unreachable WAITs -> WAIT_SOURCE_ONLY_HINT (INFO, source_only_hint; zero delay nodes)
+ */
+function auditWaitStatements(
+  graph: MigrationFlowGraph,
+  warnings: MigrationGraphWarning[]
+): void {
+  const capturedWaits = graph.diagnostics.sourceWaitStatements || [];
+  if (capturedWaits.length === 0) return;
+
+  const survivingBySourceWaitId = new Map<string, MigrationStep[]>();
+  const survivingSections = new Set<string>();
+  const firstStepBySection = new Map<string, MigrationStep>();
+
+  const collectSurviving = (list: MigrationStep[], fallbackSection: string) => {
+    for (const st of list) {
+      const secName = st.sectionHint || fallbackSection;
+      if (secName) {
+        survivingSections.add(secName);
+        if (!firstStepBySection.has(secName)) {
+          firstStepBySection.set(secName, st);
+        }
+      }
+      if (st.sourceWaitId) {
+        const arr = survivingBySourceWaitId.get(st.sourceWaitId) || [];
+        arr.push(st);
+        survivingBySourceWaitId.set(st.sourceWaitId, arr);
+      }
+      if (st.yesSteps) collectSurviving(st.yesSteps, secName);
+      if (st.noSteps) collectSurviving(st.noSteps, secName);
+      if (st.openSteps) collectSurviving(st.openSteps, secName);
+      if (st.closedSteps) collectSurviving(st.closedSteps, secName);
+      if (st.holidaySteps) collectSurviving(st.holidaySteps, secName);
+      if (st.successSteps) collectSurviving(st.successSteps, secName);
+      if (st.failureSteps) collectSurviving(st.failureSteps, secName);
+      if (st.timeoutSteps) collectSurviving(st.timeoutSteps, secName);
+      if (st.foundSteps) collectSurviving(st.foundSteps, secName);
+      if (st.notFoundSteps) collectSurviving(st.notFoundSteps, secName);
+      if (st.bodySteps) collectSurviving(st.bodySteps, secName);
+      if (st.defaultSteps) collectSurviving(st.defaultSteps, secName);
+      if (st.cases) st.cases.forEach((c) => collectSurviving(c.steps, secName));
+    }
+  };
+
+  for (const task of graph.tasks) {
+    if (task.kind === 'fallback') continue;
+    const taskSec = task.originalTarget || task.refId;
+    if (taskSec) survivingSections.add(taskSec);
+    collectSurviving(task.steps, taskSec);
+  }
+
+  graph.diagnostics.waitSourceOnlyHints = [];
+  graph.diagnostics.activeWaitFindings = [];
+  const mode: 'strict' | 'stub' = graph.diagnostics.compatibilityStubMode ? 'stub' : 'strict';
+
+  for (const rec of capturedWaits) {
+    if (rec.status === 'mapped_delay') {
+      const activeSteps = survivingBySourceWaitId.get(rec.id) || [];
+      if (activeSteps.length > 0) {
+        const msg = `Aktiver WAIT-Schritt (${rec.rawCommand}, Zeile ${rec.lineNumber}): Warteschleifen-Verzoegerung in Genesys Cloud in einen In-Queue Call Flow auslagern oder Timing pruefen.`;
+        for (const st of activeSteps) {
+          appendStepYamlComment(st, `OFFENE MIGRATIONSFRAGE: ${msg}`);
+          appendStepAnnotation(
+            st,
+            'WAIT_UNMAPPED_ACTIVE_PATH',
+            'OFFENE MIGRATIONSFRAGE',
+            [
+              `Active WAIT (${rec.rawCommand}, line ${rec.lineNumber}) remains on a reachable routing path; verify delay placement or move hold logic into an In-Queue Call Flow.`,
+            ],
+            mode
+          );
+          appendStepFinding(st, {
+            severity: 'WARN',
+            code: 'WAIT_UNMAPPED_ACTIVE_PATH',
+            message: msg,
+          });
+        }
+        warnings.push({
+          code: 'WAIT_UNMAPPED_ACTIVE_PATH',
+          severity: 'warning',
+          lineNumber: rec.lineNumber,
+          message: msg,
+        });
+      } else {
+        graph.diagnostics.waitSourceOnlyHints.push({
+          id: rec.id,
+          lineNumber: rec.lineNumber,
+          section: rec.section,
+          rawCommand: rec.rawCommand,
+          message: `Quell-Hinweis (Zeile ${rec.lineNumber}, Section "${rec.section}"): "${rec.rawCommand}" liegt nur in einem verworfenen oder unerreichbaren Avaya-Pfad und wurde nicht als aktiver Genesys-Delay uebernommen.`,
+        });
+      }
+    } else {
+      // unmapped_syntax WAIT
+      const isActive = !rec.prunedInLocalBlock && survivingSections.has(rec.section);
+      if (isActive) {
+        const msg = `Unvollstaendig abbildbares WAIT (${rec.rawCommand}, Zeile ${rec.lineNumber}) auf aktivem Pfad (Section "${rec.section}"): Kein synthetisches delay erfunden — Warte-/Hold-Semantik im In-Queue Call Flow klaeren.`;
+        const attachStep =
+          firstStepBySection.get(rec.section) || graph.tasks[0]?.steps[0];
+        if (attachStep) {
+          appendStepYamlComment(attachStep, `OFFENE MIGRATIONSFRAGE: ${msg}`);
+          appendStepAnnotation(
+            attachStep,
+            'WAIT_UNMAPPED_ACTIVE_PATH',
+            'OFFENE MIGRATIONSFRAGE',
+            [
+              `Unmapped WAIT (${rec.rawCommand}, line ${rec.lineNumber}) sits on an active reachable path; clarify In-Queue Call Flow hold/delay behavior before import.`,
+            ],
+            mode
+          );
+          appendStepFinding(attachStep, {
+            severity: 'WARN',
+            code: 'WAIT_UNMAPPED_ACTIVE_PATH',
+            message: msg,
+          });
+        } else {
+          graph.diagnostics.activeWaitFindings.push({
+            id: rec.id,
+            lineNumber: rec.lineNumber,
+            section: rec.section,
+            rawCommand: rec.rawCommand,
+            message: msg,
+          });
+        }
+        warnings.push({
+          code: 'WAIT_UNMAPPED_ACTIVE_PATH',
+          severity: 'warning',
+          lineNumber: rec.lineNumber,
+          message: msg,
+        });
+      } else {
+        graph.diagnostics.waitSourceOnlyHints.push({
+          id: rec.id,
+          lineNumber: rec.lineNumber,
+          section: rec.section,
+          rawCommand: rec.rawCommand,
+          message: `Quell-Hinweis (Zeile ${rec.lineNumber}, Section "${rec.section}"): "${rec.rawCommand}" liegt nur in nicht aktiv gerendertem Avaya-Quellcode (verworfen/unerreichbar); kein delay-Knoten generiert.`,
+        });
+      }
+    }
+  }
+}
+
 function finalizeScriptTranslation(
   node: ParsedScriptNode,
   built: BuildMigrationGraphResult,
@@ -4288,7 +4498,7 @@ export function translateAvayaWorkspaceToGenesys(
         brokenTargetKeysForScript: brokenByScriptKey.get(node.scriptKey) || new Set<string>(),
         compatibilityStubMode,
       },
-      '1.5.6'
+      '1.6.0'
     );
     builtByKey.set(node.scriptKey, { node, built });
     allGraphsByKey.set(node.scriptKey, built.graph);
@@ -4308,6 +4518,7 @@ export function translateAvayaWorkspaceToGenesys(
     );
     auditBranchFallthroughsAndTerminality(built.graph, missingSubflows, built.warnings);
     auditParallelHolidayLogic(built.graph, built.warnings);
+    auditWaitStatements(built.graph, built.warnings);
 
     const translated = finalizeScriptTranslation(
       node,
@@ -4327,7 +4538,7 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.5.6',
+    schemaVersion: '1.6.0',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     compatibilityStubMode,

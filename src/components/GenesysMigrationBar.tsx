@@ -18,6 +18,7 @@ import {
 import {
   ArchyYamlValidationIssue,
   FlowIRFindingCategory,
+  FlowIRWarningClass,
   GenesysReadinessLevel,
   GenesysScriptTranslation,
   GenesysWorkspaceTranslation,
@@ -57,20 +58,31 @@ const FINDING_CATEGORY_ORDER: FlowIRFindingCategory[] = [
   'holiday_logic',
   'terminality',
   'subflow',
+  'wait_hint',
   'reference',
   'scope',
   'reachability',
+  'cleanup',
 ];
 
 const FINDING_CATEGORY_LABELS: Record<FlowIRFindingCategory, string> = {
   provenance: 'Provenance',
-  expression_review: 'Ausdrucksprüfung',
-  holiday_logic: 'Feiertagslogik',
-  terminality: 'Terminalität',
-  subflow: 'Subflows',
-  reference: 'Referenzen',
+  expression_review: 'Expression Review',
+  holiday_logic: 'Holiday Logic',
+  terminality: 'Terminality',
+  subflow: 'Unloaded Subflows',
+  wait_hint: 'WAIT / Source Hints',
+  reference: 'References',
   scope: 'Scope',
   reachability: 'Reachability',
+  cleanup: 'Cleanup / Info',
+};
+
+const WARNING_CLASS_LABELS: Record<FlowIRWarningClass, string> = {
+  actionable_migration: 'Actionable',
+  semantic_review: 'Semantic Review',
+  source_only_hint: 'Source-Only Hint',
+  informational_cleanup: 'Cleanup',
 };
 
 function getReadinessBadgeClasses(level: GenesysReadinessLevel): string {
@@ -97,6 +109,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
   const [previewMode, setPreviewMode] = useState<'genesys' | 'avaya'>('genesys');
   const [showWarnings, setShowWarnings] = useState(false);
   const [showValidationPanel, setShowValidationPanel] = useState(false);
+  const [showHintsAndCleanup, setShowHintsAndCleanup] = useState(false);
   const [isEditingYaml, setIsEditingYaml] = useState(false);
   const [customYamlText, setCustomYamlText] = useState('');
   const [copiedYaml, setCopiedYaml] = useState(false);
@@ -161,20 +174,35 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
       const fallbackMeta = classifyFlowIRFinding(f.code);
       return {
         ...f,
+        warningClass: f.warningClass || fallbackMeta.warningClass,
         category: f.category || fallbackMeta.category,
         requiresBusinessReview: f.requiresBusinessReview ?? fallbackMeta.requiresBusinessReview,
       };
     });
   }, [isMasterView, effectiveScript, translation.scripts]);
 
-  const openReviewCount = useMemo(
-    () => displayedIrFindings.filter((f) => f.requiresBusinessReview).length,
+  const primaryReviewFindings = useMemo(
+    () =>
+      displayedIrFindings.filter(
+        (f) => f.warningClass === 'actionable_migration' || f.warningClass === 'semantic_review'
+      ),
     [displayedIrFindings]
   );
 
-  const groupedIrFindings = useMemo(() => {
+  const secondaryHintFindings = useMemo(
+    () =>
+      displayedIrFindings.filter(
+        (f) => f.warningClass === 'source_only_hint' || f.warningClass === 'informational_cleanup'
+      ),
+    [displayedIrFindings]
+  );
+
+  const openReviewCount = primaryReviewFindings.length;
+  const hintCleanupCount = secondaryHintFindings.length;
+
+  const groupFindingsByCategory = (items: typeof displayedIrFindings) => {
     const map = new Map<FlowIRFindingCategory, typeof displayedIrFindings>();
-    for (const f of displayedIrFindings) {
+    for (const f of items) {
       const cat = f.category;
       const list = map.get(cat) || [];
       list.push(f);
@@ -185,7 +213,17 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
       label: FINDING_CATEGORY_LABELS[cat],
       items: map.get(cat)!,
     }));
-  }, [displayedIrFindings]);
+  };
+
+  const groupedPrimaryFindings = useMemo(
+    () => groupFindingsByCategory(primaryReviewFindings),
+    [primaryReviewFindings]
+  );
+
+  const groupedSecondaryFindings = useMemo(
+    () => groupFindingsByCategory(secondaryHintFindings),
+    [secondaryHintFindings]
+  );
 
   const displayedValidation = useMemo(() => {
     if (isEditingYaml && effectiveScript && liveEditorValidation) {
@@ -394,7 +432,8 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             )}
             <span>
               {validationBadgeLabel}
-              {displayedIrFindings.length > 0 ? ` · ${displayedIrFindings.length} IR` : ''}
+              {openReviewCount > 0 ? ` · ${openReviewCount} Review` : ''}
+              {hintCleanupCount > 0 ? ` · ${hintCleanupCount} Hints` : ''}
             </span>
           </button>
 
@@ -521,9 +560,8 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-wide pb-0.5">
             <div className="flex flex-wrap items-center gap-2">
               <span className={displayedValidation.isValid ? 'text-emerald-300' : 'text-rose-300'}>
-                Archy-YAML &amp; flowIR v1.1 Prüfung ({displayedValidation.errorCount} Fehler ·{' '}
-                {displayedValidation.warningCount} YAML-Hinweise · {displayedIrFindings.length} IR-Findings
-                {openReviewCount > 0 ? ` · ${openReviewCount} fachl. offen` : ''})
+                YAML Schema Errors: {displayedValidation.errorCount} · Open Review Signals: {openReviewCount} · Hints / Cleanup: {hintCleanupCount}
+                {displayedValidation.warningCount > 0 ? ` · YAML Hints: ${displayedValidation.warningCount}` : ''}
               </span>
               {displayedValidation.stats && (
                 <span className="font-mono text-slate-400 normal-case font-normal">
@@ -629,68 +667,153 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
           ))}
 
           {displayedIrFindings.length > 0 && (
-            <div className="space-y-2 pt-1">
-              <div className="text-[10px] font-semibold uppercase tracking-wide text-cyan-300">
-                flowIR v1.1 Migrations-Findings &amp; offene Fragen ({displayedIrFindings.length}
-                {openReviewCount > 0 ? ` · ${openReviewCount} mit Fachprüfung` : ''})
+            <div className="space-y-2.5 pt-1">
+              <div
+                className={`text-[10.5px] rounded border px-2.5 py-1.5 ${
+                  compatibilityStubMode
+                    ? 'border-amber-500/40 bg-amber-950/30 text-amber-100'
+                    : 'border-cyan-500/30 bg-cyan-950/20 text-cyan-100'
+                }`}
+              >
+                {compatibilityStubMode
+                  ? 'Compatibility Stub Mode (Opt-In): Synthetische Stubs fuellen fehlende Variablen temporaererweise, waehrend Semantic-Review-Risiken, Fallthroughs und fehlende Subflows sichtbar bleiben.'
+                  : 'Strict Honest Mode (Default): Offene Review-Signale sind bewusste Migrationsnachweise (# OFFENE MIGRATIONSFRAGE), keine Konverter-Defekte.'}
               </div>
-              {groupedIrFindings.map((group) => (
-                <div key={group.category} className="space-y-1">
-                  <div className="text-[10px] font-semibold text-slate-300 flex items-center gap-1.5">
-                    <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-[9.5px]">
-                      {group.label}
-                    </span>
-                    <span className="text-slate-500 font-mono">({group.items.length})</span>
+
+              {groupedPrimaryFindings.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+                    Open Review Signals — Actionable &amp; Semantic Review ({openReviewCount})
                   </div>
-                  {group.items.map((finding, idx) => {
-                    const traceLabel = finding.sourceTrace
-                      ? `${finding.sourceTrace.script}${
-                          finding.sourceTrace.section ? ` · ${finding.sourceTrace.section}` : ''
-                        } · Z.${finding.sourceTrace.lineStart}`
-                      : finding.fileName;
-                    const badgeClass =
-                      finding.severity === 'ERROR'
-                        ? 'text-rose-300 border-rose-500/35 bg-rose-950/30'
-                        : finding.severity === 'WARN'
-                        ? 'text-amber-300 border-amber-500/30 bg-amber-950/25'
-                        : 'text-cyan-300 border-cyan-500/30 bg-cyan-950/25';
-                    return (
-                      <div
-                        key={`ir-${group.category}-${finding.fileName}-${finding.code}-${finding.nodeId || idx}-${idx}`}
-                        className={`flex items-start justify-between gap-2 text-[11px] border rounded px-2.5 py-1.5 ${badgeClass}`}
-                      >
-                        <div className="min-w-0 space-y-0.5">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="font-mono font-semibold">
-                              [{finding.code}] {traceLabel}
-                            </span>
-                            {finding.requiresBusinessReview && (
-                              <span className="px-1 py-0.2 rounded bg-amber-500/20 border border-amber-500/40 text-amber-200 text-[9.5px] font-semibold">
-                                Fachprüfung
-                              </span>
+                  {groupedPrimaryFindings.map((group) => (
+                    <div key={`primary-${group.category}`} className="space-y-1">
+                      <div className="text-[10px] font-semibold text-slate-300 flex items-center gap-1.5">
+                        <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-200 font-mono text-[9.5px]">
+                          {group.label}
+                        </span>
+                        <span className="text-slate-500 font-mono">({group.items.length})</span>
+                      </div>
+                      {group.items.map((finding, idx) => {
+                        const traceLabel = finding.sourceTrace
+                          ? `${finding.sourceTrace.script}${
+                              finding.sourceTrace.section ? ` · ${finding.sourceTrace.section}` : ''
+                            } · Z.${finding.sourceTrace.lineStart}`
+                          : finding.fileName;
+                        const isSemantic = finding.warningClass === 'semantic_review';
+                        const badgeClass =
+                          finding.severity === 'ERROR'
+                            ? 'text-rose-300 border-rose-500/35 bg-rose-950/30'
+                            : isSemantic
+                            ? 'text-cyan-200 border-cyan-500/35 bg-cyan-950/25'
+                            : 'text-amber-300 border-amber-500/30 bg-amber-950/25';
+                        return (
+                          <div
+                            key={`ir-primary-${group.category}-${finding.fileName}-${finding.code}-${finding.nodeId || idx}-${idx}`}
+                            className={`flex items-start justify-between gap-2 text-[11px] border rounded px-2.5 py-1.5 ${badgeClass}`}
+                          >
+                            <div className="min-w-0 space-y-0.5">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-mono font-semibold">
+                                  [{finding.code}] {traceLabel}
+                                </span>
+                                <span
+                                  className={`px-1 py-0.2 rounded border text-[9.5px] font-semibold ${
+                                    isSemantic
+                                      ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-200'
+                                      : 'bg-amber-500/20 border-amber-500/40 text-amber-200'
+                                  }`}
+                                >
+                                  {WARNING_CLASS_LABELS[finding.warningClass]}
+                                </span>
+                              </div>
+                              <div className="text-slate-100">{finding.message}</div>
+                              {finding.variableName && (
+                                <div className="text-[10.5px] text-slate-300/85">
+                                  Variable: <span className="font-mono">{finding.variableName}</span>
+                                </div>
+                              )}
+                            </div>
+                            {isMasterView && onSelectDetailScript && (
+                              <button
+                                type="button"
+                                onClick={() => onSelectDetailScript(finding.scriptNumber)}
+                                className="text-[10.5px] font-semibold text-cyan-300 hover:text-cyan-200 whitespace-nowrap shrink-0 cursor-pointer"
+                              >
+                                Flow öffnen →
+                              </button>
                             )}
                           </div>
-                          <div className="text-slate-100">{finding.message}</div>
-                          {finding.variableName && (
-                            <div className="text-[10.5px] text-slate-300/85">
-                              Variable: <span className="font-mono">{finding.variableName}</span>
-                            </div>
-                          )}
-                        </div>
-                        {isMasterView && onSelectDetailScript && (
-                          <button
-                            type="button"
-                            onClick={() => onSelectDetailScript(finding.scriptNumber)}
-                            className="text-[10.5px] font-semibold text-cyan-300 hover:text-cyan-200 whitespace-nowrap shrink-0 cursor-pointer"
-                          >
-                            Flow öffnen →
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
+                        );
+                      })}
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
+
+              {groupedSecondaryFindings.length > 0 && (
+                <div className="pt-1 border-t border-slate-800/80 space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setShowHintsAndCleanup((v) => !v)}
+                    className="w-full flex items-center justify-between text-left px-2 py-1 rounded bg-slate-950/70 hover:bg-slate-800/60 border border-slate-800 text-[10.5px] font-semibold text-slate-300 cursor-pointer transition-colors"
+                  >
+                    <span>
+                      Source Hints &amp; Cleanup ({hintCleanupCount})
+                    </span>
+                    <span className="text-slate-400 font-mono text-[10px]">
+                      {showHintsAndCleanup ? 'Ausblenden ▲' : 'Anzeigen ▼'}
+                    </span>
+                  </button>
+                  {showHintsAndCleanup && (
+                    <div className="space-y-1.5 pl-1">
+                      {groupedSecondaryFindings.map((group) => (
+                        <div key={`secondary-${group.category}`} className="space-y-1">
+                          <div className="text-[10px] font-semibold text-slate-400 flex items-center gap-1.5">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300 font-mono text-[9.5px]">
+                              {group.label}
+                            </span>
+                            <span className="text-slate-500 font-mono">({group.items.length})</span>
+                          </div>
+                          {group.items.map((finding, idx) => {
+                            const traceLabel = finding.sourceTrace
+                              ? `${finding.sourceTrace.script}${
+                                  finding.sourceTrace.section ? ` · ${finding.sourceTrace.section}` : ''
+                                } · Z.${finding.sourceTrace.lineStart}`
+                              : finding.fileName;
+                            return (
+                              <div
+                                key={`ir-secondary-${group.category}-${finding.fileName}-${finding.code}-${finding.nodeId || idx}-${idx}`}
+                                className="flex items-start justify-between gap-2 text-[11px] border border-slate-800 bg-slate-950/55 text-slate-300 rounded px-2.5 py-1.5"
+                              >
+                                <div className="min-w-0 space-y-0.5">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="font-mono font-semibold text-slate-300">
+                                      [{finding.code}] {traceLabel}
+                                    </span>
+                                    <span className="px-1 py-0.2 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[9.5px] font-semibold">
+                                      {WARNING_CLASS_LABELS[finding.warningClass]}
+                                    </span>
+                                  </div>
+                                  <div className="text-slate-300/90">{finding.message}</div>
+                                </div>
+                                {isMasterView && onSelectDetailScript && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onSelectDetailScript(finding.scriptNumber)}
+                                    className="text-[10.5px] font-semibold text-cyan-300 hover:text-cyan-200 whitespace-nowrap shrink-0 cursor-pointer"
+                                  >
+                                    Flow öffnen →
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

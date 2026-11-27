@@ -188,11 +188,19 @@ export interface FlowIRTransition {
 
 export type FlowIRFindingSeverity = 'INFO' | 'WARN' | 'ERROR';
 
+export type FlowIRWarningClass =
+  | 'actionable_migration'
+  | 'semantic_review'
+  | 'source_only_hint'
+  | 'informational_cleanup';
+
 export type FlowIRFindingCategory =
   | 'provenance'
   | 'terminality'
   | 'holiday_logic'
   | 'expression_review'
+  | 'wait_hint'
+  | 'cleanup'
   | 'reachability'
   | 'scope'
   | 'reference'
@@ -219,6 +227,8 @@ export type FlowIRFindingCode =
   | 'POTENTIAL_BRANCH_FALLTHROUGH'
   | 'DUPLICATE_HOLIDAY_LOGIC'
   | 'DATE_COMPARISON_SEMANTIC_REVIEW'
+  | 'WAIT_UNMAPPED_ACTIVE_PATH'
+  | 'WAIT_SOURCE_ONLY_HINT'
   | 'UNRESOLVED_TASK_REF'
   | 'DUPLICATE_VARIABLE_SCOPE'
   | 'UNREACHABLE_TASK_PRUNED';
@@ -227,6 +237,7 @@ export interface FlowIRFinding {
   severity: FlowIRFindingSeverity;
   code: FlowIRFindingCode;
   message: string;
+  warningClass?: FlowIRWarningClass;
   category?: FlowIRFindingCategory;
   requiresBusinessReview?: boolean;
   nodeId?: string;
@@ -435,10 +446,12 @@ const ANNOTATION_ORDER: Partial<Record<FlowIRFindingCode, number>> = {
   DUPLICATE_HOLIDAY_LOGIC: 3,
   DATE_COMPARISON_SEMANTIC_REVIEW: 4,
   POTENTIAL_BRANCH_FALLTHROUGH: 5,
+  WAIT_UNMAPPED_ACTIVE_PATH: 6,
 };
 
 export function classifyFlowIRFinding(code: FlowIRFindingCode): {
   category: FlowIRFindingCategory;
+  warningClass: FlowIRWarningClass;
   requiresBusinessReview: boolean;
 } {
   switch (code) {
@@ -446,34 +459,83 @@ export function classifyFlowIRFinding(code: FlowIRFindingCode): {
     case 'SWITCH_WITHOUT_SOURCE':
     case 'MISSING_CONDITION_SOURCE':
     case 'VARIABLE_UNDECLARED':
-      return { category: 'provenance', requiresBusinessReview: true };
+      return {
+        category: 'provenance',
+        warningClass: 'actionable_migration',
+        requiresBusinessReview: true,
+      };
     case 'POTENTIAL_BRANCH_FALLTHROUGH':
     case 'TERMINAL_PATH_CONTINUES':
     case 'TERMINAL_HAS_OUTGOING':
-      return { category: 'terminality', requiresBusinessReview: true };
+      return {
+        category: 'terminality',
+        warningClass: 'actionable_migration',
+        requiresBusinessReview: true,
+      };
     case 'DUPLICATE_HOLIDAY_LOGIC':
-      return { category: 'holiday_logic', requiresBusinessReview: true };
+      return {
+        category: 'holiday_logic',
+        warningClass: 'semantic_review',
+        requiresBusinessReview: true,
+      };
     case 'DATE_COMPARISON_SEMANTIC_REVIEW':
-      return { category: 'expression_review', requiresBusinessReview: true };
+      return {
+        category: 'expression_review',
+        warningClass: 'semantic_review',
+        requiresBusinessReview: true,
+      };
+    case 'WAIT_UNMAPPED_ACTIVE_PATH':
+      return {
+        category: 'wait_hint',
+        warningClass: 'actionable_migration',
+        requiresBusinessReview: true,
+      };
+    case 'WAIT_SOURCE_ONLY_HINT':
+      return {
+        category: 'wait_hint',
+        warningClass: 'source_only_hint',
+        requiresBusinessReview: false,
+      };
     case 'UNREACHABLE_TASK_PRUNED':
     case 'UNREACHABLE_NODE':
-      return { category: 'reachability', requiresBusinessReview: false };
+      return {
+        category: 'reachability',
+        warningClass: 'informational_cleanup',
+        requiresBusinessReview: false,
+      };
     case 'DUPLICATE_VARIABLE_SCOPE':
-      return { category: 'scope', requiresBusinessReview: false };
+      return {
+        category: 'scope',
+        warningClass: 'informational_cleanup',
+        requiresBusinessReview: false,
+      };
+    case 'UNRESOLVED_INTEGRATION_OUTPUT':
+      return {
+        category: 'cleanup',
+        warningClass: 'informational_cleanup',
+        requiresBusinessReview: false,
+      };
     case 'UNRESOLVED_TASK_REF':
     case 'BROKEN_TRANSITION_REF':
     case 'INVALID_ENTRY_NODE':
     case 'UNRESOLVED_TRANSFER_TARGET':
-      return { category: 'reference', requiresBusinessReview: true };
+      return {
+        category: 'reference',
+        warningClass: 'actionable_migration',
+        requiresBusinessReview: true,
+      };
     case 'MISSING_SUBFLOW_SOURCE':
     case 'SECTION_RENDERED_BLINDLY':
     case 'MISSING_ERROR_PATH':
     case 'MISSING_TIMEOUT_PATH':
-    case 'UNRESOLVED_INTEGRATION_OUTPUT':
     case 'EMPTY_BRANCH':
     case 'DUMMY_CONDITION':
     default:
-      return { category: 'subflow', requiresBusinessReview: true };
+      return {
+        category: 'subflow',
+        warningClass: 'actionable_migration',
+        requiresBusinessReview: true,
+      };
   }
 }
 
@@ -539,6 +601,7 @@ const NODE_COMMENT_PARITY_CODES = new Set<FlowIRFindingCode>([
   'POTENTIAL_BRANCH_FALLTHROUGH',
   'DUPLICATE_HOLIDAY_LOGIC',
   'DATE_COMPARISON_SEMANTIC_REVIEW',
+  'WAIT_UNMAPPED_ACTIVE_PATH',
 ]);
 
 export function verifyFlowIRCommentParity(ir: FlowIR): {
@@ -1491,6 +1554,40 @@ export function buildFlowIRFromMigrationGraph(
     });
   }
 
+  // Pass-2 WAIT classification diagnostics: source-only WAIT hints & any standalone unmapped active WAIT findings
+  for (const wh of graph.diagnostics.waitSourceOnlyHints || []) {
+    preFindings.push({
+      severity: 'INFO',
+      code: 'WAIT_SOURCE_ONLY_HINT',
+      warningClass: 'source_only_hint',
+      category: 'wait_hint',
+      requiresBusinessReview: false,
+      message: wh.message,
+      sourceTrace: {
+        script: scriptName,
+        section: wh.section,
+        lineStart: Math.max(1, wh.lineNumber || 1),
+        lineEnd: Math.max(1, wh.lineNumber || 1),
+      },
+    });
+  }
+  for (const aw of graph.diagnostics.activeWaitFindings || []) {
+    preFindings.push({
+      severity: 'WARN',
+      code: 'WAIT_UNMAPPED_ACTIVE_PATH',
+      warningClass: 'actionable_migration',
+      category: 'wait_hint',
+      requiresBusinessReview: true,
+      message: aw.message,
+      sourceTrace: {
+        script: scriptName,
+        section: aw.section,
+        lineStart: Math.max(1, aw.lineNumber || 1),
+        lineEnd: Math.max(1, aw.lineNumber || 1),
+      },
+    });
+  }
+
   const ir: FlowIR = {
     meta: {
       flowId: graph.cleanName,
@@ -1550,6 +1647,7 @@ export function buildFlowIRFromMigrationGraph(
     const meta = classifyFlowIRFinding(f.code);
     combined.push({
       ...f,
+      warningClass: f.warningClass || meta.warningClass,
       category: f.category || meta.category,
       requiresBusinessReview: f.requiresBusinessReview ?? meta.requiresBusinessReview,
     });
@@ -2114,6 +2212,7 @@ export function validateIR(ir: FlowIR): FlowIRValidationResult {
     const meta = classifyFlowIRFinding(f.code);
     return {
       ...f,
+      warningClass: f.warningClass || meta.warningClass,
       category: f.category || meta.category,
       requiresBusinessReview: f.requiresBusinessReview ?? meta.requiresBusinessReview,
     };
@@ -2154,15 +2253,25 @@ export function renderAvayaView(ir: FlowIR): RenderedModeReport {
     ? 'Kompatibilitäts-/Stub-Modus (Opt-In)'
     : 'Ehrliche Migration (Strict Default)';
 
-  const kurzfazit = `Normalisiertes Avaya-Mapping (${modeLabel}) für "${ir.meta.sourceScript}" (${ir.nodes.length} IR-Knoten, ${ir.transitions.length} Transitionen, ${ir.variables.length} scope-freie Variablen, ${allFindings.length} Finding(s)).`;
+  const avayaOpenReviewItems = allFindings.filter((f) => {
+    const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
+    return cls === 'actionable_migration' || cls === 'semantic_review';
+  });
+  const avayaHintCleanupItems = allFindings.filter((f) => {
+    const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
+    return cls === 'source_only_hint' || cls === 'informational_cleanup';
+  });
+
+  const kurzfazit = `Normalisiertes Avaya-Mapping (${modeLabel}) für "${ir.meta.sourceScript}" (${ir.nodes.length} IR-Knoten, ${ir.transitions.length} Transitionen, ${ir.variables.length} scope-freie Variablen, ${avayaOpenReviewItems.length} Open Review Signals, ${avayaHintCleanupItems.length} Hints/Cleanup).`;
 
   const annahmenUndOffenePunkte: string[] =
     allFindings.length > 0
       ? allFindings.map((f) => {
+          const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
           const traceStr = f.sourceTrace
             ? ` [${f.sourceTrace.script}${f.sourceTrace.section ? ` · ${f.sourceTrace.section}` : ''} · Z.${f.sourceTrace.lineStart}]`
             : '';
-          return `[${f.severity} · ${f.code}] ${f.message}${traceStr}`;
+          return `[${f.severity} · ${f.code} · ${cls}] ${f.message}${traceStr}`;
         })
       : ['Keine offenen Migrationsfragen oder Struktur-Findings im Avaya-IR erkannt.'];
 
@@ -2749,24 +2858,34 @@ export function renderGenesysView(ir: FlowIR, preRenderedArchyYaml?: string): Re
   const validation = validateIR(ir);
   const allFindings = ir.findings.length > 0 ? ir.findings : validation.findings;
   const yaml = preRenderedArchyYaml || renderArchyYamlFromFlowIR(ir);
-
   const modeLabel = ir.meta.compatibilityStubMode
     ? 'Kompatibilitäts-/Stub-Modus (Opt-In)'
     : 'Ehrliche Migration (Strict Default)';
-  const kurzfazit = `Genesys Cloud Architect Zielstruktur (${modeLabel}) für "${ir.meta.flowId}" (${validation.stats.decisionCount} Decisions, ${validation.stats.switchCount} Switches, ${validation.stats.integrationCount} Integrationen, ${validation.errorCount} IR-Fehler, ${allFindings.filter((f) => f.severity === 'WARN').length} offene Migrationspunkte).`;
+
+  const openReviewItems = allFindings.filter((f) => {
+    const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
+    return cls === 'actionable_migration' || cls === 'semantic_review';
+  });
+  const sourceAndCleanupItems = allFindings.filter((f) => {
+    const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
+    return cls === 'source_only_hint' || cls === 'informational_cleanup';
+  });
+  const kurzfazit = `Genesys Cloud Architect Zielstruktur (${modeLabel}) für "${ir.meta.flowId}" (${validation.stats.decisionCount} Decisions, ${validation.stats.switchCount} Switches, ${validation.stats.integrationCount} Integrationen, ${validation.errorCount} IR-Fehler, ${openReviewItems.length} Open Review Signals, ${sourceAndCleanupItems.length} Hints/Cleanup).`;
 
   const annahmenUndOffenePunkte: string[] =
     allFindings.length > 0
       ? allFindings.map((f) => {
+          const cls = f.warningClass || classifyFlowIRFinding(f.code).warningClass;
           const traceStr = f.sourceTrace
             ? ` [${f.sourceTrace.script}${f.sourceTrace.section ? ` · ${f.sourceTrace.section}` : ''} · Z.${f.sourceTrace.lineStart}]`
             : '';
-          return `[${f.severity} · ${f.code}] ${f.message}${traceStr}`;
+          return `[${f.severity} · ${f.code} · ${cls}] ${f.message}${traceStr}`;
         })
       : ['Alle IR-Regeln erfüllt — keine offenen Migrationsfragen oder ungefüllten Variablen erkannt.'];
 
   const migrationshinweise: string[] = [
     `Migrationsmodus: ${modeLabel}.`,
+    `Review-Triage: ${openReviewItems.length} Open Review Signal(s) (actionable_migration / semantic_review) getrennt von ${sourceAndCleanupItems.length} Hint-/Cleanup-Meldung(en) (source_only_hint / informational_cleanup).`,
     'Variablen-Scopes: Alle Variablen sind in der IR scope-frei gehalten und erst im Genesys-YAML als Flow.* bzw. Task.* gerendert.',
     'Kontrollfluss: Avaya-Sections und GOTO-Sprünge wurden graphbasiert in echte Architect-Verzweigungen aufgelöst; geschützte Besetzt-/Fehler-Pfade sind nur bedingt erreichbar.',
   ];

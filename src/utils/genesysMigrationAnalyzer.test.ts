@@ -9,6 +9,7 @@ import {
 import { ScriptModule } from '../types/mermaidStudio';
 import {
   FlowIR,
+  classifyFlowIRFinding,
   exportAllArchyYamlsZipBlob,
   renderArchyYamlFromFlowIR,
   renderAvayaView,
@@ -2056,7 +2057,214 @@ SECTION Start
       normalVal.findings.some((f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW')
     ).toBe(false);
   });
+
+  it('generic_service_flow golden regression (Strict Honest Mode): validates warningClass separation, verbatim date expression, scoped fallthrough, and clean subtasks', () => {
+    const genericFlow = makeModule(
+      'generic_service_flow',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    EXECUTE Special_Event_Handling
+  ELSE
+    GIVE RAN Closed_Message
+    DISCONNECT
+  END IF
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Service_Message
+  END IF
+  EXECUTE Core_Service_Routing
+  EXECUTE Night_Service_Check
+  GIVE RAN Service_Welcome
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    const ws = buildScriptWorkspace([genericFlow]);
+    const strictRes = translateAvayaWorkspaceToGenesys(ws);
+    const script = strictRes.scripts[0];
+
+    expect(strictRes.compatibilityStubMode).toBe(false);
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.yamlValidation.errors).toHaveLength(0);
+    expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
+    expect(script.archyYaml).not.toContain('getParticipantData:');
+    expect(script.archyYaml).toContain(
+      'Preserved verbatim for auditability, but likely requires manual normalization (date format, timezone, or Data Table lookup) before productive Architect import.'
+    );
+
+    // Tiered warningClass verification
+    const varFinding = script.flowIR.findings.find(
+      (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_HolidayList_Region'
+    );
+    const dupFinding = script.flowIR.findings.find((f) => f.code === 'DUPLICATE_HOLIDAY_LOGIC');
+    const dateFinding = script.flowIR.findings.find(
+      (f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW'
+    );
+    const fallthroughFindings = script.flowIR.findings.filter(
+      (f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH'
+    );
+
+    expect(varFinding?.warningClass).toBe('actionable_migration');
+    expect(dupFinding?.warningClass).toBe('semantic_review');
+    expect(dateFinding?.warningClass).toBe('semantic_review');
+    expect(fallthroughFindings).toHaveLength(1);
+    expect(fallthroughFindings[0].warningClass).toBe('actionable_migration');
+    expect(fallthroughFindings[0].message).toContain('nach "Holiday_Service_Message"');
+    expect(fallthroughFindings[0].message).not.toContain('nach "Special_Event_Handling"');
+    expect(fallthroughFindings[0].message).not.toContain('nach "Night_Service_Check"');
+  });
+
+  it('Two-phase WAIT audit classifies active reachable WAIT as WAIT_UNMAPPED_ACTIVE_PATH and pruned/unreachable WAIT as WAIT_SOURCE_ONLY_HINT', () => {
+    const activeWaitMod = makeModule(
+      'Active_Wait_Flow',
+      `
+SECTION Start
+  GIVE RAN Greeting_Prompt
+  WAIT 15
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    const activeScript = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([activeWaitMod])).scripts[0];
+    expect(activeScript.yamlValidation.isValid).toBe(true);
+    expect(activeScript.archyYaml).toContain('delay:');
+    expect(activeScript.warnings.some((w) => w.code === 'WAIT_UNMAPPED_ACTIVE_PATH')).toBe(true);
+    const activeWaitIr = activeScript.flowIR.findings.find(
+      (f) => f.code === 'WAIT_UNMAPPED_ACTIVE_PATH'
+    );
+    expect(activeWaitIr?.severity).toBe('WARN');
+    expect(activeWaitIr?.warningClass).toBe('actionable_migration');
+    expect(activeWaitIr?.category).toBe('wait_hint');
+    expect(activeScript.irValidation.commentParityOk).toBe(true);
+
+    // Dead-path WAIT (after DISCONNECT) + unreachable orphan section WAIT -> source_only_hint only!
+    const deadWaitMod = makeModule(
+      'Pruned_Wait_Flow',
+      `
+SECTION Start
+  GIVE RAN Service_Welcome
+  QUEUE TO SKILLSET SERVICE_QUEUE
+  WAIT 15
+SECTION Legacy_Orphan_Section
+  WAIT 20
+  DISCONNECT
+`
+    );
+
+    const deadScript = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([deadWaitMod])).scripts[0];
+    expect(deadScript.yamlValidation.isValid).toBe(true);
+    expect(deadScript.archyYaml).not.toContain('delay:');
+    expect(deadScript.warnings.some((w) => w.code === 'WAIT_UNMAPPED_ACTIVE_PATH')).toBe(false);
+    expect(deadScript.warnings.some((w) => w.code === 'IN_QUEUE_FLOW_REQUIRED')).toBe(false);
+
+    const sourceOnlyHints = deadScript.flowIR.findings.filter(
+      (f) => f.code === 'WAIT_SOURCE_ONLY_HINT'
+    );
+    expect(sourceOnlyHints.length).toBe(2);
+    for (const sh of sourceOnlyHints) {
+      expect(sh.severity).toBe('INFO');
+      expect(sh.warningClass).toBe('source_only_hint');
+      expect(sh.category).toBe('wait_hint');
+      expect(sh.requiresBusinessReview).toBe(false);
+    }
+
+    // Active non-numeric unmapped WAIT emits WAIT_UNMAPPED_ACTIVE_PATH without inventing delay node
+    const unmappedActiveMod = makeModule(
+      'Unmapped_Active_Wait_Flow',
+      `
+SECTION Start
+  GIVE RAN Service_Welcome
+  WAIT LV_CustomDelay
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+    const unmappedActiveScript = translateAvayaWorkspaceToGenesys(
+      buildScriptWorkspace([unmappedActiveMod])
+    ).scripts[0];
+    expect(unmappedActiveScript.archyYaml).not.toContain('delay:');
+    expect(
+      unmappedActiveScript.flowIR.findings.some((f) => f.code === 'WAIT_UNMAPPED_ACTIVE_PATH')
+    ).toBe(true);
+  });
+
+  it('Genesys Mermaid renders dashed Fallthrough rejoin edge ONLY for unproven branch calls (Holiday_Service_Message -> Core_Service_Routing)', () => {
+    const genericFlow = makeModule(
+      'generic_service_flow',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    EXECUTE Special_Event_Handling
+  ELSE
+    GIVE RAN Closed_Message
+    DISCONNECT
+  END IF
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Service_Message
+  END IF
+  EXECUTE Core_Service_Routing
+  EXECUTE Night_Service_Check
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    const script = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([genericFlow])).scripts[0];
+    const mmd = script.genesysMermaid;
+
+    expect(mmd).toContain('-.->|"Fallthrough (unproven terminality)"|');
+    expect(mmd).toContain('Call Task: Holiday_Service_Message | Unproven Terminality -> Continues');
+    expect(mmd).toContain('classDef gcFallthrough');
+    expect(mmd).toContain('[Unproven Var / Duplicate Holiday / Date Review]');
+
+    // Special_Event_Handling & Night_Service_Check must NOT get fallthrough markers
+    expect(mmd).not.toContain(
+      'Call Task: Special_Event_Handling | Unproven Terminality -> Continues'
+    );
+    expect(mmd).not.toContain(
+      'Call Task: Night_Service_Check | Unproven Terminality -> Continues'
+    );
+  });
+
+  it('classifyFlowIRFinding and dual-mode reports separate all four warningClass tiers consistently', () => {
+    expect(classifyFlowIRFinding('VAR_USED_BEFORE_SET').warningClass).toBe('actionable_migration');
+    expect(classifyFlowIRFinding('POTENTIAL_BRANCH_FALLTHROUGH').warningClass).toBe(
+      'actionable_migration'
+    );
+    expect(classifyFlowIRFinding('WAIT_UNMAPPED_ACTIVE_PATH').warningClass).toBe(
+      'actionable_migration'
+    );
+    expect(classifyFlowIRFinding('DATE_COMPARISON_SEMANTIC_REVIEW').warningClass).toBe(
+      'semantic_review'
+    );
+    expect(classifyFlowIRFinding('DUPLICATE_HOLIDAY_LOGIC').warningClass).toBe('semantic_review');
+    expect(classifyFlowIRFinding('WAIT_SOURCE_ONLY_HINT').warningClass).toBe('source_only_hint');
+    expect(classifyFlowIRFinding('UNREACHABLE_TASK_PRUNED').warningClass).toBe(
+      'informational_cleanup'
+    );
+    expect(classifyFlowIRFinding('DUPLICATE_VARIABLE_SCOPE').warningClass).toBe(
+      'informational_cleanup'
+    );
+
+    const mod = makeModule(
+      'Triage_Flow',
+      `
+SECTION Start
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Service_Message
+  END IF
+  QUEUE TO SKILLSET SERVICE_QUEUE
+SECTION Unused_Section
+  WAIT 15
+  DISCONNECT
+`
+    );
+    const script = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([mod])).scripts[0];
+    expect(script.genesysView.kurzfazit).toContain('Open Review Signals');
+    expect(script.genesysView.kurzfazit).toContain('Hints/Cleanup');
+    expect(script.avayaView.kurzfazit).toContain('Open Review Signals');
+    expect(script.avayaView.annahmenUndOffenePunkte.some((l) => l.includes('WAIT_SOURCE_ONLY_HINT'))).toBe(true);
+  });
 });
+
 
 
 

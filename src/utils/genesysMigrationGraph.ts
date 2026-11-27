@@ -193,6 +193,8 @@ export interface MigrationStep {
   migrationAnnotations?: StepMigrationAnnotation[];
   /** Hinweis auf absichtlich unverändert beibehaltene Ausdrücke mit Klärungsbedarf (z. B. DateTime == String). */
   expressionReview?: StepExpressionReview;
+  /** Verknüpfung zur erfassten Avaya-WAIT-Quellzeile für Post-Pruning Pass-2-Klassifikation. */
+  sourceWaitId?: string;
 }
 
 export interface StepMigrationAnnotation {
@@ -218,6 +220,8 @@ export interface StepProvenanceFinding {
     | 'POTENTIAL_BRANCH_FALLTHROUGH'
     | 'DUPLICATE_HOLIDAY_LOGIC'
     | 'DATE_COMPARISON_SEMANTIC_REVIEW'
+    | 'WAIT_UNMAPPED_ACTIVE_PATH'
+    | 'WAIT_SOURCE_ONLY_HINT'
     | 'UNRESOLVED_TASK_REF'
     | 'UNREACHABLE_TASK_PRUNED';
   message: string;
@@ -249,7 +253,9 @@ export interface MigrationGraphWarning {
     | 'UNPROVEN_VARIABLE_SOURCE'
     | 'POTENTIAL_BRANCH_FALLTHROUGH'
     | 'DUPLICATE_HOLIDAY_LOGIC'
-    | 'DATE_COMPARISON_SEMANTIC_REVIEW';
+    | 'DATE_COMPARISON_SEMANTIC_REVIEW'
+    | 'WAIT_UNMAPPED_ACTIVE_PATH'
+    | 'WAIT_SOURCE_ONLY_HINT';
   severity: 'warning' | 'blocker';
   message: string;
   lineNumber?: number;
@@ -259,6 +265,34 @@ export interface PrunedUnreachableTaskRecord {
   refId: string;
   originalTarget: string;
   reason: string;
+}
+
+export interface SourceWaitStatementRecord {
+  id: string;
+  lineNumber: number;
+  section: string;
+  rawCommand: string;
+  parsedSeconds?: number;
+  mappedStepId?: string;
+  status: 'mapped_delay' | 'unmapped_syntax';
+  prunedInLocalBlock?: boolean;
+}
+
+export interface WaitSourceOnlyHintRecord {
+  id: string;
+  lineNumber: number;
+  section: string;
+  rawCommand: string;
+  message: string;
+}
+
+export interface ActiveWaitFindingRecord {
+  id: string;
+  lineNumber: number;
+  section: string;
+  rawCommand: string;
+  stepId?: string;
+  message: string;
 }
 
 export interface MigrationGraphDiagnostics {
@@ -273,6 +307,9 @@ export interface MigrationGraphDiagnostics {
   normalizedTargets: NormalizedTransferTarget[];
   compatibilityStubMode?: boolean;
   prunedUnreachableTasks?: PrunedUnreachableTaskRecord[];
+  sourceWaitStatements?: SourceWaitStatementRecord[];
+  waitSourceOnlyHints?: WaitSourceOnlyHintRecord[];
+  activeWaitFindings?: ActiveWaitFindingRecord[];
 }
 
 export interface MigrationFlowGraph {
@@ -1190,7 +1227,7 @@ export function buildMigrationFlowGraph(
   node: ParsedScriptNode,
   mod: ScriptModule | undefined,
   ctx: BuildMigrationGraphContext,
-  schemaVersion = '1.5.6'
+  schemaVersion = '1.6.0'
 ): BuildMigrationGraphResult {
   const rawText = mod?.rawText || '';
   const strippedLines = rawText ? stripOclCommentsPreservingLines(rawText) : [];
@@ -1314,6 +1351,9 @@ export function buildMigrationFlowGraph(
   let fallbackExpressionCount = 0;
   let needsFallbackErrorTask = false;
   const uniqueSkillsets = new Set<string>();
+  const sourceWaitStatements: SourceWaitStatementRecord[] = [];
+  let waitRecordCounter = 0;
+  const currentSectionContext = { name: 'Main_Task' };
 
   const resolveStaticVar = (tok: string): string => {
     const clean = tok.trim().replace(/^["']|["']$/g, '');
@@ -1762,25 +1802,46 @@ export function buildMigrationFlowGraph(
       return emitted;
     }
 
-    // WAIT n
-    const waitMatch = trimmed.match(/^\s*WAIT\s+(\d{1,5})(?:\s*(?:SEC|SECONDS|S))?\b/i);
+    // WAIT n (Pass 1 captures raw WAIT statement into sourceWaitStatements; Pass 2 classifies active vs source-only after pruning)
+    const waitMatch = trimmed.match(/^\s*(?:GIVE\s+)?WAIT\s+(\d{1,5})(?:\s*(?:SEC|SECONDS|S))?\b/i);
     if (waitMatch) {
       const secs = Math.max(1, Number(waitMatch[1]) || 10);
-      warnings.push({
-        code: 'IN_QUEUE_FLOW_REQUIRED',
-        severity: 'warning',
-        message: `WAIT ${secs}s in Zeile ${lineNumber}: Warte-Pausen in Warteschleifen in Genesys Cloud über In-Queue Call Flow / Delay abbilden.`,
+      waitRecordCounter += 1;
+      const waitId = `srcwait_${waitRecordCounter}`;
+      const stepId = nextStepId('wait');
+      sourceWaitStatements.push({
+        id: waitId,
         lineNumber,
+        section: currentSectionContext.name,
+        rawCommand: trimmed,
+        parsedSeconds: secs,
+        mappedStepId: stepId,
+        status: 'mapped_delay',
       });
       emitted.push({
-        id: nextStepId('wait'),
+        id: stepId,
         kind: 'delay',
         lineNumber,
         avayaCommand: `WAIT ${secs}`,
         label: `Delay (In-Queue): ${secs}s`,
         target: `${secs}s`,
         delaySeconds: secs,
+        sourceWaitId: waitId,
         isTerminal: false,
+      });
+      return emitted;
+    }
+
+    // Unmapped/non-numeric WAIT variants (e.g. WAIT $VAR / WAIT UNTIL ...): record without inventing delay nodes
+    if (/^\s*(?:GIVE\s+)?WAIT(?:\s+(?!TIME\b).*)?$/i.test(trimmed)) {
+      waitRecordCounter += 1;
+      const waitId = `srcwait_${waitRecordCounter}`;
+      sourceWaitStatements.push({
+        id: waitId,
+        lineNumber,
+        section: currentSectionContext.name,
+        rawCommand: trimmed,
+        status: 'unmapped_syntax',
       });
       return emitted;
     }
@@ -2345,6 +2406,7 @@ export function buildMigrationFlowGraph(
   ): MigrationStep[] => {
     const steps: MigrationStep[] = [];
     let idx = 0;
+    let blockHasTerminated = false;
 
     while (idx < blockLines.length) {
       const { lineNumber, text } = blockLines[idx];
@@ -2851,8 +2913,15 @@ export function buildMigrationFlowGraph(
 
       // D. Plain statement(s) on this line
       idx += 1;
+      const wasTerminatedBeforeStmt = blockHasTerminated || isStepListTerminal(steps);
       for (const stmt of splitOclStatementsOutsideQuotes(text)) {
+        const waitCountBefore = sourceWaitStatements.length;
         const translated = translateSingleStatement(stmt, lineNumber, taskVars, activeDigitsVarRef);
+        if (wasTerminatedBeforeStmt && sourceWaitStatements.length > waitCountBefore) {
+          for (let wi = waitCountBefore; wi < sourceWaitStatements.length; wi += 1) {
+            sourceWaitStatements[wi].prunedInLocalBlock = true;
+          }
+        }
         for (const step of translated) {
           // Wire immediate follow-up steps after callDataAction / collectInput into successSteps when appropriate
           const prevStep = steps[steps.length - 1];
@@ -2890,6 +2959,12 @@ export function buildMigrationFlowGraph(
             steps.push(step);
           }
         }
+        if (isStepListTerminal(steps)) {
+          blockHasTerminated = true;
+        }
+      }
+      if (isStepListTerminal(steps)) {
+        blockHasTerminated = true;
       }
     }
 
@@ -2902,6 +2977,7 @@ export function buildMigrationFlowGraph(
 
   for (let sIdx = 0; sIdx < rawSections.length; sIdx += 1) {
     const sec = rawSections[sIdx];
+    currentSectionContext.name = sec.rawName;
     const taskVars = new Map<string, MigrationVariableDecl>();
     const activeDigitsVarRef = { name: 'collectedDigits' };
 
@@ -4017,6 +4093,7 @@ export function buildMigrationFlowGraph(
       normalizedTargets,
       compatibilityStubMode,
       prunedUnreachableTasks,
+      sourceWaitStatements,
     },
   };
 
