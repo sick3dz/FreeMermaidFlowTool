@@ -23,7 +23,7 @@ import {
 import { AUDIT_APP_VERSION } from '../utils/offlineAuditEngine';
 import { OfflineAuditSection } from './OfflineAuditSection';
 
-const PROJECT_OFFLINE_FILENAME = 'MermaidFree2UseOpen_Projekt_Offline.html';
+const PROJECT_OFFLINE_FILENAME = 'MermaidFree2Use_Projekt_Offline.html';
 
 async function copyTextWithFallback(text: string): Promise<boolean> {
   try {
@@ -50,7 +50,7 @@ const WORKFLOW_STAGES = [
   {
     step: '01.',
     title: 'Online nur Projekt laden',
-    body: 'Diese Webseite liefert ausschließlich die selbstenthaltene Einzeldatei MermaidFree2UseOpen_Projekt_Offline.html aus. Es werden online weder Konfiguratoren noch Callflow-Skripte verarbeitet.',
+    body: 'Diese Webseite liefert ausschließlich die selbstenthaltene Einzeldatei MermaidFree2Use_Projekt_Offline.html aus. Es werden online weder Konfiguratoren noch Callflow-Skripte verarbeitet.',
   },
   {
     step: '02.',
@@ -205,7 +205,7 @@ export default function OnlineProjectLanding() {
             onClick={() => navigateToOnlineSection('overview')}
             className="text-sm sm:text-base font-semibold tracking-tight text-slate-100 whitespace-nowrap shrink-0 cursor-pointer hover:text-white transition-colors"
           >
-            MermaidFree2UseOpen
+            MermaidFree2Use
           </button>
 
           {/* Zone 2: Minimal Navigation + Vollständiger IT-Audit Tab */}
@@ -639,7 +639,7 @@ export default function OnlineProjectLanding() {
       <footer className="border-t border-slate-800/90 bg-slate-950">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 py-5 flex flex-col gap-2 text-xs text-slate-500">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-            <span className="font-medium text-slate-400">MermaidFree2UseOpen</span>
+            <span className="font-medium text-slate-400">MermaidFree2Use</span>
             <span>
               Offline-First Einzeldatei-Verteiler · Builder und Callflow-Studio laufen
               ausschließlich lokal unter file://
@@ -647,8 +647,10 @@ export default function OnlineProjectLanding() {
           </div>
           <p className="text-[11px] text-slate-500 leading-relaxed">
             Unabhängiges internes Projektwerkzeug ohne Verbindung, Partnerschaft oder
-            Zertifizierung durch Avaya Inc. oder Microsoft Corporation. Markennamen dienen
-            ausschließlich der technischen Beschreibung der Dateikompatibilität (§ 23 MarkenG).
+            Zertifizierung durch Genesys Telecommunications Laboratories, Inc. (Genesys Cloud CX /
+            Architect / Archy), Avaya Inc., Microsoft Corporation (Visio / Excel), Oracle
+            Corporation oder FlixCheck. Markennamen dienen ausschließlich der technischen
+            Beschreibung der Dateikompatibilität und Schnittstellen-Analyse (§ 23 MarkenG).
           </p>
         </div>
       </footer>

@@ -1059,7 +1059,7 @@ export function compileOclConditionToArchitectExpr(
       };
     }
 
-    // Generic identifier (e.g., COUNTER, FLIXCHECK_KFZ_Schaden_RHLD, Gesellschaft, RoutingFlag)
+    // Generic identifier (e.g., COUNTER, FLIXCHECK_Case_RegionA, EntityFlag, RoutingFlag)
     if (/^[A-Za-zÄÖÜäöüß_][A-Za-z0-9ÄÖÜäöüß_.-]*$/.test(op)) {
       const looksCounter = /count|retry|zaehler|versuch|attempt|index/i.test(op);
       const inferredType = looksCounter ? 'integer' : preferType;
@@ -1150,7 +1150,7 @@ export function compileOclConditionToArchitectExpr(
     };
   }
 
-  // Bare boolean flag identifier (e.g. `FLIXCHECK_KFZ_Schaden_RHLD`, `GV_IsVip`, `OUT OF RANGE`)
+  // Bare boolean flag identifier (e.g. `FLIXCHECK_Case_RegionA`, `GV_IsVip`, `OUT OF RANGE`)
   if (/^OUT\s+OF\s+RANGE$/i.test(atom)) {
     const dVar = registry.ensureTaskVar(taskVars, activeDigitsVarName, 'string', '');
     return { expression: `IsNotSetOrEmpty(${dVar.refName})`, isFallbackFlag: false };
@@ -1367,7 +1367,7 @@ export function buildMigrationFlowGraph(
   node: ParsedScriptNode,
   mod: ScriptModule | undefined,
   ctx: BuildMigrationGraphContext,
-  schemaVersion = '1.6.5'
+  schemaVersion = '1.6.8'
 ): BuildMigrationGraphResult {
   const rawText = mod?.rawText || '';
   const strippedLines = rawText ? stripOclCommentsPreservingLines(rawText) : [];

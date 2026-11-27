@@ -661,13 +661,13 @@ SECTION Start
 
   it('v2 Level-1 Graph -> Level-2 Renderer: real branching expressions, terminal dead-path pruning, clean Flow/Task variable scoping, E.164 vs CDN normalization, populated schedule/input/dataAction branches, hydrated subtasks, and unique action names', () => {
     const mainMod = makeModule(
-      'Schaden_Service_RHLD',
+      'Claim_Service_RegionA',
       `
 SECTION Start
   IF DAY OF WEEK = MONDAY..FRIDAY AND TIME OF DAY = 08:00..18:00 THEN
     IF CDN = 7401 THEN
       EXECUTE Menu
-      IF NOT FLIXCHECK_KFZ_Schaden_RHLD THEN
+      IF NOT FLIXCHECK_Case_RegionA THEN
         TRANSFER TO 002218277279035
         TRANSFER TO 2510
         EXECUTE MobilNummerEingeben
@@ -723,7 +723,7 @@ SECTION Mobile_Entry
 
     const ws = buildScriptWorkspace([mainMod, menuMod, mobileMod]);
     const res = translateAvayaWorkspaceToGenesys(ws);
-    const main = res.scriptsByKey['schaden_service_rhld'];
+    const main = res.scriptsByKey['claim_service_regiona'];
 
     expect(main).toBeDefined();
     expect(main.yamlValidation.isValid).toBe(true);
@@ -733,7 +733,7 @@ SECTION Mobile_Entry
     expect(main.archyYaml).not.toContain('Flow.avayaCondition');
     // Real Architect expressions compiled from Avaya OCL
     expect(main.archyYaml).toContain('Call.Dnis == \\"7401\\"');
-    expect(main.archyYaml).toContain('!Flow.FLIXCHECK_KFZ_Schaden_RHLD');
+    expect(main.archyYaml).toContain('!Flow.FLIXCHECK_Case_RegionA');
 
     // 2. Schedule Group has populated open, closed, holiday branches (never empty actions: [])
     expect(main.archyYaml).toContain('evaluateScheduleGroup:');
@@ -757,7 +757,7 @@ SECTION Mobile_Entry
 
     // 5. Clean Variable Scoping (Flow vs Task separated; NO Flow./Task. in declaration names)
     expect(main.archyYaml).toContain('name: avayaOriginScript');
-    expect(main.archyYaml).toContain('name: FLIXCHECK_KFZ_Schaden_RHLD');
+    expect(main.archyYaml).toContain('name: FLIXCHECK_Case_RegionA');
     expect(main.archyYaml).not.toMatch(/^\s+name:\s+(?:Flow|Task)\./m);
     // Task variables (LV_Choice, LV_MobileNr) live inside their respective tasks, NOT in inboundCall.variables
     const inboundVarsSection = main.archyYaml.split('  tasks:')[0];
@@ -1427,7 +1427,7 @@ SECTION UNUSED_SCHALTER
     expect(script.flowIR.findings.some((f) => f.code === 'SWITCH_WITHOUT_SOURCE')).toBe(true);
   });
 
-  it('Honest Migration default: maps Avaya date natively to GetCurrentDateTimeUtc(), omits getParticipantData for unproven Sys_Feiertagliste_NRW, flags POTENTIAL_BRANCH_FALLTHROUGH without inventing disconnect, and warns on parallel holiday logic', () => {
+  it('Honest Migration default: maps Avaya date natively to GetCurrentDateTimeUtc(), omits getParticipantData for unproven Sys_HolidayList_RegionA, flags POTENTIAL_BRANCH_FALLTHROUGH without inventing disconnect, and warns on parallel holiday logic', () => {
     const mainMod = makeModule(
       'Main_Holiday_Flow',
       `
@@ -1438,7 +1438,7 @@ SECTION Start
     GIVE RAN Geschlossen
     DISCONNECT
   END IF
-  IF date = Sys_Feiertagliste_NRW THEN
+  IF date = Sys_HolidayList_RegionA THEN
     EXECUTE Feiertag
   END IF
   EXECUTE Callflow_1
@@ -1457,13 +1457,13 @@ SECTION Start
     expect(script.yamlValidation.errors).toHaveLength(0);
 
     // 1. Differentiated provenance: `date` -> native GetCurrentDateTimeUtc(), NO Flow.date, NO getParticipantData!
-    expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_Feiertagliste_NRW');
+    expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_RegionA');
     expect(script.archyYaml).not.toContain('Flow.date');
     expect(script.archyYaml).not.toContain('getParticipantData:');
-    expect(script.archyYaml).toContain('OFFENE MIGRATIONSFRAGE: Source for "Flow.Sys_Feiertagliste_NRW"');
+    expect(script.archyYaml).toContain('OFFENE MIGRATIONSFRAGE: Source for "Flow.Sys_HolidayList_RegionA"');
     expect(
       script.flowIR.findings.some(
-        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_Feiertagliste_NRW'
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_HolidayList_RegionA'
       )
     ).toBe(true);
     expect(
@@ -1484,7 +1484,7 @@ SECTION Start
     // 3. Parallel holiday logic: BOTH evaluateScheduleGroup.holiday AND explicit holiday decision preserved + DUPLICATE_HOLIDAY_LOGIC warning
     expect(script.archyYaml).toContain('evaluateScheduleGroup:');
     expect(script.archyYaml).toContain('holiday:');
-    expect(script.archyYaml).toContain('Sys_Feiertagliste_NRW');
+    expect(script.archyYaml).toContain('Sys_HolidayList_RegionA');
     expect(script.flowIR.findings.some((f) => f.code === 'DUPLICATE_HOLIDAY_LOGIC')).toBe(true);
     expect(script.warnings.some((w) => w.code === 'DUPLICATE_HOLIDAY_LOGIC')).toBe(true);
     expect(script.archyYaml).toContain('Moegliche doppelte Feiertagslogik');
@@ -1495,7 +1495,7 @@ SECTION Start
     expect(stubRes.compatibilityStubMode).toBe(true);
     expect(stubScript.yamlValidation.isValid).toBe(true);
     expect(stubScript.archyYaml).toContain('getParticipantData:');
-    expect(stubScript.archyYaml).toContain('Get Participant Data Sys_Feiertagliste_NRW');
+    expect(stubScript.archyYaml).toContain('Get Participant Data Sys_HolidayList_RegionA');
     expect(stubScript.archyYaml).not.toContain('Get Participant Data date');
     expect(stubScript.archyYaml).toContain('KOMPATIBILITAETS-STUB (OPT-IN)');
   });
@@ -1505,7 +1505,7 @@ SECTION Start
       'Main_With_Terminal_Feiertag',
       `
 SECTION Start
-  IF date = Sys_Feiertagliste_NRW THEN
+  IF date = Sys_HolidayList_RegionA THEN
     EXECUTE Feiertag
   END IF
   QUEUE TO SKILLSET Support_DE
@@ -1542,7 +1542,7 @@ SECTION Start
       'Main_With_NonTerminal_Feiertag',
       `
 SECTION Start
-  IF date = Sys_Feiertagliste_NRW THEN
+  IF date = Sys_HolidayList_RegionA THEN
     EXECUTE Feiertag
   END IF
   QUEUE TO SKILLSET Support_DE
@@ -1674,7 +1674,7 @@ SECTION Start
           name: 'Holiday List Check',
           terminal: false,
           parameters: {},
-          condition: { expr: 'GetCurrentDateTimeUtc() == Sys_Feiertagliste_NRW' },
+          condition: { expr: 'GetCurrentDateTimeUtc() == Sys_HolidayList_RegionA' },
           sourceTrace: { script: 'Hardened_Check_Flow.s', lineStart: 5, lineEnd: 5 },
         },
         {
@@ -2053,7 +2053,7 @@ SECTION Start
     expect(temporalFinding?.category).toBe('expression_review');
     expect(temporalFinding?.requiresBusinessReview).toBe(true);
 
-    const normalVal = validateIR(makeDecisionIr('regionCode == "NRW"', 'regionCode'));
+    const normalVal = validateIR(makeDecisionIr('regionCode == "REG_A"', 'regionCode'));
     expect(
       normalVal.findings.some((f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW')
     ).toBe(false);
@@ -2350,7 +2350,7 @@ SECTION Start
     });
 
     for (const res of [defaultRes, disabledRes]) {
-      expect(res.schemaVersion).toBe('1.6.5');
+      expect(res.schemaVersion).toBe('1.6.8');
       expect(res.resolvedTargetMode).toBe(false);
       const script = res.scripts[0];
       expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
@@ -2395,7 +2395,7 @@ SECTION Start
     });
     const script = res.scripts[0];
 
-    expect(res.schemaVersion).toBe('1.6.5');
+    expect(res.schemaVersion).toBe('1.6.8');
     expect(res.resolvedTargetMode).toBe(true);
     expect(script.yamlValidation.isValid).toBe(true);
     expect(script.yamlValidation.errors).toHaveLength(0);

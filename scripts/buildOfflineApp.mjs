@@ -52,7 +52,7 @@ export async function generateSingleFileOfflineHtml(outPath) {
           output: {
             format: 'iife',
             codeSplitting: false,
-            name: 'MermaidFree2UseOpenApp',
+            name: 'MermaidFree2UseApp',
           },
         },
       },

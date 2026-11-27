@@ -3996,7 +3996,7 @@ function auditBranchFallthroughsAndTerminality(
 /**
  * Parallel Holiday Logic Transparency Audit:
  * Preserves both `evaluateScheduleGroup.holiday` and any separate explicit holiday `decision`
- * (e.g. `GetCurrentDateTimeUtc() == Flow.Sys_Feiertagliste_NRW`) without merging or emptying
+ * (e.g. `GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region`) without merging or emptying
  * either branch, and flags the overlap as DUPLICATE_HOLIDAY_LOGIC for business clarification.
  */
 function auditParallelHolidayLogic(
@@ -4595,7 +4595,7 @@ export function translateAvayaWorkspaceToGenesys(
         compatibilityStubMode,
         resolvedTargetConfig,
       },
-      '1.6.5'
+      '1.6.8'
     );
     builtByKey.set(node.scriptKey, { node, built });
     allGraphsByKey.set(node.scriptKey, built.graph);
@@ -4635,7 +4635,7 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.6.5',
+    schemaVersion: '1.6.8',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     compatibilityStubMode,

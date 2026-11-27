@@ -41,7 +41,7 @@ import {
   makeXlsxBannerRows,
 } from './openingHoursExporter';
 
-export const INVENTORY_SCHEMA_VERSION = '1.6.5';
+export const INVENTORY_SCHEMA_VERSION = '1.6.8';
 
 export type InventoryCategory =
   | 'prompts_wavs'

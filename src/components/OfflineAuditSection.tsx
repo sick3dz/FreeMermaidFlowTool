@@ -756,11 +756,12 @@ export const OfflineAuditSection: React.FC<OfflineAuditSectionProps> = ({
               <span>Rechtliche Einordnung · § 23 MarkenG · Vertraulichkeit</span>
             </div>
             <h2 className="text-base sm:text-lg font-semibold text-slate-100">
-              6. Marken-, Hersteller-Unabhängigkeits- &amp; Datenerklärung (Avaya / Visio)
+              6. Marken-, Hersteller-Unabhängigkeits- &amp; Datenerklärung (Avaya / Genesys Cloud / Microsoft / Oracle / FlixCheck)
             </h2>
             <p className="text-xs text-slate-400">
-              Fakten zur Unabhängigkeit von Avaya Inc. und Microsoft Corporation sowie zum
-              Ausschluss proprietärer Quelltexte und vorbefüllter Fremddaten.
+              Fakten zur Unabhängigkeit von Genesys Telecommunications Laboratories, Inc., Avaya Inc.,
+              Microsoft Corporation, Oracle Corporation und FlixCheck sowie zum Ausschluss proprietärer
+              Quelltexte, privater Inhalte und vorbefüllter Fremddaten.
             </p>
           </div>
 

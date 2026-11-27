@@ -77,7 +77,7 @@ export interface SbomPackageItem {
   corporateNote: string;
 }
 
-export const AUDIT_APP_VERSION = '1.6.5';
+export const AUDIT_APP_VERSION = '1.6.8';
 
 export const ENTERPRISE_HIGHLIGHT_TILES: EnterpriseHighlightTile[] = [
   {
@@ -262,13 +262,13 @@ export const AUDIT_COMPLIANCE_STANDARDS: AuditComplianceStandardSpec[] = [
     verificationTitle: 'PRÜFNACHWEIS FÜR IT-SECURITY / ISMS',
     verificationHint: 'PowerShell / SHA-256 Audit',
     verificationSteps: `# 1. SHA-256 Freigabe-Hash erzeugen (Windows PowerShell):
-Get-FileHash .\\MermaidFree2UseOpen_Offline.html -Algorithm SHA256
+Get-FileHash .\\MermaidFree2Use_Offline.html -Algorithm SHA256
 
 # 2. Statische Prüfung auf externe Skript-/CDN-Aufrufe (0 Treffer):
-Select-String -Path .\\MermaidFree2UseOpen_Offline.html -Pattern "<script[^>]+src=https?://|unpkg\\.com|jsdelivr\\.net|fonts\\.googleapis"
+Select-String -Path .\\MermaidFree2Use_Offline.html -Pattern "<script[^>]+src=https?://|unpkg\\.com|jsdelivr\\.net|fonts\\.googleapis"
 
 # Linux / macOS:
-sha256sum MermaidFree2UseOpen_Offline.html`,
+sha256sum MermaidFree2Use_Offline.html`,
     approvalCopyText: `IT-Security / ISMS-Kurzstellungnahme (ISO/IEC 27001:2022) – Offline-HTML Callflow-Tool (Version ${AUDIT_APP_VERSION}):
 • Architektur: Statische Single-File-HTML ohne lokale Installation, ohne Server-Port und ohne Admin-Rechte.
 • Annex A.8.12 / A.8.20 (DLP & Netzwerksicherheit): 0 Byte ausgehender Traffic, 100 % Air-Gap-fähig auf isolierten VMs/Sprungservern.
@@ -414,10 +414,10 @@ sha256sum MermaidFree2UseOpen_Offline.html`,
     verificationHint: 'Windows Endpoint / AppLocker',
     verificationSteps: `# 1. Prüfen, dass keinerlei .exe/.dll/.msi oder Windows-Dienste installiert werden
 # 2. Hash für AppLocker / Software-Freigabe-Whitelist dokumentieren:
-Get-FileHash .\\MermaidFree2UseOpen_Offline.html -Algorithm SHA256
+Get-FileHash .\\MermaidFree2Use_Offline.html -Algorithm SHA256
 
 # 3. Verifizieren, dass keine externen URIs in Skript-Tags enthalten sind:
-Select-String -Path .\\MermaidFree2UseOpen_Offline.html -Pattern "<script[^>]+src=https?://"`,
+Select-String -Path .\\MermaidFree2Use_Offline.html -Pattern "<script[^>]+src=https?://"`,
     approvalCopyText: `BSI IT-Grundschutz-Kurzstellungnahme (APP.1.1 / APP.1.2 / CON.1 / OPS.1.1.3) – Version ${AUDIT_APP_VERSION}:
 • Ausführungskontext (APP.1.1): Reine Browser-HTML-Anwendung ohne Installer, ohne .exe/.msi, ohne Admin-Rechte und ohne OS-Registry-Änderungen.
 • Browser-Sicherheit (APP.1.2): Keine Drittserver-Skripte, keine Webfonts, keine Plug-ins; Mermaid läuft im Modus securityLevel="strict".
@@ -484,6 +484,27 @@ export const ENTERPRISE_STAKEHOLDER_FACTS: EnterpriseStakeholderFact[] = [
     factTitle: 'Eindeutiger SHA-256-Fingerprint',
     evidence: 'Die geschlossene Einzeldatei-Architektur ermöglicht unmittelbare Hash-Inventarisierung für AppLocker und Software-Freigaben.',
     reference: 'ISO 27001 A.8.9 / AppLocker',
+  },
+  {
+    id: 'arch-genesys-flowir',
+    stakeholder: 'IT-Betrieb / Paketierung',
+    factTitle: 'Deterministische Genesys Cloud Architect Migration (FlowIR v1.1)',
+    evidence: 'Übersetzt Avaya-OCL-Skripte offline im RAM in validiertes Archy-YAML (Strict Honest Default, opt-in Guarded Holiday-DB v1.6.5, WAIT source_hint) ohne Cloud-API-Call.',
+    reference: 'FlowIR v1.1 · Zero-API',
+  },
+  {
+    id: 'rev-inventory-export',
+    stakeholder: 'Datenschutz (DSB)',
+    factTitle: 'Natives Asset-Inventar (.xlsx / .csv / .json) im RAM',
+    evidence: 'Extrahiert Prompts, WAVs, Skillsets, DNIS/CDNs, Variablen, DB-/API-Aufrufe und Zeitpläne rein lokal und erzeugt 9-Blatt-Excel-Workbooks ohne externe Makros.',
+    reference: 'DSGVO Art. 5 · OpenXML',
+  },
+  {
+    id: 'sec-flixcheck-redaction',
+    stakeholder: 'IT-Security / ISMS',
+    factTitle: 'FlixCheck HDX & OCL-Analyse mit Secret-Redaction',
+    evidence: 'Erkennt FlixCheck-HDX- und Oracle-Schnittstellen regelbasiert offline, maskiert API-Tokens/Secrets vor jedem Export und schützt Regex-Parser vor ReDoS.',
+    reference: 'ISO 27001 A.8.25 / A.8.28',
   },
 ];
 
@@ -684,11 +705,84 @@ if (incomingHasData || !existingCache.hasProjectData) {
     codeExcerpt: `export function runCallflowAudit(input: ScriptWorkspace | ScriptModule[]): AuditReport {
   // Reine RAM-Auswertung ohne fs/fetch; speichert niemals rawText oder rawLine:
   return {
-    schemaVersion: '1.6.5',
+    schemaVersion: '1.6.8',
     privacyMode: '100%-in-memory-metadata-only',
     summary, nodes, brokenLinks, orphanScripts, deadEndScripts, circularLoops, externalIntegrations,
   };
 }`,
+  },
+  {
+    id: 'genesys-flowir-migration-engine',
+    numberLabel: '08',
+    title: 'Genesys Cloud Architect Migration Engine, FlowIR v1.1, Holiday-DB (v1.6.5) & WAIT source_hint',
+    category: 'Migration · Strict Honest · Deterministisches Archy-YAML',
+    relevanceForCompany:
+      'Bei der Migration von Avaya-AACC-Beständen nach Genesys Cloud CX dürfen weder erfundene Datenquellen (getParticipantData) noch unbewiesene Disconnects oder Cloud-Uploads entstehen.',
+    technicalExplanation:
+      'Die zweistufige Migrations-Pipeline trennt Avaya-Analyse, kanonische FlowIR-v1.1-Zwischenrepräsentation und Genesys-Archy-YAML-Rendering strikt im Browser-RAM. Im Standardmodus (Strict Honest Mode) werden offene Variablen-Herkünfte transparent markiert. Nur per explizitem Opt-in aktiviert der Guarded Resolved-Target-Modus (v1.6.5) für erkannte Feiertags-DB-Muster ein Lookup (Data Action Standard / Data Table Override) auf Flow.IsExternalHolidayToday mit terminalem Feiertagszweig. Avaya-WAIT-Befehle werden zweiphasig geprüft und bei fehlendem Zielpfad sauber als source_hint getrennt.',
+    excludedRisk:
+      'Kein API-Call an Genesys Cloud oder KI-Dienste, keine heimlich erfundenen Datenquellen im Strict-Modus, keine unerreichbaren Task-Fragmente im finalen Archy-YAML.',
+    moduleHint: 'src/utils/genesysMigrationAnalyzer.ts · src/utils/genesysFlowIR.ts',
+    codeTitle: 'CODE INSPECT: STRICT HONEST DEFAULT & GUARDED HOLIDAY-DB LOOKUP',
+    auditFacts: [
+      { label: 'Standardmodus', value: 'Strict Honest (0 erfundene Quellen)' },
+      { label: 'Holiday-DB (v1.6.5)', value: 'Opt-in Data Action / Data Table → Boolean' },
+      { label: 'WAIT-Audit', value: 'Aktiver Pfad vs. source_hint getrennt' },
+    ],
+    codeExcerpt: `const result = translateAvayaWorkspaceToGenesys(workspace, {
+  compatibilityStubMode: false, // Strict Honest Default
+  resolvedTargetConfig: {
+    enabled: false,             // Opt-in für bekannte Feiertags-DB
+    defaultLookupTarget: 'dataAction',
+  },
+});
+// Validiert FlowIR-Referenzintegrität, Erreichbarkeit & Archy-YAML lokal im RAM`,
+  },
+  {
+    id: 'workspace-inventory-multi-export',
+    numberLabel: '09',
+    title: 'Workspace Asset Inventory & Nativer Multi-Format-Export (.xlsx, .csv, .json)',
+    category: 'Inventar · OpenXML ohne Makros · Secret-Redaction',
+    relevanceForCompany:
+      'Für Bestandsaufnahmen, Fachbereichs-Übergaben und Migrationsplanung wird ein vollständiges Ressourcen-Inventar benötigt, das ohne Excel-Makros (VBA) und ohne Cloud-Konverter direkt lokal erzeugt wird.',
+    technicalExplanation:
+      'src/utils/inventoryExporter.ts indiziert alle geladenen Skripte im Arbeitsspeicher nach Prompts/WAVs, Skillsets/Agents, DNIS/CDNs/Transfers, Variablen (inkl. Lese-/Schreibzählung), externen DB-/Hist-/API-Aufrufen, Subflows, Öffnungszeiten/SondZeit/Feiertagen sowie Anomalien (unbenutzte/fehlende/deaktivierte Referenzen). Der Export erzeugt direkt im RAM makrolose 9-Blatt-OpenXML-Workbooks (.xlsx via JSZip), UTF-8-BOM-CSV und strukturiertes JSON mit automatischer Token-Maskierung.',
+    excludedRisk:
+      'Kein VBA-/Makro-Code im Excel-Export, kein ungeschützter Klartext-Export erkannter API-Tokens oder Secrets, 0 Byte Netzwerkverkehr bei der Datei-Erzeugung.',
+    moduleHint: 'src/utils/inventoryExporter.ts · buildWorkspaceInventory() & exportInventoryXlsxBlob()',
+    codeTitle: 'CODE INSPECT: IN-MEMORY INVENTAR & MAKROLOSES 9-BLATT-XLSX',
+    auditFacts: [
+      { label: 'Kategorien', value: '8 Asset-Domänen inkl. Anomalien' },
+      { label: 'Export-Formate', value: '9-Blatt .xlsx (makrolos) · .csv · .json' },
+      { label: 'Secret-Schutz', value: 'Automatische Maskierung vor Export' },
+    ],
+    codeExcerpt: `const bundle = buildWorkspaceInventory(workspace, { diagramTitle });
+// 100 % RAM-basiert: 9-Blatt OpenXML (.xlsx via JSZip), UTF-8-BOM CSV & JSON
+const xlsxBlob = await exportInventoryXlsxBlob(bundle);
+const safeJson = exportInventoryJson(bundle); // Secrets vorab redaktiert`,
+  },
+  {
+    id: 'flixcheck-ocl-script-analysis',
+    numberLabel: '10',
+    title: 'FlixCheck HDX & Avaya OCL Skriptanalyse mit Secret-Redaction & ReDoS-Schutz',
+    category: 'Parser · Schnittstellen-Check · Eingabehärtung',
+    relevanceForCompany:
+      'Avaya-OCL-Skripte enthalten komplexe Verschachtelungen, historische FlixCheck-HDX-/Oracle-Aufrufe sowie potenziell sensible Header oder Parameter. Parser müssen deterministisch, schnell und geschützt vor manipulierten Eingaben arbeiten.',
+    technicalExplanation:
+      'Die Module src/utils/scriptCallflowParser.ts und src/utils/flixcheckSpec.ts analysieren OCL-Kontrollstrukturen, Zeitpläne und FlixCheck-HDX-Aufrufe (API v1/v7, HTTP-Verb/Pfad-Prüfung, Health-Checks) rein statisch im Browser ohne echte Gegenstelle aufzurufen. Sensible Token-, Passwort- und Authorization-Muster werden vor der Anzeige und dem Export redaktiert; lineare Parser-Schleifen und begrenzte Muster verhindern ReDoS-Verzögerungen.',
+    excludedRisk:
+      'Keine Live-HTTP-Requests an FlixCheck- oder Oracle-Endpunkte, kein Klartext-Leak von API-Keys in Berichten, kein Parser-Freeze bei tief verschachtelten Skripten.',
+    moduleHint: 'src/utils/flixcheckSpec.ts · src/utils/scriptCallflowParser.ts',
+    codeTitle: 'CODE INSPECT: STATISCHE HDX-/OCL-ANALYSE OHNE LIVE-ENDPUNKT',
+    auditFacts: [
+      { label: 'Live-Endpunkte', value: '0 Requests an FlixCheck / Oracle' },
+      { label: 'HDX-Prüfung', value: 'Statische API v1/v7 & Parameter-Checks' },
+      { label: 'Härtung', value: 'Secret-Redaction & ReDoS-sichere Tokenizer' },
+    ],
+    codeExcerpt: `// Rein statische Analyse ohne HTTP-Aufruf an externe Schnittstellen:
+const parsed = parseCallflowTextWithFallback(rawScriptText);
+const hdxFindings = analyzeFlixCheckUsage(parsed.modules);
+// Sensible Token-/Secret-Werte werden vor Anzeige & Export maskiert`,
   },
 ];
 
@@ -865,17 +959,17 @@ export interface LegalNoticeCardItem {
 export const LEGAL_AVAYA_CARDS: LegalNoticeCardItem[] = [
   {
     id: 'trademark-independence',
-    title: '1. Markenrecht & Hersteller-Unabhängigkeit (Avaya / Microsoft Visio)',
-    body: 'MermaidFree2UseOpen ist ein unabhängiges internes Projektwerkzeug. Es besteht keinerlei Verbindung, Partnerschaft, Sponsoring, Zertifizierung oder offizielle Unterstützung durch Avaya Inc., Microsoft Corporation oder sonstige Telekommunikations- oder Software-Rechteinhaber.',
+    title: '1. Markenrecht & Hersteller-Unabhängigkeit (Avaya / Genesys Cloud / Microsoft / Oracle / FlixCheck)',
+    body: 'MermaidFree2Use ist ein unabhängiges internes Projektwerkzeug. Es besteht keinerlei Verbindung, Partnerschaft, Sponsoring, Zertifizierung oder offizielle Unterstützung durch Genesys Telecommunications Laboratories, Inc., Avaya Inc., Microsoft Corporation, Oracle Corporation, FlixCheck oder sonstige Telekommunikations- oder Software-Rechteinhaber.',
     detail:
-      'Sämtliche Produkt- und Dateiformat-Nennungen wie „Avaya“, „Avaya Aura Contact Center (AACC)“ oder „Microsoft Visio“ (.s / .vsdx) erfolgen ausschließlich rein deskriptiv zur technischen Beschreibung der unterstützten Dateikompatibilität (§ 23 MarkenG). Alle Marken verbleiben Eigentum ihrer jeweiligen Inhaber.',
+      'Sämtliche Produkt-, Plattform- und Dateiformat-Nennungen wie „Genesys Cloud CX“, „Genesys Cloud Architect“, „Archy“ (Archy YAML), „Avaya“, „Avaya Aura Contact Center (AACC)“ (.s), „Microsoft Visio“ (.vsdx), „Microsoft Excel“ (.xlsx), „Oracle“ und „FlixCheck“ erfolgen ausschließlich rein deskriptiv zur technischen Beschreibung der unterstützten Dateikompatibilität, Migrationsanalyse und Schnittstellen-Erkennung (§ 23 MarkenG). Alle Marken verbleiben Eigentum ihrer jeweiligen Inhaber.',
   },
   {
     id: 'zero-proprietary-code',
-    title: '2. Keine Hersteller-Quelltexte & keine vorbefüllten Kundendaten',
-    body: 'Die ausgelieferte Anwendung enthält keinerlei proprietäre Programmteile, geschützte Konfigurationsbibliotheken oder Muster-Skripte von Avaya, Microsoft oder anderen Herstellern sowie keine vorbefüllten Kundendaten, Rufnummern oder Namen.',
+    title: '2. Keine Hersteller-Quelltexte, keine privaten Inhalte & keine Kundendaten',
+    body: 'Die ausgelieferte Anwendung und das Repository enthalten keinerlei proprietäre Programmteile, geschützte Konfigurationsbibliotheken, Muster-Skripte von Genesys, Avaya, Microsoft, Oracle oder FlixCheck sowie keinerlei private Bilder, Chat-Screenshots, Kundendaten, Rufnummern oder personenbezogene Daten.',
     detail:
-      'Eingelesene kundenspezifische .s-Skripte, DNIS-/Rufnummernpläne und Öffnungszeiten verbleiben im flüchtigen Browser-RAM bzw. lokal auf dem Endgerät des Betreibers und unterliegen den jeweiligen Projekt-NDAs und internen Ablagerichtlinien.',
+      'Eingelesene kundenspezifische .s-Skripte, Visio-Dateien, DNIS-/Rufnummernpläne, Öffnungszeiten und generierte Genesys-Cloud-Archy-YAML-Entwürfe verbleiben ausschließlich im flüchtigen Browser-RAM bzw. lokal auf dem Endgerät des Betreibers und unterliegen den jeweiligen Projekt-NDAs und internen Ablagerichtlinien.',
   },
   {
     id: 'oss-and-audit-scope',
@@ -887,10 +981,10 @@ export const LEGAL_AVAYA_CARDS: LegalNoticeCardItem[] = [
 ];
 
 export const LEGAL_AVAYA_COPY_TEXT = [
-  `Marken-, Unabhängigkeits- & Nutzungshinweis (MermaidFree2UseOpen Version ${AUDIT_APP_VERSION}):`,
-  '• Unabhängiges Werkzeug: Eigenständiges internes Projektwerkzeug für reine Offline-Nutzung (file://). Keine Verbindung, Partnerschaft, Zertifizierung oder Unterstützung durch Avaya Inc., Microsoft Corporation oder sonstige Rechteinhaber.',
-  '• Deskriptive Markennennung (§ 23 MarkenG): Nennungen wie „Avaya“, „Avaya Aura Contact Center (AACC)“ oder „Microsoft Visio“ dienen ausschließlich der technischen Beschreibung der Dateikompatibilität (.s-Skripte und .vsdx-Dateien).',
-  '• Keine Fremddaten / Kein Hersteller-Code: Enthält keinerlei proprietäre Hersteller-Quelltexte und keine vorbefüllten Kundendaten; Kundenskripte werden ausschließlich lokal im RAM verarbeitet (0 Byte Traffic).',
+  `Marken-, Unabhängigkeits- & Nutzungshinweis (MermaidFree2Use Version ${AUDIT_APP_VERSION}):`,
+  '• Unabhängiges Werkzeug: Eigenständiges internes Projektwerkzeug für reine Offline-Nutzung (file://). Keine Verbindung, Partnerschaft, Zertifizierung oder Unterstützung durch Genesys Telecommunications Laboratories, Inc., Avaya Inc., Microsoft Corporation, Oracle Corporation, FlixCheck oder sonstige Rechteinhaber.',
+  '• Deskriptive Markennennung (§ 23 MarkenG): Nennungen wie „Genesys Cloud CX“, „Genesys Cloud Architect“, „Archy“, „Avaya“, „Avaya Aura Contact Center (AACC)“, „Microsoft Visio“, „Microsoft Excel“, „Oracle“ und „FlixCheck“ dienen ausschließlich der technischen Beschreibung der Dateikompatibilität (.s, .vsdx, .xlsx, Archy YAML) und statischen Schnittstellen-Erkennung. Alle Marken sind Eigentum ihrer jeweiligen Inhaber.',
+  '• Keine Fremddaten / Kein Hersteller-Code: Enthält keinerlei proprietäre Hersteller-Quelltexte, keine privaten Bilder/Chat-Anhänge und keine vorbefüllten Kundendaten; Kundenskripte werden ausschließlich lokal im RAM verarbeitet (0 Byte Traffic).',
   '• Open-Source-Basis: Eingebundene Pakete stehen unter ihren jeweiligen Open-Source-Lizenzen (MIT / EPL-2.0 / ISC / Apache-2.0).',
 ].join('\n');
 
@@ -898,7 +992,7 @@ export function buildFullAuditMarkdownReport(): string {
   const lines: string[] = [];
 
   lines.push(
-    `# IT-Audit & Konzern-Freigabedossier – MermaidFree2UseOpen (Version ${AUDIT_APP_VERSION})`
+    `# IT-Audit & Konzern-Freigabedossier – MermaidFree2Use (Version ${AUDIT_APP_VERSION})`
   );
   lines.push('');
   lines.push(`- **Erstellungszeitpunkt:** ${new Date().toLocaleString('de-DE')}`);
@@ -975,7 +1069,7 @@ export function buildFullAuditMarkdownReport(): string {
   });
   lines.push('');
 
-  lines.push('## 6. Marken-, Hersteller-Unabhängigkeits- & Datenschutz-Erklärung (Avaya / Visio)');
+  lines.push('## 6. Marken-, Hersteller-Unabhängigkeits- & Datenschutz-Erklärung (Avaya / Genesys Cloud / Microsoft / Oracle / FlixCheck)');
   lines.push('');
   LEGAL_AVAYA_CARDS.forEach((card) => {
     lines.push(`### ${card.title}`);
@@ -986,7 +1080,7 @@ export function buildFullAuditMarkdownReport(): string {
 
   lines.push('---');
   lines.push(
-    'Erstellt lokal im Browser ohne Server-Übertragung · MermaidFree2UseOpen Offline-Audit.'
+    'Erstellt lokal im Browser ohne Server-Übertragung · MermaidFree2Use Offline-Audit.'
   );
 
   return lines.join('\n');
@@ -1107,7 +1201,7 @@ export function buildStandaloneAuditHtmlDossier(): string {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>IT-Audit-Dossier — MermaidFree2UseOpen v${AUDIT_APP_VERSION}</title>
+  <title>IT-Audit-Dossier — MermaidFree2Use v${AUDIT_APP_VERSION}</title>
   <style>
     :root { color-scheme: light; }
     * { box-sizing: border-box; }
@@ -1144,7 +1238,7 @@ export function buildStandaloneAuditHtmlDossier(): string {
 <body>
   <div class="container">
     <header>
-      <h1>IT-Audit &amp; Konzern-Freigabedossier — MermaidFree2UseOpen</h1>
+      <h1>IT-Audit &amp; Konzern-Freigabedossier — MermaidFree2Use</h1>
       <div class="meta">Version ${AUDIT_APP_VERSION} · Erstellt am ${escapeHtml(generatedAt)} · 0 Byte Server-Übertragung</div>
     </header>
 
@@ -1190,7 +1284,7 @@ export function buildStandaloneAuditHtmlDossier(): string {
       <div class="panel-head">
         <div>
           <div class="kicker">Rechtliche Einordnung &amp; § 23 MarkenG</div>
-          <h3>5. Marken-, Hersteller-Unabhängigkeits- &amp; Datenerklärung (Avaya / Visio)</h3>
+          <h3>5. Marken-, Hersteller-Unabhängigkeits- &amp; Datenerklärung (Avaya / Genesys Cloud / Microsoft / Oracle / FlixCheck)</h3>
         </div>
       </div>
       ${LEGAL_AVAYA_CARDS.map(
@@ -1215,7 +1309,7 @@ export function triggerAuditReportDownload(
     format === 'html' ? 'text/html;charset=utf-8' : 'text/markdown;charset=utf-8';
   const filename =
     format === 'html'
-      ? `MermaidFree2UseOpen_IT_Audit_Dossier_${AUDIT_APP_VERSION}.html`
-      : `MermaidFree2UseOpen_IT_Audit_${AUDIT_APP_VERSION}.md`;
+      ? `MermaidFree2Use_IT_Audit_Dossier_${AUDIT_APP_VERSION}.html`
+      : `MermaidFree2Use_IT_Audit_${AUDIT_APP_VERSION}.md`;
   triggerLocalDownload(new Blob([content], { type: mime }), filename);
 }

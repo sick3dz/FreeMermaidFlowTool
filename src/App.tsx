@@ -5615,7 +5615,7 @@ function OfflineStudioApp() {
             }}
             className="text-xs sm:text-base font-bold tracking-tight text-slate-100 whitespace-nowrap shrink-0"
           >
-            MermaidFree2UseOpen
+            MermaidFree2Use
           </a>
 
           <div

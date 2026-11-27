@@ -113,7 +113,7 @@ export const TemplateGalleryModal: React.FC<TemplateGalleryModalProps> = ({
         <div className="flex flex-col gap-3 px-4 sm:px-6 py-3.5 sm:py-4 border-b border-slate-800 bg-slate-950/60 shrink-0">
           <div className="flex items-center justify-between gap-4">
             <h2 className="text-sm sm:text-base font-semibold text-slate-100 truncate">
-              MermaidFree2UseOpen — Bibliothek & Speicher
+              MermaidFree2Use — Bibliothek & Speicher
             </h2>
             <button
               type="button"
@@ -481,7 +481,7 @@ flowchart TD
             <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-2">
               <div className="text-xs text-indigo-400 font-medium">Touch & Desktop-Bedienung</div>
               <h3 className="text-sm font-semibold text-slate-100">
-                Gesten & Navigation in MermaidFree2UseOpen
+                Gesten & Navigation in MermaidFree2Use
               </h3>
               <ul className="text-xs text-slate-300 space-y-1.5 pt-1">
                 <li>

@@ -306,7 +306,7 @@ export const MERMAID_TEMPLATES: DiagramTemplate[] = [
     description: 'Hierarchische Wissens- und Architekturstrukturierung mit verschiedenen Knotenformen.',
     supportsDirection: false,
     code: `mindmap
-  root((MermaidFree2UseOpen))
+  root((MermaidFree2Use))
     Lokale Engine
       Mermaid v11 ESM
       ELK Anti-Overlap

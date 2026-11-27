@@ -447,6 +447,55 @@ SCHED_1040_1 -->|Innerhalb Öffnungszeit| QUEUE_S_Service`,
 );`,
   },
   {
+    id: 'genesys-migration',
+    category: 'analysis',
+    categoryLabel: 'Migration & FlowIR',
+    title: 'Genesys Cloud Architect Migration (FlowIR v1.1 & v1.6.5)',
+    versionTag: 'Strict Honest Default · Guarded Holiday-DB · Archy YAML',
+    pipelineLine: 'Avaya-OCL-Analyse → Kanonische FlowIR v1.1 → Validiertes Genesys Archy-YAML',
+    description:
+      'Übersetzt Avaya-AACC-Callflows vollständig lokal im Browser-RAM in strukturiertes Genesys-Cloud-Archy-YAML inklusive Referenzintegrität, Erreichbarkeits-Prüfung und WAIT-source_hint-Trennung.',
+    capabilities: [
+      'Strict Honest Mode als Standard: Keine erfundenen getParticipantData-Calls oder unbelegte Disconnects',
+      'Guarded Resolved-Target Holiday-DB (v1.6.5, Opt-in): Data Action (Standard) oder Data Table → Flow.IsExternalHolidayToday',
+      'Zweiphasiges WAIT-Audit (aktiver Pfad vs. source_hint) und integrierter Archy-YAML- & FlowIR-Validator',
+    ],
+    facts: [
+      { label: 'Zwischenformat', value: 'Kanonische FlowIR v1.1 + Validator' },
+      { label: 'Zielformat', value: 'Archy YAML (Genesys Cloud Architect)' },
+      { label: 'Cloud-Traffic', value: '0 Byte (100 % offline im RAM)' },
+    ],
+    codeTitle: 'GUARDED RESOLVED-TARGET HOLIDAY-DB LOOKUP (OPT-IN)',
+    code: `const res = translateAvayaWorkspaceToGenesys(workspace, {
+  compatibilityStubMode: false,
+  resolvedTargetConfig: { enabled: true, defaultLookupTarget: 'dataAction' },
+});`,
+  },
+  {
+    id: 'workspace-inventory',
+    category: 'exports',
+    categoryLabel: 'Offline-Exporte',
+    title: 'Workspace Asset Inventory & 9-Blatt Excel-Export (.xlsx / .csv / .json)',
+    versionTag: 'OpenXML ohne Makros · Secret-Redaction',
+    pipelineLine: 'Multi-Skript-Scanner → 8 Asset-Domänen → .xlsx (9 Blätter), .csv & .json',
+    description:
+      'Inventarisiert sämtliche Prompts/WAVs, Skillsets/Agents, DNIS/CDNs, Variablen, DB-/Hist-/FlixCheck-Aufrufe, Zeitpläne und Anomalien vollständig im RAM.',
+    capabilities: [
+      'Erzeugt makrolose 9-Blatt-OpenXML-Dateien (.xlsx) via JSZip, UTF-8-BOM-CSV und strukturiertes JSON',
+      'Weist unbenutzte Variablen, fehlende Subflows, verwaiste Skripte und deaktivierte Ziele direkt aus',
+      'Maskiert erkannte API-Tokens und Secrets automatisch vor Anzeige und Datei-Export',
+    ],
+    facts: [
+      { label: 'Excel-Export', value: '9-Blatt .xlsx (OpenXML, 0 VBA-Makros)' },
+      { label: 'Domänen', value: 'WAVs · Skillsets · DNIS · Vars · APIs · Zeiten' },
+      { label: 'Datenschutz', value: 'Secret-Redaction & 100 % RAM-Verarbeitung' },
+    ],
+    codeTitle: 'IN-MEMORY ASSET-INVENTAR & MULTI-FORMAT-EXPORT',
+    code: `const bundle = buildWorkspaceInventory(workspace, { diagramTitle });
+const xlsxBlob = await exportInventoryXlsxBlob(bundle);
+const csvText = exportInventoryCsv(bundle, { mode: 'occurrences' });`,
+  },
+  {
     id: 'offline-exports',
     category: 'exports',
     categoryLabel: 'Offline-Exporte',
@@ -463,7 +512,7 @@ SCHED_1040_1 -->|Innerhalb Öffnungszeit| QUEUE_S_Service`,
     facts: [
       { label: 'DOM-Quine', value: 'Erstellt neue Offline-App ohne Server-Zugriff' },
       { label: 'XSS-Schutz', value: 'Escape für </script>, <!-- & Unicode-Umbrüche' },
-      { label: 'Formate', value: '.html · .svg · .png · .csv · .md · .mmd · .json' },
+      { label: 'Formate', value: '.html · .svg · .png · .xlsx · .csv · .md · .yaml · .json' },
     ],
     codeTitle: 'XSS-SICHERE SEED-EINBETTUNG IM OFFLINE-EXPORT',
     code: `const safeSeedJson = JSON.stringify(seedPayload)
@@ -475,10 +524,10 @@ SCHED_1040_1 -->|Innerhalb Öffnungszeit| QUEUE_S_Service`,
 
 const LEGAL_TRADEMARK_COPY_TEXT = [
   'Marken-, Unabhängigkeits- & Nutzungshinweis (Internes Offline-Projektwerkzeug):',
-  '• Unabhängiges Werkzeug: MermaidFree2UseOpen ist ein unabhängiges internes Projektwerkzeug für reine Offline-Nutzung (file://). Es besteht keine Verbindung, Partnerschaft, Zertifizierung oder Unterstützung durch Avaya Inc., Microsoft Corporation oder sonstige Rechteinhaber.',
-  '• Deskriptive Markennennung (§ 23 MarkenG): Nennungen wie „Avaya“, „Avaya Aura Contact Center (AACC)“ oder „Microsoft Visio“ dienen ausschließlich der technischen Beschreibung der Dateikompatibilität (Parser für Avaya-.s-Skripte und .vsdx-Dateien). Alle Marken sind Eigentum ihrer jeweiligen Inhaber.',
+  '• Unabhängiges Werkzeug: MermaidFree2Use ist ein unabhängiges internes Projektwerkzeug für reine Offline-Nutzung (file://). Es besteht keine Verbindung, Partnerschaft, Zertifizierung oder Unterstützung durch Genesys Telecommunications Laboratories, Inc., Avaya Inc., Microsoft Corporation, Oracle Corporation, FlixCheck oder sonstige Rechteinhaber.',
+  '• Deskriptive Markennennung (§ 23 MarkenG): Nennungen wie „Genesys Cloud CX“, „Genesys Cloud Architect“, „Archy“, „Avaya“, „Avaya Aura Contact Center (AACC)“, „Microsoft Visio“, „Microsoft Excel“, „Oracle“ und „FlixCheck“ dienen ausschließlich der technischen Beschreibung der Dateikompatibilität (.s, .vsdx, .xlsx, Archy YAML) und Schnittstellen-Erkennung. Alle Marken sind Eigentum ihrer jeweiligen Inhaber.',
   '• Reiner Offline-Betrieb & Vertraulichkeit: Das Werkzeug wird ausschließlich lokal ohne Server-Übertragung (0 Byte Netzwerkverkehr) betrieben. Kundenskripte und Exporte unterliegen den internen Vertraulichkeits- und Freigaberichtlinien des jeweiligen Projekts.',
-  '• Open-Source-Basis: Eingebundene Bibliotheken (u. a. Mermaid.js, Eclipse ELK, JSZip, React) stehen unter ihren jeweiligen Open-Source-Lizenzen (MIT / EPL-2.0). Es sind keine geschützten fremden Programmteile oder Kundendaten enthalten.',
+  '• Open-Source-Basis: Eingebundene Bibliotheken (u. a. Mermaid.js, Eclipse ELK, JSZip, React) stehen unter ihren jeweiligen Open-Source-Lizenzen (MIT / EPL-2.0). Es sind keine geschützten fremden Programmteile, privaten Bilder oder Kundendaten enthalten.',
 ].join('\n');
 
 async function copyTextWithOfflineFallback(text: string): Promise<boolean> {
@@ -516,7 +565,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
 
   // Builder configuration state
   const [customFilename, setCustomFilename] = useState<string>(
-    'MermaidFree2UseOpen_Offline.html'
+    'MermaidFree2Use_Offline.html'
   );
   const [defaultWorkspaceMode, setDefaultWorkspaceMode] = useState<'guided' | 'free'>(
     'guided'
@@ -551,7 +600,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
 
   const normalizedFilename = useMemo(() => {
     const trimmed = customFilename.trim();
-    if (!trimmed) return 'MermaidFree2UseOpen_Offline.html';
+    if (!trimmed) return 'MermaidFree2Use_Offline.html';
     const safe = trimmed.replace(/[<>:"/\\|?*\x00-\x1F]+/g, '_');
     return safe.toLowerCase().endsWith('.html') ? safe : `${safe}.html`;
   }, [customFilename]);
@@ -711,7 +760,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
             onClick={() => handleSwitchHeaderView('builder')}
             className="text-sm sm:text-base font-semibold tracking-tight text-slate-100 whitespace-nowrap shrink-0 cursor-pointer hover:text-white transition-colors"
           >
-            MermaidFree2UseOpen
+            MermaidFree2Use
           </button>
 
           {/* Zone 2: Primary View Navigation (Header-Only Switching) */}
@@ -923,7 +972,7 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                 type="text"
                 value={customFilename}
                 onChange={(e) => setCustomFilename(e.target.value)}
-                placeholder="MermaidFree2UseOpen_Offline.html"
+                placeholder="MermaidFree2Use_Offline.html"
                 className="w-full px-3 py-2 text-xs font-mono text-slate-100 bg-slate-950 border border-slate-800 rounded-lg focus:outline-none focus:border-emerald-500/70"
               />
             </div>
@@ -1435,15 +1484,17 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                     1. Markenrecht &amp; Unabhängigkeit
                   </div>
                   <p className="text-xs text-slate-300 leading-relaxed">
-                    MermaidFree2UseOpen ist ein unabhängiges internes Projektwerkzeug. Es
+                    MermaidFree2Use ist ein unabhängiges internes Projektwerkzeug. Es
                     besteht keine Verbindung, Partnerschaft, Zertifizierung oder
-                    Unterstützung durch Avaya Inc., Microsoft Corporation oder sonstige
-                    Rechteinhaber.
+                    Unterstützung durch Genesys Telecommunications Laboratories, Inc.,
+                    Avaya Inc., Microsoft Corporation, Oracle Corporation, FlixCheck oder
+                    sonstige Rechteinhaber.
                   </p>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    Nennungen wie „Avaya“ oder „Visio“ erfolgen rein deskriptiv zur
-                    Bezeichnung der unterstützten Dateiformate (§ 23 MarkenG). Alle Marken
-                    bleiben Eigentum ihrer jeweiligen Inhaber.
+                    Nennungen wie „Genesys Cloud CX“, „Architect“, „Archy“, „Avaya“,
+                    „Visio“, „Excel“, „Oracle“ oder „FlixCheck“ erfolgen rein deskriptiv zur
+                    Bezeichnung der unterstützten Dateiformate und Schnittstellen (§ 23
+                    MarkenG). Alle Marken bleiben Eigentum ihrer jeweiligen Inhaber.
                   </p>
                 </div>
 
@@ -1458,8 +1509,8 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                   </p>
                   <p className="text-xs text-slate-400 leading-relaxed">
                     Im Rahmen von Kundenprojekten sind etwaige Geheimhaltungsvereinbarungen
-                    (NDAs) und interne Ablagerichtlinien für exportierte Callflow.html-
-                    und CSV-Dateien einzuhalten.
+                    (NDAs) und interne Ablagerichtlinien für exportierte Callflow.html-,
+                    Archy-YAML-, XLSX- und CSV-Dateien einzuhalten.
                   </p>
                 </div>
 
@@ -1469,8 +1520,8 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
                   </div>
                   <p className="text-xs text-slate-300 leading-relaxed">
                     Die Anwendung enthält keinerlei proprietäre Quelltexte, Bibliotheken
-                    oder Muster-Skripte von Telekommunikationsherstellern und keine
-                    vorbefüllten Kundendaten.
+                    oder Muster-Skripte von Telekommunikationsherstellern, keine privaten
+                    Bilder und keine vorbefüllten Kundendaten.
                   </p>
                   <p className="text-xs text-slate-400 leading-relaxed">
                     Eingebundene Open-Source-Pakete (u. a. Mermaid.js, Eclipse ELK, JSZip,
@@ -1494,17 +1545,19 @@ export const LocalHtmlBuilderLanding: React.FC = () => {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5 flex flex-col gap-2 text-xs text-slate-400">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <span className="font-medium text-slate-300">
-              MermaidFree2UseOpen · Reine Offline-Einzeldatei-App (file://)
+              MermaidFree2Use · Reine Offline-Einzeldatei-App (file://)
             </span>
             <span className="text-[11px] text-slate-500">
-              Mermaid v11 · Eclipse ELK &amp; Dagre · Parser für Avaya-.s-Skripte · JSZip
-              Visio Parser · Öffnungszeiten-Solver
+              Mermaid v11 · Eclipse ELK · Avaya-.s- &amp; Visio-Parser · Genesys Cloud FlowIR ·
+              Asset-Inventar (.xlsx/.csv/.json)
             </span>
           </div>
           <p className="text-[11px] text-slate-500 leading-relaxed">
             Unabhängiges internes Projektwerkzeug ohne Verbindung, Partnerschaft oder
-            Zertifizierung durch Avaya Inc. oder Microsoft Corporation. Markennamen dienen
-            ausschließlich der technischen Beschreibung der Dateikompatibilität.
+            Zertifizierung durch Genesys Telecommunications Laboratories, Inc. (Genesys Cloud CX /
+            Architect / Archy), Avaya Inc., Microsoft Corporation (Visio / Excel), Oracle
+            Corporation oder FlixCheck. Markennamen dienen ausschließlich der technischen
+            Beschreibung der Dateikompatibilität und Schnittstellen-Analyse (§ 23 MarkenG).
           </p>
         </div>
       </footer>

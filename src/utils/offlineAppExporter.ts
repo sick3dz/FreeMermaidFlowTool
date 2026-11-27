@@ -407,7 +407,7 @@ function reconstructHtmlFromActiveOfflineDocument(): string | null {
   const jsText = (scriptEl.textContent || '').replace(/<\/(script)/gi, '<\\/$1');
   if (!jsText.trim()) return null;
 
-  const title = document.title || 'MermaidFree2UseOpen';
+  const title = document.title || 'MermaidFree2Use';
   const safeTitle = title
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -512,7 +512,7 @@ export async function buildAndDownloadOfflineApp(options: {
     finalHtml = baseHtml.replace('<!--MERMAID_OFFLINE_SEED_SLOT-->', () => '');
   }
 
-  const filename = options.filename || 'MermaidFree2UseOpen_Offline.html';
+  const filename = options.filename || 'MermaidFree2Use_Offline.html';
   const blob = new Blob([finalHtml], { type: 'text/html;charset=utf-8' });
   triggerLocalDownload(blob, filename);
 

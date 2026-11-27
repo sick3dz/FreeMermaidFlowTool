@@ -492,7 +492,7 @@ runTest('7. 120-script export performance guard (< 1500 ms) & version sync', () 
     AUDIT_APP_VERSION,
     `package.json version (${pkg.version}) must match AUDIT_APP_VERSION (${AUDIT_APP_VERSION})`
   );
-  assert.equal(AUDIT_APP_VERSION, '1.6.5', 'Expected release version 1.6.5');
+  assert.equal(AUDIT_APP_VERSION, '1.6.8', 'Expected release version 1.6.8');
 });
 
 async function finalizeSuite() {
