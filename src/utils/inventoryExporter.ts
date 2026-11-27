@@ -2958,7 +2958,9 @@ export function getEmbeddedInventoryAndGenesysZipRuntimeJs(): string {
         }
         usedNames.add(baseName.toLowerCase());
         files['archy-flows/' + baseName + '.yaml'] = s.archyYaml || '';
-        if (s.flowIR) {
+        if (s.flowIrJson) {
+          files['migration-graphs/' + baseName + '.graph.json'] = '{"flowIR":' + s.flowIrJson + '}';
+        } else if (s.flowIR) {
           files['migration-graphs/' + baseName + '.graph.json'] = JSON.stringify({ flowIR: s.flowIR }, null, 2);
         }
       });

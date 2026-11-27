@@ -96,7 +96,7 @@ import {
   buildLiveSvgDomIndex,
   disconnectEdgeInMermaidCode,
   findNearestMagneticPort,
-  generateInteractiveCallflowHtml,
+  generateInteractiveCallflowHtmlParts,
   GenesysProfileKey,
   hitTestLiveSvgNodeAtClientPoint,
   InteractiveCallflowHtmlAnalysisPayload,
@@ -4448,7 +4448,13 @@ function OfflineStudioApp() {
       targetSurface: 'dark' | 'light',
       preferredInitialView?: PreferredInitialHtmlView,
       includeOriginalScripts = true
-    ): Promise<{ html: string | null; aborted?: boolean; fallbackCount?: number; errorMessage?: string }> => {
+    ): Promise<{
+      html: string | null;
+      htmlParts?: string[] | null;
+      aborted?: boolean;
+      fallbackCount?: number;
+      errorMessage?: string;
+    }> => {
       const exportThemeConfig: ThemeConfiguration =
         targetSurface === 'dark'
           ? {
@@ -4563,7 +4569,8 @@ function OfflineStudioApp() {
             ).svg
           : currentExportSvg;
         return {
-          html: generateInteractiveCallflowHtml(
+          html: null,
+          htmlParts: generateInteractiveCallflowHtmlParts(
             diagramTitle || 'Callflow',
             rawUnfilteredSvg,
             callflowGraph,
@@ -4686,7 +4693,10 @@ function OfflineStudioApp() {
           healthFindings,
           scheduleRows,
           inventoryBundle,
-          auditReport: exportAuditReport,
+          auditReport: {
+            ...exportAuditReport,
+            nodes: [],
+          },
           auditMermaid: exportAuditPayloads.mermaidContent,
           registry,
           routingMatrixRows,
@@ -4877,12 +4887,11 @@ function OfflineStudioApp() {
             },
             masterGenesysMermaid: tr.masterGenesysMermaid,
             scripts: tr.scripts.map((s) => ({
+              viewKey: `script:${s.scriptNumber}`,
               cleanName: s.cleanName,
               scriptNumber: s.scriptNumber,
               fileName: s.fileName,
               archyFilename: s.archyFilename,
-              archyYaml: s.archyYaml,
-              flowIR: s.flowIR,
               readiness: s.readiness,
               readinessReasons: s.readinessReasons,
               yamlValid: s.yamlValidation.isValid,
@@ -4953,6 +4962,42 @@ function OfflineStudioApp() {
         };
 
         const genesysSvgPool: Record<string, { svg: string; graph?: CallflowGraph }> = {};
+        const genesysTextPool: Record<string, string> = {};
+        const genesysTextKeyByContent = new Map<string, string>();
+        let genesysTextSeq = 0;
+        const internGenesysText = (raw: string | undefined | null): string | undefined => {
+          if (!raw) return undefined;
+          const existing = genesysTextKeyByContent.get(raw);
+          if (existing) return existing;
+          const key = 't' + (genesysTextSeq++).toString(36);
+          genesysTextKeyByContent.set(raw, key);
+          genesysTextPool[key] = raw;
+          return key;
+        };
+
+        const genesysVariantPool: Record<string, InteractiveCallflowHtmlGenesysVariant> = {};
+        const genesysVariantKeyByJson = new Map<string, string>();
+        let genesysVariantSeq = 0;
+        const internGenesysVariant = (variant: InteractiveCallflowHtmlGenesysVariant): string => {
+          const sig = JSON.stringify(variant);
+          const existing = genesysVariantKeyByJson.get(sig);
+          if (existing) return existing;
+          const key = 'v' + (genesysVariantSeq++).toString(36);
+          genesysVariantKeyByJson.set(sig, key);
+          genesysVariantPool[key] = variant;
+          return key;
+        };
+
+        const serializeFlowIrForExport = (flowIR: unknown): string | undefined => {
+          if (!flowIR) return undefined;
+          try {
+            return JSON.stringify(flowIR, (key, value) =>
+              !includeOriginalScripts && key === 'raw' ? undefined : value
+            );
+          } catch {
+            return undefined;
+          }
+        };
 
         const renderGenesysMermaidForExport = async (
           gMermaid: string,
@@ -5022,9 +5067,7 @@ function OfflineStudioApp() {
           return poolKey;
         };
 
-        const cachedMasterGenesysVariants: Partial<
-          Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysVariant>
-        > = {};
+        const cachedMasterGenesysVariantRefs: Partial<Record<GenesysProfileKey, string>> = {};
 
         const views: InteractiveCallflowHtmlView[] = [];
         for (let idx = 0; idx < viewSpecs.length; idx++) {
@@ -5349,13 +5392,11 @@ function OfflineStudioApp() {
             }
 
             // Render deduplicated Genesys Cloud target variants across all 4 profiles (Quelltreu/Holiday-DB/Platzhalter)
-            let genesysVariants:
-              | Partial<Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysVariant>>
-              | undefined;
+            let genesysVariantRefs: Partial<Record<GenesysProfileKey, string>> | undefined;
 
             try {
               if (spec.key === 'master' || spec.key === 'master:detailed') {
-                if (Object.keys(cachedMasterGenesysVariants).length === 0) {
+                if (Object.keys(cachedMasterGenesysVariantRefs).length === 0) {
                   for (const profCfg of profileConfigs) {
                     const tr = genesysTranslationsByProfile[profCfg.key];
                     if (!tr || !tr.masterGenesysMermaid) continue;
@@ -5367,26 +5408,11 @@ function OfflineStudioApp() {
                     if (!svgKey) continue;
                     const primaryEntry =
                       tr.scripts.find((s) => s.isEntryPoint) || tr.scripts[0] || null;
-                    const wsYamlErrors = tr.scripts.flatMap((s) =>
-                      s.yamlValidation.errors.map((e) => ({
-                        lineNumber: e.lineNumber,
-                        code: e.code,
-                        message: e.message,
-                        suggestion: e.suggestion,
-                        fileName: s.archyFilename,
-                      }))
-                    );
-                    const wsYamlWarnings = tr.scripts.flatMap((s) =>
-                      s.yamlValidation.warnings.map((w) => ({
-                        lineNumber: w.lineNumber,
-                        code: w.code,
-                        message: w.message,
-                        suggestion: w.suggestion,
-                        fileName: s.archyFilename,
-                      }))
-                    );
-                    cachedMasterGenesysVariants[profCfg.key] = {
+                    cachedMasterGenesysVariantRefs[profCfg.key] = internGenesysVariant({
                       svgKey,
+                      primaryViewKey: primaryEntry
+                        ? `script:${primaryEntry.scriptNumber}`
+                        : undefined,
                       readiness: tr.overallReadiness,
                       readinessReasons: [
                         `LOW ${tr.summary.lowCount}`,
@@ -5394,66 +5420,15 @@ function OfflineStudioApp() {
                         `HIGH ${tr.summary.highCount}`,
                         `Common Modules: ${tr.summary.commonModuleCount}`,
                       ],
-                      warnings: tr.scripts.flatMap((s) =>
-                        s.warnings.map((w) => ({
-                          code: w.code,
-                          severity: w.severity,
-                          message: `${s.fileName}: ${w.message}`,
-                          lineNumber: w.lineNumber,
-                        }))
-                      ),
-                      archyYaml: primaryEntry?.archyYaml,
-                      archyFilename: primaryEntry?.archyFilename,
-                      yamlValidation: {
-                        isValid: wsYamlErrors.length === 0,
-                        errorCount: wsYamlErrors.length,
-                        warningCount: wsYamlWarnings.length,
-                        validScriptCount: tr.summary.yamlValidScriptCount,
-                        totalScriptCount: tr.summary.totalScripts,
-                        errors: wsYamlErrors,
-                        warnings: wsYamlWarnings,
-                      },
-                      flowIR: primaryEntry?.flowIR,
-                      flowIRFilename: primaryEntry ? `${primaryEntry.cleanName}.flowIR.json` : undefined,
-                      irFindings: collectIrFindingsForScripts(tr.scripts, true),
-                      avayaReport: primaryEntry?.avayaView
-                        ? {
-                            mode: 'avaya',
-                            modeLabel: profCfg.modeLabel,
-                            summary: primaryEntry.avayaView.kurzfazit
-                              ? [primaryEntry.avayaView.kurzfazit]
-                              : [],
-                            assumptionsAndOpenPoints:
-                              primaryEntry.avayaView.annahmenUndOffenePunkte || [],
-                            migrationHints: primaryEntry.avayaView.migrationshinweise || [],
-                            renderedCode: primaryEntry.avayaView.ergebnisText || '',
-                          }
-                        : undefined,
-                      genesysReport: primaryEntry?.genesysView
-                        ? {
-                            mode: 'genesys',
-                            modeLabel: profCfg.modeLabel,
-                            summary: primaryEntry.genesysView.kurzfazit
-                              ? [primaryEntry.genesysView.kurzfazit]
-                              : [],
-                            assumptionsAndOpenPoints:
-                              primaryEntry.genesysView.annahmenUndOffenePunkte || [],
-                            migrationHints: primaryEntry.genesysView.migrationshinweise || [],
-                            renderedCode: primaryEntry.genesysView.ergebnisText || '',
-                          }
-                        : undefined,
-                      holidayMappings: collectHolidayMappingsForScripts(tr.scripts),
-                    };
+                    });
                   }
                 }
-                if (Object.keys(cachedMasterGenesysVariants).length > 0) {
-                  genesysVariants = cachedMasterGenesysVariants;
+                if (Object.keys(cachedMasterGenesysVariantRefs).length > 0) {
+                  genesysVariantRefs = cachedMasterGenesysVariantRefs;
                 }
               } else if (spec.scriptNumber) {
                 const canonKey = canonicalScriptMatchKey(spec.scriptNumber);
-                const scriptVariants: Partial<
-                  Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysVariant>
-                > = {};
+                const scriptVariantRefs: Partial<Record<GenesysProfileKey, string>> = {};
                 for (const profCfg of profileConfigs) {
                   const tr = genesysTranslationsByProfile[profCfg.key];
                   const gScript = tr?.scriptsByKey[canonKey];
@@ -5464,7 +5439,10 @@ function OfflineStudioApp() {
                   );
                   if (signal.aborted) return { html: null, aborted: true };
                   if (!svgKey) continue;
-                  scriptVariants[profCfg.key] = {
+                  const archyYamlKey = internGenesysText(gScript.archyYaml);
+                  const flowIrKey = internGenesysText(serializeFlowIrForExport(gScript.flowIR));
+                  const avayaCodeKey = internGenesysText(gScript.avayaView?.ergebnisText);
+                  scriptVariantRefs[profCfg.key] = internGenesysVariant({
                     svgKey,
                     readiness: gScript.readiness,
                     readinessReasons: gScript.readinessReasons,
@@ -5474,7 +5452,7 @@ function OfflineStudioApp() {
                       message: w.message,
                       lineNumber: w.lineNumber,
                     })),
-                    archyYaml: gScript.archyYaml,
+                    archyYamlKey,
                     archyFilename: gScript.archyFilename,
                     yamlValidation: {
                       isValid: gScript.yamlValidation.isValid,
@@ -5497,7 +5475,7 @@ function OfflineStudioApp() {
                         fileName: gScript.archyFilename,
                       })),
                     },
-                    flowIR: gScript.flowIR,
+                    flowIrKey,
                     flowIRFilename: `${gScript.cleanName}.flowIR.json`,
                     irFindings: collectIrFindingsForScripts([gScript], false),
                     avayaReport: gScript.avayaView
@@ -5510,7 +5488,7 @@ function OfflineStudioApp() {
                           assumptionsAndOpenPoints:
                             gScript.avayaView.annahmenUndOffenePunkte || [],
                           migrationHints: gScript.avayaView.migrationshinweise || [],
-                          renderedCode: gScript.avayaView.ergebnisText || '',
+                          renderedCodeKey: avayaCodeKey,
                         }
                       : undefined,
                     genesysReport: gScript.genesysView
@@ -5523,14 +5501,13 @@ function OfflineStudioApp() {
                           assumptionsAndOpenPoints:
                             gScript.genesysView.annahmenUndOffenePunkte || [],
                           migrationHints: gScript.genesysView.migrationshinweise || [],
-                          renderedCode: gScript.genesysView.ergebnisText || '',
                         }
                       : undefined,
                     holidayMappings: collectHolidayMappingsForScripts([gScript]),
-                  };
+                  });
                 }
-                if (Object.keys(scriptVariants).length > 0) {
-                  genesysVariants = scriptVariants;
+                if (Object.keys(scriptVariantRefs).length > 0) {
+                  genesysVariantRefs = scriptVariantRefs;
                 }
               }
             } catch {
@@ -5545,7 +5522,7 @@ function OfflineStudioApp() {
               svg: finalSvg,
               graph: parsedGraph,
               nodeDetails,
-              genesysVariants,
+              genesysVariantRefs,
             });
           }
 
@@ -5587,7 +5564,8 @@ function OfflineStudioApp() {
             throw new Error('Es konnten keine renderbaren Ansichten für Callflow.html erzeugt werden.');
           }
           return {
-            html: generateInteractiveCallflowHtml(
+            html: null,
+            htmlParts: generateInteractiveCallflowHtmlParts(
               'Callflow',
               currentExportSvg,
               callflowGraph,
@@ -5640,7 +5618,8 @@ function OfflineStudioApp() {
           includeOriginalScripts && Object.keys(rawScriptsByNumber).length > 0;
 
         return {
-          html: generateInteractiveCallflowHtml(
+          html: null,
+          htmlParts: generateInteractiveCallflowHtmlParts(
             'Callflow',
             views[0].svg,
             views[0].graph,
@@ -5658,6 +5637,8 @@ function OfflineStudioApp() {
               rawScriptsByNumber: hasAnyRawScripts ? rawScriptsByNumber : undefined,
               initialGenesysProfile,
               genesysSvgPool,
+              genesysTextPool,
+              genesysVariantPool,
               genesysProfiles: genesysProfilesSummary,
             }
           ),
@@ -5742,20 +5723,26 @@ function OfflineStudioApp() {
       setLastQuickHtmlIncludeScripts(effectiveIncludeOriginalScripts);
       setIsDownloadingHtml(true);
       try {
-        const { html: htmlContent, aborted, fallbackCount, errorMessage } =
+        const { html: htmlContent, htmlParts, aborted, fallbackCount, errorMessage } =
           await buildInteractiveHtmlForSurface(
             canvasSurface,
             undefined,
             effectiveIncludeOriginalScripts
           );
         if (aborted) return;
-        if (!htmlContent) {
+        const blobParts =
+          htmlParts && htmlParts.length > 0
+            ? htmlParts
+            : htmlContent
+            ? [htmlContent]
+            : null;
+        if (!blobParts) {
           if (errorMessage) {
             setHtmlExportNotice(errorMessage);
           }
           return;
         }
-        const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+        const blob = new Blob(blobParts, { type: 'text/html;charset=utf-8' });
         triggerLocalDownload(blob, 'Callflow.html');
         setQuickDownloadFeedback('html');
         if (fallbackCount && fallbackCount > 0) {

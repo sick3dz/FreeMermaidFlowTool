@@ -3745,7 +3745,8 @@ export interface InteractiveCallflowHtmlGenesysModeReport {
   summary: string[];
   assumptionsAndOpenPoints: string[];
   migrationHints: string[];
-  renderedCode: string;
+  renderedCode?: string;
+  renderedCodeKey?: string;
 }
 
 export interface InteractiveCallflowHtmlGenesysHolidayMapping {
@@ -3758,6 +3759,7 @@ export interface InteractiveCallflowHtmlGenesysHolidayMapping {
 
 export interface InteractiveCallflowHtmlGenesysVariant {
   svgKey?: string;
+  primaryViewKey?: string;
   readiness?: 'LOW' | 'MEDIUM' | 'HIGH';
   readinessReasons?: string[];
   warnings?: Array<{
@@ -3767,9 +3769,12 @@ export interface InteractiveCallflowHtmlGenesysVariant {
     lineNumber?: number;
   }>;
   archyYaml?: string;
+  archyYamlKey?: string;
   archyFilename?: string;
   yamlValidation?: InteractiveCallflowHtmlView['genesysYamlValidation'];
   flowIR?: unknown;
+  flowIrKey?: string;
+  flowIrJson?: string;
   flowIRFilename?: string;
   irFindings?: InteractiveCallflowHtmlGenesysFinding[];
   avayaReport?: InteractiveCallflowHtmlGenesysModeReport;
@@ -3797,12 +3802,14 @@ export interface InteractiveCallflowHtmlGenesysProfileSummary {
   };
   masterGenesysMermaid?: string;
   scripts: Array<{
+    viewKey?: string;
     cleanName: string;
     scriptNumber: string;
     fileName: string;
     archyFilename: string;
-    archyYaml: string;
+    archyYaml?: string;
     flowIR?: unknown;
+    flowIrJson?: string;
     readiness: 'LOW' | 'MEDIUM' | 'HIGH';
     readinessReasons: string[];
     yamlValid: boolean;
@@ -3852,6 +3859,7 @@ export interface InteractiveCallflowHtmlView {
     }>;
   };
   genesysVariants?: Partial<Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysVariant>>;
+  genesysVariantRefs?: Partial<Record<GenesysProfileKey, string>>;
 }
 
 export interface InteractiveCallflowHtmlAnalysisPayload {
@@ -3868,6 +3876,24 @@ export interface InteractiveCallflowHtmlAnalysisPayload {
   parametersByScript?: Record<string, CallflowScriptParameterItem[]>;
 }
 
+export interface InteractiveCallflowHtmlOptions {
+  views?: InteractiveCallflowHtmlView[];
+  activeViewKey?: string;
+  initialMasterDensity?: 'compact' | 'detailed';
+  initialPathColorMode?: PathColorMode;
+  initialHiddenNodeTypes?: SmartColorNodeType[];
+  initialIsolateSubgraph?: boolean;
+  analysis?: InteractiveCallflowHtmlAnalysisPayload | null;
+  globalSearchIndex?: GlobalSearchEntry[] | null;
+  includeOriginalScripts?: boolean;
+  rawScriptsByNumber?: Record<string, string>;
+  initialGenesysProfile?: GenesysProfileKey;
+  genesysSvgPool?: Record<string, { svg: string; graph?: CallflowGraph }>;
+  genesysTextPool?: Record<string, string>;
+  genesysVariantPool?: Record<string, InteractiveCallflowHtmlGenesysVariant>;
+  genesysProfiles?: Partial<Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysProfileSummary>>;
+}
+
 function escapeHtmlText(str: string): string {
   return str
     .replace(/&/g, '&amp;')
@@ -3877,39 +3903,126 @@ function escapeHtmlText(str: string): string {
     .replace(/'/g, '&#39;');
 }
 
+function sanitizeJsonForScriptTag(jsonStr: string): string {
+  return jsonStr.replace(/<\/script>/gi, '<\\/script>');
+}
+
+function pushSafeJsonChunk(parts: string[], value: unknown): void {
+  const serialized = JSON.stringify(value);
+  parts.push(serialized === undefined ? 'null' : sanitizeJsonForScriptTag(serialized));
+}
+
+function pushChunkedJsonArray(parts: string[], arr: unknown[] | null | undefined): void {
+  if (!Array.isArray(arr)) {
+    parts.push('[]');
+    return;
+  }
+  parts.push('[');
+  for (let i = 0; i < arr.length; i++) {
+    if (i > 0) parts.push(',');
+    pushSafeJsonChunk(parts, arr[i]);
+  }
+  parts.push(']');
+}
+
+function pushChunkedJsonRecord(
+  parts: string[],
+  rec: Record<string, unknown> | null | undefined
+): void {
+  if (!rec || typeof rec !== 'object') {
+    parts.push('null');
+    return;
+  }
+  const entries = Object.entries(rec);
+  parts.push('{');
+  let first = true;
+  for (let i = 0; i < entries.length; i++) {
+    const [k, v] = entries[i];
+    if (v === undefined) continue;
+    if (!first) parts.push(',');
+    first = false;
+    parts.push(sanitizeJsonForScriptTag(JSON.stringify(k)), ':');
+    pushSafeJsonChunk(parts, v);
+  }
+  parts.push('}');
+}
+
+function pushChunkedInventoryBundle(
+  parts: string[],
+  inv: WorkspaceInventoryBundle | undefined
+): void {
+  if (!inv) {
+    parts.push('null');
+    return;
+  }
+  const { items, occurrences, ...rest } = inv as WorkspaceInventoryBundle & {
+    items?: unknown[];
+    occurrences?: unknown[];
+  };
+  parts.push('{');
+  let first = true;
+  for (const [k, v] of Object.entries(rest)) {
+    if (v === undefined) continue;
+    if (!first) parts.push(',');
+    first = false;
+    parts.push(sanitizeJsonForScriptTag(JSON.stringify(k)), ':');
+    pushSafeJsonChunk(parts, v);
+  }
+  if (!first) parts.push(',');
+  parts.push('"items":');
+  pushChunkedJsonArray(parts, items || []);
+  parts.push(',"occurrences":');
+  pushChunkedJsonArray(parts, occurrences || []);
+  parts.push('}');
+}
+
+function pushChunkedAnalysisPayload(
+  parts: string[],
+  analysis: InteractiveCallflowHtmlAnalysisPayload | null
+): void {
+  if (!analysis) {
+    parts.push('null');
+    return;
+  }
+  parts.push('{"openIssues":');
+  pushChunkedJsonArray(parts, analysis.openIssues);
+  parts.push(',"healthFindings":');
+  pushChunkedJsonArray(parts, analysis.healthFindings);
+  parts.push(',"scheduleRows":');
+  pushChunkedJsonArray(parts, analysis.scheduleRows);
+  parts.push(',"openingHoursBundle":');
+  pushSafeJsonChunk(parts, analysis.openingHoursBundle || null);
+  parts.push(',"inventoryBundle":');
+  pushChunkedInventoryBundle(parts, analysis.inventoryBundle);
+  parts.push(',"auditReport":');
+  pushSafeJsonChunk(parts, analysis.auditReport || null);
+  parts.push(',"auditMermaid":');
+  pushSafeJsonChunk(parts, analysis.auditMermaid || null);
+  parts.push(',"registry":');
+  pushSafeJsonChunk(parts, analysis.registry || null);
+  parts.push(',"routingMatrixRows":');
+  pushChunkedJsonArray(parts, analysis.routingMatrixRows);
+  parts.push(',"masterScriptNumber":');
+  pushSafeJsonChunk(parts, analysis.masterScriptNumber || null);
+  parts.push(',"parametersByScript":');
+  pushChunkedJsonRecord(
+    parts,
+    (analysis.parametersByScript as Record<string, unknown> | undefined) || null
+  );
+  parts.push('}');
+}
+
 /**
- * Generates a 100% standalone, offline-capable interactive HTML file containing:
- * - True 1:1 SVG dimensions with Zoom +/-, Fit, 1:1, Zoom-to-Cursor & Auto-Focus
- * - Automatic GPU-safe raster proxy (<=4096px) during pan/zoom/overview with O(1) hit-testing
- * - Switchable Compact / Detailed Master Overview alongside all Detail Script views
- * - Dark/Light surface toggle with automatic SVG node/edge/cluster contrast adaptation
- * - Structured Double-Click Element Info Box (Übersicht, Zeiten & Regeln, Skript-Sprung)
- * - Dedicated Opening Hours & Asset-Inventar Overview windows (Excel .xlsx, CSV, JSON, Markdown)
- * - Full Genesys Cloud Architect Migration Mode (Quelltreu (Strikt) vs. Platzhalter-Modus,
- *   Holiday-DB Data Action/Data Table/Strict Review, flowIR v1.1 Dual-Mode, ZIP-Paket)
- * - Full Callflow filters & Read-Only Analysis Suite incl. Graph-Audit
+ * Generates a 100% standalone, offline-capable interactive HTML file as an array of Blob-ready string chunks
+ * so even very large multi-script workspaces never exceed V8's maximum single-string length limit.
  */
-export function generateInteractiveCallflowHtml(
+export function generateInteractiveCallflowHtmlParts(
   diagramTitle: string,
   svgString: string,
   graph: CallflowGraph,
   canvasSurface: 'dark' | 'light',
-  options?: {
-    views?: InteractiveCallflowHtmlView[];
-    activeViewKey?: string;
-    initialMasterDensity?: 'compact' | 'detailed';
-    initialPathColorMode?: PathColorMode;
-    initialHiddenNodeTypes?: SmartColorNodeType[];
-    initialIsolateSubgraph?: boolean;
-    analysis?: InteractiveCallflowHtmlAnalysisPayload | null;
-    globalSearchIndex?: GlobalSearchEntry[] | null;
-    includeOriginalScripts?: boolean;
-    rawScriptsByNumber?: Record<string, string>;
-    initialGenesysProfile?: GenesysProfileKey;
-    genesysSvgPool?: Record<string, { svg: string; graph?: CallflowGraph }>;
-    genesysProfiles?: Partial<Record<GenesysProfileKey, InteractiveCallflowHtmlGenesysProfileSummary>>;
-  }
-): string {
+  options?: InteractiveCallflowHtmlOptions
+): string[] {
   const effectiveViews: InteractiveCallflowHtmlView[] =
     options?.views && options.views.length > 0
       ? options.views
@@ -4013,11 +4126,16 @@ export function generateInteractiveCallflowHtml(
       genesysArchyFilename: v.genesysArchyFilename || null,
       genesysYamlValidation: v.genesysYamlValidation || null,
       genesysVariants: v.genesysVariants || null,
+      genesysVariantRefs: v.genesysVariantRefs || null,
     };
   });
 
   const hasGenesysViews = effectiveViews.some((v) =>
-    Boolean(v.genesysSvg || (v.genesysVariants && Object.keys(v.genesysVariants).length > 0))
+    Boolean(
+      v.genesysSvg ||
+        (v.genesysVariants && Object.keys(v.genesysVariants).length > 0) ||
+        (v.genesysVariantRefs && Object.keys(v.genesysVariantRefs).length > 0)
+    )
   );
 
   const drillTargetsByNodeId: Record<string, { viewKey: string; scriptRef: string }> = {};
@@ -4046,43 +4164,77 @@ export function generateInteractiveCallflowHtml(
     : null;
 
   const scriptCount = effectiveViews.filter((v) => Boolean(v.scriptNumber)).length;
-  const safePayloadJson = JSON.stringify({
-    views: serializedViews,
-    initialViewKey: 'welcome',
-    defaultTargetViewKey: targetViewKey,
-    mainViewKey: mainView ? mainView.key : null,
-    mainViewLabel: mainView ? mainView.label : null,
-    welcomeSummary: {
+  const pushPayloadJsonParts = (parts: string[]) => {
+    parts.push('{"views":');
+    pushChunkedJsonArray(parts, serializedViews);
+    parts.push(',"initialViewKey":"welcome","defaultTargetViewKey":');
+    pushSafeJsonChunk(parts, targetViewKey);
+    parts.push(',"mainViewKey":');
+    pushSafeJsonChunk(parts, mainView ? mainView.key : null);
+    parts.push(',"mainViewLabel":');
+    pushSafeJsonChunk(parts, mainView ? mainView.label : null);
+    parts.push(',"welcomeSummary":');
+    pushSafeJsonChunk(parts, {
       title: diagramTitle || 'Callflow',
       viewCount: effectiveViews.length,
       scriptCount,
       hasMultiViews: effectiveViews.length > 1,
-    },
-    initialMasterDensity,
-    hasBothMasterVariants: hasCompactMaster && hasDetailedMaster,
-    initialPathColorMode,
-    initialSurface: canvasSurface,
-    initialHiddenNodeTypes,
-    initialIsolateSubgraph,
-    drillTargetsByNodeId,
-    viewKeyByScriptNumber,
-    nodeTypeOptions: SMART_COLOR_NODE_TYPE_OPTIONS,
-    semanticPalettes: SEMANTIC_PALETTES,
-    analysis: enrichedAnalysis,
-    globalSearchIndex: options?.globalSearchIndex || [],
-    includeOriginalScripts: hasOriginalScriptsEnabled,
-    rawScriptsByNumber: sanitizedRawScriptsByNumber,
-    hasGenesysViews,
-    initialGenesysProfile,
-    genesysSvgPool: serializedGenesysSvgPool,
-    genesysProfiles: options?.genesysProfiles || null,
-  }).replace(/<\/script>/gi, '<\\/script>');
+    });
+    parts.push(',"initialMasterDensity":');
+    pushSafeJsonChunk(parts, initialMasterDensity);
+    parts.push(',"hasBothMasterVariants":');
+    pushSafeJsonChunk(parts, hasCompactMaster && hasDetailedMaster);
+    parts.push(',"initialPathColorMode":');
+    pushSafeJsonChunk(parts, initialPathColorMode);
+    parts.push(',"initialSurface":');
+    pushSafeJsonChunk(parts, canvasSurface);
+    parts.push(',"initialHiddenNodeTypes":');
+    pushSafeJsonChunk(parts, initialHiddenNodeTypes);
+    parts.push(',"initialIsolateSubgraph":');
+    pushSafeJsonChunk(parts, initialIsolateSubgraph);
+    parts.push(',"drillTargetsByNodeId":');
+    pushSafeJsonChunk(parts, drillTargetsByNodeId);
+    parts.push(',"viewKeyByScriptNumber":');
+    pushSafeJsonChunk(parts, viewKeyByScriptNumber);
+    parts.push(',"nodeTypeOptions":');
+    pushSafeJsonChunk(parts, SMART_COLOR_NODE_TYPE_OPTIONS);
+    parts.push(',"semanticPalettes":');
+    pushSafeJsonChunk(parts, SEMANTIC_PALETTES);
+    parts.push(',"analysis":');
+    pushChunkedAnalysisPayload(parts, enrichedAnalysis);
+    parts.push(',"globalSearchIndex":');
+    pushChunkedJsonArray(parts, options?.globalSearchIndex || []);
+    parts.push(',"includeOriginalScripts":');
+    pushSafeJsonChunk(parts, hasOriginalScriptsEnabled);
+    parts.push(',"rawScriptsByNumber":');
+    pushChunkedJsonRecord(parts, sanitizedRawScriptsByNumber);
+    parts.push(',"hasGenesysViews":');
+    pushSafeJsonChunk(parts, hasGenesysViews);
+    parts.push(',"initialGenesysProfile":');
+    pushSafeJsonChunk(parts, initialGenesysProfile);
+    parts.push(',"genesysSvgPool":');
+    pushChunkedJsonRecord(parts, serializedGenesysSvgPool);
+    parts.push(',"genesysTextPool":');
+    pushChunkedJsonRecord(parts, options?.genesysTextPool || null);
+    parts.push(',"genesysVariantPool":');
+    pushChunkedJsonRecord(
+      parts,
+      (options?.genesysVariantPool as Record<string, unknown> | undefined) || null
+    );
+    parts.push(',"genesysProfiles":');
+    pushChunkedJsonRecord(
+      parts,
+      (options?.genesysProfiles as Record<string, unknown> | undefined) || null
+    );
+    parts.push('}');
+  };
 
   const hasMultiViews = effectiveViews.length > 1;
   const safeTitle = escapeHtmlText(diagramTitle || 'Callflow');
   const isDarkSurface = canvasSurface === 'dark';
 
-  return `<!doctype html>
+  const htmlParts: string[] = [];
+  htmlParts.push(`<!doctype html>
 <html lang="de" class="${isDarkSurface ? 'dark' : 'light'}">
 <head>
   <meta charset="UTF-8" />
@@ -6254,7 +6406,9 @@ export function generateInteractiveCallflowHtml(
   </div>
 
   <script>
-    const PAYLOAD = ${safePayloadJson};
+    const PAYLOAD = `);
+  pushPayloadJsonParts(htmlParts);
+  htmlParts.push(`;
     const viewsByKey = new Map(PAYLOAD.views.map(v => [v.key, v]));
     let isDarkSurface = PAYLOAD.initialSurface !== 'light';
     let activePlatformMode = 'avaya';
@@ -6264,11 +6418,28 @@ export function generateInteractiveCallflowHtml(
     let showGenesysHintsAndCleanup = false;
     let activeViewKey = PAYLOAD.initialViewKey;
 
-    function getActiveGenesysVariant(viewObj) {
+    const hydratedGenesysVariantCache = new WeakMap();
+    const masterGenesysAggCache = new Map();
+
+    function resolveGenesysText(textKey, directVal) {
+      if (typeof directVal === 'string' && directVal.length > 0) return directVal;
+      if (textKey && PAYLOAD.genesysTextPool && typeof PAYLOAD.genesysTextPool[textKey] === 'string') {
+        return PAYLOAD.genesysTextPool[textKey];
+      }
+      return '';
+    }
+
+    function resolveRawGenesysVariantForProfile(viewObj, profileKey) {
       if (!viewObj) return null;
+      if (viewObj.genesysVariantRefs && PAYLOAD.genesysVariantPool) {
+        const refKey = viewObj.genesysVariantRefs[profileKey] || viewObj.genesysVariantRefs[Object.keys(viewObj.genesysVariantRefs)[0]];
+        if (refKey && PAYLOAD.genesysVariantPool[refKey]) {
+          return PAYLOAD.genesysVariantPool[refKey];
+        }
+      }
       if (viewObj.genesysVariants) {
-        if (viewObj.genesysVariants[activeGenesysProfile]) {
-          return viewObj.genesysVariants[activeGenesysProfile];
+        if (viewObj.genesysVariants[profileKey]) {
+          return viewObj.genesysVariants[profileKey];
         }
         const keys = Object.keys(viewObj.genesysVariants);
         if (keys.length > 0) return viewObj.genesysVariants[keys[0]];
@@ -6284,6 +6455,125 @@ export function generateInteractiveCallflowHtml(
         };
       }
       return null;
+    }
+
+    function hydrateGenesysVariant(rawVar) {
+      if (!rawVar || typeof rawVar !== 'object') return null;
+      if (hydratedGenesysVariantCache.has(rawVar)) {
+        return hydratedGenesysVariantCache.get(rawVar);
+      }
+      const hydrated = Object.assign({}, rawVar);
+      hydrated.archyYaml = resolveGenesysText(rawVar.archyYamlKey, rawVar.archyYaml);
+      hydrated.flowIrJson = resolveGenesysText(rawVar.flowIrKey, rawVar.flowIrJson);
+      if (rawVar.avayaReport) {
+        hydrated.avayaReport = Object.assign({}, rawVar.avayaReport, {
+          renderedCode: resolveGenesysText(rawVar.avayaReport.renderedCodeKey, rawVar.avayaReport.renderedCode),
+        });
+      }
+      hydratedGenesysVariantCache.set(rawVar, hydrated);
+      return hydrated;
+    }
+
+    function getActiveGenesysVariant(viewObj) {
+      if (!viewObj) return null;
+      const rawVar = resolveRawGenesysVariantForProfile(viewObj, activeGenesysProfile);
+      if (!rawVar) return null;
+      if (isMasterViewKey(viewObj.key) && rawVar.primaryViewKey) {
+        const cacheKey = activeGenesysProfile + '::' + (rawVar.svgKey || '');
+        if (masterGenesysAggCache.has(cacheKey)) {
+          return masterGenesysAggCache.get(cacheKey);
+        }
+        const primaryView = viewsByKey.get(rawVar.primaryViewKey);
+        const primaryHydrated = primaryView
+          ? hydrateGenesysVariant(resolveRawGenesysVariantForProfile(primaryView, activeGenesysProfile))
+          : null;
+        const aggWarnings = [];
+        const aggYamlErrors = [];
+        const aggYamlWarnings = [];
+        const aggIrFindings = [];
+        const aggHolidayByLower = new Map();
+        let validScriptCount = 0;
+        let totalScriptCount = 0;
+        for (let i = 0; i < PAYLOAD.views.length; i++) {
+          const sv = PAYLOAD.views[i];
+          if (!sv || !sv.scriptNumber) continue;
+          const sRaw = resolveRawGenesysVariantForProfile(sv, activeGenesysProfile);
+          if (!sRaw) continue;
+          totalScriptCount += 1;
+          const sFileLabel = sRaw.archyFilename || sv.scriptNumber;
+          if (Array.isArray(sRaw.warnings)) {
+            for (let w = 0; w < sRaw.warnings.length; w++) {
+              const wn = sRaw.warnings[w];
+              aggWarnings.push({
+                code: wn.code,
+                severity: wn.severity,
+                message: sFileLabel + ': ' + (wn.message || ''),
+                lineNumber: wn.lineNumber,
+              });
+            }
+          }
+          if (sRaw.yamlValidation) {
+            if (sRaw.yamlValidation.isValid) validScriptCount += 1;
+            if (Array.isArray(sRaw.yamlValidation.errors)) {
+              for (let e = 0; e < sRaw.yamlValidation.errors.length; e++) {
+                aggYamlErrors.push(sRaw.yamlValidation.errors[e]);
+              }
+            }
+            if (Array.isArray(sRaw.yamlValidation.warnings)) {
+              for (let w = 0; w < sRaw.yamlValidation.warnings.length; w++) {
+                aggYamlWarnings.push(sRaw.yamlValidation.warnings[w]);
+              }
+            }
+          } else {
+            validScriptCount += 1;
+          }
+          if (Array.isArray(sRaw.irFindings)) {
+            for (let f = 0; f < sRaw.irFindings.length; f++) {
+              const fn = sRaw.irFindings[f];
+              aggIrFindings.push(fn.fileName ? fn : Object.assign({ fileName: sFileLabel }, fn));
+            }
+          }
+          if (Array.isArray(sRaw.holidayMappings)) {
+            for (let h = 0; h < sRaw.holidayMappings.length; h++) {
+              const hm = sRaw.holidayMappings[h];
+              if (!hm || !hm.variableName) continue;
+              const lk = hm.variableName.toLowerCase();
+              if (!aggHolidayByLower.has(lk) || hm.lookupTarget) {
+                aggHolidayByLower.set(lk, hm);
+              }
+            }
+          }
+        }
+        const agg = {
+          svgKey: rawVar.svgKey,
+          readiness: rawVar.readiness,
+          readinessReasons: rawVar.readinessReasons || [],
+          warnings: aggWarnings,
+          archyYaml: primaryHydrated ? primaryHydrated.archyYaml : '',
+          archyFilename: primaryHydrated ? primaryHydrated.archyFilename : '',
+          yamlValidation: {
+            isValid: aggYamlErrors.length === 0,
+            errorCount: aggYamlErrors.length,
+            warningCount: aggYamlWarnings.length,
+            validScriptCount: validScriptCount,
+            totalScriptCount: totalScriptCount,
+            errors: aggYamlErrors,
+            warnings: aggYamlWarnings,
+          },
+          flowIR: primaryHydrated ? primaryHydrated.flowIR : undefined,
+          flowIrJson: primaryHydrated ? primaryHydrated.flowIrJson : '',
+          flowIRFilename: primaryHydrated ? primaryHydrated.flowIRFilename : undefined,
+          irFindings: aggIrFindings,
+          avayaReport: primaryHydrated ? primaryHydrated.avayaReport : undefined,
+          genesysReport: primaryHydrated ? primaryHydrated.genesysReport : undefined,
+          holidayMappings: Array.from(aggHolidayByLower.values()).sort(function (a, b) {
+            return (a.variableName || '').localeCompare(b.variableName || '');
+          }),
+        };
+        masterGenesysAggCache.set(cacheKey, agg);
+        return agg;
+      }
+      return hydrateGenesysVariant(rawVar);
     }
 
     function getViewCacheKey(viewKey) {
@@ -7582,7 +7872,10 @@ ${getEmbeddedInventoryAndGenesysZipRuntimeJs()}
       const isStrict = activeGenesysProfile !== 'placeholder';
       const isHolidayEnabled = activeGenesysProfile === 'strict-dataAction' || activeGenesysProfile === 'strict-dataTable';
       const holidayTarget = activeGenesysProfile === 'strict-dataTable' ? 'dataTable' : 'dataAction';
-      const hasMultiProfiles = Boolean(viewObj.genesysVariants && Object.keys(viewObj.genesysVariants).length > 1);
+      const hasMultiProfiles = Boolean(
+        (viewObj.genesysVariantRefs && Object.keys(viewObj.genesysVariantRefs).length > 1) ||
+        (viewObj.genesysVariants && Object.keys(viewObj.genesysVariants).length > 1)
+      );
       const isMasterCtx = isMasterViewKey(activeViewKey);
 
       if (genesysFlowLabel) {
@@ -7773,7 +8066,7 @@ ${getEmbeddedInventoryAndGenesysZipRuntimeJs()}
       const yamlFile = variant.archyFilename || viewObj.genesysArchyFilename || 'flow.yaml';
       const hasYaml = Boolean(yamlText);
       const hasAvayaReport = Boolean(variant.avayaReport && variant.avayaReport.renderedCode);
-      const hasFlowIr = Boolean(variant.flowIR);
+      const hasFlowIr = Boolean(variant.flowIrJson || variant.flowIR);
       const profileSum = getActiveGenesysProfileSummary();
       const hasZip = Boolean(profileSum && Array.isArray(profileSum.scripts) && profileSum.scripts.length > 0);
 
@@ -11148,9 +11441,19 @@ ${getEmbeddedInventoryAndGenesysZipRuntimeJs()}
       btnGenesysFlowIrDownload.addEventListener('click', function () {
         const v = viewsByKey.get(activeViewKey);
         const variant = getActiveGenesysVariant(v);
-        if (!variant || !variant.flowIR) return;
+        if (!variant || (!variant.flowIrJson && !variant.flowIR)) return;
         const fname = variant.flowIRFilename || 'flowIR.json';
-        const blob = new Blob([JSON.stringify(variant.flowIR, null, 2)], { type: 'application/json;charset=utf-8' });
+        let jsonText = '';
+        if (variant.flowIrJson) {
+          try {
+            jsonText = JSON.stringify(JSON.parse(variant.flowIrJson), null, 2);
+          } catch {
+            jsonText = variant.flowIrJson;
+          }
+        } else {
+          jsonText = JSON.stringify(variant.flowIR, null, 2);
+        }
+        const blob = new Blob([jsonText], { type: 'application/json;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -11164,8 +11467,21 @@ ${getEmbeddedInventoryAndGenesysZipRuntimeJs()}
     if (btnGenesysZipDownload) {
       btnGenesysZipDownload.addEventListener('click', function () {
         const prof = getActiveGenesysProfileSummary();
-        if (!prof) return;
-        downloadGenesysAllYamlsZipFromProfile(prof, 'genesys-archy-flows-' + activeGenesysProfile + '.zip');
+        if (!prof || !Array.isArray(prof.scripts)) return;
+        const hydratedProf = Object.assign({}, prof, {
+          scripts: prof.scripts.map(function (s) {
+            if (s.archyYaml && (s.flowIrJson || s.flowIR)) return s;
+            const sv = s.viewKey ? viewsByKey.get(s.viewKey) : (s.scriptNumber && PAYLOAD.viewKeyByScriptNumber ? viewsByKey.get(PAYLOAD.viewKeyByScriptNumber[s.scriptNumber]) : null);
+            const rawVar = sv ? resolveRawGenesysVariantForProfile(sv, activeGenesysProfile) : null;
+            if (!rawVar) return s;
+            return Object.assign({}, s, {
+              archyYaml: s.archyYaml || resolveGenesysText(rawVar.archyYamlKey, rawVar.archyYaml),
+              flowIrJson: s.flowIrJson || resolveGenesysText(rawVar.flowIrKey, rawVar.flowIrJson),
+              flowIR: s.flowIR || rawVar.flowIR,
+            });
+          }),
+        });
+        downloadGenesysAllYamlsZipFromProfile(hydratedProf, 'genesys-archy-flows-' + activeGenesysProfile + '.zip');
       });
     }
     if (btnGenesysYamlCopy) {
@@ -11779,7 +12095,31 @@ ${getEmbeddedInventoryAndGenesysZipRuntimeJs()}
     bootActiveViewOnDemand();
   </script>
 </body>
-</html>`;
+</html>`);
+
+  return htmlParts;
 }
+
+/**
+ * Backward-compatible string wrapper around generateInteractiveCallflowHtmlParts.
+ * For very large workspaces prefer generateInteractiveCallflowHtmlParts() + new Blob(parts)
+ * to avoid V8's single-string length limit.
+ */
+export function generateInteractiveCallflowHtml(
+  diagramTitle: string,
+  svgString: string,
+  graph: CallflowGraph,
+  canvasSurface: 'dark' | 'light',
+  options?: InteractiveCallflowHtmlOptions
+): string {
+  return generateInteractiveCallflowHtmlParts(
+    diagramTitle,
+    svgString,
+    graph,
+    canvasSurface,
+    options
+  ).join('');
+}
+
 
 

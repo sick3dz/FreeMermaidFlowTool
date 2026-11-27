@@ -53,6 +53,7 @@ interface ExportModalProps {
     includeOriginalScripts?: boolean
   ) => Promise<{
     html: string | null;
+    htmlParts?: string[] | null;
     aborted?: boolean;
     fallbackCount?: number;
     errorMessage?: string;
@@ -196,6 +197,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     try {
       const targetSurface = bgMode === 'light' ? 'light' : 'dark';
       let htmlContent: string | null = null;
+      let htmlParts: string[] | null = null;
       let wasAborted = false;
       let fallbackCount = 0;
       let buildErrorMessage: string | undefined;
@@ -205,6 +207,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           preferredHtmlView,
           includeOriginalScripts
         );
+        htmlParts = res.htmlParts && res.htmlParts.length > 0 ? res.htmlParts : null;
         htmlContent = res.html;
         wasAborted = Boolean(res.aborted);
         fallbackCount = res.fallbackCount ?? 0;
@@ -215,11 +218,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         setTimeout(() => setExportStatus(null), 3000);
         return;
       }
-      if (!htmlContent && buildErrorMessage) {
+      if (!htmlParts && !htmlContent && buildErrorMessage) {
         setExportStatus(buildErrorMessage);
         return;
       }
-      if (!htmlContent && rawHtmlSvg) {
+      if (!htmlParts && !htmlContent && rawHtmlSvg) {
         const htmlSvg =
           targetSurface === 'dark' ? getSurfaceAdjustedSvg(rawHtmlSvg, 'dark') : rawHtmlSvg;
         htmlContent = generateInteractiveCallflowHtml(
@@ -230,11 +233,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           { initialPathColorMode: pathColorMode }
         );
       }
-      if (!htmlContent) {
+      if (!htmlParts && !htmlContent) {
         setExportStatus('Es konnte kein Callflow für den HTML-Export gefunden werden.');
         return;
       }
-      const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+      const blob = new Blob(htmlParts ? htmlParts : [htmlContent as string], {
+        type: 'text/html;charset=utf-8',
+      });
       triggerLocalDownload(blob, 'Callflow.html');
       if (fallbackCount > 0) {
         setExportStatus(
