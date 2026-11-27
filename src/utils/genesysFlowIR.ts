@@ -113,6 +113,19 @@ export type FlowIRTerminalityEvidence =
   | 'unproven_external'
   | 'non_terminal';
 
+export interface FlowIRMigrationAnnotation {
+  findingCode: FlowIRFindingCode;
+  prefix: 'OFFENE MIGRATIONSFRAGE' | 'KOMPATIBILITAETS-STUB (OPT-IN)';
+  lines: string[];
+  mode: 'strict' | 'stub';
+}
+
+export interface FlowIRExpressionReview {
+  kind: 'datetime_vs_string_or_list';
+  preservedExpression: string;
+  reason: string;
+}
+
 export interface FlowIRNode {
   id: string;
   kind: FlowIRNodeKind;
@@ -145,6 +158,10 @@ export interface FlowIRNode {
   migrationNote?: string;
   /** Mehrzeilige # OFFENE MIGRATIONSFRAGE Kommentare synchron zu findings. */
   migrationComments?: string[];
+  /** Strukturierte 1:1 Kommentar-Annotationen verknuepft mit Finding-Codes. */
+  migrationAnnotations?: FlowIRMigrationAnnotation[];
+  /** Hinweis auf absichtlich unveraendert belassene Ausdruecke mit Semantik-Pruefbedarf. */
+  expressionReview?: FlowIRExpressionReview;
 }
 
 export type FlowIRTransitionType =
@@ -171,6 +188,16 @@ export interface FlowIRTransition {
 
 export type FlowIRFindingSeverity = 'INFO' | 'WARN' | 'ERROR';
 
+export type FlowIRFindingCategory =
+  | 'provenance'
+  | 'terminality'
+  | 'holiday_logic'
+  | 'expression_review'
+  | 'reachability'
+  | 'scope'
+  | 'reference'
+  | 'subflow';
+
 export type FlowIRFindingCode =
   | 'VAR_USED_BEFORE_SET'
   | 'TERMINAL_PATH_CONTINUES'
@@ -191,6 +218,7 @@ export type FlowIRFindingCode =
   | 'MISSING_SUBFLOW_SOURCE'
   | 'POTENTIAL_BRANCH_FALLTHROUGH'
   | 'DUPLICATE_HOLIDAY_LOGIC'
+  | 'DATE_COMPARISON_SEMANTIC_REVIEW'
   | 'UNRESOLVED_TASK_REF'
   | 'DUPLICATE_VARIABLE_SCOPE'
   | 'UNREACHABLE_TASK_PRUNED';
@@ -199,6 +227,8 @@ export interface FlowIRFinding {
   severity: FlowIRFindingSeverity;
   code: FlowIRFindingCode;
   message: string;
+  category?: FlowIRFindingCategory;
+  requiresBusinessReview?: boolean;
   nodeId?: string;
   variableName?: string;
   sourceTrace?: FlowIRSourceTrace;
@@ -249,6 +279,7 @@ export interface FlowIRValidationResult {
   errorCount: number;
   warningCount: number;
   infoCount: number;
+  commentParityOk?: boolean;
   findings: FlowIRFinding[];
   stats: {
     nodeCount: number;
@@ -396,6 +427,143 @@ function escYaml(raw: string): string {
     .replace(/"/g, '\\"')
     .replace(/\r?\n/g, ' ')
     .trim();
+}
+
+const ANNOTATION_ORDER: Partial<Record<FlowIRFindingCode, number>> = {
+  VAR_USED_BEFORE_SET: 1,
+  SWITCH_WITHOUT_SOURCE: 2,
+  DUPLICATE_HOLIDAY_LOGIC: 3,
+  DATE_COMPARISON_SEMANTIC_REVIEW: 4,
+  POTENTIAL_BRANCH_FALLTHROUGH: 5,
+};
+
+export function classifyFlowIRFinding(code: FlowIRFindingCode): {
+  category: FlowIRFindingCategory;
+  requiresBusinessReview: boolean;
+} {
+  switch (code) {
+    case 'VAR_USED_BEFORE_SET':
+    case 'SWITCH_WITHOUT_SOURCE':
+    case 'MISSING_CONDITION_SOURCE':
+    case 'VARIABLE_UNDECLARED':
+      return { category: 'provenance', requiresBusinessReview: true };
+    case 'POTENTIAL_BRANCH_FALLTHROUGH':
+    case 'TERMINAL_PATH_CONTINUES':
+    case 'TERMINAL_HAS_OUTGOING':
+      return { category: 'terminality', requiresBusinessReview: true };
+    case 'DUPLICATE_HOLIDAY_LOGIC':
+      return { category: 'holiday_logic', requiresBusinessReview: true };
+    case 'DATE_COMPARISON_SEMANTIC_REVIEW':
+      return { category: 'expression_review', requiresBusinessReview: true };
+    case 'UNREACHABLE_TASK_PRUNED':
+    case 'UNREACHABLE_NODE':
+      return { category: 'reachability', requiresBusinessReview: false };
+    case 'DUPLICATE_VARIABLE_SCOPE':
+      return { category: 'scope', requiresBusinessReview: false };
+    case 'UNRESOLVED_TASK_REF':
+    case 'BROKEN_TRANSITION_REF':
+    case 'INVALID_ENTRY_NODE':
+    case 'UNRESOLVED_TRANSFER_TARGET':
+      return { category: 'reference', requiresBusinessReview: true };
+    case 'MISSING_SUBFLOW_SOURCE':
+    case 'SECTION_RENDERED_BLINDLY':
+    case 'MISSING_ERROR_PATH':
+    case 'MISSING_TIMEOUT_PATH':
+    case 'UNRESOLVED_INTEGRATION_OUTPUT':
+    case 'EMPTY_BRANCH':
+    case 'DUMMY_CONDITION':
+    default:
+      return { category: 'subflow', requiresBusinessReview: true };
+  }
+}
+
+/**
+ * Shared comment-block synthesizer used by BOTH the primary Archy YAML renderer
+ * and renderArchyYamlFromFlowIR so multi-line # OFFENE MIGRATIONSFRAGE blocks
+ * follow deterministic ordering and stay 1:1 synchronized with FlowIR findings.
+ */
+export function formatOrderedMigrationAnnotations(
+  annotations?: FlowIRMigrationAnnotation[],
+  fallbackNote?: string,
+  fallbackComments?: string[]
+): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  const pushLine = (line: string) => {
+    const clean = line.trim();
+    if (!clean || seen.has(clean)) return;
+    seen.add(clean);
+    result.push(clean);
+  };
+
+  if (annotations && annotations.length > 0) {
+    const sorted = [...annotations].sort((a, b) => {
+      const pa = ANNOTATION_ORDER[a.findingCode] ?? 99;
+      const pb = ANNOTATION_ORDER[b.findingCode] ?? 99;
+      return pa - pb;
+    });
+    for (const ann of sorted) {
+      ann.lines.forEach((rawLine, idx) => {
+        const t = rawLine.trim();
+        if (!t) return;
+        if (
+          idx === 0 &&
+          !/^(?:OFFENE MIGRATIONSFRAGE|KOMPATIBILITAETS-STUB \(OPT-IN\)|HINWEIS)\s*:/i.test(t)
+        ) {
+          pushLine(`${ann.prefix}: ${t}`);
+        } else {
+          pushLine(t);
+        }
+      });
+    }
+    return result;
+  }
+
+  const rawList =
+    fallbackComments && fallbackComments.length > 0
+      ? fallbackComments
+      : fallbackNote
+      ? fallbackNote
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [];
+  for (const line of rawList) {
+    pushLine(line);
+  }
+  return result;
+}
+
+const NODE_COMMENT_PARITY_CODES = new Set<FlowIRFindingCode>([
+  'VAR_USED_BEFORE_SET',
+  'POTENTIAL_BRANCH_FALLTHROUGH',
+  'DUPLICATE_HOLIDAY_LOGIC',
+  'DATE_COMPARISON_SEMANTIC_REVIEW',
+]);
+
+export function verifyFlowIRCommentParity(ir: FlowIR): {
+  isSynchronized: boolean;
+  missingNodeFindings: Array<{ nodeId: string; code: FlowIRFindingCode }>;
+} {
+  const nodeMap = new Map<string, FlowIRNode>((ir.nodes || []).map((n) => [n.id, n]));
+  const missingNodeFindings: Array<{ nodeId: string; code: FlowIRFindingCode }> = [];
+  for (const f of ir.findings || []) {
+    if (!f.nodeId || (f.severity !== 'WARN' && f.severity !== 'ERROR')) continue;
+    if (!NODE_COMMENT_PARITY_CODES.has(f.code)) continue;
+    const node = nodeMap.get(f.nodeId);
+    if (!node) continue;
+    const hasAnn = (node.migrationAnnotations || []).some((a) => a.findingCode === f.code);
+    const hasLegacyComment =
+      Boolean(node.migrationComments && node.migrationComments.length > 0) ||
+      Boolean(node.migrationNote && /OFFENE MIGRATIONSFRAGE|KOMPATIBILITAETS-STUB/i.test(node.migrationNote));
+    if (!hasAnn && !hasLegacyComment) {
+      missingNodeFindings.push({ nodeId: f.nodeId, code: f.code });
+    }
+  }
+  return {
+    isSynchronized: missingNodeFindings.length === 0,
+    missingNodeFindings,
+  };
 }
 
 // ============================================================================
@@ -622,26 +790,52 @@ export function buildFlowIRFromMigrationGraph(
         lineEnd: Math.max(1, step.lineNumber || 1),
       };
 
-      // Surface any provenance & semantic audit findings recorded during Level-1/Level-2 graph building
-      const stepFindings = [
-        ...(step.provenanceFinding ? [step.provenanceFinding] : []),
-        ...(step.additionalFindings || []),
-      ];
-      for (const sf of stepFindings) {
-        preFindings.push({
-          severity: sf.severity,
-          code: sf.code,
-          message: sf.message,
-          variableName: sf.variableName,
-          sourceTrace: trace,
-        });
-      }
+      const pushStepFindings = (nodeId?: string) => {
+        const stepFindings = [
+          ...(step.provenanceFinding ? [step.provenanceFinding] : []),
+          ...(step.additionalFindings || []),
+        ];
+        for (const sf of stepFindings) {
+          const meta = classifyFlowIRFinding(sf.code);
+          preFindings.push({
+            severity: sf.severity,
+            code: sf.code,
+            message: sf.message,
+            category: meta.category,
+            requiresBusinessReview: meta.requiresBusinessReview,
+            ...(nodeId ? { nodeId } : {}),
+            variableName: sf.variableName,
+            sourceTrace: trace,
+          });
+        }
+      };
+
+      const buildCommentFields = () => {
+        const formatted = formatOrderedMigrationAnnotations(
+          step.migrationAnnotations,
+          step.yamlComment
+        );
+        return {
+          ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+          ...(formatted.length > 0 ? { migrationComments: formatted } : {}),
+          ...(step.migrationAnnotations && step.migrationAnnotations.length > 0
+            ? {
+                migrationAnnotations: step.migrationAnnotations.map((a) => ({
+                  ...a,
+                  lines: [...a.lines],
+                })),
+              }
+            : {}),
+          ...(step.expressionReview ? { expressionReview: { ...step.expressionReview } } : {}),
+        };
+      };
 
       // Handle jumpToReusableTask -> link directly to target task's entry node
       if (step.kind === 'jumpToReusableTask' && step.targetTaskRefId) {
         const targetRef = step.targetTaskRefId;
         const targetNodeId = taskEntryIdMap.get(targetRef);
         if (targetNodeId) {
+          pushStepFindings(targetNodeId);
           linkFromPending(targetNodeId);
           // Jump is terminal for the current sequential chain
           return { firstId, openExits: [] };
@@ -649,6 +843,7 @@ export function buildFlowIRFromMigrationGraph(
         // Fallback if target task wasn't built yet: record as invokeSubflow
         const id = nextNodeId('sub', targetRef);
         subflowsSet.add(targetRef);
+        pushStepFindings(id);
         nodes.push({
           id,
           kind: 'invokeSubflow',
@@ -656,7 +851,7 @@ export function buildFlowIRFromMigrationGraph(
           terminal: true,
           parameters: { target: targetRef, mode: 'jump' },
           sourceTrace: trace,
-          ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+          ...buildCommentFields(),
         });
         linkFromPending(id);
         connectToTerminalEnd(id);
@@ -669,6 +864,7 @@ export function buildFlowIRFromMigrationGraph(
           const unscopedExpr = stripScopesFromExpr(step.expression || '');
           const referencedVars = extractReferencedVarNamesFromExpr(unscopedExpr);
           referencedVars.forEach((vn) => markVarUsed(vn, id));
+          pushStepFindings(id);
 
           nodes.push({
             id,
@@ -685,10 +881,7 @@ export function buildFlowIRFromMigrationGraph(
               expr: unscopedExpr,
               ...(step.rawCondition ? { sourceExpr: step.rawCondition } : {}),
             },
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
-            ...(splitStepComments(step.yamlComment)
-              ? { migrationComments: splitStepComments(step.yamlComment) }
-              : {}),
+            ...buildCommentFields(),
           });
           linkFromPending(id);
 
@@ -716,6 +909,7 @@ export function buildFlowIRFromMigrationGraph(
           const id = nextNodeId('sw', step.variableName || 'switch');
           const unscopedExpr = stripScopesFromExpr(step.variableRef || step.expression || '');
           extractReferencedVarNamesFromExpr(unscopedExpr).forEach((vn) => markVarUsed(vn, id));
+          pushStepFindings(id);
 
           nodes.push({
             id,
@@ -731,7 +925,7 @@ export function buildFlowIRFromMigrationGraph(
               expr: unscopedExpr,
               sourceExpr: step.variableName || unscopedExpr,
             },
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
+            ...buildCommentFields(),
           });
           linkFromPending(id);
 
@@ -963,6 +1157,7 @@ export function buildFlowIRFromMigrationGraph(
           const targetName = step.targetTaskRefId || step.targetSlug || step.target || 'SubTask';
           subflowsSet.add(targetName);
           const id = nextNodeId('sub', targetName);
+          pushStepFindings(id);
           const isUnloaded =
             missingSubflowsSet.has(targetName.toLowerCase()) ||
             missingSubflowsSet.has((step.target || '').toLowerCase());
@@ -990,10 +1185,7 @@ export function buildFlowIRFromMigrationGraph(
               ...(step.targetTaskRefId && !hasDeclaredTarget ? { unresolvedTaskRef: true } : {}),
             },
             sourceTrace: trace,
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
-            ...(splitStepComments(step.yamlComment)
-              ? { migrationComments: splitStepComments(step.yamlComment) }
-              : {}),
+            ...buildCommentFields(),
           });
           linkFromPending(id);
           pendingExits = [{ nodeId: id, type: 'unconditional' }];
@@ -1004,6 +1196,7 @@ export function buildFlowIRFromMigrationGraph(
           const modName = step.targetSlug || step.target || 'CommonModule';
           commonModulesSet.add(modName);
           const id = nextNodeId('cm', modName);
+          pushStepFindings(id);
           nodes.push({
             id,
             kind: 'invokeCommonModule',
@@ -1015,10 +1208,7 @@ export function buildFlowIRFromMigrationGraph(
               originalTarget: step.target || modName,
             },
             sourceTrace: trace,
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
-            ...(splitStepComments(step.yamlComment)
-              ? { migrationComments: splitStepComments(step.yamlComment) }
-              : {}),
+            ...buildCommentFields(),
           });
           linkFromPending(id);
           pendingExits = [{ nodeId: id, type: 'unconditional' }];
@@ -1103,6 +1293,7 @@ export function buildFlowIRFromMigrationGraph(
         default: {
           // playAudio, updateData, setParticipantData, getParticipantData, playHoldMusic, delay, setPriority, setLanguage, setUuiData, createCallback, menu
           const id = nextNodeId('act', step.targetSlug || step.variableName || step.kind);
+          pushStepFindings(id);
           const unscopedVar = step.variableName?.replace(/^(?:Flow|Task)\./i, '');
           const unscopedExpr = step.expressionValue ? stripScopesFromExpr(step.expressionValue) : undefined;
           if (unscopedVar) markVarUsed(unscopedVar, id);
@@ -1158,10 +1349,7 @@ export function buildFlowIRFromMigrationGraph(
                 }
               : {}),
             sourceTrace: trace,
-            ...(step.yamlComment ? { migrationNote: step.yamlComment } : {}),
-            ...(splitStepComments(step.yamlComment)
-              ? { migrationComments: splitStepComments(step.yamlComment) }
-              : {}),
+            ...buildCommentFields(),
           });
           linkFromPending(id);
           if (step.isTerminal) {
@@ -1338,6 +1526,7 @@ export function buildFlowIRFromMigrationGraph(
   const seenKey = new Set<string>();
   const seenVarBeforeSet = new Set<string>();
   const seenDupHoliday = new Set<string>();
+  const seenDateReview = new Set<string>();
   const combined: FlowIRFinding[] = [];
   for (const f of [...preFindings, ...validation.findings]) {
     if (f.code === 'VAR_USED_BEFORE_SET' && f.variableName) {
@@ -1350,10 +1539,20 @@ export function buildFlowIRFromMigrationGraph(
       if (seenDupHoliday.has(holKey)) continue;
       seenDupHoliday.add(holKey);
     }
+    if (f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW') {
+      const dateKey = `${f.variableName?.toLowerCase() || ''}:${f.sourceTrace?.lineStart || 0}`;
+      if (seenDateReview.has(dateKey)) continue;
+      seenDateReview.add(dateKey);
+    }
     const key = `${f.code}:${f.nodeId || ''}:${f.variableName || ''}:${f.message}`;
     if (seenKey.has(key)) continue;
     seenKey.add(key);
-    combined.push(f);
+    const meta = classifyFlowIRFinding(f.code);
+    combined.push({
+      ...f,
+      category: f.category || meta.category,
+      requiresBusinessReview: f.requiresBusinessReview ?? meta.requiresBusinessReview,
+    });
   }
   ir.findings = combined;
   return ir;
@@ -1672,6 +1871,31 @@ export function validateIR(ir: FlowIR): FlowIRValidationResult {
             });
           }
         }
+
+        // Semantic DateTime vs. String/List review check (preserved verbatim, flagged for review)
+        if (
+          /\b(?:GetCurrentDateTimeUtc|DayOfWeek)\s*\(/.test(expr) &&
+          /(?:==|!=)/.test(expr)
+        ) {
+          for (const vName of vars) {
+            const vDecl = varMap.get(vName.toLowerCase());
+            const isStringOrList =
+              vDecl?.type === 'string' ||
+              /(?:list|liste|table|tabelle|holiday|feiertag)/i.test(vName);
+            if (isStringOrList) {
+              findings.push({
+                severity: 'WARN',
+                code: 'DATE_COMPARISON_SEMANTIC_REVIEW',
+                category: 'expression_review',
+                requiresBusinessReview: true,
+                variableName: vName,
+                nodeId: node.id,
+                sourceTrace: node.sourceTrace,
+                message: `Semantische Datumsprüfung erforderlich (Zeile ${node.sourceTrace?.lineStart || 1}): Decision "${node.name}" vergleicht Zeit-/Datumswert mit "${vName}" ("${expr}"). Für Auditierbarkeit unverändert übernommen; erfordert vor produktivem Architect-Import manuelle Normalisierung.`,
+              });
+            }
+          }
+        }
       }
     }
 
@@ -1886,16 +2110,27 @@ export function validateIR(ir: FlowIR): FlowIRValidationResult {
     }
   }
 
-  const errorCount = findings.filter((f) => f.severity === 'ERROR').length;
-  const warningCount = findings.filter((f) => f.severity === 'WARN').length;
-  const infoCount = findings.filter((f) => f.severity === 'INFO').length;
+  const enrichedFindings: FlowIRFinding[] = findings.map((f) => {
+    const meta = classifyFlowIRFinding(f.code);
+    return {
+      ...f,
+      category: f.category || meta.category,
+      requiresBusinessReview: f.requiresBusinessReview ?? meta.requiresBusinessReview,
+    };
+  });
+
+  const parity = verifyFlowIRCommentParity({ ...ir, findings: enrichedFindings });
+  const errorCount = enrichedFindings.filter((f) => f.severity === 'ERROR').length;
+  const warningCount = enrichedFindings.filter((f) => f.severity === 'WARN').length;
+  const infoCount = enrichedFindings.filter((f) => f.severity === 'INFO').length;
 
   return {
     isValid: errorCount === 0,
     errorCount,
     warningCount,
     infoCount,
-    findings,
+    commentParityOk: parity.isSynchronized,
+    findings: enrichedFindings,
     stats: {
       nodeCount: (ir.nodes || []).length,
       transitionCount: (ir.transitions || []).length,
@@ -1915,8 +2150,11 @@ export function validateIR(ir: FlowIR): FlowIRValidationResult {
 export function renderAvayaView(ir: FlowIR): RenderedModeReport {
   const validation = validateIR(ir);
   const allFindings = ir.findings.length > 0 ? ir.findings : validation.findings;
+  const modeLabel = ir.meta.compatibilityStubMode
+    ? 'Kompatibilitäts-/Stub-Modus (Opt-In)'
+    : 'Ehrliche Migration (Strict Default)';
 
-  const kurzfazit = `Normalisiertes Avaya-Mapping für "${ir.meta.sourceScript}" (${ir.nodes.length} IR-Knoten, ${ir.transitions.length} Transitionen, ${ir.variables.length} scope-freie Variablen, ${allFindings.length} Finding(s)).`;
+  const kurzfazit = `Normalisiertes Avaya-Mapping (${modeLabel}) für "${ir.meta.sourceScript}" (${ir.nodes.length} IR-Knoten, ${ir.transitions.length} Transitionen, ${ir.variables.length} scope-freie Variablen, ${allFindings.length} Finding(s)).`;
 
   const annahmenUndOffenePunkte: string[] =
     allFindings.length > 0
@@ -2189,15 +2427,11 @@ export function renderArchyYamlFromFlowIR(ir: FlowIR): string {
       return;
     }
 
-    const commentList =
-      node.migrationComments && node.migrationComments.length > 0
-        ? node.migrationComments
-        : node.migrationNote
-        ? node.migrationNote
-            .split(/\r?\n/)
-            .map((c) => c.trim())
-            .filter(Boolean)
-        : [];
+    const commentList = formatOrderedMigrationAnnotations(
+      node.migrationAnnotations,
+      node.migrationNote,
+      node.migrationComments
+    );
     for (const cl of commentList) {
       lines.push(`${li}# ${cl}`);
     }
@@ -2516,7 +2750,10 @@ export function renderGenesysView(ir: FlowIR, preRenderedArchyYaml?: string): Re
   const allFindings = ir.findings.length > 0 ? ir.findings : validation.findings;
   const yaml = preRenderedArchyYaml || renderArchyYamlFromFlowIR(ir);
 
-  const kurzfazit = `Genesys Cloud Architect Zielstruktur für "${ir.meta.flowId}" (${validation.stats.decisionCount} Decisions, ${validation.stats.switchCount} Switches, ${validation.stats.integrationCount} Integrationen, ${validation.errorCount} IR-Fehler, ${allFindings.filter((f) => f.severity === 'WARN').length} offene Migrationspunkte).`;
+  const modeLabel = ir.meta.compatibilityStubMode
+    ? 'Kompatibilitäts-/Stub-Modus (Opt-In)'
+    : 'Ehrliche Migration (Strict Default)';
+  const kurzfazit = `Genesys Cloud Architect Zielstruktur (${modeLabel}) für "${ir.meta.flowId}" (${validation.stats.decisionCount} Decisions, ${validation.stats.switchCount} Switches, ${validation.stats.integrationCount} Integrationen, ${validation.errorCount} IR-Fehler, ${allFindings.filter((f) => f.severity === 'WARN').length} offene Migrationspunkte).`;
 
   const annahmenUndOffenePunkte: string[] =
     allFindings.length > 0
@@ -2529,6 +2766,7 @@ export function renderGenesysView(ir: FlowIR, preRenderedArchyYaml?: string): Re
       : ['Alle IR-Regeln erfüllt — keine offenen Migrationsfragen oder ungefüllten Variablen erkannt.'];
 
   const migrationshinweise: string[] = [
+    `Migrationsmodus: ${modeLabel}.`,
     'Variablen-Scopes: Alle Variablen sind in der IR scope-frei gehalten und erst im Genesys-YAML als Flow.* bzw. Task.* gerendert.',
     'Kontrollfluss: Avaya-Sections und GOTO-Sprünge wurden graphbasiert in echte Architect-Verzweigungen aufgelöst; geschützte Besetzt-/Fehler-Pfade sind nur bedingt erreichbar.',
   ];

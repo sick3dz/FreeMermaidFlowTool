@@ -29,6 +29,8 @@ import {
   MigrationTaskGraph,
   MigrationVariableDataType,
   MigrationVariableDecl,
+  StepExpressionReview,
+  StepMigrationAnnotation,
   StepProvenanceFinding,
   buildMigrationFlowGraph,
   flattenMigrationSteps,
@@ -38,15 +40,21 @@ import {
 import {
   FlowIR,
   FlowIRDocument,
+  FlowIRExpressionReview,
   FlowIRFinding,
+  FlowIRFindingCategory,
   FlowIRFindingCode,
+  FlowIRMigrationAnnotation,
   FlowIRValidationResult,
   RenderedModeReport,
   buildFlowIRFromMigrationGraph,
+  classifyFlowIRFinding,
+  formatOrderedMigrationAnnotations,
   renderArchyYamlFromFlowIR,
   renderAvayaView,
   renderGenesysView,
   validateIR,
+  verifyFlowIRCommentParity,
 } from './genesysFlowIR';
 
 export type {
@@ -56,12 +64,17 @@ export type {
   MigrationVariableDataType,
   MigrationVariableDecl,
   NormalizedTransferTarget,
+  StepExpressionReview,
+  StepMigrationAnnotation,
 } from './genesysMigrationGraph';
 export type {
   FlowIR,
   FlowIRDocument,
+  FlowIRExpressionReview,
   FlowIRFinding,
+  FlowIRFindingCategory,
   FlowIRFindingCode,
+  FlowIRMigrationAnnotation,
   FlowIRNode,
   FlowIRNodeKind,
   FlowIRSourceTrace,
@@ -74,10 +87,13 @@ export type {
 } from './genesysFlowIR';
 export {
   buildFlowIRFromMigrationGraph,
+  classifyFlowIRFinding,
+  formatOrderedMigrationAnnotations,
   renderArchyYamlFromFlowIR,
   renderAvayaView,
   renderGenesysView,
   validateIR,
+  verifyFlowIRCommentParity,
 };
 
 export type GenesysReadinessLevel = 'LOW' | 'MEDIUM' | 'HIGH';
@@ -185,6 +201,7 @@ export interface GenesysScriptWarning {
     | 'UNPROVEN_VARIABLE_SOURCE'
     | 'POTENTIAL_BRANCH_FALLTHROUGH'
     | 'DUPLICATE_HOLIDAY_LOGIC'
+    | 'DATE_COMPARISON_SEMANTIC_REVIEW'
     | 'ARCHY_YAML_VALIDATION_ERROR';
   severity: 'warning' | 'blocker';
   message: string;
@@ -377,14 +394,12 @@ function emitArchyStepList(
     const p = spaces(propIndent);
     const li = spaces(listIndent);
 
-    if (step.yamlComment) {
-      const commentLines = step.yamlComment
-        .split(/\r?\n/)
-        .map((c) => c.trim())
-        .filter(Boolean);
-      for (const cl of commentLines) {
-        lines.push(`${li}# ${cl}`);
-      }
+    const commentLines = formatOrderedMigrationAnnotations(
+      step.migrationAnnotations,
+      step.yamlComment
+    );
+    for (const cl of commentLines) {
+      lines.push(`${li}# ${cl}`);
     }
 
     switch (step.kind) {
@@ -3003,7 +3018,6 @@ function buildDomainAwareFallbackSubtask(
         name: ref.name,
         kind: 'subscript',
         originalTarget: ref.originalTarget,
-        yamlComment: `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" hat keine geladene .s-Quelldatei — kein Data Table Lookup und kein disconnect erfunden; delegiert an Common Module "${modSlug}".`,
         taskVariables: [],
         steps: [
           {
@@ -3014,7 +3028,7 @@ function buildDomainAwareFallbackSubtask(
             label: `Common Module: ${modSlug}`,
             target: ref.originalTarget,
             targetSlug: modSlug,
-            yamlComment: `OFFENE MIGRATIONSFRAGE: Inhalt von "${ref.originalTarget}.s" im Workspace ergaenzen oder als Genesys Common Module "${modSlug}" implementieren.`,
+            yamlComment: 'OFFENE MIGRATIONSFRAGE: Legacy source for this module is not loaded.',
             isTerminal: false,
           },
         ],
@@ -3092,7 +3106,7 @@ function buildDomainAwareFallbackSubtask(
   }
 
   // Response / Validation unloaded block (e.g. CHECK_RESPONSE) — directly uses Flow variable (NO Task duplicate, NO getParticipantData!)
-  if (/check|response|valid/i.test(lower)) {
+  if (/response|check_?resp|validat/i.test(lower)) {
     const existingRespFlowVar =
       callerFlowVars.find((v) => v.name.toLowerCase() === 'hdx_resp_cv') ||
       callerFlowVars.find((v) => /(?:^|_)resp(?:onse)?(?:_cv)?$/i.test(v.name));
@@ -3181,6 +3195,16 @@ function buildDomainAwareFallbackSubtask(
           variableRef: respVarRef,
           expression: respVarRef,
           yamlComment: `OFFENE MIGRATIONSFRAGE: ${respVarRef} muss aus vorgeschaltetem Modul, Lookup oder externer Integration befuellt werden.`,
+          migrationAnnotations: [
+            {
+              findingCode: 'SWITCH_WITHOUT_SOURCE',
+              prefix: 'OFFENE MIGRATIONSFRAGE',
+              lines: [
+                `OFFENE MIGRATIONSFRAGE: ${respVarRef} muss aus vorgeschaltetem Modul, Lookup oder externer Integration befuellt werden.`,
+              ],
+              mode: compatibilityStubMode ? 'stub' : 'strict',
+            },
+          ],
           provenanceFinding: {
             severity: 'WARN',
             code: 'SWITCH_WITHOUT_SOURCE',
@@ -3225,7 +3249,6 @@ function buildDomainAwareFallbackSubtask(
     name: ref.name,
     kind: 'subscript',
     originalTarget: ref.originalTarget,
-    yamlComment: `OFFENE MIGRATIONSFRAGE: Baustein "${ref.originalTarget}" hat keine geladene .s-Quelldatei — delegiert sauber an Common Module "${modSlug}".`,
     taskVariables: [],
     steps: [
       {
@@ -3236,7 +3259,7 @@ function buildDomainAwareFallbackSubtask(
         label: `Common Module: ${modSlug}`,
         target: ref.originalTarget,
         targetSlug: modSlug,
-        yamlComment: `OFFENE MIGRATIONSFRAGE: Inhalt von "${ref.originalTarget}.s" im Workspace ergaenzen oder als Genesys Common Module "${modSlug}" implementieren.`,
+        yamlComment: 'OFFENE MIGRATIONSFRAGE: Legacy source for this module is not loaded.',
         isTerminal: false,
       },
     ],
@@ -3614,6 +3637,27 @@ function appendStepYamlComment(step: MigrationStep, comment: string): void {
   }
 }
 
+function appendStepAnnotation(
+  step: MigrationStep,
+  findingCode: StepProvenanceFinding['code'],
+  prefix: StepMigrationAnnotation['prefix'],
+  lines: string[],
+  mode: 'strict' | 'stub'
+): void {
+  const cleaned = lines.map((l) => l.trim()).filter(Boolean);
+  if (cleaned.length === 0) return;
+  step.migrationAnnotations = step.migrationAnnotations || [];
+  const dup = step.migrationAnnotations.some(
+    (a) =>
+      a.findingCode === findingCode &&
+      a.prefix === prefix &&
+      a.lines.join('\n') === cleaned.join('\n')
+  );
+  if (!dup) {
+    step.migrationAnnotations.push({ findingCode, prefix, lines: cleaned, mode });
+  }
+}
+
 function appendStepFinding(step: MigrationStep, finding: StepProvenanceFinding): void {
   if (!step.provenanceFinding) {
     step.provenanceFinding = finding;
@@ -3779,9 +3823,14 @@ function auditBranchFallthroughsAndTerminality(
           : `Ziel-Task "${targetName}" hat im Avaya-Bestand keinen durchgehend terminalen Abschluss`;
 
       const lineNum = lastStep.lineNumber || parentStep.lineNumber || 1;
-      appendStepYamlComment(
+      const fallthroughComment = `OFFENE MIGRATIONSFRAGE: Zweig (${branchLabel}) ruft "${targetName}" auf, aber ${reasonDetail} — Hauptpfad (${nextPreview}) laeuft danach weiter. Kein disconnect erfunden; bitte pruefen, ob dieser Zweig terminal enden soll.`;
+      appendStepYamlComment(lastStep, fallthroughComment);
+      appendStepAnnotation(
         lastStep,
-        `OFFENE MIGRATIONSFRAGE: Zweig (${branchLabel}) ruft "${targetName}" auf, aber ${reasonDetail} — Hauptpfad (${nextPreview}) laeuft danach weiter. Kein disconnect erfunden; bitte pruefen, ob dieser Zweig terminal enden soll.`
+        'POTENTIAL_BRANCH_FALLTHROUGH',
+        'OFFENE MIGRATIONSFRAGE',
+        [fallthroughComment],
+        graph.diagnostics.compatibilityStubMode ? 'stub' : 'strict'
       );
       appendStepFinding(lastStep, {
         severity: 'WARN',
@@ -3824,6 +3873,12 @@ function auditBranchFallthroughsAndTerminality(
           inspectStepList(step.defaultSteps, following);
         }
       } else if (step.kind === 'evaluateScheduleGroup') {
+        // Audit closed and holiday branches when main-path continuation follows;
+        // openSteps intentionally continue into the main routing sequence.
+        if (hasMainContinuation) {
+          inspectBranchForFallthrough(step.closedSteps, 'closed', step, following);
+          inspectBranchForFallthrough(step.holidaySteps, 'holiday', step, following);
+        }
         if (step.openSteps) inspectStepList(step.openSteps, following);
         if (step.closedSteps) inspectStepList(step.closedSteps, following);
         if (step.holidaySteps) inspectStepList(step.holidaySteps, following);
@@ -3919,9 +3974,14 @@ function auditParallelHolidayLogic(
   for (const dec of explicitHolidayDecisions) {
     const condSummary = dec.expression || dec.conditionLabel || dec.label;
     const lineNum = dec.lineNumber || 1;
-    appendStepYamlComment(
+    const dupComment = `OFFENE MIGRATIONSFRAGE: Moegliche doppelte Feiertagslogik — neben evaluateScheduleGroup.holiday ("${scheduleGroupName}") existiert diese zusaetzliche explizite Feiertagspruefung (${condSummary}). Beide Pfade wurden unveraendert beibehalten; bitte fachlich klaeren, ob Standard-Feiertage (Schedule Group) und Sonder-Feiertagsliste bewusst getrennt sind oder zusammengefasst werden koennen.`;
+    appendStepYamlComment(dec, dupComment);
+    appendStepAnnotation(
       dec,
-      `OFFENE MIGRATIONSFRAGE: Moegliche doppelte Feiertagslogik — neben evaluateScheduleGroup.holiday ("${scheduleGroupName}") existiert diese zusaetzliche explizite Feiertagspruefung (${condSummary}). Beide Pfade wurden unveraendert beibehalten; bitte fachlich klaeren, ob Standard-Feiertage (Schedule Group) und Sonder-Feiertagsliste bewusst getrennt sind oder zusammengefasst werden koennen.`
+      'DUPLICATE_HOLIDAY_LOGIC',
+      'OFFENE MIGRATIONSFRAGE',
+      [dupComment],
+      graph.diagnostics.compatibilityStubMode ? 'stub' : 'strict'
     );
     appendStepFinding(dec, {
       severity: 'WARN',
@@ -4228,7 +4288,7 @@ export function translateAvayaWorkspaceToGenesys(
         brokenTargetKeysForScript: brokenByScriptKey.get(node.scriptKey) || new Set<string>(),
         compatibilityStubMode,
       },
-      '1.5.5'
+      '1.5.6'
     );
     builtByKey.set(node.scriptKey, { node, built });
     allGraphsByKey.set(node.scriptKey, built.graph);
@@ -4267,7 +4327,7 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.5.5',
+    schemaVersion: '1.5.6',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     compatibilityStubMode,

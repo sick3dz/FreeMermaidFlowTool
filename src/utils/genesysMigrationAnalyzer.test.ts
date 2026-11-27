@@ -17,6 +17,7 @@ import {
   translateAvayaWorkspaceToGenesys,
   validateArchyYaml,
   validateIR,
+  verifyFlowIRCommentParity,
 } from './genesysMigrationAnalyzer';
 import {
   generateInteractiveCallflowHtml,
@@ -1457,7 +1458,7 @@ SECTION Start
     expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_Feiertagliste_NRW');
     expect(script.archyYaml).not.toContain('Flow.date');
     expect(script.archyYaml).not.toContain('getParticipantData:');
-    expect(script.archyYaml).toContain('OFFENE MIGRATIONSFRAGE: Quelle fuer "Flow.Sys_Feiertagliste_NRW"');
+    expect(script.archyYaml).toContain('OFFENE MIGRATIONSFRAGE: Source for "Flow.Sys_Feiertagliste_NRW"');
     expect(
       script.flowIR.findings.some(
         (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_Feiertagliste_NRW'
@@ -1729,6 +1730,331 @@ SECTION Start
     const yamlRes = validateArchyYaml(dupScopeYaml);
     expect(yamlRes.isValid).toBe(true);
     expect(yamlRes.warnings.some((w) => w.code === 'DUPLICATE_VARIABLE_SCOPE')).toBe(true);
+  });
+
+  it('insurance_service_hotline golden regression (strict honest default): 0 schema errors, verbatim date comparison, stacked ordered comments, scoped fallthrough on Holiday_Service_Message only, and clean unloaded subtasks', () => {
+    const hotlineMod = makeModule(
+      'insurance_service_hotline',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    EXECUTE Special_Event_Handling
+  ELSE
+    GIVE RAN Closed_Notice
+    DISCONNECT
+  END IF
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Service_Message
+  END IF
+  EXECUTE Core_Service_Routing
+  EXECUTE Night_Service_Check
+  GIVE RAN Welcome_Message
+  GIVE RAN Transfer_Message
+  QUEUE TO SKILLSET INSURANCE_SERVICE_QUEUE
+`
+    );
+
+    const ws = buildScriptWorkspace([hotlineMod]);
+    const strictRes = translateAvayaWorkspaceToGenesys(ws);
+    const script = strictRes.scripts[0];
+
+    expect(strictRes.compatibilityStubMode).toBe(false);
+    expect(script).toBeDefined();
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.yamlValidation.errors).toHaveLength(0);
+
+    // 1. Verbatim temporal expression & zero fabricated getParticipantData
+    expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
+    expect(script.archyYaml).not.toContain('getParticipantData:');
+
+    // 2. Stacked deterministic # OFFENE MIGRATIONSFRAGE comments on the holiday decision
+    const idxVar = script.archyYaml.indexOf('Source for "Flow.Sys_HolidayList_Region"');
+    const idxDup = script.archyYaml.indexOf('Moegliche doppelte Feiertagslogik');
+    const idxDate = script.archyYaml.indexOf(
+      'Expression "GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region"'
+    );
+    expect(idxVar).toBeGreaterThan(-1);
+    expect(idxDup).toBeGreaterThan(idxVar);
+    expect(idxDate).toBeGreaterThan(idxDup);
+    expect(script.archyYaml).toContain('manual normalization');
+
+    // 3. FlowIR findings & category metadata
+    const varFinding = script.flowIR.findings.find(
+      (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_HolidayList_Region'
+    );
+    const dupFinding = script.flowIR.findings.find((f) => f.code === 'DUPLICATE_HOLIDAY_LOGIC');
+    const dateFinding = script.flowIR.findings.find(
+      (f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW'
+    );
+    expect(varFinding?.category).toBe('provenance');
+    expect(varFinding?.requiresBusinessReview).toBe(true);
+    expect(dupFinding?.category).toBe('holiday_logic');
+    expect(dupFinding?.requiresBusinessReview).toBe(true);
+    expect(dateFinding?.category).toBe('expression_review');
+    expect(dateFinding?.requiresBusinessReview).toBe(true);
+
+    // 4. Scoped fallthrough: ONLY Holiday_Service_Message triggers POTENTIAL_BRANCH_FALLTHROUGH
+    const fallthroughFindings = script.flowIR.findings.filter(
+      (f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH'
+    );
+    expect(fallthroughFindings).toHaveLength(1);
+    expect(fallthroughFindings[0].message).toContain('nach "Holiday_Service_Message"');
+    expect(fallthroughFindings[0].message).not.toContain('nach "Special_Event_Handling"');
+    expect(fallthroughFindings[0].message).not.toContain('nach "Night_Service_Check"');
+
+    // 5. Minimal honest unloaded-task rendering (no comment above - task:, single Legacy source comment, no disconnect)
+    for (const taskRef of [
+      'Special_Event_Handling',
+      'Holiday_Service_Message',
+      'Night_Service_Check',
+    ]) {
+      const taskObj = script.migrationGraph.tasks.find((t) => t.refId === taskRef);
+      expect(taskObj).toBeDefined();
+      expect(taskObj!.yamlComment).toBeUndefined();
+      expect(taskObj!.steps).toHaveLength(1);
+      expect(taskObj!.steps[0].kind).toBe('callCommonModule');
+      expect(taskObj!.steps.some((s) => s.kind === 'disconnect')).toBe(false);
+    }
+    expect(script.archyYaml).toContain(
+      '# OFFENE MIGRATIONSFRAGE: Legacy source for this module is not loaded.'
+    );
+    expect(script.archyYaml).not.toMatch(/# OFFENE MIGRATIONSFRAGE:[^\n]*\n\s+- task:/);
+  });
+
+  it('insurance_service_hotline in compatibilityStubMode: synthesizes getParticipantData ONLY for Sys_HolidayList_Region and preserves DATE_COMPARISON_SEMANTIC_REVIEW and parallel holiday logic', () => {
+    const hotlineMod = makeModule(
+      'insurance_service_hotline',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    EXECUTE Special_Event_Handling
+  ELSE
+    GIVE RAN Closed_Notice
+    DISCONNECT
+  END IF
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Service_Message
+  END IF
+  EXECUTE Night_Service_Check
+  QUEUE TO SKILLSET INSURANCE_SERVICE_QUEUE
+`
+    );
+
+    const ws = buildScriptWorkspace([hotlineMod]);
+    const stubRes = translateAvayaWorkspaceToGenesys(ws, { compatibilityStubMode: true });
+    const script = stubRes.scripts[0];
+
+    expect(stubRes.compatibilityStubMode).toBe(true);
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.archyYaml).toContain('getParticipantData:');
+    expect(script.archyYaml).toContain('Get Participant Data Sys_HolidayList_Region');
+    expect(script.archyYaml).not.toContain('Get Participant Data date');
+    expect(script.archyYaml).toContain('KOMPATIBILITAETS-STUB (OPT-IN)');
+    expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
+    expect(
+      script.flowIR.findings.some((f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW')
+    ).toBe(true);
+    expect(script.flowIR.findings.some((f) => f.code === 'DUPLICATE_HOLIDAY_LOGIC')).toBe(true);
+  });
+
+  it('Dual-renderer parity: generateArchyYaml and renderArchyYamlFromFlowIR produce consistent comments, verbatim date expressions, and valid Archy YAML for insurance_service_hotline', () => {
+    const hotlineMod = makeModule(
+      'insurance_service_hotline',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    EXECUTE Special_Event_Handling
+  ELSE
+    GIVE RAN Closed_Notice
+    DISCONNECT
+  END IF
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Service_Message
+  END IF
+  EXECUTE Night_Service_Check
+  QUEUE TO SKILLSET INSURANCE_SERVICE_QUEUE
+`
+    );
+
+    const ws = buildScriptWorkspace([hotlineMod]);
+    const script = translateAvayaWorkspaceToGenesys(ws).scripts[0];
+    const directIrYaml = renderArchyYamlFromFlowIR(script.flowIR);
+
+    expect(validateArchyYaml(script.archyYaml).isValid).toBe(true);
+    expect(validateArchyYaml(directIrYaml).isValid).toBe(true);
+
+    for (const yamlText of [script.archyYaml, directIrYaml]) {
+      expect(yamlText).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
+      expect(yamlText).not.toContain('getParticipantData:');
+      expect(yamlText).toContain('evaluateScheduleGroup:');
+      expect(yamlText).toContain('holiday:');
+      expect(yamlText).toContain(
+        '# OFFENE MIGRATIONSFRAGE: Legacy source for this module is not loaded.'
+      );
+      const iVar = yamlText.indexOf('Source for "Flow.Sys_HolidayList_Region"');
+      const iDup = yamlText.indexOf('Moegliche doppelte Feiertagslogik');
+      const iDate = yamlText.indexOf(
+        'Expression "GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region"'
+      );
+      expect(iVar).toBeGreaterThan(-1);
+      expect(iDup).toBeGreaterThan(iVar);
+      expect(iDate).toBeGreaterThan(iDup);
+    }
+  });
+
+  it('evaluateScheduleGroup closed branch non-terminal subtask emits POTENTIAL_BRANCH_FALLTHROUGH without inventing disconnect, while open branch does not', () => {
+    const schedMod = makeModule(
+      'Schedule_Closed_Fallthrough',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    EXECUTE Open_Sub
+  ELSE
+    EXECUTE Closed_Sub
+  END IF
+  QUEUE TO SKILLSET Main_Queue
+`
+    );
+
+    const ws = buildScriptWorkspace([schedMod]);
+    const script = translateAvayaWorkspaceToGenesys(ws).scripts[0];
+
+    expect(script.yamlValidation.isValid).toBe(true);
+    const fallthroughs = script.flowIR.findings.filter(
+      (f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH'
+    );
+    expect(fallthroughs.some((f) => f.message.includes('Closed_Sub'))).toBe(true);
+    expect(fallthroughs.some((f) => f.message.includes('Open_Sub'))).toBe(false);
+
+    const closedTask = script.migrationGraph.tasks.find((t) => t.refId === 'Closed_Sub');
+    expect(closedTask).toBeDefined();
+    expect(closedTask!.steps.some((s) => s.kind === 'disconnect')).toBe(false);
+  });
+
+  it('verifyFlowIRCommentParity enforces 1:1 synchronization between node findings and YAML annotations in both strict and stub modes', () => {
+    const hotlineMod = makeModule(
+      'insurance_service_hotline',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    EXECUTE Special_Event_Handling
+  ELSE
+    GIVE RAN Closed_Notice
+    DISCONNECT
+  END IF
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Service_Message
+  END IF
+  EXECUTE Night_Service_Check
+  QUEUE TO SKILLSET INSURANCE_SERVICE_QUEUE
+`
+    );
+
+    const ws = buildScriptWorkspace([hotlineMod]);
+    const strictScript = translateAvayaWorkspaceToGenesys(ws, {
+      compatibilityStubMode: false,
+    }).scripts[0];
+    const stubScript = translateAvayaWorkspaceToGenesys(ws, {
+      compatibilityStubMode: true,
+    }).scripts[0];
+
+    const strictParity = verifyFlowIRCommentParity(strictScript.flowIR);
+    expect(strictParity.isSynchronized).toBe(true);
+    expect(strictParity.missingNodeFindings).toHaveLength(0);
+    expect(strictScript.irValidation.commentParityOk).toBe(true);
+
+    const stubParity = verifyFlowIRCommentParity(stubScript.flowIR);
+    expect(stubParity.isSynchronized).toBe(true);
+    expect(stubParity.missingNodeFindings).toHaveLength(0);
+    expect(stubScript.irValidation.commentParityOk).toBe(true);
+  });
+
+  it('validateIR directly detects DATE_COMPARISON_SEMANTIC_REVIEW on temporal vs list comparison and ignores ordinary string comparisons', () => {
+    const makeDecisionIr = (expr: string, varName: string): FlowIR => ({
+      meta: {
+        flowId: 'Date_Review_Check',
+        sourceSystem: 'Avaya',
+        targetSystem: 'Genesys',
+        sourceScript: 'Date_Review_Check.s',
+        entryNodeId: 'n_start',
+        language: 'de-de',
+        version: '1.1',
+      },
+      variables: [
+        {
+          id: `v_${varName}`,
+          name: varName,
+          scope: 'flow',
+          category: 'flow',
+          type: 'string',
+          initialValue: '',
+          source: { origin: 'avaya', originalName: varName },
+          sourceTrace: { script: 'Date_Review_Check.s', lineStart: 1, lineEnd: 1 },
+          usedByNodes: ['n_dec'],
+        },
+      ],
+      nodes: [
+        {
+          id: 'n_start',
+          kind: 'entry',
+          name: 'Start',
+          terminal: false,
+          parameters: {},
+          sourceTrace: { script: 'Date_Review_Check.s', lineStart: 1, lineEnd: 1 },
+        },
+        {
+          id: 'n_dec',
+          kind: 'decision',
+          name: 'Check Condition',
+          terminal: false,
+          parameters: {},
+          condition: { expr },
+          sourceTrace: { script: 'Date_Review_Check.s', lineStart: 2, lineEnd: 2 },
+        },
+        {
+          id: 'n_yes',
+          kind: 'disconnect',
+          name: 'End Yes',
+          terminal: true,
+          parameters: {},
+          sourceTrace: { script: 'Date_Review_Check.s', lineStart: 3, lineEnd: 3 },
+        },
+        {
+          id: 'n_no',
+          kind: 'disconnect',
+          name: 'End No',
+          terminal: true,
+          parameters: {},
+          sourceTrace: { script: 'Date_Review_Check.s', lineStart: 4, lineEnd: 4 },
+        },
+      ],
+      transitions: [
+        { from: 'n_start', to: 'n_dec', type: 'unconditional' },
+        { from: 'n_dec', to: 'n_yes', type: 'whenTrue' },
+        { from: 'n_dec', to: 'n_no', type: 'whenFalse' },
+      ],
+      dependencies: { subflows: [], commonModules: [], dataActions: [] },
+      findings: [],
+      renderingHints: {
+        genesys: { preferReusableTasks: true, preferDecisionNodes: true, avoidGotoStyleSections: true },
+      },
+    });
+
+    const temporalVal = validateIR(
+      makeDecisionIr('GetCurrentDateTimeUtc() == Sys_HolidayList_Region', 'Sys_HolidayList_Region')
+    );
+    const temporalFinding = temporalVal.findings.find(
+      (f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW'
+    );
+    expect(temporalFinding).toBeDefined();
+    expect(temporalFinding?.severity).toBe('WARN');
+    expect(temporalFinding?.category).toBe('expression_review');
+    expect(temporalFinding?.requiresBusinessReview).toBe(true);
+
+    const normalVal = validateIR(makeDecisionIr('regionCode == "NRW"', 'regionCode'));
+    expect(
+      normalVal.findings.some((f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW')
+    ).toBe(false);
   });
 });
 

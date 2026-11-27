@@ -189,6 +189,23 @@ export interface MigrationStep {
   provenanceFinding?: StepProvenanceFinding;
   /** Zusätzliche strukturierte Findings (z. B. Fallthrough oder Doppel-Feiertagslogik) auf demselben Schritt. */
   additionalFindings?: StepProvenanceFinding[];
+  /** Strukturierte YAML-Kommentar-Annotationen (1:1 verknüpft mit Finding-Codes). */
+  migrationAnnotations?: StepMigrationAnnotation[];
+  /** Hinweis auf absichtlich unverändert beibehaltene Ausdrücke mit Klärungsbedarf (z. B. DateTime == String). */
+  expressionReview?: StepExpressionReview;
+}
+
+export interface StepMigrationAnnotation {
+  findingCode: StepProvenanceFinding['code'];
+  prefix: 'OFFENE MIGRATIONSFRAGE' | 'KOMPATIBILITAETS-STUB (OPT-IN)';
+  lines: string[];
+  mode: 'strict' | 'stub';
+}
+
+export interface StepExpressionReview {
+  kind: 'datetime_vs_string_or_list';
+  preservedExpression: string;
+  reason: string;
 }
 
 export interface StepProvenanceFinding {
@@ -200,6 +217,7 @@ export interface StepProvenanceFinding {
     | 'MISSING_CONDITION_SOURCE'
     | 'POTENTIAL_BRANCH_FALLTHROUGH'
     | 'DUPLICATE_HOLIDAY_LOGIC'
+    | 'DATE_COMPARISON_SEMANTIC_REVIEW'
     | 'UNRESOLVED_TASK_REF'
     | 'UNREACHABLE_TASK_PRUNED';
   message: string;
@@ -230,7 +248,8 @@ export interface MigrationGraphWarning {
     | 'UNREACHABLE_CODE_PRUNED'
     | 'UNPROVEN_VARIABLE_SOURCE'
     | 'POTENTIAL_BRANCH_FALLTHROUGH'
-    | 'DUPLICATE_HOLIDAY_LOGIC';
+    | 'DUPLICATE_HOLIDAY_LOGIC'
+    | 'DATE_COMPARISON_SEMANTIC_REVIEW';
   severity: 'warning' | 'blocker';
   message: string;
   lineNumber?: number;
@@ -1171,7 +1190,7 @@ export function buildMigrationFlowGraph(
   node: ParsedScriptNode,
   mod: ScriptModule | undefined,
   ctx: BuildMigrationGraphContext,
-  schemaVersion = '1.5.5'
+  schemaVersion = '1.5.6'
 ): BuildMigrationGraphResult {
   const rawText = mod?.rawText || '';
   const strippedLines = rawText ? stripOclCommentsPreservingLines(rawText) : [];
@@ -3487,6 +3506,27 @@ export function buildMigrationFlowGraph(
     }
   };
 
+  const appendAnnotation = (
+    target: MigrationStep,
+    findingCode: StepProvenanceFinding['code'],
+    prefix: StepMigrationAnnotation['prefix'],
+    lines: string[],
+    mode: 'strict' | 'stub'
+  ) => {
+    const cleaned = lines.map((l) => l.trim()).filter(Boolean);
+    if (cleaned.length === 0) return;
+    target.migrationAnnotations = target.migrationAnnotations || [];
+    const dup = target.migrationAnnotations.some(
+      (a) =>
+        a.findingCode === findingCode &&
+        a.prefix === prefix &&
+        a.lines.join('\n') === cleaned.join('\n')
+    );
+    if (!dup) {
+      target.migrationAnnotations.push({ findingCode, prefix, lines: cleaned, mode });
+    }
+  };
+
   const appendFinding = (target: MigrationStep, finding: StepProvenanceFinding) => {
     if (!target.provenanceFinding) {
       target.provenanceFinding = finding;
@@ -3528,6 +3568,9 @@ export function buildMigrationFlowGraph(
       const copy: MigrationStep = {
         ...st,
         additionalFindings: st.additionalFindings ? [...st.additionalFindings] : undefined,
+        migrationAnnotations: st.migrationAnnotations
+          ? st.migrationAnnotations.map((a) => ({ ...a, lines: [...a.lines] }))
+          : undefined,
       };
 
       // Check unread variables in decision / switch BEFORE pushing the step
@@ -3635,21 +3678,73 @@ export function buildMigrationFlowGraph(
           } else {
             // Strict Honest Migration (Default): NEVER invent getParticipantData or synthetic Data Table Lookups.
             // Mark transparently as open migration question via inline YAML comment + structured FlowIR finding.
-            const hasDateTimeStringComparison =
-              /\bGetCurrentDateTimeUtc\s*\(\s*\)/.test(copy.expression) &&
-              registry.flowVars.get(lower)?.dataType === 'string';
-            const dateTypeHint = hasDateTimeStringComparison
-              ? ' (Hinweis: DateTime-vs-String-Vergleich in Architect ueber Datumsformatierung oder Data Table pruefen)'
-              : '';
-            appendComment(
+            const varInfo = `Source for "${r.refName}" is not proven in the legacy script. No synthetic getParticipantData, data action, or lookup has been generated in strict mode.`;
+            const varGuidance = `Please clarify whether this value comes from participant data, a data table, or an upstream module.`;
+            appendComment(copy, `OFFENE MIGRATIONSFRAGE: Quelle fuer "${r.refName}" im Avaya-Skript nicht belegt — kein getParticipantData/Lookup erfunden; Herkunft (z. B. Participant Data, Data Table oder vorgeschaltetes Modul) bitte fachlich klaeren.`);
+            appendAnnotation(
               copy,
-              `OFFENE MIGRATIONSFRAGE: Quelle fuer "${r.refName}" im Avaya-Skript nicht belegt — kein getParticipantData/Lookup erfunden; Herkunft (z. B. Participant Data, Data Table oder vorgeschaltetes Modul) bitte fachlich klaeren.${dateTypeHint}`
+              'VAR_USED_BEFORE_SET',
+              'OFFENE MIGRATIONSFRAGE',
+              [varInfo, varGuidance],
+              'strict'
             );
             appendFinding(copy, {
               severity: 'WARN',
               code: 'VAR_USED_BEFORE_SET',
               variableName: r.name,
-              message: `Variable "${r.name}" wird in Zeile ${copy.lineNumber} geprüft, hat aber keine belegte Quelle im Avaya-Skript (kein getParticipantData/Lookup erfunden — offene Migrationsfrage).${dateTypeHint}`,
+              message: `Variable "${r.name}" wird in Zeile ${copy.lineNumber} geprüft, hat aber keine belegte Quelle im Avaya-Skript (kein getParticipantData/Lookup erfunden — offene Migrationsfrage).`,
+            });
+          }
+        }
+
+        // Semantic Date/Time Comparison Review (applies in BOTH strict & stub mode without silent normalization)
+        if (
+          /\b(?:GetCurrentDateTimeUtc|DayOfWeek)\s*\(/.test(copy.expression) &&
+          /(?:==|!=)/.test(copy.expression)
+        ) {
+          const flaggedVar = refs.find((r) => {
+            const lower = r.name.toLowerCase();
+            const fVar = registry.flowVars.get(lower);
+            const tVar = hostTask.taskVariables.find((tv) => tv.name.toLowerCase() === lower);
+            const dt = fVar?.dataType || tVar?.dataType;
+            return (
+              dt === 'string' ||
+              /(?:list|liste|table|tabelle|holiday|feiertag)/i.test(r.name)
+            );
+          });
+          if (flaggedVar) {
+            const reviewReason =
+              `Expression "${copy.expression}" compares DateTime against string/list variable "${flaggedVar.refName}"; preserved verbatim for auditability, but likely requires manual normalization before productive Architect import.`;
+            copy.expressionReview = {
+              kind: 'datetime_vs_string_or_list',
+              preservedExpression: copy.expression,
+              reason: reviewReason,
+            };
+            appendComment(
+              copy,
+              `OFFENE MIGRATIONSFRAGE: DateTime-vs-String/List-Vergleich (${copy.expression}) fuer Nachvollziehbarkeit unveraendert uebernommen — erfordert vor produktivem Architect-Import manuelle Format-/Typpruefung.`
+            );
+            appendAnnotation(
+              copy,
+              'DATE_COMPARISON_SEMANTIC_REVIEW',
+              'OFFENE MIGRATIONSFRAGE',
+              [
+                `Expression "${copy.expression}" compares a temporal value against "${flaggedVar.refName}".`,
+                `Preserved verbatim for auditability, but likely requires manual normalization (date format, timezone, or Data Table lookup) before productive Architect import.`,
+              ],
+              compatibilityStubMode ? 'stub' : 'strict'
+            );
+            appendFinding(copy, {
+              severity: 'WARN',
+              code: 'DATE_COMPARISON_SEMANTIC_REVIEW',
+              variableName: flaggedVar.name,
+              message: `Semantische Datumsprüfung erforderlich (Zeile ${copy.lineNumber}): "${copy.expression}" vergleicht einen Zeit-/Datumswert mit "${flaggedVar.refName}". Für Auditierbarkeit unverändert übernommen; erfordert vor produktivem Architect-Import manuelle Normalisierung.`,
+            });
+            warnings.push({
+              code: 'DATE_COMPARISON_SEMANTIC_REVIEW',
+              severity: 'warning',
+              lineNumber: copy.lineNumber,
+              message: `Zeile ${copy.lineNumber}: Ausdruck "${copy.expression}" vergleicht DateTime mit "${flaggedVar.refName}" — unverändert übernommen, bitte vor produktivem Architect-Import manuell normalisieren.`,
             });
           }
         }
@@ -3679,11 +3774,20 @@ export function buildMigrationFlowGraph(
           // when the Avaya script doesn't show the upstream write — annotate transparently as OFFENE MIGRATIONSFRAGE!
           const prevWasSubflow =
             prevOut && (prevOut.kind === 'callTask' || prevOut.kind === 'callCommonModule');
-          appendComment(
+          const switchMsg = prevWasSubflow
+            ? `OFFENE MIGRATIONSFRAGE: ${r.refName} muss aus vorgeschaltetem Modul "${prevOut.target || 'Subflow'}", Lookup oder externer Integration befuellt werden.`
+            : `OFFENE MIGRATIONSFRAGE: ${r.refName} muss aus vorgeschaltetem Modul, Lookup oder externer Integration befuellt werden.`;
+          appendComment(copy, switchMsg);
+          appendAnnotation(
             copy,
-            prevWasSubflow
-              ? `OFFENE MIGRATIONSFRAGE: ${r.refName} muss aus vorgeschaltetem Modul "${prevOut.target || 'Subflow'}", Lookup oder externer Integration befuellt werden.`
-              : `OFFENE MIGRATIONSFRAGE: ${r.refName} muss aus vorgeschaltetem Modul, Lookup oder externer Integration befuellt werden.`
+            'SWITCH_WITHOUT_SOURCE',
+            'OFFENE MIGRATIONSFRAGE',
+            [
+              prevWasSubflow
+                ? `${r.refName} must be populated by upstream module "${prevOut.target || 'Subflow'}", lookup, or external integration.`
+                : `${r.refName} must be populated by an upstream module, lookup, or external integration.`,
+            ],
+            compatibilityStubMode ? 'stub' : 'strict'
           );
           appendFinding(copy, {
             severity: 'WARN',
@@ -3750,6 +3854,15 @@ export function buildMigrationFlowGraph(
               appendComment(
                 copy,
                 `OFFENE MIGRATIONSFRAGE: Quelle fuer "${r.refName}" im Avaya-Skript nicht belegt — kein getParticipantData/Lookup erfunden; Herkunft bitte fachlich klaeren.`
+              );
+              appendAnnotation(
+                copy,
+                'VAR_USED_BEFORE_SET',
+                'OFFENE MIGRATIONSFRAGE',
+                [
+                  `Source for "${r.refName}" is not proven in the legacy script. No synthetic getParticipantData or lookup has been generated in strict mode.`,
+                ],
+                'strict'
               );
               appendFinding(copy, {
                 severity: 'WARN',
