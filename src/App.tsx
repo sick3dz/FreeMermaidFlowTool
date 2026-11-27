@@ -471,7 +471,7 @@ function OfflineStudioApp() {
   const [genesysCompatibilityStubMode, setGenesysCompatibilityStubMode] = useState<boolean>(false);
   const [genesysResolvedTargetConfig, setGenesysResolvedTargetConfig] =
     useState<ResolvedTargetConfig>({
-      enabled: false,
+      enabled: true,
       holidayLookupTarget: 'dataAction',
       variableMappings: {},
     });

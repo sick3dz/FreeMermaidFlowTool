@@ -43,9 +43,9 @@ function walkBinaryImageFiles(dirPath: string, results: string[] = []): string[]
   return results;
 }
 
-describe('offlineAuditEngine — IT Audit, § 23 MarkenG, Brand Hygiene & Repository Privacy (v1.6.8)', () => {
-  it('exposes version 1.6.8, script-analysis proofs 08–10, and complete § 23 MarkenG notices including Genesys Cloud', () => {
-    expect(AUDIT_APP_VERSION).toBe('1.6.8');
+describe('offlineAuditEngine — IT Audit, § 23 MarkenG, Brand Hygiene & Repository Privacy (v1.7.1)', () => {
+  it('exposes version 1.7.1, script-analysis proofs 08–10, canonical Holiday DB terminology, and complete § 23 MarkenG notices including Genesys Cloud', () => {
+    expect(AUDIT_APP_VERSION).toBe('1.7.1');
 
     const proofNumbers = CODE_INSPECT_AUDIT_PROOFS.map((p) => p.numberLabel);
     expect(proofNumbers).toEqual(['01', '02', '03', '04', '05', '06', '07', '08', '09', '10']);
@@ -75,16 +75,20 @@ describe('offlineAuditEngine — IT Audit, § 23 MarkenG, Brand Hygiene & Reposi
       expect(text).toContain('Oracle Corporation');
       expect(text).toContain('FlixCheck');
       expect(text).toContain('§ 23 MarkenG');
-      expect(text).toContain('1.6.8');
+      expect(text).toContain('1.7.1');
     }
 
     expect(LEGAL_AVAYA_CARDS[0].title).toContain('Genesys Cloud');
     expect(markdown).toContain('WAIT source_hint');
+    expect(markdown).toContain('Holiday DB: Guarded Standard');
+    expect(markdown).toContain('Strict Holiday Review');
+    expect(markdown).toContain('Holiday_Service');
+    expect(markdown).toContain('CheckHolidayByDate');
     expect(markdown).toContain('Flow.IsExternalHolidayToday');
     expect(html).toContain('Workspace Asset Inventory');
   });
 
-  it('enforces repository privacy hygiene: zero private image binaries, zero banned client/regional tokens, and zero legacy brand suffix in src/, scripts/, and index.html', () => {
+  it('enforces repository privacy hygiene: zero private image binaries, zero banned client/partner/regional/event/number pattern-group violations, and zero legacy brand suffix in src/, scripts/, and index.html', () => {
     const repoRoot = process.cwd();
     const scanDirs = [path.join(repoRoot, 'src'), path.join(repoRoot, 'scripts')];
     const filesToScan = [
@@ -92,30 +96,78 @@ describe('offlineAuditEngine — IT Audit, § 23 MarkenG, Brand Hygiene & Reposi
       path.join(repoRoot, 'index.html'),
     ];
 
-    // Assemble prohibited patterns from fragments so no banned token appears literally in source
-    const bannedTokens = [
-      ['r', 'h', 'l', 'd'].join(''),
-      ['rhein', 'land'].join(''),
-      ['rh', 'ion'].join(''),
-      ['credit', 'life'].join(''),
+    // Assemble prohibited exact tokens and pattern groups from fragments so no banned token appears literally in source
+    const privacyPatternGroups: Array<{ group: string; regex: RegExp }> = [
+      {
+        group: 'client_brand_tokens',
+        regex: new RegExp(
+          [
+            ['r', 'h', 'l', 'd'].join(''),
+            ['rhein', 'land'].join(''),
+            ['rh', 'ion'].join(''),
+            ['credit', 'life'].join(''),
+          ].join('|'),
+          'i'
+        ),
+      },
+      {
+        group: 'org_prefix_and_regional_holiday_patterns',
+        regex: new RegExp(
+          [
+            `\\b${['r', 'h'].join('')}\\d{2}(?:_[A-Za-z0-9]+)?\\b`,
+            `${['Sys_', 'Feiertag', 'liste_'].join('')}[A-Za-z0-9_]+`,
+            `\\b${['N', 'R', 'W'].join('')}\\b`,
+          ].join('|'),
+          'i'
+        ),
+      },
+      {
+        group: 'venue_event_and_internal_numbering_patterns',
+        regex: new RegExp(
+          [
+            ['do', 'rint'].join(''),
+            ['betriebs', 'versammlung'].join(''),
+            `\\b${['Gesell', 'schaft'].join('')}\\d+\\b`,
+            `\\b${['Gru', 'nd'].join('')}\\d+\\b`,
+            `\\b${['CDN_', '6556'].join('')}\\b`,
+          ].join('|'),
+          'i'
+        ),
+      },
+      {
+        group: 'partner_internal_and_real_phone_patterns',
+        regex: new RegExp(
+          [
+            `\\b${['AD', 'AC'].join('')}(?:_[A-Za-z0-9]+)?\\b`,
+            `\\b${['KP', 'V_'].join('')}[A-Za-z0-9]+\\b`,
+            `\\b${['L_', 'CL_', 'TOD'].join('')}\\b`,
+            `\\b${['MCF_', 'Blacklist_', 'flag_cv'].join('')}\\b`,
+            ['8976', '760'].join(''),
+            ['8277', '2790', '35'].join(''),
+          ].join('|'),
+          'i'
+        ),
+      },
     ];
-    const bannedRegex = new RegExp(bannedTokens.join('|'), 'i');
     const legacyBrand = ['MermaidFree2Use', 'Open'].join('');
 
-    const tokenViolations: string[] = [];
+    const patternViolations: Array<{ file: string; group: string }> = [];
     const brandViolations: string[] = [];
 
     for (const filePath of filesToScan) {
       const content = fs.readFileSync(filePath, 'utf8');
-      if (bannedRegex.test(content)) {
-        tokenViolations.push(path.relative(repoRoot, filePath));
+      const relPath = path.relative(repoRoot, filePath);
+      for (const { group, regex } of privacyPatternGroups) {
+        if (regex.test(content)) {
+          patternViolations.push({ file: relPath, group });
+        }
       }
       if (content.includes(legacyBrand)) {
-        brandViolations.push(path.relative(repoRoot, filePath));
+        brandViolations.push(relPath);
       }
     }
 
-    expect(tokenViolations).toEqual([]);
+    expect(patternViolations).toEqual([]);
     expect(brandViolations).toEqual([]);
 
     const imageBinaries = scanDirs.flatMap((d) => walkBinaryImageFiles(d));

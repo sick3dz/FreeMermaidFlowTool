@@ -34,7 +34,7 @@ function makeModule(scriptNumber: string, rawText: string, fileName?: string): S
   };
 }
 
-describe('inventoryExporter — Workspace Asset Inventory & Multi-Format Export (v1.6.8)', () => {
+describe('inventoryExporter — Workspace Asset Inventory & Multi-Format Export (v1.7.1)', () => {
   const mainMod = makeModule(
     'Main',
     `
@@ -92,8 +92,8 @@ SECTION Legacy_Only
     const ws = buildScriptWorkspace([mainMod, subMod, orphanMod]);
     const bundle = buildWorkspaceInventory(ws, { diagramTitle: 'Enterprise Demo' });
 
-    expect(bundle.schemaVersion).toBe('1.6.8');
-    expect(INVENTORY_SCHEMA_VERSION).toBe('1.6.8');
+    expect(bundle.schemaVersion).toBe('1.7.1');
+    expect(INVENTORY_SCHEMA_VERSION).toBe('1.7.1');
     expect(bundle.scriptCount).toBe(3);
 
     // Prompts & WAVs
@@ -191,7 +191,7 @@ SECTION Legacy_Only
 
     // JSON export
     const parsedJson = JSON.parse(exportInventoryJson(bundle));
-    expect(parsedJson.schemaVersion).toBe('1.6.8');
+    expect(parsedJson.schemaVersion).toBe('1.7.1');
     expect(Array.isArray(parsedJson.items)).toBe(true);
     expect(parsedJson.items[0].occurrences.length).toBeGreaterThan(0);
 

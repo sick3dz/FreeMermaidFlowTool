@@ -1195,6 +1195,7 @@ export function buildFlowIRFromMigrationGraph(
           const integrationType: FlowIRIntegrationSpec['type'] =
             isTable ||
             step.dataActionCategory === 'Oracle_Integration' ||
+            step.dataActionCategory === 'Holiday_Service' ||
             step.dataActionCategory === 'External_Holiday_Integration'
               ? 'dbLookup'
               : step.dataActionCategory === 'FlixCheck_API'
@@ -2270,10 +2271,10 @@ export function validateIR(ir: FlowIR): FlowIRValidationResult {
         const msg = resolvedMeta
           ? `Parallele Feiertagsquellen (Zeile ${n.sourceTrace?.lineStart || 1}): Neben evaluateScheduleGroup.holiday (Basis-Feiertage der Schedule Group) prüft Decision "${n.name}" die externe Feiertags-DB via ${
               resolvedMeta.lookupTarget === 'dataTable' ? 'Data Table' : 'Data Action'
-            } "${resolvedMeta.targetName || 'External_Holiday'}" -> Flow.${
+            } "${resolvedMeta.targetName || 'CheckHolidayByDate'}" -> Flow.${
               resolvedMeta.booleanVarName || 'IsExternalHolidayToday'
-            } (Quelle: ${resolvedMeta.originalVariable || 'HolidayDB'}). Beide Pfade bewusst getrennt belassen — Konsolidierung auf eine Single Source of Truth empfohlen, sofern identische fachliche Feiertagskalender gemeint sind; bei regionalen/speziellen Sondertagen klar differenziert beibehalten.`
-          : `Mögliche doppelte Feiertagslogik (Zeile ${n.sourceTrace?.lineStart || 1}): Neben evaluateScheduleGroup.holiday existiert Decision "${n.name}" (${n.condition?.expr || ''}). Beide Pfade getrennt beibehalten und fachlich klären.`;
+            } (Quelle: ${resolvedMeta.originalVariable || 'HolidayDB'}). Sofern beide dieselbe fachliche Feiertags-Bedeutung haben, ist eine Konsolidierung auf eine Single Source of Truth das bevorzugte Zielbild; parallele Beibehaltung nur bei bewusst getrennten Feiertagsarten.`
+          : `Mögliche doppelte Feiertagslogik (Zeile ${n.sourceTrace?.lineStart || 1}): Neben evaluateScheduleGroup.holiday existiert Decision "${n.name}" (${n.condition?.expr || ''}). Sofern identisch gemeint, Konsolidierung auf eine Single Source of Truth bevorzugt; sonst beide Pfade fachlich differenziert beibehalten.`;
         findings.push({
           severity: 'WARN',
           code: 'DUPLICATE_HOLIDAY_LOGIC',

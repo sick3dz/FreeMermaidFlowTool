@@ -187,6 +187,7 @@ export interface GenesysMappedAction {
     | 'Oracle_Integration'
     | 'FlixCheck_API'
     | 'Genesys_Cloud_Data_Actions'
+    | 'Holiday_Service'
     | 'External_Holiday_Integration';
   skills?: string[];
   isMultiSkillset?: boolean;
@@ -526,7 +527,7 @@ function emitArchyStepList(
             ? 'FlixCheck'
             : category === 'Genesys_Cloud_Data_Actions'
             ? 'QueueObs'
-            : category === 'External_Holiday_Integration'
+            : category === 'Holiday_Service' || category === 'External_Holiday_Integration'
             ? 'ExternalHoliday'
             : 'Oracle';
         const actName = uniqueName(`${prefixLabel} ${targetSlug}`);
@@ -2268,7 +2269,10 @@ function generateSingleScriptGenesysMermaid(script: GenesysScriptTranslation): s
         } else if (step.dataActionCategory === 'Genesys_Cloud_Data_Actions') {
           lines.push(`  ${nodeId}["Data Action: Queue Observations (${targetClean})"]`);
           classBuckets.gcPriority.push(nodeId);
-        } else if (step.dataActionCategory === 'External_Holiday_Integration') {
+        } else if (
+          step.dataActionCategory === 'Holiday_Service' ||
+          step.dataActionCategory === 'External_Holiday_Integration'
+        ) {
           lines.push(`  ${nodeId}["Data Action: External Holiday DB (${targetClean})"]`);
           classBuckets.gcDataTable.push(nodeId);
         } else {
@@ -3148,8 +3152,8 @@ function buildDomainAwareFallbackSubtask(
           dataActionOutputs: [
             {
               field: 'isListed',
-              targetVarName: 'MCF_Blacklist_flag_cv',
-              targetVarRef: 'Flow.MCF_Blacklist_flag_cv',
+              targetVarName: 'Caller_Blacklist_Flag_cv',
+              targetVarRef: 'Flow.Caller_Blacklist_Flag_cv',
               dataType: 'string',
             },
           ],
@@ -3160,9 +3164,9 @@ function buildDomainAwareFallbackSubtask(
               kind: 'updateData',
               lineNumber: 0,
               avayaCommand: 'BLACKLIST_HIT',
-              label: 'Set Flow.MCF_Blacklist_flag_cv = "1"',
-              variableName: 'MCF_Blacklist_flag_cv',
-              variableRef: 'Flow.MCF_Blacklist_flag_cv',
+              label: 'Set Flow.Caller_Blacklist_Flag_cv = "1"',
+              variableName: 'Caller_Blacklist_Flag_cv',
+              variableRef: 'Flow.Caller_Blacklist_Flag_cv',
               variableDataType: 'string',
               literalValue: '1',
               isTerminal: false,
@@ -3183,9 +3187,9 @@ function buildDomainAwareFallbackSubtask(
               kind: 'updateData',
               lineNumber: 0,
               avayaCommand: 'BLACKLIST_MISS',
-              label: 'Set Flow.MCF_Blacklist_flag_cv = "0"',
-              variableName: 'MCF_Blacklist_flag_cv',
-              variableRef: 'Flow.MCF_Blacklist_flag_cv',
+              label: 'Set Flow.Caller_Blacklist_Flag_cv = "0"',
+              variableName: 'Caller_Blacklist_Flag_cv',
+              variableRef: 'Flow.Caller_Blacklist_Flag_cv',
               variableDataType: 'string',
               literalValue: '0',
               isTerminal: false,
@@ -3535,17 +3539,17 @@ function hydrateLocalSubscriptTasks(
         callerGraph.flowVariables,
         compatibilityStubMode
       );
-      // Ensure Flow.MCF_Blacklist_flag_cv is declared ONLY when compatibilityStubMode synthesized its Blacklist Data Table Lookup
+      // Ensure Flow.Caller_Blacklist_Flag_cv is declared ONLY when compatibilityStubMode synthesized its Blacklist Data Table Lookup
       if (
         compatibilityStubMode &&
         /blacklist|vip/i.test(ref.originalTarget) &&
-        !existingFlowVarKeys.has('mcf_blacklist_flag_cv')
+        !existingFlowVarKeys.has('caller_blacklist_flag_cv')
       ) {
-        existingFlowVarKeys.add('mcf_blacklist_flag_cv');
+        existingFlowVarKeys.add('caller_blacklist_flag_cv');
         callerGraph.flowVariables.push({
-          name: 'MCF_Blacklist_flag_cv',
-          refName: 'Flow.MCF_Blacklist_flag_cv',
-          originalName: 'MCF_Blacklist_flag_cv',
+          name: 'Caller_Blacklist_Flag_cv',
+          refName: 'Flow.Caller_Blacklist_Flag_cv',
+          originalName: 'Caller_Blacklist_Flag_cv',
           scope: 'flow',
           isParticipantData: true,
           dataType: 'string',
@@ -4070,7 +4074,7 @@ function auditParallelHolidayLogic(
     if (resolvedMeta) {
       const targetKindLabel =
         resolvedMeta.lookupTarget === 'dataTable' ? 'Data Table' : 'Data Action';
-      const dupComment = `CONSOLIDATION REVIEW: Parallele Feiertagsquellen — evaluateScheduleGroup.holiday ("${scheduleGroupName}") deckt Basis-Feiertage der Schedule Group ab, waehrend dieser aufgeloeste Pfad die externe Feiertags-DB (${resolvedMeta.originalVariable} via ${targetKindLabel} "${resolvedMeta.targetName}" -> Flow.${resolvedMeta.booleanVarName}) prueft. Beide Pfade wurden differenziert beibehalten; Konsolidierung auf eine Single Source of Truth empfohlen, sofern identische Feiertagskalender gelten.`;
+      const dupComment = `CONSOLIDATION REVIEW: Parallele Feiertagsquellen — evaluateScheduleGroup.holiday ("${scheduleGroupName}") und externer Feiertags-DB-Lookup (${resolvedMeta.originalVariable} via ${targetKindLabel} "${resolvedMeta.targetName}" -> Flow.${resolvedMeta.booleanVarName}). Wenn beide dieselbe Business-Bedeutung haben, ist Konsolidierung auf eine Single Source of Truth bevorzugt; parallele Beibehaltung nur fuer bewusst getrennte Feiertagsarten.`;
       appendStepYamlComment(dec, dupComment);
       appendStepAnnotation(
         dec,
@@ -4082,13 +4086,13 @@ function auditParallelHolidayLogic(
       appendStepFinding(dec, {
         severity: 'WARN',
         code: 'DUPLICATE_HOLIDAY_LOGIC',
-        message: `Parallele Feiertagsquellen (Zeile ${lineNum}): evaluateScheduleGroup.holiday ("${scheduleGroupName}", Basis-Feiertage) und aufgelöster externer Feiertags-DB-Lookup (${resolvedMeta.originalVariable} via ${targetKindLabel} "${resolvedMeta.targetName}" -> Flow.${resolvedMeta.booleanVarName}) bestehen parallel. Beide differenziert beibehalten — Konsolidierung auf eine Single Source of Truth empfohlen, falls derselbe Fachkalender gepflegt wird.`,
+        message: `Parallele Feiertagsquellen (Zeile ${lineNum}): evaluateScheduleGroup.holiday ("${scheduleGroupName}") und externer Feiertags-DB-Lookup (${resolvedMeta.originalVariable} via ${targetKindLabel} "${resolvedMeta.targetName}" -> Flow.${resolvedMeta.booleanVarName}). Bei gleicher Business-Bedeutung ist Konsolidierung auf eine Single Source of Truth bevorzugt; parallele Beibehaltung nur bei bewusst getrennten Feiertagsarten.`,
       });
       warnings.push({
         code: 'DUPLICATE_HOLIDAY_LOGIC',
         severity: 'warning',
         lineNumber: lineNum,
-        message: `Zeile ${lineNum}: Parallele Feiertagsquellen — evaluateScheduleGroup.holiday ("${scheduleGroupName}") und externer Feiertags-DB-Lookup (${resolvedMeta.originalVariable} -> Flow.${resolvedMeta.booleanVarName}) bestehen parallel. Beide wurden differenziert beibehalten; Konsolidierung empfohlen, sofern derselbe Feiertagskalender gemeint ist.`,
+        message: `Zeile ${lineNum}: Parallele Feiertagsquellen — evaluateScheduleGroup.holiday ("${scheduleGroupName}") und externer Feiertags-DB-Lookup (${resolvedMeta.originalVariable} -> Flow.${resolvedMeta.booleanVarName}). Bei gleicher Business-Bedeutung Konsolidierung auf Single Source of Truth bevorzugt; parallele Beibehaltung nur fuer bewusst getrennte Feiertagsarten.`,
       });
     } else {
       const dupComment = `OFFENE MIGRATIONSFRAGE: Moegliche doppelte Feiertagslogik — neben evaluateScheduleGroup.holiday ("${scheduleGroupName}") existiert diese zusaetzliche explizite Feiertagspruefung (${condSummary}). Beide Pfade wurden unveraendert beibehalten; bitte fachlich klaeren, ob Standard-Feiertage (Schedule Group) und Sonder-Feiertagsliste bewusst getrennt sind oder zusammengefasst werden koennen.`;
@@ -4521,15 +4525,34 @@ export function translateAvayaWorkspaceToGenesys(
     generatedAt?: string;
     /** Optionaler Kompatibilitäts-/Stub-Modus (Opt-In, Standard = false = Ehrliche Migration). */
     compatibilityStubMode?: boolean;
-    /** Guarded Resolved-Target-Konfiguration (v1.6.5) für externe Feiertags-DB-Lookups. */
+    /** Holiday DB: Guarded Standard Konfiguration (Standard = aktiv fuer erkannte Holiday-DB-Muster + Zeitpruefung; enabled: false = Strict Holiday Review). */
     resolvedTargetConfig?: ResolvedTargetConfig;
   }
 ): GenesysWorkspaceTranslation {
   const compatibilityStubMode = Boolean(options?.compatibilityStubMode);
-  const resolvedTargetConfig = options?.resolvedTargetConfig;
+  const resolvedTargetConfig: ResolvedTargetConfig = compatibilityStubMode
+    ? { enabled: false }
+    : {
+        enabled: options?.resolvedTargetConfig?.enabled ?? true,
+        holidayLookupTarget: options?.resolvedTargetConfig?.holidayLookupTarget || 'dataAction',
+        defaultHolidayActionCategory:
+          options?.resolvedTargetConfig?.defaultHolidayActionCategory || 'Holiday_Service',
+        defaultHolidayActionName:
+          options?.resolvedTargetConfig?.defaultHolidayActionName || 'CheckHolidayByDate',
+        ...(options?.resolvedTargetConfig?.defaultHolidayDataTableName
+          ? { defaultHolidayDataTableName: options.resolvedTargetConfig.defaultHolidayDataTableName }
+          : {}),
+        defaultBooleanVarName:
+          options?.resolvedTargetConfig?.defaultBooleanVarName || 'IsExternalHolidayToday',
+        ...(options?.resolvedTargetConfig?.defaultDateExpression
+          ? { defaultDateExpression: options.resolvedTargetConfig.defaultDateExpression }
+          : {}),
+        ...(options?.resolvedTargetConfig?.variableMappings
+          ? { variableMappings: options.resolvedTargetConfig.variableMappings }
+          : {}),
+      };
   const resolvedTargetMode = Boolean(
     !compatibilityStubMode &&
-      resolvedTargetConfig &&
       (resolvedTargetConfig.enabled ||
         Object.values(resolvedTargetConfig.variableMappings || {}).some((m) => m && m.enabled !== false))
   );
@@ -4595,7 +4618,7 @@ export function translateAvayaWorkspaceToGenesys(
         compatibilityStubMode,
         resolvedTargetConfig,
       },
-      '1.6.8'
+      '1.7.1'
     );
     builtByKey.set(node.scriptKey, { node, built });
     allGraphsByKey.set(node.scriptKey, built.graph);
@@ -4635,7 +4658,7 @@ export function translateAvayaWorkspaceToGenesys(
     highCount > 0 ? 'HIGH' : mediumCount > 0 ? 'MEDIUM' : 'LOW';
 
   const result: GenesysWorkspaceTranslation = {
-    schemaVersion: '1.6.8',
+    schemaVersion: '1.7.1',
     generatedAt: options?.generatedAt || auditReport.generatedAt,
     privacyMode: '100%-in-memory-metadata-only',
     compatibilityStubMode,

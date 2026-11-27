@@ -668,13 +668,13 @@ SECTION Start
     IF CDN = 7401 THEN
       EXECUTE Menu
       IF NOT FLIXCHECK_Case_RegionA THEN
-        TRANSFER TO 002218277279035
+        TRANSFER TO 00493000001234
         TRANSFER TO 2510
         EXECUTE MobilNummerEingeben
       ELSE
         EXECUTE MobilNummerEingeben
-        SEND REQUEST FlixCheck_Schaden
-        QUEUE TO SKILLSET Schaden_KFZ
+        SEND REQUEST FlixCheck_Service_Request
+        QUEUE TO SKILLSET Service_Team_A
       END IF
     ELSE
       GIVE CDN 2510
@@ -742,16 +742,16 @@ SECTION Mobile_Entry
     expect(main.archyYaml).not.toMatch(/holiday:\s*\n\s*actions: \[\]/);
 
     // 3. Terminal cutoff & dead-path pruning:
-    //    - After TRANSFER TO 002218277279035 -> trailing TRANSFER TO 2510 & EXECUTE MobilNummerEingeben pruned
+    //    - After TRANSFER TO 00493000001234 -> trailing TRANSFER TO 2510 & EXECUTE MobilNummerEingeben pruned
     //    - After first DISCONNECT in ELSE -> second DISCONNECT & trailing IF COUNTER >= 3 pruned
     expect(main.metrics.prunedDeadPathCount).toBeGreaterThanOrEqual(3);
     expect(main.archyYaml).not.toContain('Prompt.S_9999');
 
     // 4. Target normalization:
-    //    - 002218277279035 -> canonical E.164 "+2218277279035" in transferToNumber
+    //    - 00493000001234 -> canonical E.164 "+493000001234" in transferToNumber
     //    - 2510 -> internal ACD Queue "CDN_2510" in transferToAcd (NOT raw PSTN transferToNumber)
-    expect(main.archyYaml).toContain('lit: "+2218277279035"');
-    expect(main.archyYaml).not.toContain('lit: "002218277279035"');
+    expect(main.archyYaml).toContain('lit: "+493000001234"');
+    expect(main.archyYaml).not.toContain('lit: "00493000001234"');
     expect(main.archyYaml).toContain('name: "CDN_2510"');
     expect(main.archyYaml).not.toContain('lit: "2510"');
 
@@ -833,12 +833,12 @@ SECTION Mobile_Entry
     expect(res.warnings.some((w) => w.code === 'PLACEHOLDER_CONDITION')).toBe(true);
   });
 
-  it('KPV_ADAC pattern: populates MCF_Blacklist_flag_cv & HDX_Resp_cv, blocks blind Section_BESETZT fall-through, inlines single-use sections, and produces scope-free flowIR v1.1', () => {
-    const kpvMod = makeModule(
-      'KPV_ADAC',
+  it('Partner_Service_Flow pattern: populates Caller_Blacklist_Flag_cv & HDX_Resp_cv, blocks blind Section_BESETZT fall-through, inlines single-use sections, and produces scope-free flowIR v1.1', () => {
+    const partnerMod = makeModule(
+      'Partner_Service_Flow',
       `
 SECTION Start
-  IF MCF_Blacklist_flag_cv = "1" THEN
+  IF Caller_Blacklist_Flag_cv = "1" THEN
     GOTO BESETZT
   ELSE
     GOSUB GET_SCHALTER
@@ -852,16 +852,16 @@ SECTION BESETZT
 SECTION CHECK_RESPONSE
   WHERE HDX_Resp_cv EQUALS
     VALUE "OK":
-      QUEUE TO SKILLSET ADAC_Service_DE
+      QUEUE TO SKILLSET Partner_Service_Queue
     VALUE "VIP":
-      QUEUE TO SKILLSET ADAC_VIP_DE
+      QUEUE TO SKILLSET Partner_Priority_Queue
     DEFAULT:
-      TRANSFER TO 00498976760
+      TRANSFER TO 0049300000100
   END WHERE
 `
     );
 
-    const ws = buildScriptWorkspace([kpvMod]);
+    const ws = buildScriptWorkspace([partnerMod]);
     const res = translateAvayaWorkspaceToGenesys(ws);
     const script = res.scripts[0];
 
@@ -873,8 +873,8 @@ SECTION CHECK_RESPONSE
     expect(script.archyYaml).not.toContain('checkResult');
     expect(script.archyYaml).not.toContain('Flow.avayaCondition');
 
-    // 2. MCF_Blacklist_flag_cv & HDX_Resp_cv recognized as Flow variables (suffix *_cv)
-    expect(script.archyYaml).toContain('name: MCF_Blacklist_flag_cv');
+    // 2. Caller_Blacklist_Flag_cv & HDX_Resp_cv recognized as Flow variables (suffix *_cv)
+    expect(script.archyYaml).toContain('name: Caller_Blacklist_Flag_cv');
     expect(script.archyYaml).toContain('name: HDX_Resp_cv');
     expect(script.archyYaml).not.toMatch(/^\s+name:\s+(?:Flow|Task)\./m);
 
@@ -883,14 +883,14 @@ SECTION CHECK_RESPONSE
     expect(script.archyYaml).not.toContain('callDataTableLookup:');
     expect(script.archyYaml).not.toContain('getParticipantData:');
     expect(script.archyYaml).toContain('OFFENE MIGRATIONSFRAGE:');
-    expect(script.archyYaml).toContain('Flow.MCF_Blacklist_flag_cv == \\"1\\"');
+    expect(script.archyYaml).toContain('Flow.Caller_Blacklist_Flag_cv == \\"1\\"');
     expect(
       script.flowIR.findings.some(
-        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'MCF_Blacklist_flag_cv'
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Caller_Blacklist_Flag_cv'
       )
     ).toBe(true);
-    const stubKpv = translateAvayaWorkspaceToGenesys(ws, { compatibilityStubMode: true }).scripts[0];
-    expect(stubKpv.archyYaml).toContain('callDataTableLookup:');
+    const stubPartner = translateAvayaWorkspaceToGenesys(ws, { compatibilityStubMode: true }).scripts[0];
+    expect(stubPartner.archyYaml).toContain('callDataTableLookup:');
 
     // 4. Single-use sections BESETZT and CHECK_RESPONSE are inlined directly (no goto-style Section_BESETZT task)
     expect(script.migrationGraph.diagnostics.inlinedSectionCount).toBeGreaterThanOrEqual(2);
@@ -898,8 +898,8 @@ SECTION CHECK_RESPONSE
     expect(script.archyYaml).not.toContain('refId: Section_CHECK_RESPONSE');
     // Positive blacklist path disconnects cleanly (no accidental fallthrough from normal path into BESETZT)
     expect(script.archyYaml).toContain('Prompt.S_9001');
-    expect(script.archyYaml).toContain('ADAC_Service_DE');
-    expect(script.archyYaml).toContain('lit: "+498976760"');
+    expect(script.archyYaml).toContain('Partner_Service_Queue');
+    expect(script.archyYaml).toContain('lit: "+49300000100"');
 
     // 5. Canonical flowIR v1.1 checks: scope-free expressions, sourceTrace & explicit terminal on every node
     expect(script.flowIR.meta.version).toBe('1.1');
@@ -908,12 +908,12 @@ SECTION CHECK_RESPONSE
     for (const v of script.flowIR.variables) {
       expect(v.name).not.toMatch(/^(?:Flow|Task)\./);
       expect(v.sourceTrace).toBeDefined();
-      expect(v.sourceTrace.script).toBe('KPV_ADAC.s');
+      expect(v.sourceTrace.script).toBe('Partner_Service_Flow.s');
     }
     for (const n of script.flowIR.nodes) {
       expect(typeof n.terminal).toBe('boolean');
       expect(n.sourceTrace).toBeDefined();
-      expect(n.sourceTrace.script).toBe('KPV_ADAC.s');
+      expect(n.sourceTrace.script).toBe('Partner_Service_Flow.s');
       if (n.condition?.expr) {
         expect(n.condition.expr).not.toMatch(/\b(?:Flow|Task)\./);
       }
@@ -1356,9 +1356,9 @@ SECTION Start
     expect(Array.isArray(parsed.flowIR.findings)).toBe(true);
   });
 
-  it('L_CL_TOD pattern: transitively inlines chained sections with 0 UNRESOLVED_TASK_REF, uses Flow.HDX_Resp_cv directly without Task/getParticipantData, omits fabricated DataTable in strict default, and documents pruned uncalled BESETZT/GET_SCHALTER tasks', () => {
-    const lClTodMod = makeModule(
-      'L_CL_TOD',
+  it('Legacy_Chained_Flow pattern: transitively inlines chained sections with 0 UNRESOLVED_TASK_REF, uses Flow.HDX_Resp_cv directly without Task/getParticipantData, omits fabricated DataTable in strict default, and documents pruned uncalled BESETZT/GET_SCHALTER tasks', () => {
+    const chainedMod = makeModule(
+      'Legacy_Chained_Flow',
       `
 SECTION Start
   EXECUTE BLACKLIST_VIP
@@ -1381,7 +1381,7 @@ SECTION UNUSED_SCHALTER
 `
     );
 
-    const ws = buildScriptWorkspace([lClTodMod]);
+    const ws = buildScriptWorkspace([chainedMod]);
     const res = translateAvayaWorkspaceToGenesys(ws);
     const script = res.scripts[0];
 
@@ -1414,13 +1414,13 @@ SECTION UNUSED_SCHALTER
     // 4. Strict honest default delegates unloaded BLACKLIST_VIP cleanly without fabricating BLACKLIST_VIP_Table
     expect(script.archyYaml).toContain('refId: BLACKLIST_VIP');
     expect(script.archyYaml).not.toContain('BLACKLIST_VIP_Table');
-    expect(script.archyYaml).not.toContain('Flow.MCF_Blacklist_flag_cv');
+    expect(script.archyYaml).not.toContain('Flow.Caller_Blacklist_Flag_cv');
 
     // 5. Opt-in compatibilityStubMode enables Blacklist Data Table Lookup stub explicitly
     const stubRes = translateAvayaWorkspaceToGenesys(ws, { compatibilityStubMode: true });
     const stubScript = stubRes.scripts[0];
     expect(stubScript.archyYaml).toContain('BLACKLIST_VIP_Table');
-    expect(stubScript.archyYaml).toContain('variable: Flow.MCF_Blacklist_flag_cv');
+    expect(stubScript.archyYaml).toContain('variable: Flow.Caller_Blacklist_Flag_cv');
     expect(stubScript.archyYaml).toContain('KOMPATIBILITAETS-STUB (OPT-IN)');
 
     // 6. flowIR records transparent SWITCH_WITHOUT_SOURCE finding
@@ -1448,7 +1448,9 @@ SECTION Start
     );
 
     const ws = buildScriptWorkspace([mainMod]);
-    const strictRes = translateAvayaWorkspaceToGenesys(ws);
+    const strictRes = translateAvayaWorkspaceToGenesys(ws, {
+      resolvedTargetConfig: { enabled: false },
+    });
     const script = strictRes.scripts[0];
 
     expect(strictRes.compatibilityStubMode).toBe(false);
@@ -1557,7 +1559,9 @@ SECTION Start
     );
 
     const ws = buildScriptWorkspace([mainMod, feiertagMod]);
-    const res = translateAvayaWorkspaceToGenesys(ws);
+    const res = translateAvayaWorkspaceToGenesys(ws, {
+      resolvedTargetConfig: { enabled: false },
+    });
     const mainScript = res.scripts.find((s) => s.cleanName === 'Main_With_NonTerminal_Feiertag')!;
 
     expect(mainScript).toBeDefined();
@@ -1593,7 +1597,9 @@ SECTION Start
     );
 
     const ws = buildScriptWorkspace([sampleHolidayMod]);
-    const res = translateAvayaWorkspaceToGenesys(ws);
+    const res = translateAvayaWorkspaceToGenesys(ws, {
+      resolvedTargetConfig: { enabled: false },
+    });
     const script = res.scripts[0];
 
     expect(script.yamlValidation.isValid).toBe(true);
@@ -1757,7 +1763,9 @@ SECTION Start
     );
 
     const ws = buildScriptWorkspace([hotlineMod]);
-    const strictRes = translateAvayaWorkspaceToGenesys(ws);
+    const strictRes = translateAvayaWorkspaceToGenesys(ws, {
+      resolvedTargetConfig: { enabled: false },
+    });
     const script = strictRes.scripts[0];
 
     expect(strictRes.compatibilityStubMode).toBe(false);
@@ -1879,7 +1887,9 @@ SECTION Start
     );
 
     const ws = buildScriptWorkspace([hotlineMod]);
-    const script = translateAvayaWorkspaceToGenesys(ws).scripts[0];
+    const script = translateAvayaWorkspaceToGenesys(ws, {
+      resolvedTargetConfig: { enabled: false },
+    }).scripts[0];
     const directIrYaml = renderArchyYamlFromFlowIR(script.flowIR);
 
     expect(validateArchyYaml(script.archyYaml).isValid).toBe(true);
@@ -2081,7 +2091,9 @@ SECTION Start
     );
 
     const ws = buildScriptWorkspace([genericFlow]);
-    const strictRes = translateAvayaWorkspaceToGenesys(ws);
+    const strictRes = translateAvayaWorkspaceToGenesys(ws, {
+      resolvedTargetConfig: { enabled: false },
+    });
     const script = strictRes.scripts[0];
 
     expect(strictRes.compatibilityStubMode).toBe(false);
@@ -2266,7 +2278,9 @@ SECTION Start
 `
     );
 
-    const script = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([genericFlow])).scripts[0];
+    const script = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([genericFlow]), {
+      resolvedTargetConfig: { enabled: false },
+    }).scripts[0];
     const mmd = script.genesysMermaid;
 
     expect(mmd).toContain('-.->|"Fallthrough (unproven terminality)"|');
@@ -2324,7 +2338,7 @@ SECTION Unused_Section
     expect(script.avayaView.annahmenUndOffenePunkte.some((l) => l.includes('WAIT_SOURCE_ONLY_HINT'))).toBe(true);
   });
 
-  it('v1.6.5 Guarded Fallback: preserves Strict Honest Mode verbatim when resolvedTargetConfig is omitted or disabled', () => {
+  it('v1.7.0 Strict Holiday Review: preserves verbatim comparison and review findings when resolvedTargetConfig.enabled is false', () => {
     const genericFlow = makeModule(
       'generic_service_flow',
       `
@@ -2344,34 +2358,31 @@ SECTION Start
     );
 
     const ws = buildScriptWorkspace([genericFlow]);
-    const defaultRes = translateAvayaWorkspaceToGenesys(ws);
     const disabledRes = translateAvayaWorkspaceToGenesys(ws, {
       resolvedTargetConfig: { enabled: false, holidayLookupTarget: 'dataAction' },
     });
 
-    for (const res of [defaultRes, disabledRes]) {
-      expect(res.schemaVersion).toBe('1.6.8');
-      expect(res.resolvedTargetMode).toBe(false);
-      const script = res.scripts[0];
-      expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
-      expect(script.archyYaml).not.toContain('IsExternalHolidayToday');
-      expect(script.archyYaml).not.toContain('Lookup_External_Holiday_By_Date');
-      expect(
-        script.flowIR.findings.some(
-          (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_HolidayList_Region'
-        )
-      ).toBe(true);
-      expect(
-        script.flowIR.findings.some((f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW')
-      ).toBe(true);
-      expect(
-        script.flowIR.findings.some((f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH')
-      ).toBe(true);
-      expect(script.flowIR.findings.some((f) => f.code === 'HOLIDAY_LOOKUP_RESOLVED')).toBe(false);
-    }
+    expect(disabledRes.schemaVersion).toBe('1.7.1');
+    expect(disabledRes.resolvedTargetMode).toBe(false);
+    const script = disabledRes.scripts[0];
+    expect(script.archyYaml).toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
+    expect(script.archyYaml).not.toContain('IsExternalHolidayToday');
+    expect(script.archyYaml).not.toContain('CheckHolidayByDate');
+    expect(
+      script.flowIR.findings.some(
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_HolidayList_Region'
+      )
+    ).toBe(true);
+    expect(
+      script.flowIR.findings.some((f) => f.code === 'DATE_COMPARISON_SEMANTIC_REVIEW')
+    ).toBe(true);
+    expect(
+      script.flowIR.findings.some((f) => f.code === 'POTENTIAL_BRANCH_FALLTHROUGH')
+    ).toBe(true);
+    expect(script.flowIR.findings.some((f) => f.code === 'HOLIDAY_LOOKUP_RESOLVED')).toBe(false);
   });
 
-  it('v1.6.5 Resolved-Target Mode (Data Action default): renders Data Action -> boolean IsExternalHolidayToday -> terminal holiday prompt + disconnect, prunes superseded var & unloaded Holiday_Subflow, and keeps parallel holiday consolidation review', () => {
+  it('v1.7.0 Holiday DB: Guarded Standard (default Data Action): activates automatically when config is omitted, renders Holiday_Service / CheckHolidayByDate -> Flow.IsExternalHolidayToday, explicit fail-open false on failure/timeout, terminal holiday branch, zero provenance review comments, and conditional pruning of unreachable Holiday_Subflow', () => {
     const genericFlow = makeModule(
       'generic_service_flow',
       `
@@ -2390,28 +2401,42 @@ SECTION Start
 `
     );
 
-    const res = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([genericFlow]), {
-      resolvedTargetConfig: { enabled: true },
-    });
+    // Omitting resolvedTargetConfig activates Holiday DB: Guarded Standard automatically
+    const res = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([genericFlow]));
     const script = res.scripts[0];
 
-    expect(res.schemaVersion).toBe('1.6.8');
+    expect(res.schemaVersion).toBe('1.7.1');
     expect(res.resolvedTargetMode).toBe(true);
     expect(script.yamlValidation.isValid).toBe(true);
     expect(script.yamlValidation.errors).toHaveLength(0);
     expect(script.irValidation.isValid).toBe(true);
     expect(script.irValidation.commentParityOk).toBe(true);
 
-    // Data Action lookup + boolean decision + terminal playAudio & disconnect
+    // Data Action default: Holiday_Service / CheckHolidayByDate -> typed boolean Flow.IsExternalHolidayToday
     expect(script.archyYaml).toContain('- callDataAction:');
-    expect(script.archyYaml).toContain('category: "External_Holiday_Integration"');
-    expect(script.archyYaml).toContain('dataAction: "Lookup_External_Holiday_By_Date"');
+    expect(script.archyYaml).toContain('category: "Holiday_Service"');
+    expect(script.archyYaml).toContain('dataAction: "CheckHolidayByDate"');
     expect(script.archyYaml).toContain('name: "currentDate"');
     expect(script.archyYaml).toContain('SubString(ToString(GetCurrentDateTimeUtc()), 0, 10)');
     expect(script.archyYaml).toContain('name: "holidayListKey"');
+    expect(script.archyYaml).toContain('name: "isHoliday"');
     expect(script.archyYaml).toContain('variable: Flow.IsExternalHolidayToday');
     expect(script.archyYaml).toContain('exp: "Flow.IsExternalHolidayToday == true"');
     expect(script.archyYaml).not.toContain('GetCurrentDateTimeUtc() == Flow.Sys_HolidayList_Region');
+
+    // Explicit fail-open on failure & timeout: updateData setting Flow.IsExternalHolidayToday = false, no error disconnect
+    expect(script.archyYaml).toMatch(
+      /failure:\s*\n\s*actions:\s*\n\s*- updateData:[\s\S]*?variable: Flow\.IsExternalHolidayToday[\s\S]*?lit: false/
+    );
+    expect(script.archyYaml).toMatch(
+      /timeout:\s*\n\s*actions:\s*\n\s*- updateData:[\s\S]*?variable: Flow\.IsExternalHolidayToday[\s\S]*?lit: false/
+    );
+    expect(script.archyYaml).not.toContain('Disconnect (ExternalHoliday Failure)');
+    expect(script.archyYaml).not.toContain('Disconnect (ExternalHoliday Timeout)');
+
+    // Resolved holiday-DB cases emit zero source-provenance review comments in final YAML
+    expect(script.archyYaml).not.toContain('Source for "Flow.Sys_HolidayList_Region"');
+    expect(script.archyYaml).not.toContain('DATE_COMPARISON_SEMANTIC_REVIEW');
 
     // Superseded Sys_HolidayList_Region pruned from flow variables; IsExternalHolidayToday declared boolean
     const boolVar = script.flowIR.variables.find((v) => v.name === 'IsExternalHolidayToday');
@@ -2420,7 +2445,7 @@ SECTION Start
     expect(boolVar?.provenance).toBe('resolved_external_lookup');
     expect(script.flowIR.variables.some((v) => v.name === 'Sys_HolidayList_Region')).toBe(false);
 
-    // Unloaded Holiday_Subflow replaced by terminal playAudio + disconnect and pruned from tasks
+    // Unloaded Holiday_Subflow replaced by terminal playAudio + disconnect and pruned because unreachable
     expect(script.archyYaml).not.toContain('refId: Holiday_Subflow');
     expect(script.migrationGraph.diagnostics.replacedHolidaySubflows).toContain('Holiday_Subflow');
     const resolvedDisconnect = script.flowIR.nodes.find(
@@ -2449,7 +2474,7 @@ SECTION Start
     expect(resolvedFinding?.warningClass).toBe('informational_cleanup');
     expect(resolvedFinding?.requiresBusinessReview).toBe(false);
 
-    // Parallel schedule-group holiday + resolved external holiday DB both preserved & differentiated
+    // Parallel schedule-group holiday + resolved external holiday DB both preserved & consolidation-first guidance emitted
     const dupFinding = script.flowIR.findings.find((f) => f.code === 'DUPLICATE_HOLIDAY_LOGIC');
     expect(dupFinding).toBeDefined();
     expect(dupFinding?.warningClass).toBe('semantic_review');
@@ -2468,10 +2493,12 @@ SECTION Start
     expect(irYamlVal.isValid).toBe(true);
     expect(irYamlVal.errors).toHaveLength(0);
     expect(irYaml).toContain('- callDataAction:');
+    expect(irYaml).toContain('category: "Holiday_Service"');
+    expect(irYaml).toContain('dataAction: "CheckHolidayByDate"');
     expect(irYaml).toContain('Flow.IsExternalHolidayToday == true');
   });
 
-  it('v1.6.5 Resolved-Target Mode (Data Table configured): renders callDataTableLookup with boolean found/notFound branches and valid dual-renderer parity', () => {
+  it('v1.7.0 Data Table override: renders callDataTableLookup with boolean found/notFound branches and valid dual-renderer parity', () => {
     const flowMod = makeModule(
       'regional_holiday_datatable_flow',
       `
@@ -2516,7 +2543,7 @@ SECTION Start
     expect(irYaml).toContain('- boolean:');
   });
 
-  it('v1.6.5 Per-Variable Mapping Override: resolves ONLY mapped holiday variable while keeping unproven non-holiday variables in Strict Honest Mode', () => {
+  it('v1.7.0 Per-Variable Mapping Override: resolves ONLY mapped holiday variable while keeping unproven non-holiday variables in Strict Holiday Review', () => {
     const mixedMod = makeModule(
       'mixed_strict_and_mapped_flow',
       `
@@ -2567,6 +2594,104 @@ SECTION Start
         (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Unproven_VipFlag'
       )
     ).toBe(true);
+  });
+
+  it('v1.7.0 Negative Regression Guard: under Holiday DB: Guarded Standard default, non-holiday unresolved variables and non-temporal holiday flags are NEVER auto-converted into lookups', () => {
+    const nonHolidayMod = makeModule(
+      'non_holiday_guard_flow',
+      `
+SECTION Start
+  IF Unproven_VipFlag = "1" THEN
+    QUEUE TO SKILLSET VIP_QUEUE
+  END IF
+  IF Caller_Blacklist_Flag_cv = "1" THEN
+    DISCONNECT
+  END IF
+  IF Sys_HolidayList_Region = "ACTIVE" THEN
+    GIVE RAN Holiday_Info
+  END IF
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    // Default call = Holiday DB: Guarded Standard active
+    const res = translateAvayaWorkspaceToGenesys(buildScriptWorkspace([nonHolidayMod]));
+    const script = res.scripts[0];
+
+    expect(res.schemaVersion).toBe('1.7.1');
+    expect(script.yamlValidation.isValid).toBe(true);
+    expect(script.yamlValidation.errors).toHaveLength(0);
+
+    // Zero synthetic Data Action, zero Data Table Lookup, zero getParticipantData, zero IsExternalHolidayToday!
+    expect(script.archyYaml).not.toContain('- callDataAction:');
+    expect(script.archyYaml).not.toContain('- callDataTableLookup:');
+    expect(script.archyYaml).not.toContain('getParticipantData:');
+    expect(script.archyYaml).not.toContain('IsExternalHolidayToday');
+    expect(script.flowIR.findings.some((f) => f.code === 'HOLIDAY_LOOKUP_RESOLVED')).toBe(false);
+
+    // All three unresolved variables remain in honest review (VAR_USED_BEFORE_SET)
+    expect(
+      script.flowIR.findings.some(
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Unproven_VipFlag'
+      )
+    ).toBe(true);
+    expect(
+      script.flowIR.findings.some(
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Caller_Blacklist_Flag_cv'
+      )
+    ).toBe(true);
+    expect(
+      script.flowIR.findings.some(
+        (f) => f.code === 'VAR_USED_BEFORE_SET' && f.variableName === 'Sys_HolidayList_Region'
+      )
+    ).toBe(true);
+  });
+
+  it('v1.7.0 Reachability Cleanup Guard: retains legacy Feiertag task when still called from another active branch, removes it only when fully unreachable', () => {
+    const sharedFeiertagMod = makeModule(
+      'shared_feiertag_flow',
+      `
+SECTION Start
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Feiertag
+  END IF
+  IF Manual_Holiday_Override = "1" THEN
+    EXECUTE Feiertag
+  END IF
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    const sharedScript = translateAvayaWorkspaceToGenesys(
+      buildScriptWorkspace([sharedFeiertagMod])
+    ).scripts[0];
+
+    expect(sharedScript.yamlValidation.isValid).toBe(true);
+    expect(sharedScript.archyYaml).toContain('category: "Holiday_Service"');
+    expect(sharedScript.archyYaml).toContain('dataAction: "CheckHolidayByDate"');
+    // Still referenced by Manual_Holiday_Override branch -> Feiertag task MUST be retained!
+    expect(sharedScript.archyYaml).toContain('refId: Feiertag');
+
+    const exclusiveFeiertagMod = makeModule(
+      'exclusive_feiertag_flow',
+      `
+SECTION Start
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Feiertag
+  END IF
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    const exclusiveScript = translateAvayaWorkspaceToGenesys(
+      buildScriptWorkspace([exclusiveFeiertagMod])
+    ).scripts[0];
+
+    expect(exclusiveScript.yamlValidation.isValid).toBe(true);
+    expect(exclusiveScript.archyYaml).toContain('category: "Holiday_Service"');
+    expect(exclusiveScript.archyYaml).toContain('dataAction: "CheckHolidayByDate"');
+    // Zero remaining incoming callers -> Feiertag task MUST be removed!
+    expect(exclusiveScript.archyYaml).not.toContain('refId: Feiertag');
   });
 });
 

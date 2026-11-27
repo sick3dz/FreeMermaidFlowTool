@@ -146,6 +146,7 @@ export interface MigrationStep {
     | 'Oracle_Integration'
     | 'FlixCheck_API'
     | 'Genesys_Cloud_Data_Actions'
+    | 'Holiday_Service'
     | 'External_Holiday_Integration';
   dataActionInputs?: MigrationDataActionInput[];
   dataActionOutputs?: MigrationDataActionOutput[];
@@ -224,11 +225,12 @@ export type HolidayLookupTargetKind = 'dataAction' | 'dataTable';
 
 export interface ResolvedHolidayMapping {
   variableName?: string;
-  /** Standard = true; auf false setzen, um eine Variable trotz globalem Modus im Strict Honest Mode zu belassen. */
+  /** Standard = true; auf false setzen, um eine Variable trotz Holiday DB: Guarded Standard im Strict Holiday Review zu belassen. */
   enabled?: boolean;
   lookupTarget?: HolidayLookupTargetKind;
   actionName?: string;
   actionCategory?:
+    | 'Holiday_Service'
     | 'External_Holiday_Integration'
     | 'Oracle_Integration'
     | 'FlixCheck_API'
@@ -241,12 +243,13 @@ export interface ResolvedHolidayMapping {
 }
 
 export interface ResolvedTargetConfig {
-  /** Guarded Aktivierung: Standard = false (Strict Honest Mode bleibt Fallback). */
+  /** Guarded Aktivierung: Standard = true (Holiday DB: Guarded Standard fuer erkannte Holiday-DB-Muster + Zeitpruefung; false = Strict Holiday Review). */
   enabled?: boolean;
   /** Konfigurierbares Ziel fuer externe Feiertagslisten (Standard = 'dataAction'). */
   holidayLookupTarget?: HolidayLookupTargetKind;
   defaultHolidayActionName?: string;
   defaultHolidayActionCategory?:
+    | 'Holiday_Service'
     | 'External_Holiday_Integration'
     | 'Oracle_Integration'
     | 'FlixCheck_API'
@@ -254,7 +257,7 @@ export interface ResolvedTargetConfig {
   defaultHolidayDataTableName?: string;
   defaultBooleanVarName?: string;
   defaultDateExpression?: string;
-  /** Optionale Per-Variable-Mapping-Overrides (wirken gezielt auch ohne globalen Schalter). */
+  /** Optionale Per-Variable-Mapping-Overrides (wirken gezielt auch bei Strict Holiday Review). */
   variableMappings?: Record<string, ResolvedHolidayMapping>;
 }
 
@@ -417,9 +420,10 @@ export interface BuildMigrationGraphContext {
    */
   compatibilityStubMode?: boolean;
   /**
-   * Guarded Resolved-Target-Konfiguration (v1.6.5, Standard = deaktiviert -> Strict Honest Fallback).
-   * Aktiviert Lookup-to-Boolean-Feiertagsmodellierung nur bei erkannten Feiertags-DB-Mustern
-   * und expliziter Freigabe (global oder per Variable-Mapping).
+   * Holiday DB: Guarded Standard Konfiguration (v1.7.0).
+   * Aktiviert Data Action / Data Table -> kanonisches Boolean (Flow.IsExternalHolidayToday) nur bei
+   * erkannten externen Feiertags-DB-Mustern plus zeitbezogener Pruefung oder explizitem Override;
+   * enabled: false schaltet auf Strict Holiday Review um.
    */
   resolvedTargetConfig?: ResolvedTargetConfig;
 }
@@ -602,7 +606,7 @@ export function normalizeTransferTarget(
     };
   }
 
-  // International 00-prefixed number (e.g. 002218277279035 -> +2218277279035, 0049... -> +49...)
+  // International 00-prefixed number (e.g. 00493000001234 -> +493000001234, 0049... -> +49...)
   if (/^00\d{7,18}$/.test(compact)) {
     const e164 = `+${compact.slice(2)}`;
     return {
@@ -614,7 +618,7 @@ export function normalizeTransferTarget(
     };
   }
 
-  // National German PSTN number (e.g. 02218277279035 -> +492218277279035)
+  // National German PSTN number (e.g. 0300000123456 -> +49300000123456)
   if (/^0[1-9]\d{6,16}$/.test(compact)) {
     const e164 = `+49${compact.slice(1)}`;
     return {
@@ -1367,7 +1371,7 @@ export function buildMigrationFlowGraph(
   node: ParsedScriptNode,
   mod: ScriptModule | undefined,
   ctx: BuildMigrationGraphContext,
-  schemaVersion = '1.6.8'
+  schemaVersion = '1.7.1'
 ): BuildMigrationGraphResult {
   const rawText = mod?.rawText || '';
   const strippedLines = rawText ? stripOclCommentsPreservingLines(rawText) : [];
@@ -4143,13 +4147,13 @@ export function buildMigrationFlowGraph(
               targetName = toCleanGraphSlug(
                 mapping.actionName ||
                   resolvedTargetConfig.defaultHolidayActionName ||
-                  'Lookup_External_Holiday_By_Date',
-                'Lookup_External_Holiday_By_Date'
+                  'CheckHolidayByDate',
+                'CheckHolidayByDate'
               );
               const category =
                 mapping.actionCategory ||
                 resolvedTargetConfig.defaultHolidayActionCategory ||
-                'External_Holiday_Integration';
+                'Holiday_Service';
               lookupStep = {
                 id: nextStepId('da'),
                 kind: 'callDataAction',
@@ -4298,26 +4302,26 @@ export function buildMigrationFlowGraph(
             }
 
             const resolvedSummary =
-              `Externes Feiertags-DB-Mapping (v1.6.5) fuer "${holRef.name}" aufgeloest: ${
+              `Holiday DB: Guarded Standard fuer "${holRef.name}" aufgeloest: ${
                 lookupTarget === 'dataTable' ? `Data Table "${targetName}"` : `Data Action "${targetName}"`
-              } -> ${boolVarDecl.refName} (boolean), terminaler Feiertagszweig${
+              } -> typisiertes Boolean isHoliday: boolean gemappt auf ${boolVarDecl.refName}, Fail-Open false bei failure/timeout, terminaler Feiertagszweig${
                 replacedSubflow ? ` (ersetzt ungeladenes Legacy-Subskript "${replacedSubflow}")` : ''
               }.`;
 
             appendComment(
               lookupStep,
-              `RESOLVED TARGET (v1.6.5): External holiday database lookup ("${holRef.name}") mapped to ${boolVarDecl.refName} via ${
+              `RESOLVED TARGET (v1.6.5): Known external holiday source ("${holRef.name}") resolved via ${
                 lookupTarget === 'dataTable' ? `Data Table "${targetName}"` : `Data Action "${targetName}"`
-              }.`
+              } -> typed boolean isHoliday mapped to ${boolVarDecl.refName} (fail-open false on failure/timeout).`
             );
             appendAnnotation(
               lookupStep,
               'HOLIDAY_LOOKUP_RESOLVED',
               'RESOLVED TARGET (v1.6.5)',
               [
-                `External holiday source "${holRef.name}" resolved via ${
+                `Known external holiday source "${holRef.name}" resolved via ${
                   lookupTarget === 'dataTable' ? `Data Table "${targetName}"` : `Data Action "${targetName}"`
-                } -> ${boolVarDecl.refName}.`,
+                } -> ${boolVarDecl.refName} (isHoliday: boolean).`,
               ],
               'resolved'
             );

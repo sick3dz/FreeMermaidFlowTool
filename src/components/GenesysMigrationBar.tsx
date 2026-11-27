@@ -129,7 +129,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
 
   const effectiveResolvedConfig: ResolvedTargetConfig = useMemo(
     () => ({
-      enabled: Boolean(resolvedTargetConfig?.enabled),
+      enabled: resolvedTargetConfig?.enabled ?? true,
       holidayLookupTarget: resolvedTargetConfig?.holidayLookupTarget || 'dataAction',
       variableMappings: resolvedTargetConfig?.variableMappings || {},
     }),
@@ -611,8 +611,8 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                 onClick={handleToggleResolvedTargetMode}
                 title={
                   effectiveResolvedConfig.enabled
-                    ? 'Resolved Target (v1.6.5) aktiv: Erkannte externe Feiertags-DB-Variablen werden als Lookup + Boolean-Decision (Flow.IsExternalHolidayToday) mit terminalem Feiertagszweig gerendert. Alle anderen Variablen bleiben im Strict Honest Mode.'
-                    : 'Strict Honest Fallback aktiv. Klicken, um den geschützten Resolved-Target-Modus (v1.6.5) für erkannte externe Feiertags-DB-Muster zu aktivieren.'
+                    ? 'Holiday DB: Guarded Standard aktiv — erkannte externe Feiertags-DB-Muster mit zeitbezogener Prüfung werden via Data Action (Holiday_Service / CheckHolidayByDate) oder Data Table auf Flow.IsExternalHolidayToday (boolean, fail-open false bei failure/timeout) mit terminalem Feiertagszweig gerendert. Alle nicht-holiday Variablen bleiben im Strict Holiday Review / Honest Mode.'
+                    : 'Strict Holiday Review aktiv — zeigt den unveränderten Legacy-Vergleich inkl. Review-Hinweisen. Klicken, um Holiday DB: Guarded Standard zu aktivieren.'
                 }
                 className={`px-2 py-0.5 rounded border text-[11px] font-medium flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap ${
                   effectiveResolvedConfig.enabled
@@ -623,8 +623,8 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                 <Database className="w-3 h-3 text-cyan-400 shrink-0" />
                 <span>
                   {effectiveResolvedConfig.enabled
-                    ? 'Resolved Target (Holiday DB)'
-                    : 'Holiday DB: Strict'}
+                    ? 'Holiday DB: Guarded Standard'
+                    : 'Strict Holiday Review'}
                 </span>
               </button>
 
@@ -756,14 +756,14 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
           <div className="px-3 py-2 border-t border-slate-800 bg-slate-900/95 space-y-1.5">
             <div className="flex items-center justify-between gap-2 text-[10.5px] font-semibold uppercase tracking-wide text-cyan-300">
               <span>
-                External Holiday DB Mappings (v1.6.5) ·{' '}
+                Holiday DB: Guarded Standard — Mappings ·{' '}
                 {effectiveResolvedConfig.enabled
-                  ? `Global aktiv (${
+                  ? `Aktiv (${
                       effectiveResolvedConfig.holidayLookupTarget === 'dataTable'
                         ? 'Data Table'
                         : 'Data Action'
                     })`
-                  : 'Strict Honest Default — Einzel-Overrides optional'}
+                  : 'Strict Holiday Review — Einzel-Overrides optional'}
               </span>
               <button
                 type="button"
@@ -802,7 +802,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                         </span>
                       ) : (
                         <span className="text-[10.5px] text-slate-400">
-                          Strict Honest Review (Interim-Vergleich aktiv)
+                          Strict Holiday Review (Legacy-Vergleich aktiv)
                         </span>
                       )}
                     </div>
@@ -813,7 +813,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                           ['dataAction', 'Data Action'],
                           ['dataTable', 'Data Table'],
                           ...(effectiveResolvedConfig.enabled
-                            ? ([['disabled', 'Strict']] as const)
+                            ? ([['disabled', 'Strict Holiday Review']] as const)
                             : []),
                         ] as const
                       ).map(([modeVal, label]) => (
@@ -964,12 +964,12 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
                 {compatibilityStubMode
                   ? 'Compatibility Stub Mode (Opt-In): Synthetische Stubs fuellen fehlende Variablen temporaererweise, waehrend Semantic-Review-Risiken, Fallthroughs und fehlende Subflows sichtbar bleiben.'
                   : translation.resolvedTargetMode
-                  ? `Resolved Target Mode (v1.6.5 · ${
+                  ? `Holiday DB: Guarded Standard (${
                       effectiveResolvedConfig.holidayLookupTarget === 'dataTable'
                         ? 'Data Table'
                         : 'Data Action'
-                    }): Erkannte externe Feiertags-DB-Variablen werden ueber Lookup + Boolean-Flag (Flow.IsExternalHolidayToday) mit terminalem Feiertagszweig gerendert. Alle anderen unbelegten Variablen bleiben im Strict Honest Mode.`
-                  : 'Strict Honest Mode (Default): Offene Review-Signale sind bewusste Migrationsnachweise (# OFFENE MIGRATIONSFRAGE), keine Konverter-Defekte.'}
+                    }): Erkannte externe Feiertags-DB-Quellen mit zeitbezogener Pruefung werden ueber Lookup + kanonisches Boolean (Flow.IsExternalHolidayToday, Fail-Open false bei failure/timeout) mit terminalem Feiertagszweig gerendert. Alle anderen unbelegten Variablen bleiben unveraendert im Review-Modus.`
+                  : 'Strict Holiday Review: Offene Review-Signale sind bewusste Migrationsnachweise (# OFFENE MIGRATIONSFRAGE), keine Konverter-Defekte.'}
               </div>
 
               {groupedPrimaryFindings.length > 0 && (
@@ -1253,7 +1253,7 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
             </div>
           </div>
 
-          {/* Mode Caution Banner: Strict Honest Default vs. Resolved Target (v1.6.5) vs. Opt-In Compatibility Stub Mode */}
+          {/* Mode Caution Banner: Holiday DB: Guarded Standard vs. Strict Holiday Review vs. Opt-In Compatibility Stub Mode */}
           <div
             className={`rounded border px-2.5 py-1.5 text-[11px] flex items-center justify-between gap-2 ${
               compatibilityStubMode
@@ -1267,12 +1267,12 @@ export const GenesysMigrationBar: React.FC<GenesysMigrationBarProps> = ({
               {compatibilityStubMode
                 ? 'Kompatibilitäts-/Stub-Modus (Opt-In) aktiv — synthetische getParticipantData-/Lookup-Stubs sind mit # KOMPATIBILITAETS-STUB (OPT-IN) markiert und dienen nur als optionale Review-Hilfe.'
                 : translation.resolvedTargetMode
-                ? `Resolved Target (v1.6.5 · Holiday DB via ${
+                ? `Holiday DB: Guarded Standard (${
                     effectiveResolvedConfig.holidayLookupTarget === 'dataTable'
                       ? 'Data Table'
                       : 'Data Action'
-                  }) — erkannte externe Feiertagslisten werden als Lookup + Boolean-Entscheidung (Flow.IsExternalHolidayToday) mit terminalem Feiertagszweig gerendert; alle anderen Variablen bleiben im Strict Honest Mode.`
-                : 'Ehrliche Migration (Strict Default) — keine erfundenen Datenquellen, Lookups oder Disconnects; offene Punkte sind mit # OFFENE MIGRATIONSFRAGE markiert.'}
+                  }) — erkannte externe Feiertags-DB-Quellen mit zeitbezogener Prüfung werden als Lookup (Holiday_Service / CheckHolidayByDate) + kanonisches Boolean (Flow.IsExternalHolidayToday, Fail-Open false bei failure/timeout) mit terminalem Feiertagszweig gerendert; alle nicht-holiday Variablen bleiben im Review-Modus.`
+                : 'Strict Holiday Review — keine erfundenen Datenquellen, Lookups oder Disconnects; offene Punkte sind mit # OFFENE MIGRATIONSFRAGE markiert.'}
             </span>
           </div>
 

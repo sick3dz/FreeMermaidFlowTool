@@ -77,7 +77,7 @@ export interface SbomPackageItem {
   corporateNote: string;
 }
 
-export const AUDIT_APP_VERSION = '1.6.8';
+export const AUDIT_APP_VERSION = '1.7.1';
 
 export const ENTERPRISE_HIGHLIGHT_TILES: EnterpriseHighlightTile[] = [
   {
@@ -489,7 +489,7 @@ export const ENTERPRISE_STAKEHOLDER_FACTS: EnterpriseStakeholderFact[] = [
     id: 'arch-genesys-flowir',
     stakeholder: 'IT-Betrieb / Paketierung',
     factTitle: 'Deterministische Genesys Cloud Architect Migration (FlowIR v1.1)',
-    evidence: 'Übersetzt Avaya-OCL-Skripte offline im RAM in validiertes Archy-YAML (Strict Honest Default, opt-in Guarded Holiday-DB v1.6.5, WAIT source_hint) ohne Cloud-API-Call.',
+    evidence: 'Übersetzt Avaya-OCL-Skripte offline im RAM in validiertes Archy-YAML (Holiday DB: Guarded Standard mit Data Action Holiday_Service / CheckHolidayByDate oder Data Table → Flow.IsExternalHolidayToday, Strict Holiday Review auf Wunsch, WAIT source_hint) ohne Cloud-API-Call.',
     reference: 'FlowIR v1.1 · Zero-API',
   },
   {
@@ -705,7 +705,7 @@ if (incomingHasData || !existingCache.hasProjectData) {
     codeExcerpt: `export function runCallflowAudit(input: ScriptWorkspace | ScriptModule[]): AuditReport {
   // Reine RAM-Auswertung ohne fs/fetch; speichert niemals rawText oder rawLine:
   return {
-    schemaVersion: '1.6.8',
+    schemaVersion: '1.7.1',
     privacyMode: '100%-in-memory-metadata-only',
     summary, nodes, brokenLinks, orphanScripts, deadEndScripts, circularLoops, externalIntegrations,
   };
@@ -714,26 +714,26 @@ if (incomingHasData || !existingCache.hasProjectData) {
   {
     id: 'genesys-flowir-migration-engine',
     numberLabel: '08',
-    title: 'Genesys Cloud Architect Migration Engine, FlowIR v1.1, Holiday-DB (v1.6.5) & WAIT source_hint',
-    category: 'Migration · Strict Honest · Deterministisches Archy-YAML',
+    title: 'Genesys Cloud Architect Migration Engine, FlowIR v1.1, Holiday DB: Guarded Standard & WAIT source_hint',
+    category: 'Migration · Guarded Standard · Deterministisches Archy-YAML',
     relevanceForCompany:
       'Bei der Migration von Avaya-AACC-Beständen nach Genesys Cloud CX dürfen weder erfundene Datenquellen (getParticipantData) noch unbewiesene Disconnects oder Cloud-Uploads entstehen.',
     technicalExplanation:
-      'Die zweistufige Migrations-Pipeline trennt Avaya-Analyse, kanonische FlowIR-v1.1-Zwischenrepräsentation und Genesys-Archy-YAML-Rendering strikt im Browser-RAM. Im Standardmodus (Strict Honest Mode) werden offene Variablen-Herkünfte transparent markiert. Nur per explizitem Opt-in aktiviert der Guarded Resolved-Target-Modus (v1.6.5) für erkannte Feiertags-DB-Muster ein Lookup (Data Action Standard / Data Table Override) auf Flow.IsExternalHolidayToday mit terminalem Feiertagszweig. Avaya-WAIT-Befehle werden zweiphasig geprüft und bei fehlendem Zielpfad sauber als source_hint getrennt.',
+      'Die zweistufige Migrations-Pipeline trennt Avaya-Analyse, kanonische FlowIR-v1.1-Zwischenrepräsentation und Genesys-Archy-YAML-Rendering strikt im Browser-RAM. Im Modus Holiday DB: Guarded Standard werden ausschließlich erkannte externe Feiertags-DB-Muster mit zeitbezogener Prüfung (oder explizitem Override) als Data Action (Holiday_Service / CheckHolidayByDate) bzw. Data Table mit typisiertem Boolean isHoliday → Flow.IsExternalHolidayToday, Fail-Open false bei failure/timeout und terminalem Feiertagszweig gerendert. Alle nicht-holiday Variablen bleiben unberührt im Review; Strict Holiday Review bleibt jederzeit umschaltbar. Avaya-WAIT-Befehle werden zweiphasig geprüft und sauber als source_hint getrennt.',
     excludedRisk:
-      'Kein API-Call an Genesys Cloud oder KI-Dienste, keine heimlich erfundenen Datenquellen im Strict-Modus, keine unerreichbaren Task-Fragmente im finalen Archy-YAML.',
+      'Kein API-Call an Genesys Cloud oder KI-Dienste, keine automatische Umwandlung von nicht-holiday Variablen, keine leeren Fehlerzweige und keine unerreichbaren Legacy-Task-Fragmente im finalen Archy-YAML.',
     moduleHint: 'src/utils/genesysMigrationAnalyzer.ts · src/utils/genesysFlowIR.ts',
-    codeTitle: 'CODE INSPECT: STRICT HONEST DEFAULT & GUARDED HOLIDAY-DB LOOKUP',
+    codeTitle: 'CODE INSPECT: HOLIDAY DB: GUARDED STANDARD & STRICT HOLIDAY REVIEW',
     auditFacts: [
-      { label: 'Standardmodus', value: 'Strict Honest (0 erfundene Quellen)' },
-      { label: 'Holiday-DB (v1.6.5)', value: 'Opt-in Data Action / Data Table → Boolean' },
-      { label: 'WAIT-Audit', value: 'Aktiver Pfad vs. source_hint getrennt' },
+      { label: 'Holiday-Standard', value: 'Holiday DB: Guarded Standard (Data Action / Data Table)' },
+      { label: 'Vertrag & Fail-Open', value: 'isHoliday: boolean → Flow.IsExternalHolidayToday (false)' },
+      { label: 'Review-Schutz', value: 'Strict Holiday Review & 0 Auto-Lookups für Non-Holiday' },
     ],
     codeExcerpt: `const result = translateAvayaWorkspaceToGenesys(workspace, {
-  compatibilityStubMode: false, // Strict Honest Default
+  compatibilityStubMode: false,
   resolvedTargetConfig: {
-    enabled: false,             // Opt-in für bekannte Feiertags-DB
-    defaultLookupTarget: 'dataAction',
+    enabled: true, // Holiday DB: Guarded Standard (false = Strict Holiday Review)
+    holidayLookupTarget: 'dataAction', // Holiday_Service / CheckHolidayByDate oder Data Table
   },
 });
 // Validiert FlowIR-Referenzintegrität, Erreichbarkeit & Archy-YAML lokal im RAM`,
