@@ -450,7 +450,7 @@ SCHED_1040_1 -->|Innerhalb Öffnungszeit| QUEUE_S_Service`,
     id: 'genesys-migration',
     category: 'analysis',
     categoryLabel: 'Migration & FlowIR',
-    title: 'Genesys Cloud Architect Migration (FlowIR v1.1 & v1.7.0)',
+    title: 'Genesys Cloud Architect Migration (FlowIR v1.1)',
     versionTag: 'Holiday DB: Guarded Standard · Strict Holiday Review · Archy YAML',
     pipelineLine: 'Avaya-OCL-Analyse → Kanonische FlowIR v1.1 → Validiertes Genesys Archy-YAML',
     description:

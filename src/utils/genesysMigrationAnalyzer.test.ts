@@ -2693,6 +2693,62 @@ SECTION Start
     // Zero remaining incoming callers -> Feiertag task MUST be removed!
     expect(exclusiveScript.archyYaml).not.toContain('refId: Feiertag');
   });
+
+  it('Version-Free YAML Comment Guard: generated Archy YAML comments never contain app or release version numbers across all modes and both renderers', () => {
+    const flowMod = makeModule(
+      'generic_service_flow',
+      `
+SECTION Start
+  IF TIME OF DAY 08:00..18:00 THEN
+    EXECUTE Special_Event_Handling
+  ELSE
+    GIVE RAN Closed_Message
+    DISCONNECT
+  END IF
+  IF date = Sys_HolidayList_Region THEN
+    EXECUTE Holiday_Subflow
+  END IF
+  EXECUTE Core_Routing
+  QUEUE TO SKILLSET SERVICE_QUEUE
+`
+    );
+
+    const ws = buildScriptWorkspace([flowMod]);
+    const modes = [
+      translateAvayaWorkspaceToGenesys(ws).scripts[0],
+      translateAvayaWorkspaceToGenesys(ws, {
+        resolvedTargetConfig: { enabled: true, holidayLookupTarget: 'dataTable' },
+      }).scripts[0],
+      translateAvayaWorkspaceToGenesys(ws, {
+        resolvedTargetConfig: { enabled: false },
+      }).scripts[0],
+      translateAvayaWorkspaceToGenesys(ws, {
+        compatibilityStubMode: true,
+      }).scripts[0],
+    ];
+
+    const versionInCommentRe = /\bv?\d+\.\d+(?:\.\d+)?\b/i;
+
+    for (const script of modes) {
+      const directYaml = script.archyYaml;
+      const irYaml = renderArchyYamlFromFlowIR(script.flowIR);
+      expect(script.irValidation.commentParityOk).toBe(true);
+
+      for (const yaml of [directYaml, irYaml]) {
+        const commentLines = yaml
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line.startsWith('#'));
+        for (const commentLine of commentLines) {
+          expect(commentLine).not.toMatch(versionInCommentRe);
+        }
+      }
+    }
+
+    // Resolved modes emit neutral # RESOLVED TARGET: without version number
+    expect(modes[0].archyYaml).toContain('# RESOLVED TARGET:');
+    expect(modes[0].archyYaml).not.toContain('RESOLVED TARGET (v');
+  });
 });
 
 

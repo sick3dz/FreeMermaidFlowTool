@@ -120,7 +120,7 @@ export interface FlowIRMigrationAnnotation {
   prefix:
     | 'OFFENE MIGRATIONSFRAGE'
     | 'KOMPATIBILITAETS-STUB (OPT-IN)'
-    | 'RESOLVED TARGET (v1.6.5)'
+    | 'RESOLVED TARGET'
     | 'CONSOLIDATION REVIEW';
   lines: string[];
   mode: 'strict' | 'stub' | 'resolved';
@@ -592,7 +592,7 @@ export function formatOrderedMigrationAnnotations(
         if (!t) return;
         if (
           idx === 0 &&
-          !/^(?:OFFENE MIGRATIONSFRAGE|KOMPATIBILITAETS-STUB \(OPT-IN\)|RESOLVED TARGET \(v1\.6\.5\)|CONSOLIDATION REVIEW|HINWEIS)\s*:/i.test(t)
+          !/^(?:OFFENE MIGRATIONSFRAGE|KOMPATIBILITAETS-STUB \(OPT-IN\)|RESOLVED TARGET|CONSOLIDATION REVIEW|HINWEIS)\s*:/i.test(t)
         ) {
           pushLine(`${ann.prefix}: ${t}`);
         } else {

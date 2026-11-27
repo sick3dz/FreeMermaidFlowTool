@@ -277,7 +277,7 @@ export interface StepMigrationAnnotation {
   prefix:
     | 'OFFENE MIGRATIONSFRAGE'
     | 'KOMPATIBILITAETS-STUB (OPT-IN)'
-    | 'RESOLVED TARGET (v1.6.5)'
+    | 'RESOLVED TARGET'
     | 'CONSOLIDATION REVIEW';
   lines: string[];
   mode: 'strict' | 'stub' | 'resolved';
@@ -4245,8 +4245,8 @@ export function buildMigrationFlowGraph(
                 ttsText: promptTts,
                 sectionHint: copy.sectionHint,
                 yamlComment: legacySubflow
-                  ? `RESOLVED TARGET (v1.6.5): Empfohlener terminaler Feiertagsabschluss (ersetzt ungeladenes Legacy-Subskript "${legacySubflow}").`
-                  : 'RESOLVED TARGET (v1.6.5): Empfohlener terminaler Feiertagsabschluss (Ansage + Disconnect).',
+                  ? `RESOLVED TARGET: Empfohlener terminaler Feiertagsabschluss (ersetzt ungeladenes Legacy-Subskript "${legacySubflow}").`
+                  : 'RESOLVED TARGET: Empfohlener terminaler Feiertagsabschluss (Ansage + Disconnect).',
                 isTerminal: false,
               };
               const discStep: MigrationStep = {
@@ -4291,7 +4291,7 @@ export function buildMigrationFlowGraph(
                       sectionHint: copy.sectionHint,
                       terminalityEvidence: 'resolved_business_policy',
                       yamlComment:
-                        'RESOLVED TARGET (v1.6.5): Empfohlener terminaler Feiertagsabschluss (Disconnect).',
+                        'RESOLVED TARGET: Empfohlener terminaler Feiertagsabschluss (Disconnect).',
                       isTerminal: true,
                     },
                   ];
@@ -4310,14 +4310,14 @@ export function buildMigrationFlowGraph(
 
             appendComment(
               lookupStep,
-              `RESOLVED TARGET (v1.6.5): Known external holiday source ("${holRef.name}") resolved via ${
+              `RESOLVED TARGET: Known external holiday source ("${holRef.name}") resolved via ${
                 lookupTarget === 'dataTable' ? `Data Table "${targetName}"` : `Data Action "${targetName}"`
               } -> typed boolean isHoliday mapped to ${boolVarDecl.refName} (fail-open false on failure/timeout).`
             );
             appendAnnotation(
               lookupStep,
               'HOLIDAY_LOOKUP_RESOLVED',
-              'RESOLVED TARGET (v1.6.5)',
+              'RESOLVED TARGET',
               [
                 `Known external holiday source "${holRef.name}" resolved via ${
                   lookupTarget === 'dataTable' ? `Data Table "${targetName}"` : `Data Action "${targetName}"`
